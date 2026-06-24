@@ -828,6 +828,13 @@ dependencies = [
 [[package]]
 name = "rc-verify"
 version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "rc-types",
+ "serde",
+ "tokio",
+ "toml",
+]
 
 [[package]]
 name = "redox_syscall"
@@ -903,6 +910,7 @@ dependencies = [
  "rc-providers",
  "rc-tools",
  "rc-types",
+ "rc-verify",
  "serde",
  "tokio",
  "toml",

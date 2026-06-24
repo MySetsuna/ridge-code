@@ -78,3 +78,27 @@ pub struct Completion {
     pub message: Message,
     pub usage: Usage,
 }
+
+/// 一条验证诊断:哪个检查失败 + 它的输出(回喂修复循环当反馈)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Diagnostic {
+    pub source: String,
+    pub detail: String,
+}
+
+/// 客观验证结论(PLAN.md §3、§7)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Verdict {
+    /// 全部检查通过。
+    Pass,
+    /// 有检查失败,reasons 携带可回喂模型的诊断。
+    Fail { reasons: Vec<Diagnostic> },
+    /// 无可用验证手段,无法判定。
+    Uncertain { note: String },
+}
+
+impl Verdict {
+    pub fn is_pass(&self) -> bool {
+        matches!(self, Verdict::Pass)
+    }
+}
