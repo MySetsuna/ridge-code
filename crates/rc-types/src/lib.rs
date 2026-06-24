@@ -102,3 +102,87 @@ impl Verdict {
         matches!(self, Verdict::Pass)
     }
 }
+
+/// 子任务难度,驱动 Router 分流(PLAN.md §2、§3)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Difficulty {
+    Trivial,
+    Moderate,
+    Hard,
+}
+
+impl Default for Difficulty {
+    fn default() -> Self {
+        Difficulty::Moderate
+    }
+}
+
+/// 模型档位。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelTier {
+    Weak,
+    Strong,
+}
+
+/// Planner 产出的一个子任务(DAG 节点;M2 暂按顺序串行执行,deps 仅记录)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Subtask {
+    pub id: String,
+    pub description: String,
+    #[serde(default)]
+    pub deps: Vec<String>,
+    #[serde(default)]
+    pub difficulty: Difficulty,
+}
+
+/// Reviewer 的结构化结论。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReviewResult {
+    pub approved: bool,
+    #[serde(default)]
+    pub issues: Vec<String>,
+}
+
+/// 按档位累计的 token 成本账单(PLAN.md §3、§9)。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct Cost {
+    pub strong_in: u64,
+    pub strong_out: u64,
+    pub weak_in: u64,
+    pub weak_out: u64,
+}
+
+impl Cost {
+    pub fn add(&mut self, tier: ModelTier, in_tok: u32, out_tok: u32) {
+        match tier {
+            ModelTier::Strong => {
+                self.strong_in += in_tok as u64;
+                self.strong_out += out_tok as u64;
+            }
+            ModelTier::Weak => {
+                self.weak_in += in_tok as u64;
+                self.weak_out += out_tok as u64;
+            }
+        }
+    }
+    pub fn strong_tokens(&self) -> u64 {
+        self.strong_in + self.strong_out
+    }
+    pub fn weak_tokens(&self) -> u64 {
+        self.weak_in + self.weak_out
+    }
+    pub fn total(&self) -> u64 {
+        self.strong_tokens() + self.weak_tokens()
+    }
+    /// 强模型 token 占比(PLAN §9 的关键省钱指标);total 为 0 时返回 0。
+    pub fn strong_share(&self) -> f64 {
+        let t = self.total();
+        if t == 0 {
+            0.0
+        } else {
+            self.strong_tokens() as f64 / t as f64
+        }
+    }
+}

@@ -8,10 +8,8 @@ name = "ridge-code"
 path = "src/main.rs"
 
 [dependencies]
-rc-types = { path = "../rc-types" }
 rc-providers = { path = "../rc-providers" }
-rc-tools = { path = "../rc-tools" }
-rc-verify = { path = "../rc-verify" }
+rc-core = { path = "../rc-core" }
 anyhow = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }

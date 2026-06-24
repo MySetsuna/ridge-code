@@ -1,21 +1,26 @@
 # 复制到 ~/.ridge/config.toml 并填写。
-# M0 先用单个 OpenAI 兼容 provider 跑通(强/弱混合是 M2 的事)。
-# ⚠️ M0 的 agent loop 依赖工具调用,必须选「支持 tool calling 的 instruct 模型」,
-#    避免纯推理型(如 *-r1),否则循环会卡住。
+# ⚠️ 模型必须支持工具调用(tool calling),避免纯推理型(如 *-r1)。
 
-# === NVIDIA NIM(免费额度,OpenAI 兼容)===
-[provider]
+# === M2:强/弱双 provider(跨模型路由,推荐)===
+# 难子任务/规划/修复/评审 → 强;其余 → 弱。两段可指向不同 provider 或不同模型。
+[strong]
 base_url = "https://integrate.api.nvidia.com/v1"
-# 从 build.nvidia.com 对应模型页复制「确切的 model 字符串」。需支持 tool calling,例如:
-#   deepseek-ai/deepseek-v3.1     qwen/qwen3-coder-...     moonshotai/kimi-k2-instruct
-model = "deepseek-ai/deepseek-v3.1"
-api_key_env = "RIDGE_API_KEY"            # 然后:export RIDGE_API_KEY=nvapi-xxxx
+model = "meta/llama-3.3-70b-instruct"
+api_key_env = "RIDGE_API_KEY"            # 然后:export RIDGE_API_KEY=nvapi-xxxx(或放 .env.local)
 
-# === 其它 OpenAI 兼容端点(备选,换 base_url + model 即可)===
-# DeepSeek 官方:  base_url = "https://api.deepseek.com/v1"                       model = "deepseek-chat"
-# 智谱 GLM:        base_url = "https://open.bigmodel.cn/api/paas/v4"
-# 阿里 Qwen:       base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-# 本地 Ollama:     base_url = "http://localhost:11434/v1"
+[weak]
+base_url = "https://integrate.api.nvidia.com/v1"
+model = "qwen/qwen3-next-80b-a3b-instruct"
+api_key_env = "RIDGE_API_KEY"
 
-# 凭证二选一:用上面的 api_key_env(推荐),或直接填(别提交进 git):
-# api_key = "nvapi-..."
+# === 兼容写法:单 provider(强=弱都用它)===
+# [provider]
+# base_url = "https://api.deepseek.com/v1"
+# model = "deepseek-chat"
+# api_key_env = "RIDGE_API_KEY"
+# api_key = "..."                        # 或直接填(别提交进 git)
+
+# 其它 OpenAI 兼容端点:
+#   智谱 GLM:  https://open.bigmodel.cn/api/paas/v4
+#   阿里 Qwen: https://dashscope.aliyuncs.com/compatible-mode/v1
+#   本地 Ollama: http://localhost:11434/v1

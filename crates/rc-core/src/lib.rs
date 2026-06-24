@@ -1,2 +1,274 @@
-//! rc-core — 编排大脑:Planner / Scheduler / Router / RepairLoop / Integrator / Reviewer。
-//! M2 实现,详见 PLAN.md §2、§5。当前为占位。
+//! rc-core — 编排大脑(M2)。详见 PLAN.md §2。
+//!
+//! 流水线:Planner(强)分解为子任务 → Router 按难度分流强/弱 → Worker 执行
+//! → 集成验证 + 失败修复(强) → Reviewer(强)评审 → 产出结果与成本账单。
+//!
+//! M2 简化(后续里程碑补全):
+//! - 子任务按规划「顺序串行」执行(deps 已记录,留待并行 + git worktree 隔离);
+//! - 编辑工具仍是整文件覆盖(留待结构化 patch 工具)。
+
+use anyhow::{anyhow, bail, Result};
+use rc_providers::LlmProvider;
+use rc_tools::{dispatch, tool_specs};
+use rc_types::{Cost, Diagnostic, Difficulty, Message, ModelTier, ReviewResult, Subtask, ToolSpec, Verdict};
+use rc_verify::{resolve_plan, verify, VerifyPlan};
+use std::path::PathBuf;
+use tracing::{debug, info, warn};
+
+/// 编排参数。
+pub struct OrchestratorConfig {
+    /// 单次 agent 运行内的工具循环上限。
+    pub max_steps: usize,
+    /// 验证失败的最多修复轮数。
+    pub max_repairs: usize,
+}
+
+impl Default for OrchestratorConfig {
+    fn default() -> Self {
+        Self { max_steps: 12, max_repairs: 3 }
+    }
+}
+
+/// 一次编排的产出。
+pub struct Outcome {
+    pub subtasks: usize,
+    pub repairs: usize,
+    pub reviewed: bool,
+    pub approved: bool,
+    pub cost: Cost,
+}
+
+/// 编排器:持有强/弱两个 provider,以及工具、验证计划、工作目录。
+pub struct Orchestrator {
+    strong: Box<dyn LlmProvider>,
+    weak: Box<dyn LlmProvider>,
+    tools: Vec<ToolSpec>,
+    read_tools: Vec<ToolSpec>,
+    verify_plan: VerifyPlan,
+    project_dir: PathBuf,
+    cfg: OrchestratorConfig,
+}
+
+impl Orchestrator {
+    pub fn new(
+        strong: Box<dyn LlmProvider>,
+        weak: Box<dyn LlmProvider>,
+        project_dir: PathBuf,
+        cfg: OrchestratorConfig,
+    ) -> Self {
+        let tools = tool_specs();
+        let read_tools = tools
+            .iter()
+            .filter(|t| matches!(t.name.as_str(), "read_file" | "list_dir"))
+            .cloned()
+            .collect();
+        let verify_plan = resolve_plan(&project_dir);
+        Self { strong, weak, tools, read_tools, verify_plan, project_dir, cfg }
+    }
+
+    pub async fn run(&self, task: &str) -> Result<Outcome> {
+        let mut cost = Cost::default();
+
+        info!("① 规划(强模型分解任务)");
+        let subtasks = self.plan(task, &mut cost).await?;
+        for st in &subtasks {
+            info!(id = %st.id, difficulty = ?st.difficulty, "  子任务: {}", st.description);
+        }
+
+        info!("② 执行子任务(按难度路由强/弱)");
+        for st in &subtasks {
+            let tier = route_tier(st.difficulty);
+            info!(id = %st.id, tier = ?tier, "  执行子任务");
+            self.work(st, tier, &mut cost).await?;
+        }
+
+        info!("③ 集成验证 + 失败修复(强)");
+        let repairs = self.verify_and_repair(&mut cost).await?;
+
+        info!("④ 评审(强)");
+        let mut reviewed = false;
+        let mut approved = true;
+        match self.review(task, &mut cost).await {
+            Some(r) => {
+                reviewed = true;
+                approved = r.approved;
+                if !r.approved && !r.issues.is_empty() {
+                    warn!(issues = ?r.issues, "  评审未通过,修复一轮");
+                    self.fix_from_review(&r, &mut cost).await?;
+                    let _ = self.verify_and_repair(&mut cost).await?;
+                    approved = true; // 已据评审修复
+                } else {
+                    info!("  ✅ 评审通过");
+                }
+            }
+            None => warn!("  评审结果无法解析,跳过(按通过处理)"),
+        }
+
+        Ok(Outcome { subtasks: subtasks.len(), repairs, reviewed, approved, cost })
+    }
+
+    /// Planner:强模型把任务分解成有序子任务(JSON);解析失败则降级为单个 hard 子任务。
+    async fn plan(&self, task: &str, cost: &mut Cost) -> Result<Vec<Subtask>> {
+        let sys = "你是任务规划器。把用户的编码任务分解成 2 到 5 个有序子任务。\
+只输出一个 JSON 数组,不要任何解释或 markdown 代码块。\
+每个元素形如 {\"id\":\"s1\",\"description\":\"具体要做什么\",\"deps\":[],\"difficulty\":\"trivial|moderate|hard\"}。\
+difficulty 用小写,表示该子任务难度。";
+        let msgs = vec![Message::system(sys), Message::user(task)];
+        for attempt in 1..=2 {
+            let c = self.strong.complete(&msgs, &[]).await?;
+            cost.add(ModelTier::Strong, c.usage.input_tokens, c.usage.output_tokens);
+            if let Some(subs) = parse_plan(&c.message.content) {
+                return Ok(subs);
+            }
+            warn!(attempt, "规划输出无法解析为 JSON,降级处理");
+        }
+        Ok(vec![Subtask {
+            id: "s1".into(),
+            description: task.to_string(),
+            deps: vec![],
+            difficulty: Difficulty::Hard,
+        }])
+    }
+
+    /// Worker:用路由到的 provider 执行一个子任务(共享文件系统)。
+    async fn work(&self, st: &Subtask, tier: ModelTier, cost: &mut Cost) -> Result<()> {
+        let user = format!(
+            "这是整体编码任务的一个子任务(id={})。\n子任务:{}\n\
+请用工具读写文件 / 执行命令来完成它;写的代码应能通过编译。完成后用一句中文总结并停止。",
+            st.id, st.description
+        );
+        let mut msgs = vec![Message::system(WORKER_SYSTEM), Message::user(user)];
+        run_agent(self.provider_for(tier), tier, &mut msgs, &self.tools, self.cfg.max_steps, cost).await?;
+        Ok(())
+    }
+
+    /// 验证 + 失败修复循环(修复一律用强模型)。
+    async fn verify_and_repair(&self, cost: &mut Cost) -> Result<usize> {
+        let mut repairs = 0usize;
+        loop {
+            match verify(&self.verify_plan, &self.project_dir).await? {
+                Verdict::Pass => {
+                    info!("  ✅ 验证通过");
+                    return Ok(repairs);
+                }
+                Verdict::Uncertain { note } => {
+                    warn!(%note, "  ⚠️ 无法客观验证,按完成处理");
+                    return Ok(repairs);
+                }
+                Verdict::Fail { reasons } => {
+                    if repairs >= self.cfg.max_repairs {
+                        bail!("修复 {repairs} 轮后仍未通过验证。最后失败:\n{}", render_reasons(&reasons));
+                    }
+                    repairs += 1;
+                    warn!(round = repairs, "  ❌ 验证失败,强模型修复");
+                    let feedback = format!(
+                        "代码未通过验证,请据以下输出直接修改代码修复,然后停止:\n\n{}",
+                        render_reasons(&reasons)
+                    );
+                    let mut msgs = vec![Message::system(WORKER_SYSTEM), Message::user(feedback)];
+                    run_agent(self.strong.as_ref(), ModelTier::Strong, &mut msgs, &self.tools, self.cfg.max_steps, cost).await?;
+                }
+            }
+        }
+    }
+
+    /// Reviewer:强模型(只读工具)评审实现是否满足任务,返回结构化结论。
+    async fn review(&self, task: &str, cost: &mut Cost) -> Option<ReviewResult> {
+        let sys = "你是代码评审器。用 read_file / list_dir 查看当前实现,判断它是否正确完成了用户任务。\
+最后只输出一个 JSON 对象:{\"approved\":true 或 false,\"issues\":[\"问题\"]}。approved 为 true 时 issues 可为空。";
+        let user = format!("原始任务:{task}\n请评审当前代码实现是否满足该任务。");
+        let mut msgs = vec![Message::system(sys), Message::user(user)];
+        match run_agent(self.strong.as_ref(), ModelTier::Strong, &mut msgs, &self.read_tools, self.cfg.max_steps, cost).await {
+            Ok(content) => parse_review(&content),
+            Err(e) => {
+                warn!(error = %e, "评审执行失败");
+                None
+            }
+        }
+    }
+
+    async fn fix_from_review(&self, review: &ReviewResult, cost: &mut Cost) -> Result<()> {
+        let issues = review.issues.join("\n- ");
+        let feedback = format!("评审发现以下问题,请直接修改代码修复后停止:\n- {issues}");
+        let mut msgs = vec![Message::system(WORKER_SYSTEM), Message::user(feedback)];
+        run_agent(self.strong.as_ref(), ModelTier::Strong, &mut msgs, &self.tools, self.cfg.max_steps, cost).await?;
+        Ok(())
+    }
+
+    fn provider_for(&self, tier: ModelTier) -> &dyn LlmProvider {
+        match tier {
+            ModelTier::Strong => self.strong.as_ref(),
+            ModelTier::Weak => self.weak.as_ref(),
+        }
+    }
+}
+
+fn route_tier(d: Difficulty) -> ModelTier {
+    match d {
+        Difficulty::Hard => ModelTier::Strong,
+        _ => ModelTier::Weak,
+    }
+}
+
+const WORKER_SYSTEM: &str = "你是 ridge-code 的执行器。你能调用工具读写文件、列目录、执行 shell 来完成编码任务。\
+请先用 list_dir / read_file 了解上下文,再用 write_file / run_shell 实施改动;\
+注意 write_file 是整文件覆盖,务必先读出并保留需要保留的已有内容。\
+你写的代码应能通过编译。完成后用一句中文总结并停止调用工具。";
+
+/// 跑一轮 agent:工具循环直到模型不再调用工具,返回最终文本;沿途按档位累计成本。
+async fn run_agent(
+    provider: &dyn LlmProvider,
+    tier: ModelTier,
+    messages: &mut Vec<Message>,
+    tools: &[ToolSpec],
+    max_steps: usize,
+    cost: &mut Cost,
+) -> Result<String> {
+    for step in 1..=max_steps {
+        let completion = provider.complete(messages.as_slice(), tools).await?;
+        cost.add(tier, completion.usage.input_tokens, completion.usage.output_tokens);
+        debug!(step, tier = ?tier, in_tok = completion.usage.input_tokens, out_tok = completion.usage.output_tokens, "模型回复");
+        let msg = completion.message;
+        if msg.tool_calls.is_empty() {
+            return Ok(msg.content);
+        }
+        messages.push(msg.clone());
+        for call in &msg.tool_calls {
+            info!(step, tool = %call.name, "    工具");
+            let result = dispatch(call).await;
+            messages.push(Message::tool_result(call.id.clone(), result));
+        }
+    }
+    Err(anyhow!("达到最大轮数 {max_steps} 仍未给出最终答复"))
+}
+
+fn render_reasons(reasons: &[Diagnostic]) -> String {
+    reasons
+        .iter()
+        .map(|d| format!("## [{}] 失败\n{}", d.source, d.detail))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// 取首个 open 到末个 close 之间的子串(用于从模型回复里抠出 JSON)。
+fn extract_between(s: &str, open: char, close: char) -> Option<&str> {
+    let start = s.find(open)?;
+    let end = s.rfind(close)?;
+    if end > start {
+        Some(&s[start..=end])
+    } else {
+        None
+    }
+}
+
+fn parse_plan(content: &str) -> Option<Vec<Subtask>> {
+    let json = extract_between(content, '[', ']')?;
+    serde_json::from_str::<Vec<Subtask>>(json)
+        .ok()
+        .filter(|v| !v.is_empty())
+}
+
+fn parse_review(content: &str) -> Option<ReviewResult> {
+    let json = extract_between(content, '{', '}')?;
+    serde_json::from_str::<ReviewResult>(json).ok()
+}

@@ -786,6 +786,15 @@ dependencies = [
 [[package]]
 name = "rc-core"
 version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "rc-providers",
+ "rc-tools",
+ "rc-types",
+ "rc-verify",
+ "serde_json",
+ "tracing",
+]
 
 [[package]]
 name = "rc-eval"
@@ -907,10 +916,8 @@ dependencies = [
  "anyhow",
  "clap",
  "dotenvy",
+ "rc-core",
  "rc-providers",
- "rc-tools",
- "rc-types",
- "rc-verify",
  "serde",
  "tokio",
  "toml",

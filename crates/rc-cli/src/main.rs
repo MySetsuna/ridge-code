@@ -1,21 +1,20 @@
-//! ridge-code M1:单模型 agent loop + 客观验证 + 失败自动修复循环。详见 HANDOFF.md §3、PLAN.md §7。
+//! ridge-code M2:薄壳。读配置(强/弱双 provider)→ 构造编排器 → 跑 → 打印报告与成本账单。
+//! 编排逻辑全在 rc-core。详见 PLAN.md §2。
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
+use rc_core::{Orchestrator, OrchestratorConfig};
 use rc_providers::{LlmProvider, OpenAiCompatProvider};
-use rc_tools::{dispatch, tool_specs};
-use rc_types::{Diagnostic, Message, ToolSpec, Verdict};
-use rc_verify::{resolve_plan, verify};
 use serde::Deserialize;
 use std::path::PathBuf;
-use tracing::{debug, info, warn};
+use tracing::info;
 
 #[derive(Parser)]
-#[command(name = "ridge-code", version, about = "成本优化的编码 agent CLI(M1)")]
+#[command(name = "ridge-code", version, about = "成本优化的编码 agent CLI(M2:强/弱编排)")]
 struct Cli {
     /// 要执行的任务描述
     task: String,
-    /// 单次执行内的工具循环最大轮数
+    /// 单次 agent 运行内的工具循环最大轮数
     #[arg(long, default_value_t = 12)]
     max_steps: usize,
     /// 验证失败后最多自动修复几轮
@@ -26,21 +25,25 @@ struct Cli {
     cwd: Option<PathBuf>,
 }
 
-#[derive(Deserialize)]
-struct Config {
-    provider: ProviderConfig,
-}
-
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct ProviderConfig {
     base_url: String,
     model: String,
-    /// 直接填写的 key(可选)
     #[serde(default)]
     api_key: Option<String>,
-    /// 从该环境变量读 key(默认 RIDGE_API_KEY)
     #[serde(default)]
     api_key_env: Option<String>,
+}
+
+/// 支持两种写法:`[provider]`(单 provider,强=弱兼容旧配置)或 `[strong]`+`[weak]`(混合)。
+#[derive(Deserialize)]
+struct Config {
+    #[serde(default)]
+    provider: Option<ProviderConfig>,
+    #[serde(default)]
+    strong: Option<ProviderConfig>,
+    #[serde(default)]
+    weak: Option<ProviderConfig>,
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -49,19 +52,11 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn config_path() -> Result<PathBuf> {
-    let home = home_dir().ok_or_else(|| anyhow!("找不到 HOME / USERPROFILE"))?;
-    Ok(home.join(".ridge").join("config.toml"))
-}
-
 fn load_config() -> Result<Config> {
-    let path = config_path()?;
-    let text = std::fs::read_to_string(&path).with_context(|| {
-        format!(
-            "读取配置 {} 失败(可参考仓库 config.example.toml)",
-            path.display()
-        )
-    })?;
+    let home = home_dir().ok_or_else(|| anyhow!("找不到 HOME / USERPROFILE"))?;
+    let path = home.join(".ridge").join("config.toml");
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("读取配置 {} 失败(可参考仓库 config.example.toml)", path.display()))?;
     toml::from_str(&text).context("解析 config.toml 失败")
 }
 
@@ -76,50 +71,19 @@ fn resolve_api_key(p: &ProviderConfig) -> Result<String> {
         .with_context(|| format!("config 未填 api_key,且环境变量 {env_name} 未设置"))
 }
 
-/// 跑一轮 agent:工具循环直到模型不再调用工具,返回其最终文本。
-async fn run_agent(
-    provider: &impl LlmProvider,
-    messages: &mut Vec<Message>,
-    tools: &[ToolSpec],
-    max_steps: usize,
-) -> Result<String> {
-    for step in 1..=max_steps {
-        let completion = provider.complete(messages.as_slice(), tools).await?;
-        debug!(
-            step,
-            in_tok = completion.usage.input_tokens,
-            out_tok = completion.usage.output_tokens,
-            "模型回复"
-        );
-        let msg = completion.message;
-
-        if msg.tool_calls.is_empty() {
-            return Ok(msg.content);
-        }
-
-        messages.push(msg.clone());
-        for call in &msg.tool_calls {
-            info!(step, tool = %call.name, args = %call.arguments, "调用工具");
-            let result = dispatch(call).await;
-            messages.push(Message::tool_result(call.id.clone(), result));
-        }
-    }
-    Err(anyhow!("达到最大轮数 {max_steps} 仍未给出最终答复"))
-}
-
-/// 把诊断渲染成回喂模型的反馈文本。
-fn render_reasons(reasons: &[Diagnostic]) -> String {
-    reasons
-        .iter()
-        .map(|d| format!("## [{}] 失败\n{}", d.source, d.detail))
-        .collect::<Vec<_>>()
-        .join("\n\n")
+fn build_provider(p: &ProviderConfig) -> Result<Box<dyn LlmProvider>> {
+    let key = resolve_api_key(p)?;
+    Ok(Box::new(OpenAiCompatProvider::new(
+        p.base_url.clone(),
+        key,
+        p.model.clone(),
+    )))
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // 先加载 .env.local / .env(若存在),让 RIDGE_API_KEY、RUST_LOG 等可从文件读。
-    // 在 --cwd 切换之前加载,确保按「启动目录」找到文件;已存在的环境变量优先,不被覆盖。
+    // 在 --cwd 切换之前加载,确保按「启动目录」找到文件;已存在的环境变量优先。
     let _ = dotenvy::from_filename(".env.local");
     let _ = dotenvy::dotenv();
 
@@ -138,61 +102,49 @@ async fn main() -> Result<()> {
     let project_dir = std::env::current_dir().context("获取当前目录失败")?;
 
     let cfg = load_config()?;
-    let api_key = resolve_api_key(&cfg.provider)?;
-    let provider = OpenAiCompatProvider::new(cfg.provider.base_url, api_key, cfg.provider.model);
+    let strong_cfg = cfg
+        .strong
+        .clone()
+        .or_else(|| cfg.provider.clone())
+        .context("配置缺少 [strong] 或 [provider]")?;
+    let weak_cfg = cfg
+        .weak
+        .clone()
+        .or_else(|| cfg.provider.clone())
+        .unwrap_or_else(|| strong_cfg.clone());
 
-    let plan = resolve_plan(&project_dir);
+    let strong_model = strong_cfg.model.clone();
+    let weak_model = weak_cfg.model.clone();
+    let strong = build_provider(&strong_cfg)?;
+    let weak = build_provider(&weak_cfg)?;
+
     info!(
-        model = provider.model_id(),
+        strong = %strong_model,
+        weak = %weak_model,
         project = %project_dir.display(),
-        checks = plan.checks.len(),
-        "ridge-code M1 启动"
+        "ridge-code M2 启动"
     );
 
-    let system = "你是 ridge-code,一个编码助手。你能调用工具读写文件、列目录、执行 shell 命令来完成编码任务。\
-请先用 list_dir / read_file 了解上下文,再用 write_file / run_shell 实施改动;你写的代码应当能通过编译。\
-完成后用一句中文总结你做了什么,并停止调用工具。\
-如果之后收到「验证失败」的反馈,请阅读错误信息并直接修改代码修复,然后再停止。";
+    let orch = Orchestrator::new(
+        strong,
+        weak,
+        project_dir,
+        OrchestratorConfig { max_steps: cli.max_steps, max_repairs: cli.max_repairs },
+    );
+    let outcome = orch.run(&cli.task).await?;
 
-    let mut messages = vec![Message::system(system), Message::user(cli.task.as_str())];
-    let tools = tool_specs();
-
-    // 初次执行任务。
-    let mut answer = run_agent(&provider, &mut messages, &tools, cli.max_steps).await?;
-
-    // 验证 + 失败修复循环。
-    let mut repairs = 0usize;
-    loop {
-        match verify(&plan, &project_dir).await? {
-            Verdict::Pass => {
-                info!("✅ 验证通过");
-                break;
-            }
-            Verdict::Uncertain { note } => {
-                warn!(%note, "⚠️ 无法客观验证,按完成处理");
-                break;
-            }
-            Verdict::Fail { reasons } => {
-                if repairs >= cli.max_repairs {
-                    println!("\n{answer}");
-                    return Err(anyhow!(
-                        "修复 {repairs} 轮后仍未通过验证。最后的失败:\n{}",
-                        render_reasons(&reasons)
-                    ));
-                }
-                repairs += 1;
-                warn!(round = repairs, "❌ 验证失败,启动第 {repairs} 轮修复");
-                let feedback = format!(
-                    "你的改动没有通过验证。以下是验证输出,请据此直接修改代码修复,然后再停止:\n\n{}",
-                    render_reasons(&reasons)
-                );
-                messages.push(Message::user(feedback));
-                answer = run_agent(&provider, &mut messages, &tools, cli.max_steps).await?;
-            }
-        }
-    }
-
-    println!("\n{answer}");
-    info!(repairs, "任务完成");
+    let c = &outcome.cost;
+    let review_status = if outcome.reviewed {
+        if outcome.approved { "通过" } else { "未通过" }
+    } else {
+        "跳过"
+    };
+    println!("\n──────── ridge-code 运行报告 ────────");
+    println!("子任务: {}   修复轮次: {}   评审: {}", outcome.subtasks, outcome.repairs, review_status);
+    println!(
+        "Token  强模型: {} (in {} / out {})   弱模型: {} (in {} / out {})",
+        c.strong_tokens(), c.strong_in, c.strong_out, c.weak_tokens(), c.weak_in, c.weak_out
+    );
+    println!("强模型 token 占比: {:.0}%  (越低越省钱,见 PLAN §9)", c.strong_share() * 100.0);
     Ok(())
 }
