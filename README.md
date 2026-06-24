@@ -9,12 +9,16 @@
 ## 跑起来
 
 ```bash
-cp config.example.toml ~/.ridge/config.toml   # 填 base_url / model / key
-export RIDGE_API_KEY=sk-...                    # 或直接在 config 里填 api_key
+cp config.example.toml ~/.ridge/config.toml   # 填 base_url / model
 
-cargo run -p ridge-code -- "在 src/lib.rs 里加一个返回 42 的 fn answer()"
-# 看更详细日志:
-RUST_LOG=debug cargo run -p ridge-code -- "..."
+# 提供 key(任一):
+#   1) 在仓库根放 .env.local,写一行:RIDGE_API_KEY=nvapi-...(启动时自动加载)
+#   2) export RIDGE_API_KEY=nvapi-...          (已导出的环境变量优先于 .env.local)
+#   3) 在 ~/.ridge/config.toml 填 api_key
+
+# 在仓库根目录运行(.env.local 按「启动目录」查找):
+cargo run -p ridge-code -- --cwd /path/to/target/project "在 src/lib.rs 加一个返回 42 的 fn answer()"
+RUST_LOG=debug cargo run -p ridge-code -- "..."   # 详细日志
 ```
 
 ## workspace 布局

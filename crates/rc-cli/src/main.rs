@@ -74,6 +74,11 @@ fn resolve_api_key(p: &ProviderConfig) -> Result<String> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // 先加载 .env.local / .env(若存在),让 RIDGE_API_KEY、RUST_LOG 等可从文件读。
+    // 在 --cwd 切换之前加载,确保按「启动目录」找到文件;已存在的环境变量优先,不被覆盖。
+    let _ = dotenvy::from_filename(".env.local");
+    let _ = dotenvy::dotenv();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
