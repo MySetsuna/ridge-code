@@ -1,0 +1,21 @@
+# 复制到 ~/.ridge/config.toml 并填写。
+# M0 先用单个 OpenAI 兼容 provider 跑通(强/弱混合是 M2 的事)。
+# ⚠️ M0 的 agent loop 依赖工具调用,必须选「支持 tool calling 的 instruct 模型」,
+#    避免纯推理型(如 *-r1),否则循环会卡住。
+
+# === NVIDIA NIM(免费额度,OpenAI 兼容)===
+[provider]
+base_url = "https://integrate.api.nvidia.com/v1"
+# 从 build.nvidia.com 对应模型页复制「确切的 model 字符串」。需支持 tool calling,例如:
+#   deepseek-ai/deepseek-v3.1     qwen/qwen3-coder-...     moonshotai/kimi-k2-instruct
+model = "deepseek-ai/deepseek-v3.1"
+api_key_env = "RIDGE_API_KEY"            # 然后:export RIDGE_API_KEY=nvapi-xxxx
+
+# === 其它 OpenAI 兼容端点(备选,换 base_url + model 即可)===
+# DeepSeek 官方:  base_url = "https://api.deepseek.com/v1"                       model = "deepseek-chat"
+# 智谱 GLM:        base_url = "https://open.bigmodel.cn/api/paas/v4"
+# 阿里 Qwen:       base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+# 本地 Ollama:     base_url = "http://localhost:11434/v1"
+
+# 凭证二选一:用上面的 api_key_env(推荐),或直接填(别提交进 git):
+# api_key = "nvapi-..."

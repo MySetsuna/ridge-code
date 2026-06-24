@@ -1,0 +1,10 @@
+[package]
+name = "rc-tools"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+rc-types = { path = "../rc-types" }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }

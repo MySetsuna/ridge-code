@@ -1,0 +1,80 @@
+//! ridge-code 的纯数据类型(serde),零业务逻辑。所有 crate 依赖它。
+//! 对应 PLAN.md §3 / pi-web 的 @pi-web/protocol 角色。
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// 对话消息角色。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+/// 模型发起的一次工具调用(内部表示,provider 无关)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    /// 原始 JSON 参数字符串,待执行时解析。
+    pub arguments: String,
+}
+
+/// 一条对话消息(内部表示)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub role: Role,
+    pub content: String,
+    /// 仅 assistant 消息可能携带。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    /// 仅 tool 消息携带,对应被回复的 tool_call。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl Message {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self { role: Role::System, content: content.into(), tool_calls: Vec::new(), tool_call_id: None }
+    }
+
+    pub fn user(content: impl Into<String>) -> Self {
+        Self { role: Role::User, content: content.into(), tool_calls: Vec::new(), tool_call_id: None }
+    }
+
+    /// tool 角色:回灌一次工具执行结果。
+    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(tool_call_id.into()),
+        }
+    }
+}
+
+/// 给模型看的工具定义。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    /// 参数的 JSON Schema(object)。
+    pub parameters: Value,
+}
+
+/// token 用量(成本记账基础,PLAN.md §3 CostRecord 的来源)。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct Usage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+/// 模型一次回复的结果(M0:非流式;流式留待 M1)。
+#[derive(Debug, Clone)]
+pub struct Completion {
+    pub message: Message,
+    pub usage: Usage,
+}

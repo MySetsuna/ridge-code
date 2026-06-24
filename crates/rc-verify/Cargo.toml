@@ -1,0 +1,6 @@
+[package]
+name = "rc-verify"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]

@@ -1,0 +1,12 @@
+[package]
+name = "rc-providers"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+rc-types = { path = "../rc-types" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

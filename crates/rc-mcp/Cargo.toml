@@ -1,0 +1,6 @@
+[package]
+name = "rc-mcp"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
