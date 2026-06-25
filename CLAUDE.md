@@ -8,13 +8,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 成本优化的**编码 agent CLI**(Rust workspace,单二进制交付)。核心赌注:编码领域有免费的客观验证器(编译/测试/lint),所以可以「弱模型扛执行量 + 强模型管规划/修复/评审 + 客观验证做免费质量闸 + 级联路由压成本」。省钱主要来自级联(弱先做,验证不过才升强),而非多开 agent。详见 `PLAN.md §1-2`。
 
-里程碑现状:**M0/M1/M2 已完成**(walking skeleton → 验证器+修复循环 → 强/弱编排大脑);`rc-eval`(M3 eval 闭环)与 `rc-mcp`(M4 MCP 客户端)仍是占位 lib。
+里程碑现状:**M0–M3 已完成**(walking skeleton → 验证器+修复循环 → 强/弱编排大脑 → eval 闭环);`rc-eval` 是 eval harness(基线 vs 编排对比、真实/离线两套运行);`rc-mcp`(M4 MCP 客户端)仍是占位 lib。
 
 ## 常用命令
 
 ```bash
 cargo build                        # 全 workspace 构建
-cargo test                         # 全 workspace 测试(目前实测仅 rc-verify 有单测)
+cargo test                         # 全 workspace 测试(rc-types/rc-providers/rc-core/rc-verify/rc-eval 均有单测 + rc-eval 离线集成测试)
 cargo test -p rc-verify            # 跑单个 crate 的测试
 cargo test -p rc-verify passing_check   # 跑单个测试函数
 cargo clippy                       # lint
@@ -22,6 +22,10 @@ cargo clippy                       # lint
 # 运行 agent(注意:二进制叫 ridge-code,但它住在 crates/rc-cli;package 名就是 ridge-code)
 cargo run -p ridge-code -- --cwd /path/to/target/project "实现 add/mul 并各写一个单元测试"
 RUST_LOG=debug cargo run -p ridge-code -- "..."   # 详细日志(看清 DAG/工具每一步)
+
+# 运行 eval(M3):基线 vs 编排的成本-质量对照
+cargo run -p rc-eval -- --offline   # 离线假模型,零联网零成本(CI 验证管道)
+cargo run -p rc-eval                # 真实 provider,量真实成本(读 ~/.ridge/config.toml + key)
 ```
 
 **易踩的坑:** `-p ridge-code`(不是 `-p rc-cli`)——目录是 `rc-cli`,但 `crates/rc-cli/Cargo.toml` 里的 package 名是 `ridge-code`。
@@ -65,7 +69,7 @@ test  = "cargo test"
 
 - 子任务**按规划顺序串行执行**;`Subtask.deps` 已记录但尚未用于并行调度(并行 + git worktree 隔离留待后续)。
 - `write_file` 是**整文件覆盖**(无结构化 patch 工具),所以 Worker 的 system prompt 强调「先读出再保留」。
-- build/test 闸盖不住「能编译但偏离规格」;Reviewer 自身也可能误判——语义正确性靠 M3 eval 度量(尚未做)。
+- build/test 闸盖不住「能编译但偏离规格」;Reviewer 自身也可能误判——语义正确性靠 M3 eval 度量(`rc-eval` 已落地,见下方 crate 表)。
 - 模型输出的 JSON 用 `extract_between`(取首个 `[`/`{` 到末个 `]`/`}`)抠出来,容忍模型包裹的解释文字。
 
 ## Crate 布局与依赖方向
@@ -73,7 +77,7 @@ test  = "cargo test"
 依赖自底向上(改下层留意上层影响):
 
 ```
-rc-types  →  { rc-providers, rc-tools, rc-verify }  →  rc-core  →  { rc-cli, (rc-eval) }
+rc-types  →  { rc-providers, rc-tools, rc-verify }  →  rc-core  →  { rc-cli, rc-eval }
 ```
 
 | crate | 角色 | 关键约束 |
@@ -84,7 +88,8 @@ rc-types  →  { rc-providers, rc-tools, rc-verify }  →  rc-core  →  { rc-cl
 | `rc-verify` | 验证 runner:跑命令、解析输出成 `Diagnostic`、产出 `Verdict` | 失败输出截断保留**末尾** `MAX_DETAIL` 字符(编译错误结论在尾部) |
 | `rc-core` | 编排大脑(上面的流水线) | 只依赖 `LlmProvider` trait,不碰具体 provider |
 | `rc-cli` | 二进制入口(薄壳) | package 名 = `ridge-code` |
-| `rc-mcp` / `rc-eval` | M4 / M3 占位 | 暂空 |
+| `rc-eval` | eval harness:基线 vs 编排成本-质量对照(`tasks`/`runner`/`reporter` + bin),真实/离线两套 provider | 独立 bin(`cargo run -p rc-eval`);离线 `StubProvider` 零联网零成本;隐藏验收注入 seed 副本跑 `cargo test` |
+| `rc-mcp` | M4 MCP 客户端 | 占位,暂空 |
 
 ## 工程约定(来自 HANDOFF.md §5,落地时遵守)
 
