@@ -1,0 +1,5 @@
+当前 Rust 库 crate(crate 名 fix_compile)的 src/lib.rs 编译不过。请修复它,使:
+
+    pub fn double(x: i64) -> i64   // 返回 x * 2
+
+能正确编译并返回 x 的两倍。不要改函数签名。完成后用一句中文总结并停止。
