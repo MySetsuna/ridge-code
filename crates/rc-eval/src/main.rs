@@ -76,6 +76,12 @@ fn load_real() -> Result<(ProviderCfg, ProviderCfg, Pricing)> {
     let strong = cfg.strong.clone().or_else(|| cfg.provider.clone()).context("配置缺少 [strong] 或 [provider]")?;
     let weak = cfg.weak.clone().or_else(|| cfg.provider.clone()).unwrap_or_else(|| strong.clone());
     let pricing = Pricing { strong: rate_of(&strong), weak: rate_of(&weak) };
+    if strong.price_in.is_none() && strong.price_out.is_none() {
+        tracing::warn!("[strong] 未配置 price_in/price_out,强模型成本将按 $0 计");
+    }
+    if weak.price_in.is_none() && weak.price_out.is_none() {
+        tracing::warn!("[weak] 未配置 price_in/price_out,弱模型成本将按 $0 计");
+    }
     Ok((strong, weak, pricing))
 }
 
@@ -114,7 +120,7 @@ async fn main() -> Result<()> {
             let (strong, weak) = if cli.offline {
                 runner::offline_providers(task, mode)
             } else {
-                let (s, w) = real.as_ref().unwrap();
+                let (s, w) = real.as_ref().expect("非离线模式必有真实 provider 配置");
                 (build_provider(s)?, build_provider(w)?)
             };
             let outcome = runner::run_one(task, mode, strong, weak, &pricing, cli.keep).await;
@@ -128,8 +134,15 @@ async fn main() -> Result<()> {
 
     let summaries = reporter::summarize(&outcomes);
     println!("{}", reporter::render(&summaries));
+    if cli.offline {
+        println!("(离线模式:provider 为脚本化 stub,以上为管道自验示意数据,真实成本/质量请用真实模式跑)");
+    }
 
-    let out_path = PathBuf::from("target/eval/result.json");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let out_path = PathBuf::from(format!("target/eval/result-{ts}.json"));
     reporter::write_json(&outcomes, &out_path)?;
     println!("结果已写入 {}", out_path.display());
     Ok(())

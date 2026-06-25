@@ -7,11 +7,15 @@
 base_url = "https://integrate.api.nvidia.com/v1"
 model = "meta/llama-3.3-70b-instruct"
 api_key_env = "RIDGE_API_KEY"            # 然后:export RIDGE_API_KEY=nvapi-xxxx(或放 .env.local)
+# price_in = 0.5    # USD / 每百万 input tokens(eval 用于折算成本;不填则按 $0 计)
+# price_out = 1.5   # USD / 每百万 output tokens
 
 [weak]
 base_url = "https://integrate.api.nvidia.com/v1"
 model = "qwen/qwen3-next-80b-a3b-instruct"
 api_key_env = "RIDGE_API_KEY"
+# price_in = 0.5    # USD / 每百万 input tokens(eval 用于折算成本;不填则按 $0 计)
+# price_out = 1.5   # USD / 每百万 output tokens
 
 # === 兼容写法:单 provider(强=弱都用它)===
 # [provider]
