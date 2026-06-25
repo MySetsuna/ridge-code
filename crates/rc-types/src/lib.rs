@@ -186,3 +186,38 @@ impl Cost {
         }
     }
 }
+
+/// 每百万 token 的美元单价。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct Rate {
+    pub in_per_mtok: f64,
+    pub out_per_mtok: f64,
+}
+
+impl Rate {
+    /// 纯算术:给定输入/输出 token 数,折算成美元。
+    pub fn cost_usd(&self, in_tok: u64, out_tok: u64) -> f64 {
+        (in_tok as f64) / 1_000_000.0 * self.in_per_mtok
+            + (out_tok as f64) / 1_000_000.0 * self.out_per_mtok
+    }
+}
+
+/// 强 / 弱两档定价。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct Pricing {
+    pub strong: Rate,
+    pub weak: Rate,
+}
+
+#[cfg(test)]
+mod pricing_tests {
+    use super::*;
+
+    #[test]
+    fn rate_cost_usd_is_per_million() {
+        let r = Rate { in_per_mtok: 3.0, out_per_mtok: 15.0 };
+        // 100 万 in * $3 + 100 万 out * $15 = $18
+        assert!((r.cost_usd(1_000_000, 1_000_000) - 18.0).abs() < 1e-9);
+        assert!((r.cost_usd(0, 0)).abs() < 1e-9);
+    }
+}

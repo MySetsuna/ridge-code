@@ -3,4 +3,21 @@ name = "rc-eval"
 edition.workspace = true
 version.workspace = true
 
+[[bin]]
+name = "rc-eval"
+path = "src/main.rs"
+
 [dependencies]
+rc-types = { path = "../rc-types" }
+rc-core = { path = "../rc-core" }
+rc-providers = { path = "../rc-providers" }
+rc-verify = { path = "../rc-verify" }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+dotenvy = { workspace = true }

@@ -793,12 +793,28 @@ dependencies = [
  "rc-types",
  "rc-verify",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "rc-eval"
 version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dotenvy",
+ "rc-core",
+ "rc-providers",
+ "rc-types",
+ "rc-verify",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "rc-mcp"
@@ -814,6 +830,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

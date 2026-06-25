@@ -107,6 +107,27 @@ impl Orchestrator {
         Ok(Outcome { subtasks: subtasks.len(), repairs, reviewed, approved, cost })
     }
 
+    /// 基线:全程强模型单 agent —— 不分解/不路由/不评审,直接工具循环 + 验证修复。
+    pub async fn run_single(&self, task: &str) -> Result<Outcome> {
+        let mut cost = Cost::default();
+        info!("基线:全程强模型单 agent 直跑");
+        let user = format!(
+            "请完成以下编码任务,写的代码应能通过编译。完成后用一句中文总结并停止:\n{task}"
+        );
+        let mut msgs = vec![Message::system(WORKER_SYSTEM), Message::user(user)];
+        run_agent(
+            self.strong.as_ref(),
+            ModelTier::Strong,
+            &mut msgs,
+            &self.tools,
+            self.cfg.max_steps,
+            &mut cost,
+        )
+        .await?;
+        let repairs = self.verify_and_repair(&mut cost).await?;
+        Ok(Outcome { subtasks: 1, repairs, reviewed: false, approved: true, cost })
+    }
+
     /// Planner:强模型把任务分解成有序子任务(JSON);解析失败则降级为单个 hard 子任务。
     async fn plan(&self, task: &str, cost: &mut Cost) -> Result<Vec<Subtask>> {
         let sys = "你是任务规划器。把用户的编码任务分解成 2 到 5 个有序子任务。\
@@ -271,4 +292,32 @@ fn parse_plan(content: &str) -> Option<Vec<Subtask>> {
 fn parse_review(content: &str) -> Option<ReviewResult> {
     let json = extract_between(content, '{', '}')?;
     serde_json::from_str::<ReviewResult>(json).ok()
+}
+
+#[cfg(test)]
+mod run_single_tests {
+    use super::*;
+    use rc_providers::{LlmProvider, StubProvider};
+    use rc_types::{Completion, Message, Role, Usage};
+
+    #[tokio::test]
+    async fn run_single_is_single_subtask_no_review() {
+        let done = Completion {
+            message: Message { role: Role::Assistant, content: "done".into(), tool_calls: vec![], tool_call_id: None },
+            usage: Usage { input_tokens: 5, output_tokens: 5 },
+        };
+        let strong: Box<dyn LlmProvider> = Box::new(StubProvider::new("s", vec![done]));
+        let weak: Box<dyn LlmProvider> = Box::new(StubProvider::new("w", vec![]));
+        // 空临时目录:无 Cargo.toml/ridge.toml → 验证 Uncertain → 视为通过。
+        let tmp = std::env::temp_dir().join("rc-core-run-single-test");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let orch = Orchestrator::new(strong, weak, tmp, OrchestratorConfig::default());
+        let out = orch.run_single("加一个函数").await.unwrap();
+
+        assert_eq!(out.subtasks, 1);
+        assert!(!out.reviewed);
+        assert!(out.approved);
+        assert!(out.cost.strong_tokens() > 0);
+    }
 }
