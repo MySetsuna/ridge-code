@@ -68,6 +68,36 @@ args = ["mcp-server-git"]
 - **rmcp 边界**:rmcp 的 wire 类型只在 `rc-mcp` 内部使用,对上归一化成 `rc_types::{ToolSpec, ToolCall}`(同 provider 边界原则)。
 - ⚠️ **Windows 坑**:bare `npx`/`uvx` 可能 ENOENT(需 shell 解析),改用绝对路径可执行文件或 `cmd /c` 包裹。
 
+## 多供应商 / 多模型 / 原生 Anthropic
+
+config 支持三种写法(自上而下优先):① `[[providers]]` 命名注册表 + `[roles]`;② `[strong]`+`[weak]`;③ 单 `[provider]`。后两者为向后兼容(`kind` 缺省 openai,旧配置零改动)。
+
+```toml
+[[providers]]
+name = "claude"
+kind = "anthropic"                       # 原生 Anthropic Messages API
+base_url = "https://api.anthropic.com/v1"
+model = "claude-sonnet-4-6"
+api_key_env = "ANTHROPIC_KEY"
+[[providers]]
+name = "deepseek"                        # kind 缺省 openai
+base_url = "https://api.deepseek.com/v1"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_KEY"
+[roles]
+strong = "claude"                        # planner/reviewer/修复/基线 + 默认 hard worker
+weak   = "deepseek"                      # 默认 trivial/moderate worker
+[routing]                                # 可选:按难度覆盖 worker 模型(用上第 3 个模型)
+hard = "claude"
+moderate = "deepseek"
+```
+
+关键点(改动时心里有数):
+- **N 模型路由**:`[routing]` 按难度(trivial/moderate/hard)把 worker 覆盖到任意命名 provider;接线在 `rc-core`:`Orchestrator::with_worker_models(HashMap<Difficulty, Box<dyn LlmProvider>>)` + `work()` 命中覆盖优先、否则回落 strong/weak。装配在 `rc-cli`(`resolve_tiers` / `resolve_worker_models`)。
+- **Cost 仍按难度 tier(强/弱)记账**:命名模型是「身份」、tier 是「成本分类」,两者解耦——`work` 用哪个命名模型,成本仍按 `route_tier(difficulty)` 记,`eval` 的「强 token 占比」语义不变。
+- **原生 Anthropic**(`rc-providers::anthropic`):第二个 `LlmProvider` 实现,`kind="anthropic"` 走 `/messages`。归一化三处关键差异——system 抽成顶层参数、tool 结果是 user 消息的 `tool_result` 块、工具调用是 assistant 的 `tool_use` 块(input 是对象),且**合并相邻同角色**(Anthropic 要求角色交替)。`max_tokens` 必填(默认 8192)。wire 类型私有,纯翻译函数离线单测。
+- 详见 `docs/superpowers/specs/2026-07-05-provider-registry-design.md`。
+
 ## 架构:编排流水线
 
 入口 `rc-cli` 是**薄壳**(读配置 → 造两个 provider → 构造 `Orchestrator` → 跑 → 打印成本账单),全部编排逻辑在 `rc-core::Orchestrator::run`:
@@ -103,7 +133,7 @@ rc-types  →  { rc-providers, rc-tools, rc-verify }  →  rc-core  →  { rc-cl
 | crate | 角色 | 关键约束 |
 |---|---|---|
 | `rc-types` | 纯数据 + serde,**零业务逻辑** | 所有 crate 依赖它;保持无业务依赖 |
-| `rc-providers` | `LlmProvider` trait + OpenAI 兼容实现 | 见下方「provider 边界」 |
+| `rc-providers` | `LlmProvider` trait + OpenAI 兼容 + 原生 Anthropic 实现 + StubProvider | 见下方「provider 边界」「多供应商/多模型」 |
 | `rc-tools` | 内置工具 read_file/write_file/list_dir/run_shell | 工具错误转成给模型看的文本(让它自我纠正),不向上抛 |
 | `rc-verify` | 验证 runner:跑命令、解析输出成 `Diagnostic`、产出 `Verdict` | 失败输出截断保留**末尾** `MAX_DETAIL` 字符(编译错误结论在尾部) |
 | `rc-core` | 编排大脑(上面的流水线) | 只依赖 `LlmProvider` trait,不碰具体 provider |

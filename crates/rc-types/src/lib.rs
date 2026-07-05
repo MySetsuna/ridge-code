@@ -114,7 +114,7 @@ impl Verdict {
 }
 
 /// 子任务难度,驱动 Router 分流(PLAN.md §2、§3)。默认 Moderate。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Difficulty {
     Trivial,

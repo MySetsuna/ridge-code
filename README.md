@@ -10,12 +10,14 @@
 
 **M4 MCP 客户端已落地(`rc-mcp`):** 在 `~/.ridge/config.toml` 声明 `[[mcp]]` 外部服务器(子进程 stdio,基于官方 `rmcp`),启动时连上、把它们的工具以 `<name>__<tool>` 命名空间接进 Worker 工具集;调用按名路由回对应服务器。单个服务器连不上会告警跳过、不影响用内置工具跑任务。设计见 `docs/superpowers/specs/2026-07-05-m4-rc-mcp-design.md`。
 
+**多供应商 / 多模型 + 原生 Anthropic:** provider 从「强/弱两段」升级为**命名注册表** `[[providers]]`——声明任意 N 个命名 provider,由 `[roles]` 按名选强/弱,可选 `[routing]` 按难度把 worker 路由到任意命名模型(用上 >2 个模型);Cost 仍按难度档位记账,eval 不受影响。新增**原生 Anthropic provider**(`kind = "anthropic"`,Messages API,`tool_use`/`tool_result`/`system` 归一化),strong=Claude 可直连原生、不必走兼容网关。旧 `[strong]`/`[weak]`/`[provider]` 写法全兼容。设计见 `docs/superpowers/specs/2026-07-05-provider-registry-design.md`。
+
 **已知局限(驱动后续里程碑):** 子任务按规划顺序串行(并行 + worktree 隔离待做);`write_file` 整文件覆盖(结构化 patch 工具待做);eval 任务集目前仅 2 个内置小任务(待扩充更真实的任务);MCP 目前只接 tools、只做子进程 stdio 传输(resources/prompts、SSE/HTTP 传输待做);M4 剩余 ratatui 实时视图待做。
 
 ## 跑起来
 
 ```bash
-cp config.example.toml ~/.ridge/config.toml   # 填 [strong] / [weak] 的 base_url 与 model
+cp config.example.toml ~/.ridge/config.toml   # 填 [strong]/[weak],或 [[providers]]+[roles] 命名注册表
 
 # 提供 key(任一):
 #   1) 在仓库根放 .env.local,写一行:RIDGE_API_KEY=nvapi-...(启动时自动加载)
@@ -69,7 +71,7 @@ git tag v0.1.0 && git push origin v0.1.0
 | crate | 角色 | 里程碑 |
 |---|---|---|
 | `rc-types` | 纯数据类型(serde) | M0 ✅ |
-| `rc-providers` | provider 抽象 + OpenAI 兼容实现 | M0 ✅ |
+| `rc-providers` | provider 抽象 + OpenAI 兼容 + 原生 Anthropic 实现 | M0 ✅ / Anthropic ✅ |
 | `rc-tools` | 内置工具(fs / shell) | M0 ✅ |
 | `rc-cli` | 二进制入口(薄壳:配置 + 报告) | M0 ✅ |
 | `rc-verify` | 验证器(build/test/lint)+ Verdict | M1 ✅ |

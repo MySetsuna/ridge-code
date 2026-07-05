@@ -7,7 +7,9 @@ use async_trait::async_trait;
 use rc_types::{Completion, Message, Role, ToolCall, ToolSpec, Usage};
 use serde::{Deserialize, Serialize};
 
+mod anthropic;
 mod stub;
+pub use anthropic::AnthropicProvider;
 pub use stub::StubProvider;
 
 /// 统一的模型 provider 接口。

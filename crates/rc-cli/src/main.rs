@@ -5,8 +5,10 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use rc_core::{Orchestrator, OrchestratorConfig};
 use rc_mcp::{McpHub, McpServerConfig};
-use rc_providers::{LlmProvider, OpenAiCompatProvider};
+use rc_providers::{AnthropicProvider, LlmProvider, OpenAiCompatProvider};
+use rc_types::Difficulty;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{info, warn};
 
@@ -30,17 +32,57 @@ struct Cli {
     cwd: Option<PathBuf>,
 }
 
+/// provider 的 wire 协议:openai 兼容(默认)或原生 anthropic。
+#[derive(Deserialize, Clone, Copy, Default)]
+#[serde(rename_all = "lowercase")]
+enum ProviderKind {
+    #[default]
+    Openai,
+    Anthropic,
+}
+
 #[derive(Deserialize, Clone)]
 struct ProviderConfig {
+    /// 命名注册表 `[[providers]]` 里用作引用名(内联段无需填)。
+    #[serde(default)]
+    name: Option<String>,
+    /// wire 协议;缺省 openai(旧配置零改动)。
+    #[serde(default)]
+    kind: ProviderKind,
     base_url: String,
     model: String,
     #[serde(default)]
     api_key: Option<String>,
     #[serde(default)]
     api_key_env: Option<String>,
+    /// 仅 anthropic 用(必填项),缺省由 provider 兜底(8192)。
+    #[serde(default)]
+    max_tokens: Option<u32>,
 }
 
-/// 支持两种写法:`[provider]`(单 provider,强=弱兼容旧配置)或 `[strong]`+`[weak]`(混合)。
+/// `[roles]`:strong/weak 按名引用 `[[providers]]` 里的 provider。
+#[derive(Deserialize, Default)]
+struct Roles {
+    #[serde(default)]
+    strong: Option<String>,
+    #[serde(default)]
+    weak: Option<String>,
+}
+
+/// `[routing]`(可选):按难度把 worker 覆盖到任意命名 provider。
+#[derive(Deserialize, Default)]
+struct Routing {
+    #[serde(default)]
+    trivial: Option<String>,
+    #[serde(default)]
+    moderate: Option<String>,
+    #[serde(default)]
+    hard: Option<String>,
+}
+
+/// 三种写法(自上而下优先):
+/// ①命名注册表 `[[providers]]` + `[roles]`(多供应商/多模型,可选 `[routing]` 按难度路由);
+/// ②`[strong]`+`[weak]`(混合两档);③单 `[provider]`(强=弱)。后两者为向后兼容。
 #[derive(Deserialize)]
 struct Config {
     #[serde(default)]
@@ -49,6 +91,13 @@ struct Config {
     strong: Option<ProviderConfig>,
     #[serde(default)]
     weak: Option<ProviderConfig>,
+    /// 命名 provider 注册表:任意 N 个,由 `[roles]`/`[routing]` 按名引用。
+    #[serde(default)]
+    providers: Vec<ProviderConfig>,
+    #[serde(default)]
+    roles: Roles,
+    #[serde(default)]
+    routing: Routing,
     /// 可选的外部 MCP 服务器(M4):`[[mcp]]` 数组,每项 name/command/args/env。
     #[serde(default)]
     mcp: Vec<McpServerConfig>,
@@ -85,11 +134,93 @@ fn resolve_api_key(p: &ProviderConfig) -> Result<String> {
 
 fn build_provider(p: &ProviderConfig) -> Result<Box<dyn LlmProvider>> {
     let key = resolve_api_key(p)?;
-    Ok(Box::new(OpenAiCompatProvider::new(
-        p.base_url.clone(),
-        key,
-        p.model.clone(),
-    )))
+    match p.kind {
+        ProviderKind::Openai => Ok(Box::new(OpenAiCompatProvider::new(
+            p.base_url.clone(),
+            key,
+            p.model.clone(),
+        ))),
+        ProviderKind::Anthropic => Ok(Box::new(AnthropicProvider::new(
+            p.base_url.clone(),
+            key,
+            p.model.clone(),
+            p.max_tokens,
+        ))),
+    }
+}
+
+/// 从 `[[providers]]` 建「名 → 配置」注册表;无 name 的项告警跳过。
+fn build_registry(providers: &[ProviderConfig]) -> HashMap<String, ProviderConfig> {
+    let mut map = HashMap::new();
+    for p in providers {
+        match &p.name {
+            Some(name) => {
+                map.insert(name.clone(), p.clone());
+            }
+            None => warn!("[[providers]] 有一项缺少 name,已跳过"),
+        }
+    }
+    map
+}
+
+/// 按名从注册表取 provider 配置(报错时指明是哪个角色引用的)。
+fn lookup(
+    registry: &HashMap<String, ProviderConfig>,
+    name: &str,
+    role: &str,
+) -> Result<ProviderConfig> {
+    registry
+        .get(name)
+        .cloned()
+        .with_context(|| format!("[{role}] 指向未在 [[providers]] 定义的 provider: {name}"))
+}
+
+/// 解析强/弱 provider 配置:优先 `[roles]` 按名引用,否则回落 `[strong]`/`[weak]` → `[provider]`。
+fn resolve_tiers(
+    cfg: &Config,
+    registry: &HashMap<String, ProviderConfig>,
+) -> Result<(ProviderConfig, ProviderConfig)> {
+    let strong = match &cfg.roles.strong {
+        Some(name) => lookup(registry, name, "roles.strong")?,
+        None => cfg
+            .strong
+            .clone()
+            .or_else(|| cfg.provider.clone())
+            .context("配置缺少 provider:用 [[providers]]+[roles],或 [strong]/[provider]")?,
+    };
+    let weak = match &cfg.roles.weak {
+        Some(name) => lookup(registry, name, "roles.weak")?,
+        None => cfg
+            .weak
+            .clone()
+            .or_else(|| cfg.provider.clone())
+            .unwrap_or_else(|| strong.clone()),
+    };
+    Ok((strong, weak))
+}
+
+/// 解析可选的 `[routing]`:按难度构建 worker 覆盖 provider(名字须在注册表)。
+fn resolve_worker_models(
+    cfg: &Config,
+    registry: &HashMap<String, ProviderConfig>,
+) -> Result<HashMap<Difficulty, Box<dyn LlmProvider>>> {
+    let mut models: HashMap<Difficulty, Box<dyn LlmProvider>> = HashMap::new();
+    let entries = [
+        (&cfg.routing.trivial, Difficulty::Trivial, "routing.trivial"),
+        (
+            &cfg.routing.moderate,
+            Difficulty::Moderate,
+            "routing.moderate",
+        ),
+        (&cfg.routing.hard, Difficulty::Hard, "routing.hard"),
+    ];
+    for (name_opt, diff, role) in entries {
+        if let Some(name) = name_opt {
+            let pc = lookup(registry, name, role)?;
+            models.insert(diff, build_provider(&pc)?);
+        }
+    }
+    Ok(models)
 }
 
 #[tokio::main]
@@ -114,16 +245,10 @@ async fn main() -> Result<()> {
     let project_dir = std::env::current_dir().context("获取当前目录失败")?;
 
     let cfg = load_config()?;
-    let strong_cfg = cfg
-        .strong
-        .clone()
-        .or_else(|| cfg.provider.clone())
-        .context("配置缺少 [strong] 或 [provider]")?;
-    let weak_cfg = cfg
-        .weak
-        .clone()
-        .or_else(|| cfg.provider.clone())
-        .unwrap_or_else(|| strong_cfg.clone());
+    // 命名注册表 + 角色/路由解析(缺省回落旧内联写法)。
+    let registry = build_registry(&cfg.providers);
+    let (strong_cfg, weak_cfg) = resolve_tiers(&cfg, &registry)?;
+    let worker_models = resolve_worker_models(&cfg, &registry)?;
 
     let strong_model = strong_cfg.model.clone();
     let weak_model = weak_cfg.model.clone();
@@ -133,8 +258,10 @@ async fn main() -> Result<()> {
     info!(
         strong = %strong_model,
         weak = %weak_model,
+        providers = registry.len(),
+        worker_overrides = worker_models.len(),
         project = %project_dir.display(),
-        "ridge-code M2 启动"
+        "ridge-code 启动"
     );
 
     let mut orch = Orchestrator::new(
@@ -146,6 +273,11 @@ async fn main() -> Result<()> {
             max_repairs: cli.max_repairs,
         },
     );
+
+    // N 模型:声明了 [routing] 则按难度把 worker 覆盖到命名 provider。
+    if !worker_models.is_empty() {
+        orch = orch.with_worker_models(worker_models);
+    }
 
     // M4:声明了 [[mcp]] 则连接外部 MCP 服务器,把其工具并入 Worker 工具集。
     if !cfg.mcp.is_empty() {

@@ -16,6 +16,7 @@ use rc_types::{
     Verdict,
 };
 use rc_verify::{resolve_plan, verify, VerifyPlan};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
 
@@ -53,6 +54,9 @@ pub struct Orchestrator {
     read_tools: Vec<ToolSpec>,
     /// 可选的外部 MCP 工具(M4);None 时行为与 M3 完全一致。
     mcp: Option<McpHub>,
+    /// 可选:按难度覆盖 worker 的 provider(命名注册表 + N 模型路由)。
+    /// 命中则用它,否则回落 strong/weak;成本档位仍按难度记(见 `work`)。
+    worker_models: HashMap<Difficulty, Box<dyn LlmProvider>>,
     verify_plan: VerifyPlan,
     project_dir: PathBuf,
     cfg: OrchestratorConfig,
@@ -78,10 +82,18 @@ impl Orchestrator {
             tools,
             read_tools,
             mcp: None,
+            worker_models: HashMap::new(),
             verify_plan,
             project_dir,
             cfg,
         }
+    }
+
+    /// 注入按难度覆盖的 worker provider(命名注册表 + N 模型路由)。
+    /// 对应难度的子任务会用覆盖模型执行;未覆盖的难度回落 strong/weak。返回 self 以链式调用。
+    pub fn with_worker_models(mut self, models: HashMap<Difficulty, Box<dyn LlmProvider>>) -> Self {
+        self.worker_models = models;
+        self
     }
 
     /// 注入外部 MCP 工具:把它们并入 Worker/修复/基线的工具集(不进 Reviewer 的只读工具集,
@@ -201,15 +213,21 @@ difficulty 用小写,表示该子任务难度。";
     }
 
     /// Worker:用路由到的 provider 执行一个子任务(共享文件系统)。
+    /// provider 选取:按难度覆盖(worker_models)命中优先,否则回落 tier(strong/weak)。
+    /// **成本档位仍是 tier**(= route_tier(difficulty)),与用哪个命名模型无关,保 eval 语义。
     async fn work(&self, st: &Subtask, tier: ModelTier, cost: &mut Cost) -> Result<()> {
         let user = format!(
             "这是整体编码任务的一个子任务(id={})。\n子任务:{}\n\
 请用工具读写文件 / 执行命令来完成它;写的代码应能通过编译。完成后用一句中文总结并停止。",
             st.id, st.description
         );
+        let provider = match self.worker_models.get(&st.difficulty) {
+            Some(b) => b.as_ref(),
+            None => self.provider_for(tier),
+        };
         let mut msgs = vec![Message::system(WORKER_SYSTEM), Message::user(user)];
         run_agent(
-            self.provider_for(tier),
+            provider,
             tier,
             &mut msgs,
             &self.tools,
@@ -438,5 +456,51 @@ mod run_single_tests {
         assert!(!out.reviewed);
         assert!(out.approved);
         assert!(out.cost.strong_tokens() > 0);
+    }
+
+    fn scripted(in_tok: u32) -> Completion {
+        Completion {
+            message: Message {
+                role: Role::Assistant,
+                content: "done".into(),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            usage: Usage {
+                input_tokens: in_tok,
+                output_tokens: 0,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn with_worker_models_overrides_provider_but_keeps_tier_cost() {
+        use std::collections::HashMap;
+        // 覆盖模型 usage=100、strong=7:用哪个 provider 由消耗到的 usage 区分。
+        let strong: Box<dyn LlmProvider> = Box::new(StubProvider::new("s", vec![scripted(7)]));
+        let weak: Box<dyn LlmProvider> = Box::new(StubProvider::new("w", vec![]));
+        let hard_model: Box<dyn LlmProvider> =
+            Box::new(StubProvider::new("hard", vec![scripted(100)]));
+
+        let tmp = std::env::temp_dir().join("rc-core-worker-models-test");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let mut models: HashMap<Difficulty, Box<dyn LlmProvider>> = HashMap::new();
+        models.insert(Difficulty::Hard, hard_model);
+        let orch = Orchestrator::new(strong, weak, tmp, OrchestratorConfig::default())
+            .with_worker_models(models);
+
+        let st = Subtask {
+            id: "s1".into(),
+            description: "x".into(),
+            deps: vec![],
+            difficulty: Difficulty::Hard,
+        };
+        let mut cost = Cost::default();
+        orch.work(&st, ModelTier::Strong, &mut cost).await.unwrap();
+
+        // 用的是覆盖模型(usage 100,而非 strong 的 7),且成本仍记在 strong tier。
+        assert_eq!(cost.strong_in, 100);
+        assert_eq!(cost.weak_tokens(), 0);
     }
 }

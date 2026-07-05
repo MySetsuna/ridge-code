@@ -1093,6 +1093,7 @@ dependencies = [
  "rc-core",
  "rc-mcp",
  "rc-providers",
+ "rc-types",
  "serde",
  "tokio",
  "toml",

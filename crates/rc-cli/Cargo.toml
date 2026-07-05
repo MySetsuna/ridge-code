@@ -8,6 +8,7 @@ name = "ridge-code"
 path = "src/main.rs"
 
 [dependencies]
+rc-types = { path = "../rc-types" }
 rc-providers = { path = "../rc-providers" }
 rc-core = { path = "../rc-core" }
 rc-mcp = { path = "../rc-mcp" }

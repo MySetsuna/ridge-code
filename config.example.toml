@@ -1,7 +1,43 @@
 # 复制到 ~/.ridge/config.toml 并填写。
 # ⚠️ 模型必须支持工具调用(tool calling),避免纯推理型(如 *-r1)。
+#
+# 三种写法(自上而下优先):① [[providers]] 命名注册表 + [roles];
+# ② [strong]+[weak];③ 单 [provider]。后两者为向后兼容。
 
-# === M2:强/弱双 provider(跨模型路由,推荐)===
+# === 推荐:命名 provider 注册表 + 角色/路由(多供应商 / 多模型 / 原生 Anthropic)===
+# 声明任意 N 个命名 provider,再由 [roles] 按名选强/弱;可选 [routing] 按难度把 worker
+# 路由到任意命名模型(真正用上 >2 个模型)。取消下面注释即启用(会覆盖上面的 [strong]/[weak])。
+#
+# [[providers]]
+# name = "claude"
+# kind = "anthropic"                       # 原生 Anthropic Messages API(x-api-key + tool_use/tool_result)
+# base_url = "https://api.anthropic.com/v1"
+# model = "claude-sonnet-4-6"
+# api_key_env = "ANTHROPIC_KEY"
+# # max_tokens = 8192                       # 仅 anthropic 用(必填项),缺省 8192
+#
+# [[providers]]
+# name = "deepseek"                         # kind 缺省 = openai(兼容端点)
+# base_url = "https://api.deepseek.com/v1"
+# model = "deepseek-chat"
+# api_key_env = "DEEPSEEK_KEY"
+#
+# [[providers]]
+# name = "qwen"
+# base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+# model = "qwen-plus"
+# api_key_env = "QWEN_KEY"
+#
+# [roles]
+# strong = "claude"                         # planner/reviewer/修复/基线 + 默认 hard worker
+# weak   = "deepseek"                       # 默认 trivial/moderate worker
+#
+# [routing]                                 # 可选:按难度覆盖 worker 模型(用上第 3 个模型)
+# hard     = "claude"
+# moderate = "qwen"
+# trivial  = "deepseek"
+
+# === 兼容:强/弱双 provider(跨模型路由)===
 # 难子任务/规划/修复/评审 → 强;其余 → 弱。两段可指向不同 provider 或不同模型。
 [strong]
 base_url = "https://integrate.api.nvidia.com/v1"
