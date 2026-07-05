@@ -12,6 +12,8 @@ rc-types = { path = "../rc-types" }
 rc-providers = { path = "../rc-providers" }
 rc-core = { path = "../rc-core" }
 rc-mcp = { path = "../rc-mcp" }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }

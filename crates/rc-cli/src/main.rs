@@ -2,8 +2,9 @@
 //! 编排逻辑全在 rc-core。详见 PLAN.md §2。
 
 mod catalog;
+mod models_dev;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use rc_core::{Orchestrator, OrchestratorConfig};
 use rc_mcp::{McpHub, McpServerConfig};
@@ -43,10 +44,13 @@ struct Cli {
 enum Command {
     /// 列出内置供应商目录(base_url / kind / key 环境变量)
     Providers,
-    /// 列出某供应商(或全部)的示例模型
+    /// 列出某供应商(或全部)的模型:默认内置示例,`--online` 从 models.dev 拉真实当前模型
     Models {
-        /// 供应商名(省略则列全部)
+        /// 供应商名(省略则列全部内置示例;`--online` 时必填)
         provider: Option<String>,
+        /// 从 models.dev 实时拉取(需联网):真实 model id + 工具调用支持 + 上下文 + 价格
+        #[arg(long)]
+        online: bool,
     },
     /// 按「供应商 + 模型」生成 ~/.ridge/config.toml(不用手写 base_url)
     Init {
@@ -283,9 +287,12 @@ fn cmd_providers() {
     );
 }
 
-/// `models`:列出某供应商(或全部)的示例模型。
-fn cmd_models(provider: Option<&str>) -> Result<()> {
-    println!("示例模型(以各家官方控制台/文档为准,可能更新;init 可填任意 model id):\n");
+/// `models`:列出模型。默认内置示例;`--online` 从 models.dev 拉真实当前模型。
+async fn cmd_models(provider: Option<&str>, online: bool) -> Result<()> {
+    if online {
+        return cmd_models_online(provider).await;
+    }
+    println!("内置示例模型(以各家官方为准,可能过时;加 --online 从 models.dev 拉真实的):\n");
     let entries: Vec<&catalog::CatalogEntry> = match provider {
         Some(name) => vec![catalog::find(name)
             .with_context(|| format!("未知供应商: {name}(见 `ridge-code providers`)"))?],
@@ -298,6 +305,38 @@ fn cmd_models(provider: Option<&str>) -> Result<()> {
         }
         println!();
     }
+    Ok(())
+}
+
+/// `models <p> --online`:从 models.dev 实时拉某供应商的真实当前模型。
+async fn cmd_models_online(provider: Option<&str>) -> Result<()> {
+    let name =
+        provider.context("`--online` 需指定供应商,如 `ridge-code models deepseek --online`")?;
+    let e = catalog::find(name)
+        .with_context(|| format!("未知供应商: {name}(见 `ridge-code providers`)"))?;
+    if e.modelsdev_id.is_empty() {
+        bail!("{name} 是本地供应商,无在线目录;用 `ollama list` 看已拉取的模型");
+    }
+    println!(
+        "从 models.dev 实时拉取 [{name}] 的模型(🔧=支持工具调用,可跑 agent;价格 USD/百万 token):\n"
+    );
+    let models = models_dev::fetch_models(e.modelsdev_id).await?;
+    for m in &models {
+        let tc = if m.tool_call { "🔧" } else { "  " };
+        let ctx = m
+            .context
+            .map(|c| format!("{}k", c / 1000))
+            .unwrap_or_default();
+        let cost = match (m.cost_in, m.cost_out) {
+            (Some(i), Some(o)) => format!("${i}/{o}"),
+            _ => String::new(),
+        };
+        println!("  {tc} {:<44} {:<8} {}", m.id, ctx, cost);
+    }
+    println!(
+        "\n共 {} 个模型。用 `ridge-code init {name} <model-id>` 生成配置。",
+        models.len()
+    );
     Ok(())
 }
 
@@ -392,7 +431,9 @@ async fn main() -> Result<()> {
             cmd_providers();
             return Ok(());
         }
-        Some(Command::Models { provider }) => return cmd_models(provider.as_deref()),
+        Some(Command::Models { provider, online }) => {
+            return cmd_models(provider.as_deref(), *online).await
+        }
         Some(Command::Init {
             provider,
             model,

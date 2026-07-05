@@ -20,7 +20,8 @@
 
 ```bash
 ridge-code providers                 # 列出供应商(anthropic/deepseek/qwen/zhipu/moonshot/openai/openrouter/groq/nvidia/ollama)
-ridge-code models deepseek           # 看某供应商的示例模型
+ridge-code models deepseek           # 看内置示例模型
+ridge-code models deepseek --online  # 从 models.dev 拉真实当前模型(id+工具调用+上下文+价格)
 ridge-code init deepseek             # 一键生成 ~/.ridge/config.toml(再设置对应 key 环境变量)
 # 本地免费(无需付费 key):ridge-code init ollama qwen2.5-coder  → 先 `ollama pull qwen2.5-coder`
 ```
