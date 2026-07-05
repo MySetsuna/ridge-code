@@ -4,10 +4,11 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use rc_core::{Orchestrator, OrchestratorConfig};
+use rc_mcp::{McpHub, McpServerConfig};
 use rc_providers::{LlmProvider, OpenAiCompatProvider};
 use serde::Deserialize;
 use std::path::PathBuf;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Parser)]
 #[command(name = "ridge-code", version, about = "成本优化的编码 agent CLI(M2:强/弱编排)")]
@@ -44,6 +45,9 @@ struct Config {
     strong: Option<ProviderConfig>,
     #[serde(default)]
     weak: Option<ProviderConfig>,
+    /// 可选的外部 MCP 服务器(M4):`[[mcp]]` 数组,每项 name/command/args/env。
+    #[serde(default)]
+    mcp: Vec<McpServerConfig>,
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -125,13 +129,32 @@ async fn main() -> Result<()> {
         "ridge-code M2 启动"
     );
 
-    let orch = Orchestrator::new(
+    let mut orch = Orchestrator::new(
         strong,
         weak,
         project_dir,
         OrchestratorConfig { max_steps: cli.max_steps, max_repairs: cli.max_repairs },
     );
-    let outcome = orch.run(&cli.task).await?;
+
+    // M4:声明了 [[mcp]] 则连接外部 MCP 服务器,把其工具并入 Worker 工具集。
+    if !cfg.mcp.is_empty() {
+        let hub = McpHub::connect(cfg.mcp).await;
+        if hub.is_empty() {
+            warn!("已声明 [[mcp]] 但无服务器连接成功,仅用内置工具");
+        } else {
+            info!(tools = hub.tool_specs().len(), "MCP 工具已接入");
+        }
+        orch = orch.with_mcp(hub);
+    }
+
+    // 运行;无论成败都关闭 MCP 子进程会话。
+    let outcome = match orch.run(&cli.task).await {
+        Ok(o) => o,
+        Err(e) => {
+            orch.shutdown().await;
+            return Err(e);
+        }
+    };
 
     let c = &outcome.cost;
     let review_status = if outcome.reviewed {
@@ -146,5 +169,7 @@ async fn main() -> Result<()> {
         c.strong_tokens(), c.strong_in, c.strong_out, c.weak_tokens(), c.weak_in, c.weak_out
     );
     println!("强模型 token 占比: {:.0}%  (越低越省钱,见 PLAN §9)", c.strong_share() * 100.0);
+
+    orch.shutdown().await;
     Ok(())
 }

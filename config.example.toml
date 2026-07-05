@@ -28,3 +28,21 @@ api_key_env = "RIDGE_API_KEY"
 #   智谱 GLM:  https://open.bigmodel.cn/api/paas/v4
 #   阿里 Qwen: https://dashscope.aliyuncs.com/compatible-mode/v1
 #   本地 Ollama: http://localhost:11434/v1
+
+# === M4:外部 MCP 服务器(可选,子进程 stdio)===
+# 声明后,启动时会连上这些服务器、把它们的工具接进 Worker 工具集,
+# 工具名带命名空间前缀 <name>__<tool>(避免多服务器/与内置工具重名)。
+# 单个服务器连不上会告警跳过,不影响用内置工具跑任务。
+# ⚠️ Windows 下用 npx/uvx 这类需 shell 解析的命令可能报 ENOENT,
+#    可改用绝对路径的可执行文件,或用 cmd /c 包裹。
+#
+# [[mcp]]
+# name = "git"                                  # 命名空间前缀,需唯一
+# command = "uvx"
+# args = ["mcp-server-git"]
+#
+# [[mcp]]
+# name = "fs"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+# env = { EXAMPLE_TOKEN = "..." }               # 可选:附加环境变量

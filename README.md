@@ -2,13 +2,15 @@
 
 成本优化的编码 agent CLI(Rust)。方向与架构见 [PLAN.md](./PLAN.md),动手指南见 [HANDOFF.md](./HANDOFF.md)。
 
-## 现状(M3:eval 闭环 + 强/弱编排)
+## 现状(M4:MCP 客户端 + eval 闭环 + 强/弱编排)
 
 完整流水线已跑通:**Planner(强模型)分解任务 → Router 按难度路由强/弱模型 → Worker 执行 → 客观验证(`cargo build`/`test` 等)+ 失败自动修复(强) → Reviewer(强)评审 → 输出结果与成本账单(强模型 token 占比)**。跨 provider 混合上线:难子任务/规划/修复/评审走强模型,其余走便宜的弱模型。
 
 **M3 eval 闭环已落地(`rc-eval`):** 在内置小任务集上跑「全程强模型单 agent」基线 vs「混合编排」两种模式,用注入的隐藏验收测试客观判定,产出成功率 / 每任务成本(USD)/ 强模型 token 占比 / 延迟的对照表 + JSON 存档。支持真实 provider 与离线 StubProvider(零联网零成本验证管道)两套运行。设计见 `docs/superpowers/specs/2026-06-25-m3-eval-design.md`。
 
-**已知局限(驱动后续里程碑):** 子任务按规划顺序串行(并行 + worktree 隔离待做);`write_file` 整文件覆盖(结构化 patch 工具待做);eval 任务集目前仅 2 个内置小任务(待扩充更真实的任务);`rc-mcp`(M4)仍占位。
+**M4 MCP 客户端已落地(`rc-mcp`):** 在 `~/.ridge/config.toml` 声明 `[[mcp]]` 外部服务器(子进程 stdio,基于官方 `rmcp`),启动时连上、把它们的工具以 `<name>__<tool>` 命名空间接进 Worker 工具集;调用按名路由回对应服务器。单个服务器连不上会告警跳过、不影响用内置工具跑任务。设计见 `docs/superpowers/specs/2026-07-05-m4-rc-mcp-design.md`。
+
+**已知局限(驱动后续里程碑):** 子任务按规划顺序串行(并行 + worktree 隔离待做);`write_file` 整文件覆盖(结构化 patch 工具待做);eval 任务集目前仅 2 个内置小任务(待扩充更真实的任务);MCP 目前只接 tools、只做子进程 stdio 传输(resources/prompts、SSE/HTTP 传输待做);M4 剩余 ratatui 实时视图待做。
 
 ## 跑起来
 
@@ -53,5 +55,5 @@ cargo run -p rc-eval                # 真实:读 ~/.ridge/config.toml + key,真�
 | `rc-cli` | 二进制入口(薄壳:配置 + 报告) | M0 ✅ |
 | `rc-verify` | 验证器(build/test/lint)+ Verdict | M1 ✅ |
 | `rc-core` | 编排大脑(Planner/Router/Worker/Verify+Repair/Reviewer/Cost) | M2 ✅ |
-| `rc-mcp` | MCP 客户端(rmcp) | M4(占位) |
+| `rc-mcp` | MCP 客户端(rmcp,子进程 stdio + tools) | M4 ✅ |
 | `rc-eval` | eval harness:基线 vs 编排成本-质量对照(真实/离线两套) | M3 ✅ |

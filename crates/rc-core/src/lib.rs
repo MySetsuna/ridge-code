@@ -8,9 +8,10 @@
 //! - 编辑工具仍是整文件覆盖(留待结构化 patch 工具)。
 
 use anyhow::{anyhow, bail, Result};
+use rc_mcp::McpHub;
 use rc_providers::LlmProvider;
 use rc_tools::{dispatch, tool_specs};
-use rc_types::{Cost, Diagnostic, Difficulty, Message, ModelTier, ReviewResult, Subtask, ToolSpec, Verdict};
+use rc_types::{Cost, Diagnostic, Difficulty, Message, ModelTier, ReviewResult, Subtask, ToolCall, ToolSpec, Verdict};
 use rc_verify::{resolve_plan, verify, VerifyPlan};
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
@@ -44,6 +45,8 @@ pub struct Orchestrator {
     weak: Box<dyn LlmProvider>,
     tools: Vec<ToolSpec>,
     read_tools: Vec<ToolSpec>,
+    /// 可选的外部 MCP 工具(M4);None 时行为与 M3 完全一致。
+    mcp: Option<McpHub>,
     verify_plan: VerifyPlan,
     project_dir: PathBuf,
     cfg: OrchestratorConfig,
@@ -63,7 +66,22 @@ impl Orchestrator {
             .cloned()
             .collect();
         let verify_plan = resolve_plan(&project_dir);
-        Self { strong, weak, tools, read_tools, verify_plan, project_dir, cfg }
+        Self { strong, weak, tools, read_tools, mcp: None, verify_plan, project_dir, cfg }
+    }
+
+    /// 注入外部 MCP 工具:把它们并入 Worker/修复/基线的工具集(不进 Reviewer 的只读工具集,
+    /// 避免评审触发副作用工具)。返回 self 以链式调用。
+    pub fn with_mcp(mut self, hub: McpHub) -> Self {
+        self.tools.extend(hub.tool_specs().iter().cloned());
+        self.mcp = Some(hub);
+        self
+    }
+
+    /// 优雅关闭:若持有 MCP,关闭其全部子进程会话。运行结束后调用。
+    pub async fn shutdown(self) {
+        if let Some(hub) = self.mcp {
+            hub.shutdown().await;
+        }
     }
 
     pub async fn run(&self, task: &str) -> Result<Outcome> {
@@ -120,6 +138,7 @@ impl Orchestrator {
             ModelTier::Strong,
             &mut msgs,
             &self.tools,
+            self.mcp.as_ref(),
             self.cfg.max_steps,
             &mut cost,
         )
@@ -159,7 +178,7 @@ difficulty 用小写,表示该子任务难度。";
             st.id, st.description
         );
         let mut msgs = vec![Message::system(WORKER_SYSTEM), Message::user(user)];
-        run_agent(self.provider_for(tier), tier, &mut msgs, &self.tools, self.cfg.max_steps, cost).await?;
+        run_agent(self.provider_for(tier), tier, &mut msgs, &self.tools, self.mcp.as_ref(), self.cfg.max_steps, cost).await?;
         Ok(())
     }
 
@@ -187,7 +206,7 @@ difficulty 用小写,表示该子任务难度。";
                         render_reasons(&reasons)
                     );
                     let mut msgs = vec![Message::system(WORKER_SYSTEM), Message::user(feedback)];
-                    run_agent(self.strong.as_ref(), ModelTier::Strong, &mut msgs, &self.tools, self.cfg.max_steps, cost).await?;
+                    run_agent(self.strong.as_ref(), ModelTier::Strong, &mut msgs, &self.tools, self.mcp.as_ref(), self.cfg.max_steps, cost).await?;
                 }
             }
         }
@@ -199,7 +218,8 @@ difficulty 用小写,表示该子任务难度。";
 最后只输出一个 JSON 对象:{\"approved\":true 或 false,\"issues\":[\"问题\"]}。approved 为 true 时 issues 可为空。";
         let user = format!("原始任务:{task}\n请评审当前代码实现是否满足该任务。");
         let mut msgs = vec![Message::system(sys), Message::user(user)];
-        match run_agent(self.strong.as_ref(), ModelTier::Strong, &mut msgs, &self.read_tools, self.cfg.max_steps, cost).await {
+        // 评审只用内置只读工具(read_file/list_dir),不接 MCP —— 传 None。
+        match run_agent(self.strong.as_ref(), ModelTier::Strong, &mut msgs, &self.read_tools, None, self.cfg.max_steps, cost).await {
             Ok(content) => parse_review(&content),
             Err(e) => {
                 warn!(error = %e, "评审执行失败");
@@ -212,7 +232,7 @@ difficulty 用小写,表示该子任务难度。";
         let issues = review.issues.join("\n- ");
         let feedback = format!("评审发现以下问题,请直接修改代码修复后停止:\n- {issues}");
         let mut msgs = vec![Message::system(WORKER_SYSTEM), Message::user(feedback)];
-        run_agent(self.strong.as_ref(), ModelTier::Strong, &mut msgs, &self.tools, self.cfg.max_steps, cost).await?;
+        run_agent(self.strong.as_ref(), ModelTier::Strong, &mut msgs, &self.tools, self.mcp.as_ref(), self.cfg.max_steps, cost).await?;
         Ok(())
     }
 
@@ -237,11 +257,13 @@ const WORKER_SYSTEM: &str = "你是 ridge-code 的执行器。你能调用工具
 你写的代码应能通过编译。完成后用一句中文总结并停止调用工具。";
 
 /// 跑一轮 agent:工具循环直到模型不再调用工具,返回最终文本;沿途按档位累计成本。
+/// `mcp` 存在时,工具调用先按名路由到 MCP,否则落内置工具(见 `dispatch_tool`)。
 async fn run_agent(
     provider: &dyn LlmProvider,
     tier: ModelTier,
     messages: &mut Vec<Message>,
     tools: &[ToolSpec],
+    mcp: Option<&McpHub>,
     max_steps: usize,
     cost: &mut Cost,
 ) -> Result<String> {
@@ -256,11 +278,25 @@ async fn run_agent(
         messages.push(msg.clone());
         for call in &msg.tool_calls {
             info!(step, tool = %call.name, "    工具");
-            let result = dispatch(call).await;
+            let result = dispatch_tool(mcp, call).await;
             messages.push(Message::tool_result(call.id.clone(), result));
         }
     }
     Err(anyhow!("达到最大轮数 {max_steps} 仍未给出最终答复"))
+}
+
+/// 工具分派:名字命中已连接的 MCP 工具则走 MCP,否则落内置工具。
+/// 与内置 `dispatch` 一致,任何错误都转成给模型看的文本(让它自我纠正),不向上抛。
+async fn dispatch_tool(mcp: Option<&McpHub>, call: &ToolCall) -> String {
+    if let Some(hub) = mcp {
+        if hub.has_tool(&call.name) {
+            return match hub.call(call).await {
+                Ok(out) => out,
+                Err(e) => format!("ERROR: {e:#}"),
+            };
+        }
+    }
+    dispatch(call).await
 }
 
 fn render_reasons(reasons: &[Diagnostic]) -> String {

@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 rc-providers = { path = "../rc-providers" }
 rc-core = { path = "../rc-core" }
+rc-mcp = { path = "../rc-mcp" }
 anyhow = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }

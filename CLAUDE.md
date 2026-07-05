@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 成本优化的**编码 agent CLI**(Rust workspace,单二进制交付)。核心赌注:编码领域有免费的客观验证器(编译/测试/lint),所以可以「弱模型扛执行量 + 强模型管规划/修复/评审 + 客观验证做免费质量闸 + 级联路由压成本」。省钱主要来自级联(弱先做,验证不过才升强),而非多开 agent。详见 `PLAN.md §1-2`。
 
-里程碑现状:**M0–M3 已完成**(walking skeleton → 验证器+修复循环 → 强/弱编排大脑 → eval 闭环);`rc-eval` 是 eval harness(基线 vs 编排对比、真实/离线两套运行);`rc-mcp`(M4 MCP 客户端)仍是占位 lib。
+里程碑现状:**M0–M4(MCP 客户端)已完成**(walking skeleton → 验证器+修复循环 → 强/弱编排大脑 → eval 闭环 → MCP 客户端);`rc-eval` 是 eval harness(基线 vs 编排对比、真实/离线两套运行);`rc-mcp` 是 MCP 客户端(rmcp,子进程 stdio + tools)。**M4 剩余**:ratatui 实时视图、cargo-dist 跨平台打包(打包配置见仓库根 `dist-workspace.toml` + `.github/workflows/release.yml`)。
 
 ## 常用命令
 
@@ -47,6 +47,26 @@ build = "cargo build"
 test  = "cargo test"
 # lint = "cargo clippy"
 ```
+
+## MCP 接入(M4,`rc-mcp`)
+
+全局 config 里声明 `[[mcp]]` 外部服务器,启动时连上并把其工具接进 Worker 工具集:
+
+```toml
+[[mcp]]
+name = "git"                 # 命名空间前缀,需唯一
+command = "uvx"
+args = ["mcp-server-git"]
+# env = { KEY = "value" }    # 可选附加环境变量
+```
+
+关键点(改动时心里有数):
+- **只做子进程 stdio + tools**:暂不接 resources/prompts,暂不做 SSE/HTTP 传输。
+- **工具名命名空间** `<name>__<tool>`,防多服务器/与内置工具重名;调用**按哈希表路由**(不解析工具名),路由表在 `McpHub::connect` 时构建。
+- **降级不崩**:单个服务器连不上/列不出工具 → 告警跳过,编排照常只用内置工具。
+- **只进 Worker,不进 Reviewer**:MCP 工具并入 `Orchestrator.tools`(Worker/修复/基线用),**不**进 `read_tools`(评审只读、避免触发副作用工具)。接线在 `rc-core`:`Orchestrator::with_mcp(hub)` + `run_agent` 的 `dispatch_tool`(先查 MCP、再落内置)+ `Orchestrator::shutdown()`。
+- **rmcp 边界**:rmcp 的 wire 类型只在 `rc-mcp` 内部使用,对上归一化成 `rc_types::{ToolSpec, ToolCall}`(同 provider 边界原则)。
+- ⚠️ **Windows 坑**:bare `npx`/`uvx` 可能 ENOENT(需 shell 解析),改用绝对路径可执行文件或 `cmd /c` 包裹。
 
 ## 架构:编排流水线
 
@@ -89,7 +109,7 @@ rc-types  →  { rc-providers, rc-tools, rc-verify }  →  rc-core  →  { rc-cl
 | `rc-core` | 编排大脑(上面的流水线) | 只依赖 `LlmProvider` trait,不碰具体 provider |
 | `rc-cli` | 二进制入口(薄壳) | package 名 = `ridge-code` |
 | `rc-eval` | eval harness:基线 vs 编排成本-质量对照(`tasks`/`runner`/`reporter` + bin),真实/离线两套 provider | 独立 bin(`cargo run -p rc-eval`);离线 `StubProvider` 零联网零成本;隐藏验收注入 seed 副本跑 `cargo test` |
-| `rc-mcp` | M4 MCP 客户端 | 占位,暂空 |
+| `rc-mcp` | MCP 客户端(rmcp,子进程 stdio + tools):`McpHub` 连接/列举/归一化/路由/关闭 | rmcp wire 类型不外泄(归一化成 `rc_types::{ToolSpec,ToolCall}`);工具名 `<server>__<tool>` 命名空间 + 哈希表路由;纯函数(命名/路由/结果渲染)离线单测。见「MCP 接入」 |
 
 ## 工程约定(来自 HANDOFF.md §5,落地时遵守)
 

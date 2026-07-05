@@ -4,3 +4,10 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
+rc-types = { path = "../rc-types" }
+rmcp = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
