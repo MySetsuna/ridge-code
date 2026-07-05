@@ -47,13 +47,22 @@ fn plan_from_ridge_toml(project_dir: &Path) -> Option<VerifyPlan> {
     let parsed: RidgeToml = toml::from_str(&text).ok()?;
     let mut checks = Vec::new();
     if let Some(c) = parsed.verify.build {
-        checks.push(Check { label: "build".into(), command: c });
+        checks.push(Check {
+            label: "build".into(),
+            command: c,
+        });
     }
     if let Some(c) = parsed.verify.test {
-        checks.push(Check { label: "test".into(), command: c });
+        checks.push(Check {
+            label: "test".into(),
+            command: c,
+        });
     }
     if let Some(c) = parsed.verify.lint {
-        checks.push(Check { label: "lint".into(), command: c });
+        checks.push(Check {
+            label: "lint".into(),
+            command: c,
+        });
     }
     if checks.is_empty() {
         None
@@ -65,7 +74,10 @@ fn plan_from_ridge_toml(project_dir: &Path) -> Option<VerifyPlan> {
 fn detect_plan(project_dir: &Path) -> VerifyPlan {
     let mut checks = Vec::new();
     if project_dir.join("Cargo.toml").exists() {
-        checks.push(Check { label: "build".into(), command: "cargo build".into() });
+        checks.push(Check {
+            label: "build".into(),
+            command: "cargo build".into(),
+        });
     } else if project_dir.join("package.json").exists() {
         // --if-present:缺少 build 脚本时跳过而非报错。
         checks.push(Check {
@@ -146,7 +158,10 @@ mod tests {
     #[tokio::test]
     async fn passing_check() {
         let plan = VerifyPlan {
-            checks: vec![Check { label: "ok".into(), command: "exit 0".into() }],
+            checks: vec![Check {
+                label: "ok".into(),
+                command: "exit 0".into(),
+            }],
         };
         let v = verify(&plan, &std::env::temp_dir()).await.unwrap();
         assert!(v.is_pass());
@@ -155,7 +170,10 @@ mod tests {
     #[tokio::test]
     async fn failing_check_reports_diagnostic() {
         let plan = VerifyPlan {
-            checks: vec![Check { label: "boom".into(), command: "exit 1".into() }],
+            checks: vec![Check {
+                label: "boom".into(),
+                command: "exit 1".into(),
+            }],
         };
         let v = verify(&plan, &std::env::temp_dir()).await.unwrap();
         match v {

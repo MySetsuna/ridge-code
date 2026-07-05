@@ -88,7 +88,11 @@ async fn run(call: &ToolCall) -> Result<String> {
             Ok(format!("已写入 {path}({} 字节)", content.len()))
         }
         "list_dir" => {
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".").to_string();
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".")
+                .to_string();
             let mut rd = tokio::fs::read_dir(&path)
                 .await
                 .with_context(|| format!("读取目录 {path} 失败"))?;

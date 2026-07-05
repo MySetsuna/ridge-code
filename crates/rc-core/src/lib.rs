@@ -11,7 +11,10 @@ use anyhow::{anyhow, bail, Result};
 use rc_mcp::McpHub;
 use rc_providers::LlmProvider;
 use rc_tools::{dispatch, tool_specs};
-use rc_types::{Cost, Diagnostic, Difficulty, Message, ModelTier, ReviewResult, Subtask, ToolCall, ToolSpec, Verdict};
+use rc_types::{
+    Cost, Diagnostic, Difficulty, Message, ModelTier, ReviewResult, Subtask, ToolCall, ToolSpec,
+    Verdict,
+};
 use rc_verify::{resolve_plan, verify, VerifyPlan};
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
@@ -26,7 +29,10 @@ pub struct OrchestratorConfig {
 
 impl Default for OrchestratorConfig {
     fn default() -> Self {
-        Self { max_steps: 12, max_repairs: 3 }
+        Self {
+            max_steps: 12,
+            max_repairs: 3,
+        }
     }
 }
 
@@ -66,7 +72,16 @@ impl Orchestrator {
             .cloned()
             .collect();
         let verify_plan = resolve_plan(&project_dir);
-        Self { strong, weak, tools, read_tools, mcp: None, verify_plan, project_dir, cfg }
+        Self {
+            strong,
+            weak,
+            tools,
+            read_tools,
+            mcp: None,
+            verify_plan,
+            project_dir,
+            cfg,
+        }
     }
 
     /// 注入外部 MCP 工具:把它们并入 Worker/修复/基线的工具集(不进 Reviewer 的只读工具集,
@@ -122,16 +137,21 @@ impl Orchestrator {
             None => warn!("  评审结果无法解析,跳过(按通过处理)"),
         }
 
-        Ok(Outcome { subtasks: subtasks.len(), repairs, reviewed, approved, cost })
+        Ok(Outcome {
+            subtasks: subtasks.len(),
+            repairs,
+            reviewed,
+            approved,
+            cost,
+        })
     }
 
     /// 基线:全程强模型单 agent —— 不分解/不路由/不评审,直接工具循环 + 验证修复。
     pub async fn run_single(&self, task: &str) -> Result<Outcome> {
         let mut cost = Cost::default();
         info!("基线:全程强模型单 agent 直跑");
-        let user = format!(
-            "请完成以下编码任务,写的代码应能通过编译。完成后用一句中文总结并停止:\n{task}"
-        );
+        let user =
+            format!("请完成以下编码任务,写的代码应能通过编译。完成后用一句中文总结并停止:\n{task}");
         let mut msgs = vec![Message::system(WORKER_SYSTEM), Message::user(user)];
         run_agent(
             self.strong.as_ref(),
@@ -144,7 +164,13 @@ impl Orchestrator {
         )
         .await?;
         let repairs = self.verify_and_repair(&mut cost).await?;
-        Ok(Outcome { subtasks: 1, repairs, reviewed: false, approved: true, cost })
+        Ok(Outcome {
+            subtasks: 1,
+            repairs,
+            reviewed: false,
+            approved: true,
+            cost,
+        })
     }
 
     /// Planner:强模型把任务分解成有序子任务(JSON);解析失败则降级为单个 hard 子任务。
@@ -156,7 +182,11 @@ difficulty 用小写,表示该子任务难度。";
         let msgs = vec![Message::system(sys), Message::user(task)];
         for attempt in 1..=2 {
             let c = self.strong.complete(&msgs, &[]).await?;
-            cost.add(ModelTier::Strong, c.usage.input_tokens, c.usage.output_tokens);
+            cost.add(
+                ModelTier::Strong,
+                c.usage.input_tokens,
+                c.usage.output_tokens,
+            );
             if let Some(subs) = parse_plan(&c.message.content) {
                 return Ok(subs);
             }
@@ -178,7 +208,16 @@ difficulty 用小写,表示该子任务难度。";
             st.id, st.description
         );
         let mut msgs = vec![Message::system(WORKER_SYSTEM), Message::user(user)];
-        run_agent(self.provider_for(tier), tier, &mut msgs, &self.tools, self.mcp.as_ref(), self.cfg.max_steps, cost).await?;
+        run_agent(
+            self.provider_for(tier),
+            tier,
+            &mut msgs,
+            &self.tools,
+            self.mcp.as_ref(),
+            self.cfg.max_steps,
+            cost,
+        )
+        .await?;
         Ok(())
     }
 
@@ -197,7 +236,10 @@ difficulty 用小写,表示该子任务难度。";
                 }
                 Verdict::Fail { reasons } => {
                     if repairs >= self.cfg.max_repairs {
-                        bail!("修复 {repairs} 轮后仍未通过验证。最后失败:\n{}", render_reasons(&reasons));
+                        bail!(
+                            "修复 {repairs} 轮后仍未通过验证。最后失败:\n{}",
+                            render_reasons(&reasons)
+                        );
                     }
                     repairs += 1;
                     warn!(round = repairs, "  ❌ 验证失败,强模型修复");
@@ -206,7 +248,16 @@ difficulty 用小写,表示该子任务难度。";
                         render_reasons(&reasons)
                     );
                     let mut msgs = vec![Message::system(WORKER_SYSTEM), Message::user(feedback)];
-                    run_agent(self.strong.as_ref(), ModelTier::Strong, &mut msgs, &self.tools, self.mcp.as_ref(), self.cfg.max_steps, cost).await?;
+                    run_agent(
+                        self.strong.as_ref(),
+                        ModelTier::Strong,
+                        &mut msgs,
+                        &self.tools,
+                        self.mcp.as_ref(),
+                        self.cfg.max_steps,
+                        cost,
+                    )
+                    .await?;
                 }
             }
         }
@@ -219,7 +270,17 @@ difficulty 用小写,表示该子任务难度。";
         let user = format!("原始任务:{task}\n请评审当前代码实现是否满足该任务。");
         let mut msgs = vec![Message::system(sys), Message::user(user)];
         // 评审只用内置只读工具(read_file/list_dir),不接 MCP —— 传 None。
-        match run_agent(self.strong.as_ref(), ModelTier::Strong, &mut msgs, &self.read_tools, None, self.cfg.max_steps, cost).await {
+        match run_agent(
+            self.strong.as_ref(),
+            ModelTier::Strong,
+            &mut msgs,
+            &self.read_tools,
+            None,
+            self.cfg.max_steps,
+            cost,
+        )
+        .await
+        {
             Ok(content) => parse_review(&content),
             Err(e) => {
                 warn!(error = %e, "评审执行失败");
@@ -232,7 +293,16 @@ difficulty 用小写,表示该子任务难度。";
         let issues = review.issues.join("\n- ");
         let feedback = format!("评审发现以下问题,请直接修改代码修复后停止:\n- {issues}");
         let mut msgs = vec![Message::system(WORKER_SYSTEM), Message::user(feedback)];
-        run_agent(self.strong.as_ref(), ModelTier::Strong, &mut msgs, &self.tools, self.mcp.as_ref(), self.cfg.max_steps, cost).await?;
+        run_agent(
+            self.strong.as_ref(),
+            ModelTier::Strong,
+            &mut msgs,
+            &self.tools,
+            self.mcp.as_ref(),
+            self.cfg.max_steps,
+            cost,
+        )
+        .await?;
         Ok(())
     }
 
@@ -251,7 +321,8 @@ fn route_tier(d: Difficulty) -> ModelTier {
     }
 }
 
-const WORKER_SYSTEM: &str = "你是 ridge-code 的执行器。你能调用工具读写文件、列目录、执行 shell 来完成编码任务。\
+const WORKER_SYSTEM: &str =
+    "你是 ridge-code 的执行器。你能调用工具读写文件、列目录、执行 shell 来完成编码任务。\
 请先用 list_dir / read_file 了解上下文,再用 write_file / run_shell 实施改动;\
 注意 write_file 是整文件覆盖,务必先读出并保留需要保留的已有内容。\
 你写的代码应能通过编译。完成后用一句中文总结并停止调用工具。";
@@ -269,7 +340,11 @@ async fn run_agent(
 ) -> Result<String> {
     for step in 1..=max_steps {
         let completion = provider.complete(messages.as_slice(), tools).await?;
-        cost.add(tier, completion.usage.input_tokens, completion.usage.output_tokens);
+        cost.add(
+            tier,
+            completion.usage.input_tokens,
+            completion.usage.output_tokens,
+        );
         debug!(step, tier = ?tier, in_tok = completion.usage.input_tokens, out_tok = completion.usage.output_tokens, "模型回复");
         let msg = completion.message;
         if msg.tool_calls.is_empty() {
@@ -339,8 +414,16 @@ mod run_single_tests {
     #[tokio::test]
     async fn run_single_is_single_subtask_no_review() {
         let done = Completion {
-            message: Message { role: Role::Assistant, content: "done".into(), tool_calls: vec![], tool_call_id: None },
-            usage: Usage { input_tokens: 5, output_tokens: 5 },
+            message: Message {
+                role: Role::Assistant,
+                content: "done".into(),
+                tool_calls: vec![],
+                tool_call_id: None,
+            },
+            usage: Usage {
+                input_tokens: 5,
+                output_tokens: 5,
+            },
         };
         let strong: Box<dyn LlmProvider> = Box::new(StubProvider::new("s", vec![done]));
         let weak: Box<dyn LlmProvider> = Box::new(StubProvider::new("w", vec![]));

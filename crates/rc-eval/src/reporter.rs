@@ -98,14 +98,42 @@ mod tests {
     use rc_types::Cost;
 
     fn outcome(mode: RunMode, success: bool, c: Cost, usd: f64) -> TaskOutcome {
-        TaskOutcome { task: "t".into(), mode, success, cost: c, usd, elapsed_ms: 10, error: None }
+        TaskOutcome {
+            task: "t".into(),
+            mode,
+            success,
+            cost: c,
+            usd,
+            elapsed_ms: 10,
+            error: None,
+        }
     }
 
     #[test]
     fn summarize_computes_rates_and_share() {
         let outcomes = vec![
-            outcome(RunMode::Baseline, true, Cost { strong_in: 100, strong_out: 50, weak_in: 0, weak_out: 0 }, 0.5),
-            outcome(RunMode::Orchestrated, true, Cost { strong_in: 20, strong_out: 10, weak_in: 80, weak_out: 40 }, 0.1),
+            outcome(
+                RunMode::Baseline,
+                true,
+                Cost {
+                    strong_in: 100,
+                    strong_out: 50,
+                    weak_in: 0,
+                    weak_out: 0,
+                },
+                0.5,
+            ),
+            outcome(
+                RunMode::Orchestrated,
+                true,
+                Cost {
+                    strong_in: 20,
+                    strong_out: 10,
+                    weak_in: 80,
+                    weak_out: 40,
+                },
+                0.1,
+            ),
         ];
         let s = summarize(&outcomes);
         assert_eq!(s.len(), 2);

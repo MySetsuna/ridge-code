@@ -44,7 +44,9 @@ struct FileCfg {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 fn resolve_api_key(p: &ProviderCfg) -> Result<String> {
@@ -54,28 +56,51 @@ fn resolve_api_key(p: &ProviderCfg) -> Result<String> {
         }
     }
     let env_name = p.api_key_env.as_deref().unwrap_or("RIDGE_API_KEY");
-    std::env::var(env_name).with_context(|| format!("config 未填 api_key,且环境变量 {env_name} 未设置"))
+    std::env::var(env_name)
+        .with_context(|| format!("config 未填 api_key,且环境变量 {env_name} 未设置"))
 }
 
 fn build_provider(p: &ProviderCfg) -> Result<Box<dyn LlmProvider>> {
     let key = resolve_api_key(p)?;
-    Ok(Box::new(OpenAiCompatProvider::new(p.base_url.clone(), key, p.model.clone())))
+    Ok(Box::new(OpenAiCompatProvider::new(
+        p.base_url.clone(),
+        key,
+        p.model.clone(),
+    )))
 }
 
 fn rate_of(p: &ProviderCfg) -> Rate {
-    Rate { in_per_mtok: p.price_in.unwrap_or(0.0), out_per_mtok: p.price_out.unwrap_or(0.0) }
+    Rate {
+        in_per_mtok: p.price_in.unwrap_or(0.0),
+        out_per_mtok: p.price_out.unwrap_or(0.0),
+    }
 }
 
 /// 读 ~/.ridge/config.toml,返回 (strong, weak, pricing)。
 fn load_real() -> Result<(ProviderCfg, ProviderCfg, Pricing)> {
     let home = home_dir().ok_or_else(|| anyhow!("找不到 HOME / USERPROFILE"))?;
     let path = home.join(".ridge").join("config.toml");
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("读取配置 {} 失败(可参考仓库 config.example.toml)", path.display()))?;
+    let text = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "读取配置 {} 失败(可参考仓库 config.example.toml)",
+            path.display()
+        )
+    })?;
     let cfg: FileCfg = toml::from_str(&text).context("解析 config.toml 失败")?;
-    let strong = cfg.strong.clone().or_else(|| cfg.provider.clone()).context("配置缺少 [strong] 或 [provider]")?;
-    let weak = cfg.weak.clone().or_else(|| cfg.provider.clone()).unwrap_or_else(|| strong.clone());
-    let pricing = Pricing { strong: rate_of(&strong), weak: rate_of(&weak) };
+    let strong = cfg
+        .strong
+        .clone()
+        .or_else(|| cfg.provider.clone())
+        .context("配置缺少 [strong] 或 [provider]")?;
+    let weak = cfg
+        .weak
+        .clone()
+        .or_else(|| cfg.provider.clone())
+        .unwrap_or_else(|| strong.clone());
+    let pricing = Pricing {
+        strong: rate_of(&strong),
+        weak: rate_of(&weak),
+    };
     if strong.price_in.is_none() && strong.price_out.is_none() {
         tracing::warn!("[strong] 未配置 price_in/price_out,强模型成本将按 $0 计");
     }
@@ -88,8 +113,14 @@ fn load_real() -> Result<(ProviderCfg, ProviderCfg, Pricing)> {
 fn default_pricing() -> Pricing {
     // 离线示意定价(仅用于演示报表;离线 token 来自 stub)。
     Pricing {
-        strong: Rate { in_per_mtok: 3.0, out_per_mtok: 15.0 },
-        weak: Rate { in_per_mtok: 0.5, out_per_mtok: 1.5 },
+        strong: Rate {
+            in_per_mtok: 3.0,
+            out_per_mtok: 15.0,
+        },
+        weak: Rate {
+            in_per_mtok: 0.5,
+            out_per_mtok: 1.5,
+        },
     }
 }
 
@@ -135,7 +166,9 @@ async fn main() -> Result<()> {
     let summaries = reporter::summarize(&outcomes);
     println!("{}", reporter::render(&summaries));
     if cli.offline {
-        println!("(离线模式:provider 为脚本化 stub,以上为管道自验示意数据,真实成本/质量请用真实模式跑)");
+        println!(
+            "(离线模式:provider 为脚本化 stub,以上为管道自验示意数据,真实成本/质量请用真实模式跑)"
+        );
     }
 
     let ts = std::time::SystemTime::now()

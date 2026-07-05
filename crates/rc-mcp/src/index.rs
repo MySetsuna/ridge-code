@@ -37,7 +37,8 @@ impl ToolIndex {
             description: description.to_string(),
             parameters: normalize_schema(schema),
         });
-        self.route.insert(exposed, (server_idx, original.to_string()));
+        self.route
+            .insert(exposed, (server_idx, original.to_string()));
     }
 
     pub(crate) fn specs(&self) -> &[ToolSpec] {
@@ -59,7 +60,8 @@ impl ToolIndex {
 fn normalize_schema(schema: Value) -> Value {
     match schema {
         Value::Object(mut map) => {
-            map.entry("type").or_insert_with(|| Value::String("object".into()));
+            map.entry("type")
+                .or_insert_with(|| Value::String("object".into()));
             Value::Object(map)
         }
         _ => json!({ "type": "object", "properties": {} }),

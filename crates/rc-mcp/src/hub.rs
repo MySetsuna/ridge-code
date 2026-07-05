@@ -43,7 +43,10 @@ impl McpHub {
                         index.add_tool(server_idx, &cfg.name, &tool.name, desc, schema);
                     }
                     tracing::info!(server = %cfg.name, tools = count, "MCP 服务器已连接");
-                    conns.push(ServerConn { name: cfg.name, peer });
+                    conns.push(ServerConn {
+                        name: cfg.name,
+                        peer,
+                    });
                 }
                 Err(e) => {
                     tracing::warn!(server = %cfg.name, error = %format!("{e:#}"), "MCP 服务器连接失败,跳过");

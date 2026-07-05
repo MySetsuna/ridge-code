@@ -38,11 +38,21 @@ pub struct Message {
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: Role::System, content: content.into(), tool_calls: Vec::new(), tool_call_id: None }
+        Self {
+            role: Role::System,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
     }
 
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: Role::User, content: content.into(), tool_calls: Vec::new(), tool_call_id: None }
+        Self {
+            role: Role::User,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
     }
 
     /// tool 角色:回灌一次工具执行结果。
@@ -103,19 +113,14 @@ impl Verdict {
     }
 }
 
-/// 子任务难度,驱动 Router 分流(PLAN.md §2、§3)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// 子任务难度,驱动 Router 分流(PLAN.md §2、§3)。默认 Moderate。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Difficulty {
     Trivial,
+    #[default]
     Moderate,
     Hard,
-}
-
-impl Default for Difficulty {
-    fn default() -> Self {
-        Difficulty::Moderate
-    }
 }
 
 /// 模型档位。
@@ -215,7 +220,10 @@ mod pricing_tests {
 
     #[test]
     fn rate_cost_usd_is_per_million() {
-        let r = Rate { in_per_mtok: 3.0, out_per_mtok: 15.0 };
+        let r = Rate {
+            in_per_mtok: 3.0,
+            out_per_mtok: 15.0,
+        };
         // 100 万 in * $3 + 100 万 out * $15 = $18
         assert!((r.cost_usd(1_000_000, 1_000_000) - 18.0).abs() < 1e-9);
         assert!((r.cost_usd(0, 0)).abs() < 1e-9);

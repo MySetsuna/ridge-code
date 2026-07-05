@@ -8,10 +8,19 @@ use rc_types::{Pricing, Rate};
 #[tokio::test]
 async fn offline_add_mul_both_modes_pass() {
     let pricing = Pricing {
-        strong: Rate { in_per_mtok: 3.0, out_per_mtok: 15.0 },
-        weak: Rate { in_per_mtok: 0.5, out_per_mtok: 1.5 },
+        strong: Rate {
+            in_per_mtok: 3.0,
+            out_per_mtok: 15.0,
+        },
+        weak: Rate {
+            in_per_mtok: 0.5,
+            out_per_mtok: 1.5,
+        },
     };
-    let task = tasks::builtin_tasks().into_iter().find(|t| t.name == "add-mul").unwrap();
+    let task = tasks::builtin_tasks()
+        .into_iter()
+        .find(|t| t.name == "add-mul")
+        .unwrap();
 
     for mode in [RunMode::Baseline, RunMode::Orchestrated] {
         let (strong, weak) = runner::offline_providers(&task, mode);

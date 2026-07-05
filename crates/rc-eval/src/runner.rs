@@ -21,12 +21,21 @@ pub fn offline_providers(
 ) -> (Box<dyn LlmProvider>, Box<dyn LlmProvider>) {
     match mode {
         RunMode::Baseline => (
-            Box::new(StubProvider::new("stub-strong", vec![write_file_completion(&task.solution_files)])),
+            Box::new(StubProvider::new(
+                "stub-strong",
+                vec![write_file_completion(&task.solution_files)],
+            )),
             Box::new(StubProvider::new("stub-weak", vec![])),
         ),
         RunMode::Orchestrated => (
-            Box::new(StubProvider::new("stub-strong", vec![plan_completion(&task.plan_json)])),
-            Box::new(StubProvider::new("stub-weak", vec![write_file_completion(&task.solution_files)])),
+            Box::new(StubProvider::new(
+                "stub-strong",
+                vec![plan_completion(&task.plan_json)],
+            )),
+            Box::new(StubProvider::new(
+                "stub-weak",
+                vec![write_file_completion(&task.solution_files)],
+            )),
         ),
     }
 }
@@ -42,8 +51,16 @@ fn write_file_completion(files: &[(String, String)]) -> Completion {
         })
         .collect();
     Completion {
-        message: Message { role: Role::Assistant, content: String::new(), tool_calls, tool_call_id: None },
-        usage: Usage { input_tokens: 200, output_tokens: 80 },
+        message: Message {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls,
+            tool_call_id: None,
+        },
+        usage: Usage {
+            input_tokens: 200,
+            output_tokens: 80,
+        },
     }
 }
 
@@ -55,7 +72,10 @@ fn plan_completion(plan_json: &str) -> Completion {
             tool_calls: Vec::new(),
             tool_call_id: None,
         },
-        usage: Usage { input_tokens: 150, output_tokens: 40 },
+        usage: Usage {
+            input_tokens: 150,
+            output_tokens: 40,
+        },
     }
 }
 
@@ -84,7 +104,7 @@ pub async fn run_one(
 ) -> TaskOutcome {
     let started = Instant::now();
     let orig = std::env::current_dir().expect("读取当前目录失败");
-    let safe_name = task.name.replace('/', "_").replace('\\', "_").replace(' ', "_");
+    let safe_name = task.name.replace(['/', '\\', ' '], "_");
     let work = std::env::temp_dir().join(format!("rc-eval-{}-{:?}", safe_name, mode));
 
     let res = run_inner(task, mode, strong, weak, &work).await;
@@ -102,7 +122,15 @@ pub async fn run_one(
         Ok((success, cost)) => {
             let usd = pricing.strong.cost_usd(cost.strong_in, cost.strong_out)
                 + pricing.weak.cost_usd(cost.weak_in, cost.weak_out);
-            TaskOutcome { task: task.name.clone(), mode, success, cost, usd, elapsed_ms, error: None }
+            TaskOutcome {
+                task: task.name.clone(),
+                mode,
+                success,
+                cost,
+                usd,
+                elapsed_ms,
+                error: None,
+            }
         }
         Err(e) => TaskOutcome {
             task: task.name.clone(),
@@ -131,7 +159,12 @@ async fn run_inner(
     copy_dir_all(&task.seed_dir, work)?;
     std::env::set_current_dir(work)?; // 让 rc-tools 文件工具落在副本里
 
-    let orch = Orchestrator::new(strong, weak, work.to_path_buf(), OrchestratorConfig::default());
+    let orch = Orchestrator::new(
+        strong,
+        weak,
+        work.to_path_buf(),
+        OrchestratorConfig::default(),
+    );
     let outcome = match mode {
         RunMode::Baseline => orch.run_single(&task.prompt).await?,
         RunMode::Orchestrated => orch.run(&task.prompt).await?,
@@ -140,7 +173,10 @@ async fn run_inner(
     // 注入隐藏验收测试,跑 cargo test 客观判定。
     copy_dir_all(&task.accept_dir, work)?;
     let plan = VerifyPlan {
-        checks: vec![Check { label: "accept".into(), command: "cargo test".into() }],
+        checks: vec![Check {
+            label: "accept".into(),
+            command: "cargo test".into(),
+        }],
     };
     let verdict = verify(&plan, work).await?;
     Ok((verdict.is_pass(), outcome.cost))

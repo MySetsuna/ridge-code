@@ -56,12 +56,24 @@ mod tests {
         assert_eq!(tasks.len(), 2);
         for t in &tasks {
             assert!(!t.prompt.trim().is_empty(), "{} prompt 为空", t.name);
-            assert!(t.seed_dir.join("Cargo.toml").exists(), "{} 缺 seed Cargo.toml", t.name);
-            assert!(t.accept_dir.join("tests/acceptance.rs").exists(), "{} 缺验收", t.name);
+            assert!(
+                t.seed_dir.join("Cargo.toml").exists(),
+                "{} 缺 seed Cargo.toml",
+                t.name
+            );
+            assert!(
+                t.accept_dir.join("tests/acceptance.rs").exists(),
+                "{} 缺验收",
+                t.name
+            );
             assert!(!t.solution_files.is_empty(), "{} 缺 solution", t.name);
             // plan_json 必须能解析成非空数组
             let v: serde_json::Value = serde_json::from_str(&t.plan_json).unwrap();
-            assert!(v.as_array().map(|a| !a.is_empty()).unwrap_or(false), "{} plan_json 非法", t.name);
+            assert!(
+                v.as_array().map(|a| !a.is_empty()).unwrap_or(false),
+                "{} plan_json 非法",
+                t.name
+            );
         }
     }
 }

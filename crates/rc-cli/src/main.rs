@@ -11,7 +11,11 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 
 #[derive(Parser)]
-#[command(name = "ridge-code", version, about = "成本优化的编码 agent CLI(M2:强/弱编排)")]
+#[command(
+    name = "ridge-code",
+    version,
+    about = "成本优化的编码 agent CLI(M2:强/弱编排)"
+)]
 struct Cli {
     /// 要执行的任务描述
     task: String,
@@ -59,8 +63,12 @@ fn home_dir() -> Option<PathBuf> {
 fn load_config() -> Result<Config> {
     let home = home_dir().ok_or_else(|| anyhow!("找不到 HOME / USERPROFILE"))?;
     let path = home.join(".ridge").join("config.toml");
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("读取配置 {} 失败(可参考仓库 config.example.toml)", path.display()))?;
+    let text = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "读取配置 {} 失败(可参考仓库 config.example.toml)",
+            path.display()
+        )
+    })?;
     toml::from_str(&text).context("解析 config.toml 失败")
 }
 
@@ -133,7 +141,10 @@ async fn main() -> Result<()> {
         strong,
         weak,
         project_dir,
-        OrchestratorConfig { max_steps: cli.max_steps, max_repairs: cli.max_repairs },
+        OrchestratorConfig {
+            max_steps: cli.max_steps,
+            max_repairs: cli.max_repairs,
+        },
     );
 
     // M4:声明了 [[mcp]] 则连接外部 MCP 服务器,把其工具并入 Worker 工具集。
@@ -158,17 +169,32 @@ async fn main() -> Result<()> {
 
     let c = &outcome.cost;
     let review_status = if outcome.reviewed {
-        if outcome.approved { "通过" } else { "未通过" }
+        if outcome.approved {
+            "通过"
+        } else {
+            "未通过"
+        }
     } else {
         "跳过"
     };
     println!("\n──────── ridge-code 运行报告 ────────");
-    println!("子任务: {}   修复轮次: {}   评审: {}", outcome.subtasks, outcome.repairs, review_status);
+    println!(
+        "子任务: {}   修复轮次: {}   评审: {}",
+        outcome.subtasks, outcome.repairs, review_status
+    );
     println!(
         "Token  强模型: {} (in {} / out {})   弱模型: {} (in {} / out {})",
-        c.strong_tokens(), c.strong_in, c.strong_out, c.weak_tokens(), c.weak_in, c.weak_out
+        c.strong_tokens(),
+        c.strong_in,
+        c.strong_out,
+        c.weak_tokens(),
+        c.weak_in,
+        c.weak_out
     );
-    println!("强模型 token 占比: {:.0}%  (越低越省钱,见 PLAN §9)", c.strong_share() * 100.0);
+    println!(
+        "强模型 token 占比: {:.0}%  (越低越省钱,见 PLAN §9)",
+        c.strong_share() * 100.0
+    );
 
     orch.shutdown().await;
     Ok(())

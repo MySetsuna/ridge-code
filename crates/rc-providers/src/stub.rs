@@ -17,7 +17,10 @@ pub struct StubProvider {
 
 impl StubProvider {
     pub fn new(model: impl Into<String>, replies: Vec<Completion>) -> Self {
-        Self { model: model.into(), replies: Mutex::new(replies.into()) }
+        Self {
+            model: model.into(),
+            replies: Mutex::new(replies.into()),
+        }
     }
 }
 
@@ -32,7 +35,10 @@ impl LlmProvider for StubProvider {
                 tool_calls: Vec::new(),
                 tool_call_id: None,
             },
-            usage: Usage { input_tokens: 10, output_tokens: 5 },
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+            },
         }))
     }
 
@@ -54,7 +60,10 @@ mod tests {
                 tool_calls: Vec::new(),
                 tool_call_id: None,
             },
-            usage: Usage { input_tokens: 1, output_tokens: 1 },
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
         };
         let p = StubProvider::new("stub", vec![scripted]);
         let r1 = p.complete(&[], &[]).await.unwrap();

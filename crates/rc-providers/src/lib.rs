@@ -65,7 +65,11 @@ impl LlmProvider for OpenAiCompatProvider {
         }
         let parsed: ChatResponse =
             serde_json::from_str(&body).with_context(|| format!("解析响应失败: {body}"))?;
-        let choice = parsed.choices.into_iter().next().context("响应无 choices")?;
+        let choice = parsed
+            .choices
+            .into_iter()
+            .next()
+            .context("响应无 choices")?;
         let message = Message {
             role: Role::Assistant,
             content: choice.message.content.unwrap_or_default(),
