@@ -20,6 +20,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
 # MCP 客户端(M4):只启 client + 子进程 stdio 传输,不需要 server/macros。
 rmcp = { version = "2", default-features = false, features = ["client", "transport-child-process"] }
+# 终端实时视图(M4):ratatui 自带 crossterm re-export,跨平台。
+ratatui = "0.30"
 
 # 发布构建:瘦身单二进制(strip 符号 + thin LTO),利于跨平台分发(PLAN §0)。
 [profile.release]

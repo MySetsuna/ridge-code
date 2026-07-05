@@ -12,7 +12,9 @@
 
 **多供应商 / 多模型 + 原生 Anthropic:** provider 从「强/弱两段」升级为**命名注册表** `[[providers]]`——声明任意 N 个命名 provider,由 `[roles]` 按名选强/弱,可选 `[routing]` 按难度把 worker 路由到任意命名模型(用上 >2 个模型);Cost 仍按难度档位记账,eval 不受影响。新增**原生 Anthropic provider**(`kind = "anthropic"`,Messages API,`tool_use`/`tool_result`/`system` 归一化),strong=Claude 可直连原生、不必走兼容网关。旧 `[strong]`/`[weak]`/`[provider]` 写法全兼容。设计见 `docs/superpowers/specs/2026-07-05-provider-registry-design.md`。
 
-**已知局限(驱动后续里程碑):** 子任务按规划顺序串行(并行 + worktree 隔离待做);`write_file` 整文件覆盖(结构化 patch 工具待做);eval 任务集目前仅 2 个内置小任务(待扩充更真实的任务);MCP 目前只接 tools、只做子进程 stdio 传输(resources/prompts、SSE/HTTP 传输待做);M4 剩余 ratatui 实时视图待做。
+**M4 ratatui 实时视图已落地:** `ridge-code --tui` 开启终端实时视图——顶部阶段 + 实时成本(强/弱 token、强占比),左侧子任务 DAG(○待办/▶运行/✓完成 + 难度/档位),右侧最近工具调用 + 事件日志;`q`/Ctrl-C 退出。编排器发结构化 `Event`(`rc-types`),不开 `--tui` 时行为与之前完全一致。设计见 `docs/superpowers/specs/2026-07-05-m4-ratatui-tui-design.md`。**至此 M0–M4 全部完成。**
+
+**已知局限(驱动后续里程碑):** 子任务按规划顺序串行(并行 + worktree 隔离待做);`write_file` 整文件覆盖(结构化 patch 工具待做);eval 任务集目前仅 2 个内置小任务(待扩充更真实的任务);MCP 目前只接 tools、只做子进程 stdio 传输(resources/prompts、SSE/HTTP 传输待做)。
 
 ## 跑起来
 
@@ -38,6 +40,7 @@ cp config.example.toml ~/.ridge/config.toml   # 填 [strong]/[weak],或 [[provid
 
 # 在仓库根目录运行(.env.local 按「启动目录」查找):
 cargo run -p ridge-code -- --cwd /path/to/target/project "实现 add/mul 两个函数并各写一个单元测试"
+cargo run -p ridge-code -- --tui --cwd /path/to/project "..."   # 实时终端视图(DAG/进度/成本)
 RUST_LOG=debug cargo run -p ridge-code -- "..."   # 详细日志
 ```
 

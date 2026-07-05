@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 成本优化的**编码 agent CLI**(Rust workspace,单二进制交付)。核心赌注:编码领域有免费的客观验证器(编译/测试/lint),所以可以「弱模型扛执行量 + 强模型管规划/修复/评审 + 客观验证做免费质量闸 + 级联路由压成本」。省钱主要来自级联(弱先做,验证不过才升强),而非多开 agent。详见 `PLAN.md §1-2`。
 
-里程碑现状:**M0–M4(MCP 客户端)已完成**(walking skeleton → 验证器+修复循环 → 强/弱编排大脑 → eval 闭环 → MCP 客户端);`rc-eval` 是 eval harness(基线 vs 编排对比、真实/离线两套运行);`rc-mcp` 是 MCP 客户端(rmcp,子进程 stdio + tools)。**M4 剩余**:ratatui 实时视图、cargo-dist 跨平台打包(打包配置见仓库根 `dist-workspace.toml` + `.github/workflows/release.yml`)。
+里程碑现状:**M0–M4 全部完成**(walking skeleton → 验证器+修复循环 → 强/弱编排大脑 → eval 闭环 → MCP 客户端 → ratatui 实时视图);`rc-eval` 是 eval harness(基线 vs 编排对比、真实/离线两套运行);`rc-mcp` 是 MCP 客户端(rmcp,子进程 stdio + tools);`--tui` 是 ratatui 实时视图(编排发 `Event` → TUI 渲染 DAG/进度/成本,见 `rc-cli/src/tui.rs`)。跨平台打包走 `.github/workflows/release.yml`(打 `v*` 标签),已发 v0.1.0。
 
 ## 常用命令
 

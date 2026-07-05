@@ -14,6 +14,7 @@ rc-core = { path = "../rc-core" }
 rc-mcp = { path = "../rc-mcp" }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
+ratatui = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }

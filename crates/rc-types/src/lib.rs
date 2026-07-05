@@ -214,6 +214,49 @@ pub struct Pricing {
     pub weak: Rate,
 }
 
+/// 编排所处阶段(TUI 顶部指示)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Planning,
+    Executing,
+    Verifying,
+    Reviewing,
+    Done,
+}
+
+/// Planner 产出的子任务摘要(给 TUI 列表用)。
+#[derive(Debug, Clone)]
+pub struct PlannedSubtask {
+    pub id: String,
+    pub description: String,
+    pub difficulty: Difficulty,
+}
+
+/// 编排过程的实时事件(给 TUI / 报告;PLAN.md §3)。不开事件 sink 时不产生。
+#[derive(Debug, Clone)]
+pub enum Event {
+    /// 进入某阶段。
+    Phase(Phase),
+    /// 规划完成,产出子任务列表。
+    Planned(Vec<PlannedSubtask>),
+    /// 某子任务开始执行(路由到的档位)。
+    SubtaskStarted { id: String, tier: ModelTier },
+    /// 某子任务执行完成。
+    SubtaskDone { id: String },
+    /// 一次工具调用。
+    Tool { step: usize, name: String },
+    /// 第 N 轮修复。
+    Repair { round: usize },
+    /// 评审结论。
+    Review { approved: bool },
+    /// 成本快照(每次模型回复后)。
+    Cost(Cost),
+    /// 自由文本备注(验证过/不过、评审跳过 等)。
+    Note(String),
+    /// 全流程结束。
+    Finished,
+}
+
 #[cfg(test)]
 mod pricing_tests {
     use super::*;

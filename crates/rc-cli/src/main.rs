@@ -3,6 +3,7 @@
 
 mod catalog;
 mod models_dev;
+mod tui;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -38,6 +39,9 @@ struct Cli {
     /// 切换到该工作目录后再执行
     #[arg(long)]
     cwd: Option<PathBuf>,
+    /// 实时终端视图(ratatui):看 DAG/进度/成本;开启时不打 tracing 日志
+    #[arg(long)]
+    tui: bool,
 }
 
 #[derive(Subcommand)]
@@ -416,13 +420,6 @@ async fn main() -> Result<()> {
     let _ = dotenvy::from_filename(".env.local");
     let _ = dotenvy::dotenv();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     let cli = Cli::parse();
 
     // 子命令:providers / models / init —— 无需 config/key,处理完即返回。
@@ -441,6 +438,17 @@ async fn main() -> Result<()> {
         }) => return cmd_init(provider, model.as_deref(), *force),
         None => {}
     }
+
+    // 非 TUI 模式才初始化 tracing —— TUI 用事件渲染,日志会画在屏幕上污染视图。
+    if !cli.tui {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            )
+            .init();
+    }
+
     let task = cli
         .task
         .clone()
@@ -498,12 +506,19 @@ async fn main() -> Result<()> {
         orch = orch.with_mcp(hub);
     }
 
-    // 运行;无论成败都关闭 MCP 子进程会话。
-    let outcome = match orch.run(&task).await {
-        Ok(o) => o,
-        Err(e) => {
-            orch.shutdown().await;
-            return Err(e);
+    // 运行:--tui 走实时视图(内部自关 MCP);否则直跑,无论成败都关 MCP。
+    let outcome = if cli.tui {
+        tui::run_with_tui(orch, task).await?
+    } else {
+        match orch.run(&task).await {
+            Ok(o) => {
+                orch.shutdown().await;
+                o
+            }
+            Err(e) => {
+                orch.shutdown().await;
+                return Err(e);
+            }
         }
     };
 
@@ -535,7 +550,5 @@ async fn main() -> Result<()> {
         "强模型 token 占比: {:.0}%  (越低越省钱,见 PLAN §9)",
         c.strong_share() * 100.0
     );
-
-    orch.shutdown().await;
     Ok(())
 }

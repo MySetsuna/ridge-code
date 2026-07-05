@@ -12,13 +12,24 @@ use rc_mcp::McpHub;
 use rc_providers::LlmProvider;
 use rc_tools::{dispatch, tool_specs};
 use rc_types::{
-    Cost, Diagnostic, Difficulty, Message, ModelTier, ReviewResult, Subtask, ToolCall, ToolSpec,
-    Verdict,
+    Cost, Diagnostic, Difficulty, Event, Message, ModelTier, Phase, PlannedSubtask, ReviewResult,
+    Subtask, ToolCall, ToolSpec, Verdict,
 };
 use rc_verify::{resolve_plan, verify, VerifyPlan};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
+
+/// 编排事件发送端(TUI 消费;不设则不产生事件)。
+pub type EventTx = UnboundedSender<Event>;
+
+/// 若有 sink 则发送事件(send 非 async、不阻塞;通道关闭则静默忽略)。
+fn emit(events: Option<&EventTx>, ev: Event) {
+    if let Some(tx) = events {
+        let _ = tx.send(ev);
+    }
+}
 
 /// 编排参数。
 pub struct OrchestratorConfig {
@@ -57,6 +68,8 @@ pub struct Orchestrator {
     /// 可选:按难度覆盖 worker 的 provider(命名注册表 + N 模型路由)。
     /// 命中则用它,否则回落 strong/weak;成本档位仍按难度记(见 `work`)。
     worker_models: HashMap<Difficulty, Box<dyn LlmProvider>>,
+    /// 可选:实时事件发送端(TUI);None 时零行为变化。
+    events: Option<EventTx>,
     verify_plan: VerifyPlan,
     project_dir: PathBuf,
     cfg: OrchestratorConfig,
@@ -83,10 +96,22 @@ impl Orchestrator {
             read_tools,
             mcp: None,
             worker_models: HashMap::new(),
+            events: None,
             verify_plan,
             project_dir,
             cfg,
         }
+    }
+
+    /// 注入实时事件发送端(TUI 用)。不注入则不产生任何事件、行为不变。返回 self 以链式调用。
+    pub fn with_events(mut self, tx: EventTx) -> Self {
+        self.events = Some(tx);
+        self
+    }
+
+    /// 发一个编排事件(无 sink 则静默)。
+    fn emit(&self, ev: Event) {
+        emit(self.events.as_ref(), ev);
     }
 
     /// 注入按难度覆盖的 worker provider(命名注册表 + N 模型路由)。
@@ -115,22 +140,41 @@ impl Orchestrator {
         let mut cost = Cost::default();
 
         info!("① 规划(强模型分解任务)");
+        self.emit(Event::Phase(Phase::Planning));
         let subtasks = self.plan(task, &mut cost).await?;
+        self.emit(Event::Planned(
+            subtasks
+                .iter()
+                .map(|st| PlannedSubtask {
+                    id: st.id.clone(),
+                    description: st.description.clone(),
+                    difficulty: st.difficulty,
+                })
+                .collect(),
+        ));
         for st in &subtasks {
             info!(id = %st.id, difficulty = ?st.difficulty, "  子任务: {}", st.description);
         }
 
         info!("② 执行子任务(按难度路由强/弱)");
+        self.emit(Event::Phase(Phase::Executing));
         for st in &subtasks {
             let tier = route_tier(st.difficulty);
             info!(id = %st.id, tier = ?tier, "  执行子任务");
+            self.emit(Event::SubtaskStarted {
+                id: st.id.clone(),
+                tier,
+            });
             self.work(st, tier, &mut cost).await?;
+            self.emit(Event::SubtaskDone { id: st.id.clone() });
         }
 
         info!("③ 集成验证 + 失败修复(强)");
+        self.emit(Event::Phase(Phase::Verifying));
         let repairs = self.verify_and_repair(&mut cost).await?;
 
         info!("④ 评审(强)");
+        self.emit(Event::Phase(Phase::Reviewing));
         let mut reviewed = false;
         let mut approved = true;
         match self.review(task, &mut cost).await {
@@ -139,16 +183,24 @@ impl Orchestrator {
                 approved = r.approved;
                 if !r.approved && !r.issues.is_empty() {
                     warn!(issues = ?r.issues, "  评审未通过,修复一轮");
+                    self.emit(Event::Note("评审未通过,修复一轮".into()));
                     self.fix_from_review(&r, &mut cost).await?;
                     let _ = self.verify_and_repair(&mut cost).await?;
                     approved = true; // 已据评审修复
                 } else {
                     info!("  ✅ 评审通过");
                 }
+                self.emit(Event::Review { approved });
             }
-            None => warn!("  评审结果无法解析,跳过(按通过处理)"),
+            None => {
+                warn!("  评审结果无法解析,跳过(按通过处理)");
+                self.emit(Event::Note("评审结果无法解析,跳过".into()));
+            }
         }
 
+        self.emit(Event::Cost(cost));
+        self.emit(Event::Phase(Phase::Done));
+        self.emit(Event::Finished);
         Ok(Outcome {
             subtasks: subtasks.len(),
             repairs,
@@ -171,6 +223,7 @@ impl Orchestrator {
             &mut msgs,
             &self.tools,
             self.mcp.as_ref(),
+            self.events.as_ref(),
             self.cfg.max_steps,
             &mut cost,
         )
@@ -232,6 +285,7 @@ difficulty 用小写,表示该子任务难度。";
             &mut msgs,
             &self.tools,
             self.mcp.as_ref(),
+            self.events.as_ref(),
             self.cfg.max_steps,
             cost,
         )
@@ -246,10 +300,12 @@ difficulty 用小写,表示该子任务难度。";
             match verify(&self.verify_plan, &self.project_dir).await? {
                 Verdict::Pass => {
                     info!("  ✅ 验证通过");
+                    self.emit(Event::Note("✅ 验证通过".into()));
                     return Ok(repairs);
                 }
                 Verdict::Uncertain { note } => {
                     warn!(%note, "  ⚠️ 无法客观验证,按完成处理");
+                    self.emit(Event::Note("⚠️ 无法客观验证,按完成处理".into()));
                     return Ok(repairs);
                 }
                 Verdict::Fail { reasons } => {
@@ -261,6 +317,7 @@ difficulty 用小写,表示该子任务难度。";
                     }
                     repairs += 1;
                     warn!(round = repairs, "  ❌ 验证失败,强模型修复");
+                    self.emit(Event::Repair { round: repairs });
                     let feedback = format!(
                         "代码未通过验证,请据以下输出直接修改代码修复,然后停止:\n\n{}",
                         render_reasons(&reasons)
@@ -272,6 +329,7 @@ difficulty 用小写,表示该子任务难度。";
                         &mut msgs,
                         &self.tools,
                         self.mcp.as_ref(),
+                        self.events.as_ref(),
                         self.cfg.max_steps,
                         cost,
                     )
@@ -294,6 +352,7 @@ difficulty 用小写,表示该子任务难度。";
             &mut msgs,
             &self.read_tools,
             None,
+            self.events.as_ref(),
             self.cfg.max_steps,
             cost,
         )
@@ -317,6 +376,7 @@ difficulty 用小写,表示该子任务难度。";
             &mut msgs,
             &self.tools,
             self.mcp.as_ref(),
+            self.events.as_ref(),
             self.cfg.max_steps,
             cost,
         )
@@ -347,12 +407,14 @@ const WORKER_SYSTEM: &str =
 
 /// 跑一轮 agent:工具循环直到模型不再调用工具,返回最终文本;沿途按档位累计成本。
 /// `mcp` 存在时,工具调用先按名路由到 MCP,否则落内置工具(见 `dispatch_tool`)。
+#[allow(clippy::too_many_arguments)]
 async fn run_agent(
     provider: &dyn LlmProvider,
     tier: ModelTier,
     messages: &mut Vec<Message>,
     tools: &[ToolSpec],
     mcp: Option<&McpHub>,
+    events: Option<&EventTx>,
     max_steps: usize,
     cost: &mut Cost,
 ) -> Result<String> {
@@ -363,6 +425,7 @@ async fn run_agent(
             completion.usage.input_tokens,
             completion.usage.output_tokens,
         );
+        emit(events, Event::Cost(*cost));
         debug!(step, tier = ?tier, in_tok = completion.usage.input_tokens, out_tok = completion.usage.output_tokens, "模型回复");
         let msg = completion.message;
         if msg.tool_calls.is_empty() {
@@ -371,6 +434,13 @@ async fn run_agent(
         messages.push(msg.clone());
         for call in &msg.tool_calls {
             info!(step, tool = %call.name, "    工具");
+            emit(
+                events,
+                Event::Tool {
+                    step,
+                    name: call.name.clone(),
+                },
+            );
             let result = dispatch_tool(mcp, call).await;
             messages.push(Message::tool_result(call.id.clone(), result));
         }
@@ -502,5 +572,32 @@ mod run_single_tests {
         // 用的是覆盖模型(usage 100,而非 strong 的 7),且成本仍记在 strong tier。
         assert_eq!(cost.strong_in, 100);
         assert_eq!(cost.weak_tokens(), 0);
+    }
+
+    #[tokio::test]
+    async fn run_emits_event_stream_ending_finished() {
+        use rc_types::{Event, Phase};
+        let strong: Box<dyn LlmProvider> = Box::new(StubProvider::new("s", vec![]));
+        let weak: Box<dyn LlmProvider> = Box::new(StubProvider::new("w", vec![]));
+        let tmp = std::env::temp_dir().join("rc-core-events-test");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let orch =
+            Orchestrator::new(strong, weak, tmp, OrchestratorConfig::default()).with_events(tx);
+        let _ = orch.run("加个函数").await.unwrap();
+
+        let mut evs = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            evs.push(e);
+        }
+
+        // 首个是进入规划阶段,含规划产出,含非零成本快照,末尾是 Finished。
+        assert!(matches!(evs.first(), Some(Event::Phase(Phase::Planning))));
+        assert!(evs.iter().any(|e| matches!(e, Event::Planned(_))));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, Event::Cost(c) if c.total() > 0)));
+        assert!(matches!(evs.last(), Some(Event::Finished)));
     }
 }
