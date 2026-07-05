@@ -131,3 +131,26 @@ async fn connect_one(cfg: &McpServerConfig) -> Result<(ClientService, Vec<Tool>)
 
     Ok((peer, tools))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::McpServerConfig;
+    use std::collections::HashMap;
+
+    /// 不存在的命令 → 连接失败被吞、跳过,hub 为空且不 panic(「单服务器不可用不崩」的核心不变量)。
+    /// 命令不存在会立即 spawn 失败,跨平台确定性,无需网络/真实 MCP 服务器。
+    #[tokio::test]
+    async fn connect_skips_unreachable_server_without_panic() {
+        let cfg = McpServerConfig {
+            name: "bad".into(),
+            command: "definitely-not-a-real-mcp-binary-xyz".into(),
+            args: vec![],
+            env: HashMap::new(),
+        };
+        let hub = McpHub::connect(vec![cfg]).await;
+        assert!(hub.is_empty());
+        assert!(hub.tool_specs().is_empty());
+        assert!(!hub.has_tool("bad__anything"));
+    }
+}
