@@ -1720,7 +1720,7 @@ dependencies = [
 
 [[package]]
 name = "rc-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "rc-mcp",
@@ -1735,7 +1735,7 @@ dependencies = [
 
 [[package]]
 name = "rc-eval"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1754,7 +1754,7 @@ dependencies = [
 
 [[package]]
 name = "rc-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "rc-types",
@@ -1767,7 +1767,7 @@ dependencies = [
 
 [[package]]
 name = "rc-providers"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1780,7 +1780,7 @@ dependencies = [
 
 [[package]]
 name = "rc-tools"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "rc-types",
@@ -1790,7 +1790,7 @@ dependencies = [
 
 [[package]]
 name = "rc-types"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1798,7 +1798,7 @@ dependencies = [
 
 [[package]]
 name = "rc-verify"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "rc-types",
@@ -1885,7 +1885,7 @@ dependencies = [
 
 [[package]]
 name = "ridge-code"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
