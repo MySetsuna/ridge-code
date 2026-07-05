@@ -45,6 +45,25 @@ cargo run -p rc-eval                # 真实:读 ~/.ridge/config.toml + key,真�
 
 输出「基线 vs 编排」对照表(成功率 / 总成本 USD / 强模型 token 占比 / 耗时),并写一份带时间戳的 JSON 到 `target/eval/`。真实模式需在 config 的 `[strong]`/`[weak]` 段填 `price_in`/`price_out`(USD/百万 token)才能算出非零成本。
 
+## 构建 / 跨平台发布
+
+本地出单二进制(release 已 strip + thin LTO):
+
+```bash
+cargo build --release -p ridge-code   # 产物:target/release/ridge-code[.exe]
+```
+
+跨平台发布走 GitHub Actions(`.github/workflows/release.yml`):打一个 `v*` 标签即为
+五个目标构建并把归档(`.tar.gz` / `.zip`)上传到对应 Release。
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+覆盖目标:Linux x86_64 / aarch64(gnu)、macOS x86_64 / aarch64、Windows x86_64。
+非本机目标(如 aarch64-linux)由 CI 自动经 `cross` 交叉编译。`.github/workflows/ci.yml`
+在 push/PR 时于三平台跑 fmt + clippy + build + test,作为「能跨平台」的护栏。
+
 ## workspace 布局
 
 | crate | 角色 | 里程碑 |
