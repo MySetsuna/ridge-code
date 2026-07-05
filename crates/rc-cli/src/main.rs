@@ -1,8 +1,10 @@
 //! ridge-code M2:薄壳。读配置(强/弱双 provider)→ 构造编排器 → 跑 → 打印报告与成本账单。
 //! 编排逻辑全在 rc-core。详见 PLAN.md §2。
 
+mod catalog;
+
 use anyhow::{anyhow, Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use rc_core::{Orchestrator, OrchestratorConfig};
 use rc_mcp::{McpHub, McpServerConfig};
 use rc_providers::{AnthropicProvider, LlmProvider, OpenAiCompatProvider};
@@ -16,11 +18,16 @@ use tracing::{info, warn};
 #[command(
     name = "ridge-code",
     version,
-    about = "成本优化的编码 agent CLI(M2:强/弱编排)"
+    about = "成本优化的编码 agent CLI(强/弱编排 + 多供应商)",
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true
 )]
 struct Cli {
-    /// 要执行的任务描述
-    task: String,
+    /// 子命令(providers/models/init);省略则按「运行任务」处理。
+    #[command(subcommand)]
+    command: Option<Command>,
+    /// 要执行的任务描述(无子命令时)
+    task: Option<String>,
     /// 单次 agent 运行内的工具循环最大轮数
     #[arg(long, default_value_t = 12)]
     max_steps: usize,
@@ -32,6 +39,27 @@ struct Cli {
     cwd: Option<PathBuf>,
 }
 
+#[derive(Subcommand)]
+enum Command {
+    /// 列出内置供应商目录(base_url / kind / key 环境变量)
+    Providers,
+    /// 列出某供应商(或全部)的示例模型
+    Models {
+        /// 供应商名(省略则列全部)
+        provider: Option<String>,
+    },
+    /// 按「供应商 + 模型」生成 ~/.ridge/config.toml(不用手写 base_url)
+    Init {
+        /// 供应商名(见 `ridge-code providers`)
+        provider: String,
+        /// 模型 ID(省略则用该供应商的第一个示例模型)
+        model: Option<String>,
+        /// 覆盖已存在的 config.toml
+        #[arg(long)]
+        force: bool,
+    },
+}
+
 /// provider 的 wire 协议:openai 兼容(默认)或原生 anthropic。
 #[derive(Deserialize, Clone, Copy, Default)]
 #[serde(rename_all = "lowercase")]
@@ -39,6 +67,15 @@ enum ProviderKind {
     #[default]
     Openai,
     Anthropic,
+}
+
+impl ProviderKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ProviderKind::Openai => "openai",
+            ProviderKind::Anthropic => "anthropic",
+        }
+    }
 }
 
 #[derive(Deserialize, Clone)]
@@ -223,6 +260,116 @@ fn resolve_worker_models(
     Ok(models)
 }
 
+/// `providers`:列出内置供应商目录。
+fn cmd_providers() {
+    println!("内置供应商目录(base_url/kind/key 为稳定事实;模型见 `ridge-code models <name>`):\n");
+    println!(
+        "  {:<11} {:<10} {:<5} {:<46} {:<7}",
+        "NAME", "KIND", "FREE", "BASE_URL", "KEY_ENV"
+    );
+    for e in catalog::catalog() {
+        let free = if e.free { "✓" } else { "" };
+        println!(
+            "  {:<11} {:<10} {:<5} {:<46} {}",
+            e.name,
+            e.kind.as_str(),
+            free,
+            e.base_url,
+            e.api_key_env
+        );
+    }
+    println!(
+        "\n用 `ridge-code models <name>` 看示例模型,`ridge-code init <name> [model]` 一键生成配置。"
+    );
+}
+
+/// `models`:列出某供应商(或全部)的示例模型。
+fn cmd_models(provider: Option<&str>) -> Result<()> {
+    println!("示例模型(以各家官方控制台/文档为准,可能更新;init 可填任意 model id):\n");
+    let entries: Vec<&catalog::CatalogEntry> = match provider {
+        Some(name) => vec![catalog::find(name)
+            .with_context(|| format!("未知供应商: {name}(见 `ridge-code providers`)"))?],
+        None => catalog::catalog().iter().collect(),
+    };
+    for e in entries {
+        println!("[{}] {}", e.name, e.note);
+        for m in e.models {
+            println!("  - {m}");
+        }
+        println!();
+    }
+    Ok(())
+}
+
+/// `init`:按「供应商 + 模型」生成 ~/.ridge/config.toml。已存在则默认不覆盖(打印片段)。
+fn cmd_init(provider: &str, model: Option<&str>, force: bool) -> Result<()> {
+    let e = catalog::find(provider)
+        .with_context(|| format!("未知供应商: {provider}(见 `ridge-code providers`)"))?;
+    let model = model
+        .map(|s| s.to_string())
+        .or_else(|| e.models.first().map(|s| s.to_string()))
+        .context("该供应商无示例模型,请显式指定 model")?;
+
+    let home = home_dir().ok_or_else(|| anyhow!("找不到 HOME / USERPROFILE"))?;
+    let dir = home.join(".ridge");
+    let path = dir.join("config.toml");
+
+    let key_line = if e.free {
+        "api_key = \"local\"                    # 本地无需真实 key".to_string()
+    } else {
+        format!("api_key_env = \"{}\"", e.api_key_env)
+    };
+    let maxtok = if matches!(e.kind, ProviderKind::Anthropic) {
+        "\n# max_tokens = 8192"
+    } else {
+        ""
+    };
+    let scaffold = format!(
+        "# 由 `ridge-code init` 生成。密钥别提交进 git。\n\
+[[providers]]\n\
+name = \"{name}\"\n\
+kind = \"{kind}\"\n\
+base_url = \"{base}\"\n\
+model = \"{model}\"\n\
+{key}{maxtok}\n\
+\n\
+[roles]\n\
+strong = \"{name}\"\n\
+weak = \"{name}\"\n",
+        name = e.name,
+        kind = e.kind.as_str(),
+        base = e.base_url,
+        key = key_line,
+    );
+
+    if path.exists() && !force {
+        println!(
+            "⚠️ {} 已存在,未覆盖(加 --force 覆盖)。把下面片段粘进去即可:\n",
+            path.display()
+        );
+        println!("{scaffold}");
+        return Ok(());
+    }
+    std::fs::create_dir_all(&dir).with_context(|| format!("创建目录 {} 失败", dir.display()))?;
+    std::fs::write(&path, &scaffold).with_context(|| format!("写入 {} 失败", path.display()))?;
+    println!(
+        "✅ 已写入 {}(供应商 {}, 模型 {})",
+        path.display(),
+        e.name,
+        model
+    );
+    if e.free {
+        println!("本地供应商:先 `ollama pull {model}`,再运行。");
+    } else {
+        println!(
+            "请设置密钥:export {}=你的key(或写进启动目录的 .env.local)。",
+            e.api_key_env
+        );
+    }
+    println!("然后:ridge-code --cwd /path/to/project \"你的任务\"");
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // 先加载 .env.local / .env(若存在),让 RIDGE_API_KEY、RUST_LOG 等可从文件读。
@@ -238,6 +385,26 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // 子命令:providers / models / init —— 无需 config/key,处理完即返回。
+    match &cli.command {
+        Some(Command::Providers) => {
+            cmd_providers();
+            return Ok(());
+        }
+        Some(Command::Models { provider }) => return cmd_models(provider.as_deref()),
+        Some(Command::Init {
+            provider,
+            model,
+            force,
+        }) => return cmd_init(provider, model.as_deref(), *force),
+        None => {}
+    }
+    let task = cli
+        .task
+        .clone()
+        .context("缺少任务描述;或用子命令 providers / models / init(--help 看用法)")?;
+
     if let Some(cwd) = &cli.cwd {
         std::env::set_current_dir(cwd)
             .with_context(|| format!("切换目录到 {} 失败", cwd.display()))?;
@@ -291,7 +458,7 @@ async fn main() -> Result<()> {
     }
 
     // 运行;无论成败都关闭 MCP 子进程会话。
-    let outcome = match orch.run(&cli.task).await {
+    let outcome = match orch.run(&task).await {
         Ok(o) => o,
         Err(e) => {
             orch.shutdown().await;

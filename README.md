@@ -16,6 +16,17 @@
 
 ## 跑起来
 
+方式一(推荐):从内置供应商目录挑,不用手写 base_url —
+
+```bash
+ridge-code providers                 # 列出供应商(anthropic/deepseek/qwen/zhipu/moonshot/openai/openrouter/groq/nvidia/ollama)
+ridge-code models deepseek           # 看某供应商的示例模型
+ridge-code init deepseek             # 一键生成 ~/.ridge/config.toml(再设置对应 key 环境变量)
+# 本地免费(无需付费 key):ridge-code init ollama qwen2.5-coder  → 先 `ollama pull qwen2.5-coder`
+```
+
+方式二:从模板手动改 —
+
 ```bash
 cp config.example.toml ~/.ridge/config.toml   # 填 [strong]/[weak],或 [[providers]]+[roles] 命名注册表
 
