@@ -253,6 +253,12 @@ pub enum Event {
     Cost(Cost),
     /// 自由文本备注(验证过/不过、评审跳过 等)。
     Note(String),
+    /// 模型输出/思考内容。
+    Message { role: String, content: String },
+    /// 工具调用结果摘要。
+    ToolResult { name: String, summary: String },
+    /// 执行结果/产出。
+    Output(String),
     /// 全流程结束。
     Finished,
 }

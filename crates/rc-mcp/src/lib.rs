@@ -14,7 +14,7 @@ mod result;
 pub use hub::McpHub;
 
 /// 一个 MCP 服务器的声明(来自 ~/.ridge/config.toml 的 `[[mcp]]`)。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct McpServerConfig {
     /// 服务器名 —— 用作工具命名空间前缀,应唯一。
     pub name: String,

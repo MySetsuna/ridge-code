@@ -55,6 +55,8 @@ pub struct Outcome {
     pub reviewed: bool,
     pub approved: bool,
     pub cost: Cost,
+    /// 如果是简单对话回复，存储在这里（subtasks=0 时）。
+    pub reply: Option<String>,
 }
 
 /// 编排器:持有强/弱两个 provider,以及工具、验证计划、工作目录。
@@ -136,10 +138,69 @@ impl Orchestrator {
         }
     }
 
+    /// 意图识别：判断用户输入是否为简单对话。
+    /// 返回 Some(reply) 表示是简单对话，直接回复；
+    /// 返回 None 表示是任务，需要进入规划流程。
+    async fn classify_intent(&self, input: &str, cost: &mut Cost) -> Result<Option<String>> {
+        let sys = "你是一个意图识别器。判断用户的输入是「简单对话」还是「编码任务」。
+
+简单对话包括：打招呼、测试、询问状态、闲聊等不需要执行代码操作的内容。
+编码任务包括：要求修改代码、创建文件、实现功能、修复bug等需要实际操作的内容。
+
+只回复一个 JSON：{\"intent\":\"chat\"} 或 {\"intent\":\"task\"}
+如果是 chat，再追加一行你的简短回复（中文，一句话）。";
+
+        let msgs = vec![Message::system(sys), Message::user(input)];
+        let c = self.strong.complete(&msgs, &[]).await?;
+        cost.add(
+            ModelTier::Strong,
+            c.usage.input_tokens,
+            c.usage.output_tokens,
+        );
+
+        let content = c.message.content.trim();
+        // 尝试解析 JSON
+        if let Some(json_start) = content.find('{') {
+            if let Some(json_end) = content[json_start..].find('}') {
+                let json_str = &content[json_start..=json_start + json_end];
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                    if val.get("intent").and_then(|v| v.as_str()) == Some("chat") {
+                        // 提取回复内容：JSON 之后的部分
+                        let after_json = content[json_start + json_end + 1..].trim();
+                        let reply = if after_json.is_empty() {
+                            "你好！有什么我可以帮你的吗？".to_string()
+                        } else {
+                            after_json.to_string()
+                        };
+                        return Ok(Some(reply));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
     pub async fn run(&self, task: &str) -> Result<Outcome> {
         let mut cost = Cost::default();
 
-        info!("① 规划(强模型分解任务)");
+        // 先判断用户意图：是否为简单对话（打招呼、测试等）
+        info!("① 意图识别(判断是否需要执行任务)");
+        if let Some(reply) = self.classify_intent(task, &mut cost).await? {
+            // 简单对话，直接回复，不进入任务流程
+            self.emit(Event::Phase(Phase::Done));
+            self.emit(Event::Note(reply.clone()));
+            self.emit(Event::Finished);
+            return Ok(Outcome {
+                subtasks: 0,
+                repairs: 0,
+                reviewed: false,
+                approved: true,
+                cost,
+                reply: Some(reply),
+            });
+        }
+
+        info!("② 规划(强模型分解任务)");
         self.emit(Event::Phase(Phase::Planning));
         let subtasks = self.plan(task, &mut cost).await?;
         self.emit(Event::Planned(
@@ -156,7 +217,7 @@ impl Orchestrator {
             info!(id = %st.id, difficulty = ?st.difficulty, "  子任务: {}", st.description);
         }
 
-        info!("② 执行子任务(按难度路由强/弱)");
+        info!("③ 执行子任务(按难度路由强/弱)");
         self.emit(Event::Phase(Phase::Executing));
         for st in &subtasks {
             let tier = route_tier(st.difficulty);
@@ -169,11 +230,11 @@ impl Orchestrator {
             self.emit(Event::SubtaskDone { id: st.id.clone() });
         }
 
-        info!("③ 集成验证 + 失败修复(强)");
+        info!("④ 集成验证 + 失败修复(强)");
         self.emit(Event::Phase(Phase::Verifying));
         let repairs = self.verify_and_repair(&mut cost).await?;
 
-        info!("④ 评审(强)");
+        info!("⑤ 评审(强)");
         self.emit(Event::Phase(Phase::Reviewing));
         let mut reviewed = false;
         let mut approved = true;
@@ -207,6 +268,7 @@ impl Orchestrator {
             reviewed,
             approved,
             cost,
+            reply: None,
         })
     }
 
@@ -235,6 +297,7 @@ impl Orchestrator {
             reviewed: false,
             approved: true,
             cost,
+            reply: None,
         })
     }
 
@@ -427,7 +490,20 @@ async fn run_agent(
         );
         emit(events, Event::Cost(*cost));
         debug!(step, tier = ?tier, in_tok = completion.usage.input_tokens, out_tok = completion.usage.output_tokens, "模型回复");
+
         let msg = completion.message;
+
+        // 发送模型输出内容
+        if !msg.content.is_empty() {
+            emit(
+                events,
+                Event::Message {
+                    role: "assistant".to_string(),
+                    content: msg.content.clone(),
+                },
+            );
+        }
+
         if msg.tool_calls.is_empty() {
             return Ok(msg.content);
         }
@@ -442,6 +518,19 @@ async fn run_agent(
                 },
             );
             let result = dispatch_tool(mcp, call).await;
+            // 发送工具结果摘要
+            let summary = if result.len() > 100 {
+                format!("{}...", &result[..100])
+            } else {
+                result.clone()
+            };
+            emit(
+                events,
+                Event::ToolResult {
+                    name: call.name.clone(),
+                    summary,
+                },
+            );
             messages.push(Message::tool_result(call.id.clone(), result));
         }
     }

@@ -34,8 +34,12 @@ impl OpenAiCompatProvider {
         api_key: impl Into<String>,
         model: impl Into<String>,
     ) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
-            client: reqwest::Client::new(),
+            client,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
             model: model.into(),
@@ -57,6 +61,7 @@ impl LlmProvider for OpenAiCompatProvider {
             .post(&url)
             .bearer_auth(&self.api_key)
             .json(&req)
+            .timeout(std::time::Duration::from_secs(90))
             .send()
             .await
             .with_context(|| format!("请求 {url} 失败"))?;

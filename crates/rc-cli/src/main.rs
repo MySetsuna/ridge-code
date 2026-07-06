@@ -2,6 +2,9 @@
 //! 编排逻辑全在 rc-core。详见 PLAN.md §2。
 
 mod catalog;
+mod config_ui;
+mod input;
+mod interactive;
 mod models_dev;
 mod tui;
 
@@ -69,7 +72,7 @@ enum Command {
 }
 
 /// provider 的 wire 协议:openai 兼容(默认)或原生 anthropic。
-#[derive(Deserialize, Clone, Copy, Default)]
+#[derive(Deserialize, Clone, Copy, Default, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 enum ProviderKind {
     #[default]
@@ -86,7 +89,7 @@ impl ProviderKind {
     }
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, serde::Serialize)]
 struct ProviderConfig {
     /// 命名注册表 `[[providers]]` 里用作引用名(内联段无需填)。
     #[serde(default)]
@@ -106,7 +109,7 @@ struct ProviderConfig {
 }
 
 /// `[roles]`:strong/weak 按名引用 `[[providers]]` 里的 provider。
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Clone, Default, serde::Serialize)]
 struct Roles {
     #[serde(default)]
     strong: Option<String>,
@@ -115,7 +118,7 @@ struct Roles {
 }
 
 /// `[routing]`(可选):按难度把 worker 覆盖到任意命名 provider。
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Clone, Default, serde::Serialize)]
 struct Routing {
     #[serde(default)]
     trivial: Option<String>,
@@ -128,7 +131,7 @@ struct Routing {
 /// 三种写法(自上而下优先):
 /// ①命名注册表 `[[providers]]` + `[roles]`(多供应商/多模型,可选 `[routing]` 按难度路由);
 /// ②`[strong]`+`[weak]`(混合两档);③单 `[provider]`(强=弱)。后两者为向后兼容。
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone, Default, serde::Serialize)]
 struct Config {
     #[serde(default)]
     provider: Option<ProviderConfig>,
@@ -220,28 +223,52 @@ fn lookup(
         .with_context(|| format!("[{role}] 指向未在 [[providers]] 定义的 provider: {name}"))
 }
 
-/// 解析强/弱 provider 配置:优先 `[roles]` 按名引用,否则回落 `[strong]`/`[weak]` → `[provider]`。
+/// 解析强/弱 provider 配置。
+/// 支持两种格式：
+/// - 纯名称: `strong = "nvidia"` → 使用该 provider 的配置
+/// - 名称+模型: `strong = "nvidia,meta/llama-3.3-70b-instruct"` → 使用该 provider 但覆盖模型
 fn resolve_tiers(
     cfg: &Config,
     registry: &HashMap<String, ProviderConfig>,
 ) -> Result<(ProviderConfig, ProviderConfig)> {
-    let strong = match &cfg.roles.strong {
-        Some(name) => lookup(registry, name, "roles.strong")?,
-        None => cfg
-            .strong
-            .clone()
-            .or_else(|| cfg.provider.clone())
-            .context("配置缺少 provider:用 [[providers]]+[roles],或 [strong]/[provider]")?,
-    };
-    let weak = match &cfg.roles.weak {
-        Some(name) => lookup(registry, name, "roles.weak")?,
-        None => cfg
-            .weak
-            .clone()
-            .or_else(|| cfg.provider.clone())
-            .unwrap_or_else(|| strong.clone()),
-    };
+    let strong = resolve_tier(&cfg.roles.strong, &cfg.strong, &cfg.provider, registry, "roles.strong")?
+        .or_else(|| cfg.strong.clone())
+        .or_else(|| cfg.provider.clone())
+        .context("配置缺少 provider:用 [[providers]]+[roles],或 [strong]/[provider]")?;
+    let weak = resolve_tier(&cfg.roles.weak, &cfg.weak, &cfg.provider, registry, "roles.weak")?
+        .or_else(|| cfg.weak.clone())
+        .or_else(|| cfg.provider.clone())
+        .unwrap_or_else(|| strong.clone());
     Ok((strong, weak))
+}
+
+/// 解析单个 tier 配置。
+fn resolve_tier(
+    role_name: &Option<String>,
+    inline_config: &Option<ProviderConfig>,
+    fallback: &Option<ProviderConfig>,
+    registry: &HashMap<String, ProviderConfig>,
+    role_label: &str,
+) -> Result<Option<ProviderConfig>> {
+    match role_name {
+        Some(name) => {
+            // 支持 "provider,model" 格式
+            let (provider_name, model_override) = if let Some(comma_pos) = name.find(',') {
+                (&name[..comma_pos], Some(name[comma_pos + 1..].to_string()))
+            } else {
+                (name.as_str(), None)
+            };
+            let mut pc = lookup(registry, provider_name, role_label)?;
+            if let Some(model) = model_override {
+                pc.model = model;
+            }
+            Ok(Some(pc))
+        }
+        None => {
+            let pc = inline_config.clone().or_else(|| fallback.clone());
+            Ok(pc)
+        }
+    }
 }
 
 /// 解析可选的 `[routing]`:按难度构建 worker 覆盖 provider(名字须在注册表)。
@@ -413,6 +440,68 @@ weak = \"{name}\"\n",
     Ok(())
 }
 
+/// `init` 的交互式版本：返回消息而不是直接打印。
+pub fn cmd_init_interactive(provider: &str, model: Option<String>) -> Result<String> {
+    let e = catalog::find(provider)
+        .with_context(|| format!("未知供应商: {provider}(见 `ridge-code providers`)"))?;
+    let model = model
+        .or_else(|| e.models.first().map(|s| s.to_string()))
+        .context("该供应商无示例模型,请显式指定 model")?;
+
+    let home = home_dir().ok_or_else(|| anyhow!("找不到 HOME / USERPROFILE"))?;
+    let dir = home.join(".ridge");
+    let path = dir.join("config.toml");
+
+    let key_line = if e.free {
+        "api_key = \"local\"                    # 本地无需真实 key".to_string()
+    } else {
+        format!("api_key_env = \"{}\"", e.api_key_env)
+    };
+    let maxtok = if matches!(e.kind, ProviderKind::Anthropic) {
+        "\n# max_tokens = 8192"
+    } else {
+        ""
+    };
+    let scaffold = format!(
+        "# 由 `ridge-code init` 生成。密钥别提交进 git。\n\
+         [[providers]]\n\
+         name = \"{name}\"\n\
+         kind = \"{kind}\"\n\
+         base_url = \"{base}\"\n\
+         model = \"{model}\"\n\
+         {key}{maxtok}\n\
+         \n\
+         [roles]\n\
+         strong = \"{name}\"\n\
+         weak = \"{name}\"\n",
+        name = e.name,
+        kind = e.kind.as_str(),
+        base = e.base_url,
+        key = key_line,
+    );
+
+    if path.exists() {
+        return Ok(format!(
+            "{} 已存在。用 /config 编辑配置。",
+            path.display()
+        ));
+    }
+
+    std::fs::create_dir_all(&dir).with_context(|| format!("创建目录 {} 失败", dir.display()))?;
+    std::fs::write(&path, &scaffold).with_context(|| format!("写入 {} 失败", path.display()))?;
+
+    let mut msg = format!("已写入 {} (供应商 {}, 模型 {})", path.display(), e.name, model);
+    if e.free {
+        msg.push_str(&format!("\n本地供应商: 先运行 `ollama pull {}`, 再使用。", model));
+    } else {
+        msg.push_str(&format!(
+            "\n请设置密钥: export {}=你的key (或写进 .env.local)",
+            e.api_key_env
+        ));
+    }
+    Ok(msg)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // 先加载 .env.local / .env(若存在),让 RIDGE_API_KEY、RUST_LOG 等可从文件读。
@@ -437,6 +526,13 @@ async fn main() -> Result<()> {
             force,
         }) => return cmd_init(provider, model.as_deref(), *force),
         None => {}
+    }
+
+    // 无参数且无任务 → 进入交互模式
+    if cli.task.is_none() {
+        // 尝试加载配置（交互模式可选）
+        let config = load_config().unwrap_or_default();
+        return interactive::run_interactive(config, cli.cwd).await;
     }
 
     // 非 TUI 模式才初始化 tracing —— TUI 用事件渲染,日志会画在屏幕上污染视图。
