@@ -92,11 +92,25 @@ pub struct ToolCall {
     pub arguments: Value,
 }
 
-/// 一次补全结果:自然语言文本 + 若干工具调用。
+/// 一次调用的 token 用量(成本记账用)。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+}
+
+impl Usage {
+    pub fn total(&self) -> u32 {
+        self.prompt_tokens + self.completion_tokens
+    }
+}
+
+/// 一次补全结果:自然语言文本 + 若干工具调用 + token 用量。
 #[derive(Clone, Debug, Default)]
 pub struct Completion {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
+    pub usage: Usage,
 }
 
 /// 一次补全请求:对话历史 + 可用工具。
@@ -134,7 +148,7 @@ impl LlmProvider for ScriptedProvider {
 
 /// OpenAI 兼容响应的归一化(纯函数,离线可测)。
 pub mod openai {
-    use super::{Completion, CompletionRequest, Message, ProviderError, Role, ToolCall};
+    use super::{Completion, CompletionRequest, Message, ProviderError, Role, ToolCall, Usage};
     use serde_json::{json, Value};
 
     /// 把统一历史铺成 OpenAI `/chat/completions` 请求体(纯函数,离线可测)。
@@ -198,13 +212,21 @@ pub mod openai {
                 });
             }
         }
-        Ok(Completion { text, tool_calls })
+        let usage = Usage {
+            prompt_tokens: v["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
+            completion_tokens: v["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
+        };
+        Ok(Completion {
+            text,
+            tool_calls,
+            usage,
+        })
     }
 }
 
 /// Anthropic Messages 响应的归一化(纯函数,离线可测)。
 pub mod anthropic {
-    use super::{Completion, CompletionRequest, ProviderError, Role, ToolCall};
+    use super::{Completion, CompletionRequest, ProviderError, Role, ToolCall, Usage};
     use serde_json::{json, Value};
 
     /// 把统一历史铺成 Anthropic `/messages` 请求体(纯函数,离线可测)。
@@ -277,7 +299,15 @@ pub mod anthropic {
                 }
             }
         }
-        Ok(Completion { text, tool_calls })
+        let usage = Usage {
+            prompt_tokens: v["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32,
+            completion_tokens: v["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32,
+        };
+        Ok(Completion {
+            text,
+            tool_calls,
+            usage,
+        })
     }
 }
 

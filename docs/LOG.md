@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-07-13 · Iteration 03 P2(成本护栏 + 无进展检测 / 停机是设计的一半)
+
+- provider `Completion` 加 `Usage`(prompt/completion tokens),两个 parse_response 从响应读用量。
+- agent 加多层独立退出:`total_tokens`/`budget_tokens`(预算熔断)+ `stall`/`MAX_STALL`(无进展检测)。`must_stop` 汇总「回合上限 | 超预算 | 僵局」,shared 路由用它——scripted 路径两值恒 0,行为不变(对抗评审:预算放 agent 层,不进 langgraph 引擎)。
+- 测试:预算耗尽 / 连续 MAX_STALL 轮输出不变 → 早于回合上限停机、approved=false。
+- `cargo test --workspace` = **25 项全绿**,clippy/fmt 干净。
+
 ## 2026-07-13 · Iteration 03 P3(耐用执行 / M3 起步)
 
 - `crates/langgraph` 新增 `FileCheckpointer`(每超步 append 一行 JSON,JSON Lines 版本日志)+ `CompiledGraph::resume(checkpoint)`(把主循环抽成 `run_loop`,invoke 从头 / resume 从快照共用)。`Checkpoint` 加条件 serde 派生。

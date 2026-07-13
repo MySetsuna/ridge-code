@@ -37,6 +37,12 @@ pub struct AgentState {
     pub issues: Vec<String>,
     /// 由 reason 节点(真实 LLM 路径)产出、待 act 节点执行的结构化工具调用。
     pub pending_call: Option<ToolCall>,
+    /// 累计消耗的 token(成本记账)。
+    pub total_tokens: usize,
+    /// token 预算(0 = 不限)。超了就熔断停机。
+    pub budget_tokens: usize,
+    /// 连续「无进展」轮数(工具输出与上一轮相同)。到 [`MAX_STALL`] 就熔断。
+    pub stall: usize,
 }
 
 impl AgentState {
@@ -45,6 +51,12 @@ impl AgentState {
             task: task.into(),
             ..Default::default()
         }
+    }
+
+    /// 设 token 预算(loop engineering 的经济护栏之一)。
+    pub fn with_budget(mut self, tokens: usize) -> Self {
+        self.budget_tokens = tokens;
+        self
     }
 }
 
@@ -57,6 +69,8 @@ pub enum Patch {
     Approved(bool),
     Issues(Vec<String>),
     PendingCall(Option<ToolCall>),
+    AddTokens(usize),
+    SetStall(usize),
     BumpStep,
     Batch(Vec<Patch>),
 }
@@ -71,10 +85,25 @@ impl GraphState for AgentState {
             Patch::Approved(b) => self.approved = b,
             Patch::Issues(v) => self.issues = v,
             Patch::PendingCall(c) => self.pending_call = c,
+            Patch::AddTokens(n) => self.total_tokens += n,
+            Patch::SetStall(n) => self.stall = n,
             Patch::BumpStep => self.steps += 1,
             Patch::Batch(v) => v.into_iter().for_each(|p| self.apply(p)),
         }
     }
+}
+
+/// 连续无进展多少轮就熔断(no-progress detection)。
+pub const MAX_STALL: usize = 3;
+
+/// 超预算?(0 预算 = 不限)
+fn over_budget(s: &AgentState) -> bool {
+    s.budget_tokens > 0 && s.total_tokens >= s.budget_tokens
+}
+
+/// 陷入僵局?(连续 MAX_STALL 轮工具输出没变)
+fn stalled(s: &AgentState) -> bool {
+    s.stall >= MAX_STALL
 }
 
 /// 验证器的确定性判据:工具输出里出现客观成功信号(shell `exit 0` 或测试 `passed`)。
@@ -82,9 +111,14 @@ fn tool_output_ok(o: &str) -> bool {
     o.contains("exit 0") || (o.contains("passed") && !o.contains("failed"))
 }
 
-/// reason 之后的路由(scripted / llm 两条路径共用):finish 或到上限 → verify,否则 → act。
+/// 多层独立退出:到回合上限 / 超预算 / 无进展任一命中,循环都该停(loop engineering:停机是设计的一半)。
+fn must_stop(s: &AgentState) -> bool {
+    s.steps >= MAX_STEPS || over_budget(s) || stalled(s)
+}
+
+/// reason 之后的路由(scripted / llm 两条路径共用):finish 或需停机 → verify,否则 → act。
 fn reason_route(s: &AgentState) -> Vec<String> {
-    if s.steps >= MAX_STEPS {
+    if must_stop(s) {
         return vec!["verify".to_string()];
     }
     match s.last_action.as_deref() {
@@ -93,9 +127,9 @@ fn reason_route(s: &AgentState) -> Vec<String> {
     }
 }
 
-/// verify 之后的路由(共用):通过或到上限 → END,否则回 reason。
+/// verify 之后的路由(共用):通过或需停机 → END,否则回 reason。
 fn verify_route(s: &AgentState) -> Vec<String> {
-    if s.approved || s.steps >= MAX_STEPS {
+    if s.approved || must_stop(s) {
         vec![END.to_string()]
     } else {
         vec!["reason".to_string()]
@@ -291,10 +325,12 @@ pub fn build_llm_agent(
                 tools,
             };
             let completion = provider.complete(&req).await?;
+            let tokens = completion.usage.total() as usize; // 成本记账
             let patch = if let Some(call) = completion.tool_calls.into_iter().next() {
                 // maker 想用工具 → 交给 act 执行。
                 Patch::Batch(vec![
                     Patch::BumpStep,
+                    Patch::AddTokens(tokens),
                     Patch::Message(format!(
                         "reason#{}: tool_call {} {}",
                         s.steps + 1,
@@ -308,6 +344,7 @@ pub fn build_llm_agent(
                 // 模型给了最终文本,没有工具调用 → 收尾。
                 Patch::Batch(vec![
                     Patch::BumpStep,
+                    Patch::AddTokens(tokens),
                     Patch::Message(format!(
                         "reason#{}: (final) {}",
                         s.steps + 1,
@@ -325,8 +362,15 @@ pub fn build_llm_agent(
         let patch = match &s.pending_call {
             Some(call) => {
                 let obs = execute_tool_call(call);
+                // 无进展检测:工具输出与上一轮相同则 stall+1,否则清零。
+                let stall = if s.tool_output.as_deref() == Some(obs.as_str()) {
+                    s.stall + 1
+                } else {
+                    0
+                };
                 Patch::Batch(vec![
                     Patch::Message(format!("act: {} -> {}", call.name, obs)),
+                    Patch::SetStall(stall),
                     Patch::ToolOutput(Some(obs)),
                     Patch::PendingCall(None),
                 ])
@@ -427,11 +471,13 @@ mod tests {
                     name: "run_shell".to_string(),
                     arguments: serde_json::json!({"cmd": "exit 0"}),
                 }],
+                ..Default::default()
             },
             // 第 2 轮:没有工具调用 → 收尾。
             Completion {
                 text: "build is green, done".to_string(),
                 tool_calls: vec![],
+                ..Default::default()
             },
         ]);
         let app = build_llm_agent(Arc::new(scripted)).unwrap();
@@ -446,5 +492,58 @@ mod tests {
         );
         assert_eq!(out.steps, 2, "run_shell -> finish");
         assert!(out.messages.iter().any(|m| m.contains("run_shell")));
+    }
+
+    // 一个「永不收工、每轮都调同一个失败命令」的 provider 步骤,带可配的 token 用量。
+    fn stuck_step(tokens: u32) -> provider::Completion {
+        provider::Completion {
+            tool_calls: vec![ToolCall {
+                id: "1".to_string(),
+                name: "run_shell".to_string(),
+                arguments: serde_json::json!({"cmd": "exit 1"}),
+            }],
+            usage: provider::Usage {
+                prompt_tokens: tokens,
+                completion_tokens: 0,
+            },
+            ..Default::default()
+        }
+    }
+
+    /// 成本护栏:每轮烧 token,预算耗尽即熔断,不跑到回合上限。
+    #[tokio::test]
+    async fn budget_breaker_stops_before_cap() {
+        use provider::ScriptedProvider;
+        let provider = ScriptedProvider::new((0..8).map(|_| stuck_step(100)).collect::<Vec<_>>());
+        let app = build_llm_agent(Arc::new(provider)).unwrap();
+        let out = app
+            .invoke(AgentState::new("loop").with_budget(250))
+            .await
+            .unwrap();
+
+        assert!(!out.approved, "must not fake success");
+        assert!(out.total_tokens >= 250, "hit budget: {}", out.total_tokens);
+        assert!(
+            out.steps < MAX_STEPS,
+            "budget熔断应早于回合上限: steps={}",
+            out.steps
+        );
+    }
+
+    /// 无进展检测:工具输出连续 MAX_STALL 轮不变即熔断,不跑到回合上限。
+    #[tokio::test]
+    async fn no_progress_detection_stops_before_cap() {
+        use provider::ScriptedProvider;
+        let provider = ScriptedProvider::new((0..8).map(|_| stuck_step(0)).collect::<Vec<_>>());
+        let app = build_llm_agent(Arc::new(provider)).unwrap();
+        let out = app.invoke(AgentState::new("stuck")).await.unwrap();
+
+        assert!(!out.approved);
+        assert!(out.stall >= MAX_STALL, "stall={}", out.stall);
+        assert!(
+            out.steps < MAX_STEPS,
+            "no-progress熔断应早于回合上限: steps={}",
+            out.steps
+        );
     }
 }
