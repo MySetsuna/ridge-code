@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-07-13 · M5 起步:规划器(目标→子任务)
+
+- `plan(provider, task)`:让 provider 把目标拆成有序子任务(JSON 数组),`parse_subtasks` 容忍模型包裹的解释文字(取首 `[` 到末 `]`);解析失败/出错**降级**为单个子任务(绝不返回空)。
+- 子任务可交给 `build_llm_agent` 逐个执行;独立子任务靠引擎 fan-out 并行(引擎已支持)。
+- 测试:JSON 数组正常解析 + 不可解析降级。
+- `cargo test --workspace` = **32 项全绿**。至此 M1–M5 核心全部落地(M3 耐用执行/M5 规划为起步版)。
+
 ## 2026-07-13 · M4:独立模型 checker(maker≠checker 强形式)
 
 - `build_llm_agent_reviewed(provider, mcp, reviewer)`:确定性 verify 通过后,再让一个**独立的** reviewer 模型看轨迹复核有没有作弊(删/跳测试、伪造输出),打回则 approved=false 回 reason。用**不同的** provider,别让写代码的模型自审。

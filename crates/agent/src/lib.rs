@@ -533,6 +533,37 @@ fn review_request(s: &AgentState) -> CompletionRequest {
     }
 }
 
+/// 规划器(M5 起步):让 provider 把一个目标拆成有序子任务(JSON 数组)。
+/// 解析失败/模型出错 → **降级**为把整个目标当单个子任务(绝不返回空,循环有活干)。
+///
+/// 子任务本身可交给 [`build_llm_agent`] 逐个执行;彼此独立的还能靠引擎的 fan-out 并行跑。
+pub async fn plan(provider: &dyn LlmProvider, task: &str) -> Vec<String> {
+    let req = CompletionRequest {
+        messages: vec![
+            Message::new(
+                Role::System,
+                "Break the user's goal into 2-5 ordered, concrete subtasks. \
+                 Reply ONLY a JSON array of strings, nothing else.",
+            ),
+            Message::new(Role::User, task.to_string()),
+        ],
+        tools: vec![],
+    };
+    let text = match provider.complete(&req).await {
+        Ok(c) => c.text,
+        Err(_) => return vec![task.to_string()],
+    };
+    parse_subtasks(&text).unwrap_or_else(|| vec![task.to_string()])
+}
+
+/// 从模型输出里抠出首个 `[` 到末个 `]` 的 JSON 数组(容忍模型包裹的解释文字)。
+fn parse_subtasks(text: &str) -> Option<Vec<String>> {
+    let start = text.find('[')?;
+    let end = text.rfind(']')?;
+    let arr: Vec<String> = serde_json::from_str(text.get(start..=end)?).ok()?;
+    (!arr.is_empty()).then_some(arr)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -802,5 +833,29 @@ mod tests {
         assert!(out.approved);
         assert!(out.messages.iter().any(|m| m.contains("独立 reviewer")));
         assert_eq!(out.steps, 2);
+    }
+
+    /// M5:规划器把目标拆成子任务(容忍模型包裹的解释文字)。
+    #[tokio::test]
+    async fn planner_decomposes_goal_into_subtasks() {
+        use provider::{Completion, ScriptedProvider};
+        let provider = ScriptedProvider::new(vec![Completion {
+            text: r#"Sure! ["add fn", "write test", "run cargo test"]"#.to_string(),
+            ..Default::default()
+        }]);
+        let subs = plan(&provider, "implement add").await;
+        assert_eq!(subs, vec!["add fn", "write test", "run cargo test"]);
+    }
+
+    /// M5:模型没给出可解析的数组 → 降级为单个子任务(绝不返回空)。
+    #[tokio::test]
+    async fn planner_falls_back_when_unparseable() {
+        use provider::{Completion, ScriptedProvider};
+        let provider = ScriptedProvider::new(vec![Completion {
+            text: "I'm not sure how to break this down".to_string(),
+            ..Default::default()
+        }]);
+        let subs = plan(&provider, "do the thing").await;
+        assert_eq!(subs, vec!["do the thing"]);
     }
 }
