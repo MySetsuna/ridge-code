@@ -1,7 +1,8 @@
 use super::*;
+use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Counter {
     n: i64,
     trail: Vec<String>,
@@ -170,4 +171,45 @@ async fn compile_rejects_missing_entry_and_dangling_edge() {
     g2.set_entry("a");
     g2.add_edge("a", "ghost"); // 指向不存在的节点
     assert!(matches!(g2.compile(), Err(GraphError::DanglingEdge { .. })));
+}
+
+#[tokio::test]
+async fn file_checkpointer_persists_and_resumes_across_processes() {
+    // a -> b -> c,每个 +1;初始 0 → 终态 3。
+    let mut g = StateGraph::<Counter>::new();
+    for name in ["a", "b", "c"] {
+        g.add_node(name, |_s| async { Ok::<_, Infallible>(Up::Add(1)) });
+    }
+    g.set_entry("a");
+    g.add_edge("a", "b");
+    g.add_edge("b", "c");
+    g.add_edge("c", END);
+    let app = g.compile().unwrap();
+
+    let mut path = std::env::temp_dir();
+    path.push(format!("ridge_ckpt_{}.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+
+    // 「进程 1」:跑完整,每个超步落盘。
+    let cp = FileCheckpointer::new(&path);
+    let out = app
+        .invoke_with(Counter::default(), &RunConfig::default(), Some(&cp), None)
+        .await
+        .unwrap();
+    assert_eq!(out.n, 3);
+
+    // 「进程 2」:全新 checkpointer 从磁盘读回,取超步 1 的快照(n=1,下一步 [b])。
+    let cp2 = FileCheckpointer::new(&path);
+    let snap: Checkpoint<Counter> = cp2.get(1).unwrap().expect("step 1 checkpoint on disk");
+    assert_eq!(snap.state.n, 1);
+    assert_eq!(snap.frontier, vec!["b"]);
+
+    // 从该快照续跑 → 到达同样的终态 3(证明跨进程恢复 + 超步连续)。
+    let resumed = app
+        .resume(snap, &RunConfig::default(), None, None)
+        .await
+        .unwrap();
+    assert_eq!(resumed.n, 3);
+
+    let _ = std::fs::remove_file(&path);
 }

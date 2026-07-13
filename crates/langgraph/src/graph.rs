@@ -165,8 +165,8 @@ impl<S: GraphState> CompiledGraph<S> {
         cp: Option<&dyn Checkpointer<S>>,
         tx: Option<&tokio::sync::mpsc::UnboundedSender<StreamEvent<S>>>,
     ) -> Result<S, GraphError> {
-        let mut state = initial;
-        let mut frontier: Vec<String> = self
+        let state = initial;
+        let frontier: Vec<String> = self
             .edges
             .get(START)
             .cloned()
@@ -183,7 +183,37 @@ impl<S: GraphState> CompiledGraph<S> {
             });
         }
 
-        let mut step = 0usize;
+        self.run_loop(state, frontier, 0, cfg, cp, tx).await
+    }
+
+    /// 从某个 checkpoint 续跑(耐用执行 / M3):用快照的 state 与 frontier,从它那个超步继续。
+    /// 崩溃后新进程读回 [`FileCheckpointer`](crate::FileCheckpointer) 的快照,交给它就能接着跑。
+    pub async fn resume(
+        &self,
+        checkpoint: Checkpoint<S>,
+        cfg: &RunConfig,
+        cp: Option<&dyn Checkpointer<S>>,
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<StreamEvent<S>>>,
+    ) -> Result<S, GraphError> {
+        let frontier: Vec<String> = checkpoint
+            .frontier
+            .into_iter()
+            .filter(|n| n != END)
+            .collect();
+        self.run_loop(checkpoint.state, frontier, checkpoint.step, cfg, cp, tx)
+            .await
+    }
+
+    /// 超步主循环:invoke_with(从头)与 resume(从快照)共用。
+    async fn run_loop(
+        &self,
+        mut state: S,
+        mut frontier: Vec<String>,
+        mut step: usize,
+        cfg: &RunConfig,
+        cp: Option<&dyn Checkpointer<S>>,
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<StreamEvent<S>>>,
+    ) -> Result<S, GraphError> {
         while !frontier.is_empty() {
             step += 1;
             if step > cfg.max_supersteps {

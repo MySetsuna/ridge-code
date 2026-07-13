@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-07-13 · Iteration 03 P3(耐用执行 / M3 起步)
+
+- `crates/langgraph` 新增 `FileCheckpointer`(每超步 append 一行 JSON,JSON Lines 版本日志)+ `CompiledGraph::resume(checkpoint)`(把主循环抽成 `run_loop`,invoke 从头 / resume 从快照共用)。`Checkpoint` 加条件 serde 派生。
+- 测试:跑完落盘 → 全新 checkpointer 从磁盘读回超步 1 快照 → `resume` 续跑到同一终态(模拟崩溃后跨进程恢复,超步连续)。
+- `cargo test --workspace` = **23 项全绿**,clippy/fmt 干净。提交前一条 aa881a6。
+- 里程碑:M3(耐用执行)起步完成基础;bincode 落作后续优化。下一步候选:成本记账+预算熔断(agent 层)、无进展检测、或 M2(rmcp MCP 客户端)。
+
 ## 2026-07-13 · 工作流加对抗评审 + Iteration 03 P1(真实 HTTP provider)
 
 - **工作流升级**:给 NotebookLM 驱动的循环加了**对抗评审**步骤(step 7)——不全信 NotebookLM(它是 maker 不是裁判,会张冠李戴引用、把概念放错层、过度设计)。关键决策要独立 checker + 高影响决策另起干净上下文当对抗评审员。写进全局 skill `notebooklm-iteration-loop` 与 `docs/WORKFLOW.md`。

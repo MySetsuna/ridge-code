@@ -35,7 +35,7 @@ mod checkpoint;
 mod graph;
 mod state;
 
-pub use checkpoint::{Checkpoint, Checkpointer, MemoryCheckpointer};
+pub use checkpoint::{Checkpoint, Checkpointer, FileCheckpointer, MemoryCheckpointer};
 pub use graph::{CompiledGraph, RunConfig, StateGraph, StreamEvent, END, START};
 pub use state::{BoxError, GraphError, GraphState};
 
