@@ -564,6 +564,64 @@ fn parse_subtasks(text: &str) -> Option<Vec<String>> {
     (!arr.is_empty()).then_some(arr)
 }
 
+/// 一个子任务的执行结果。
+#[derive(Clone, Debug)]
+pub struct SubtaskResult {
+    pub task: String,
+    pub approved: bool,
+    pub steps: usize,
+    pub tokens: usize,
+}
+
+/// 规划-执行的聚合报告。
+#[derive(Clone, Debug)]
+pub struct PlanReport {
+    pub subtasks: Vec<SubtaskResult>,
+    /// 全部子任务都通过才算整体通过。
+    pub approved: bool,
+    pub total_tokens: usize,
+    pub total_steps: usize,
+}
+
+/// **规划 + 执行**(orchestrator-workers,M5 完整版):
+/// `planner`(通常是强模型)把目标拆成子任务,`worker` 逐个执行,聚合结果。
+/// 成本杠杆:强模型只管规划,弱模型扛执行量(planner ≠ worker)。
+///
+/// 目前**串行**执行(子任务常有依赖);彼此独立的子任务可改用 `tokio::spawn` + `join_all`
+/// 并行(引擎/运行时已支持),这里先要正确性。
+pub async fn run_planned(
+    planner: Arc<dyn LlmProvider>,
+    worker: Arc<dyn LlmProvider>,
+    task: &str,
+) -> Result<PlanReport, GraphError> {
+    let subtasks = plan(planner.as_ref(), task).await;
+    let mut results = Vec::with_capacity(subtasks.len());
+    let mut total_tokens = 0;
+    let mut total_steps = 0;
+    let mut approved = true;
+
+    for sub in subtasks {
+        let app = build_llm_agent(worker.clone())?;
+        let out = app.invoke(AgentState::new(sub.clone())).await?;
+        approved &= out.approved;
+        total_tokens += out.total_tokens;
+        total_steps += out.steps;
+        results.push(SubtaskResult {
+            task: sub,
+            approved: out.approved,
+            steps: out.steps,
+            tokens: out.total_tokens,
+        });
+    }
+
+    Ok(PlanReport {
+        subtasks: results,
+        approved,
+        total_tokens,
+        total_steps,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -857,5 +915,51 @@ mod tests {
         }]);
         let subs = plan(&provider, "do the thing").await;
         assert_eq!(subs, vec!["do the thing"]);
+    }
+
+    /// M5 完整:planner 拆 2 个子任务 → worker 逐个执行到 approved → 聚合整体通过。
+    #[tokio::test]
+    async fn orchestrator_plans_and_runs_subtasks() {
+        use provider::{Completion, ScriptedProvider};
+
+        let planner = ScriptedProvider::new(vec![Completion {
+            text: r#"["impl add", "test add"]"#.to_string(),
+            ..Default::default()
+        }]);
+        // worker 被两个子任务共享(串行):每个子任务耗 [跑 exit 0, 收尾] 两个补全。
+        let step_pass = || Completion {
+            tool_calls: vec![ToolCall {
+                id: "1".to_string(),
+                name: "run_shell".to_string(),
+                arguments: serde_json::json!({"cmd": "exit 0"}),
+            }],
+            ..Default::default()
+        };
+        let step_done = || Completion {
+            text: "done".to_string(),
+            ..Default::default()
+        };
+        let worker =
+            ScriptedProvider::new(vec![step_pass(), step_done(), step_pass(), step_done()]);
+
+        let report = run_planned(
+            Arc::new(planner),
+            Arc::new(worker),
+            "implement add with test",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.subtasks.len(), 2);
+        assert!(report.approved, "两个子任务都应通过");
+        assert!(report.subtasks.iter().all(|s| s.approved));
+        assert_eq!(
+            report
+                .subtasks
+                .iter()
+                .map(|s| s.task.as_str())
+                .collect::<Vec<_>>(),
+            vec!["impl add", "test add"]
+        );
     }
 }

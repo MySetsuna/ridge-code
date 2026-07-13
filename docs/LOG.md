@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-07-13 · M5 完整:plan-and-execute 编排器(orchestrator-workers)
+
+- `run_planned(planner, worker, task)`:planner(强模型)拆子任务,worker 逐个执行(build_llm_agent),聚合成 `PlanReport`(每个子任务的 approved/steps/tokens + 整体)。成本杠杆:planner≠worker。
+- 串行执行(子任务常有依赖);独立子任务可 tokio::spawn 并行(引擎已支持),先要正确性。
+- 测试:planner 拆 2 子任务 → worker 逐个到 approved → 整体通过。
+- `cargo test --workspace` = **33 项全绿**。M5 从「分解」升级为「规划+执行」完整闭环。
+
 ## 2026-07-13 · ridge CLI:接真实 provider,成为可运行工具
 
 - 重写 `crates/agent/src/main.rs`:解析任务 + `--cwd`;按环境变量(`RIDGE_API_KEY`/`RIDGE_PROVIDER`/`RIDGE_MODEL`/`RIDGE_BASE_URL`)装配真实 Anthropic/OpenAI provider → `build_llm_agent` 用结构化 tool_call 驱动真实 shell/文件工具;无 key 时降级跑离线脚本 demo。密钥绝不打印。
