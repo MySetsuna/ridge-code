@@ -65,5 +65,12 @@ let out = g.compile()?.invoke(S { n: 0 }).await?; // out.n == 1
 | M5 规划器 + 执行(`run_planned` orchestrator-workers) | ✅ |
 | 停机护栏(回合上限 / 预算 / 无进展) | ✅ |
 | 可运行 CLI(`ridge`,接真实 provider + `--cwd`) | ✅ |
+| Eval harness(`ridge-eval`,批量测成功率 + 成本) | ✅ |
+| 可观测(`tracing` 全链路,`RUST_LOG` 控制) | ✅ |
 
-待做(生产硬化,均在既有接缝后):MCP 真实 stdio 换官方 `rmcp`、子任务 **并行** 编排(引擎 fan-out 已支持)、沙箱隔离、流式 TUI、`bincode` checkpoint、eval harness(批量跑真实任务测成功率/成本)。详见 `docs/WORKFLOW.md` 与 `docs/iterations/`。
+待做(生产硬化,均在既有接缝后):MCP 真实 stdio 换官方 `rmcp`、子任务 **并行** 编排(引擎 fan-out 已支持)、沙箱隔离(Docker/gVisor/WASM)、流式 TUI(引擎 `StreamEvent` 已就绪)、`bincode` checkpoint。详见 `docs/WORKFLOW.md` 与 `docs/iterations/`。
+
+```bash
+cargo run -p eval --bin ridge-eval           # 离线 eval demo:每 case PASS/FAIL + 总成功率
+RUST_LOG=langgraph=debug,agent=debug ridge …  # 全链路结构化日志
+```
