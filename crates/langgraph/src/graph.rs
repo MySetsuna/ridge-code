@@ -246,6 +246,7 @@ impl<S: GraphState> CompiledGraph<S> {
                     source,
                 })?;
                 state.apply(update);
+                tracing::debug!(target: "langgraph", superstep = step, node = %node, "node finished");
                 if let Some(tx) = tx {
                     let _ = tx.send(StreamEvent::NodeFinished {
                         superstep: step,
@@ -280,9 +281,11 @@ impl<S: GraphState> CompiledGraph<S> {
                 });
             }
 
+            tracing::debug!(target: "langgraph", superstep = step, next = ?next, "superstep complete");
             frontier = next;
         }
 
+        tracing::info!(target: "langgraph", supersteps = step, "run finished");
         Ok(state)
     }
 

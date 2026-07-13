@@ -7,6 +7,13 @@ use provider::{Completion, ScriptedProvider, ToolCall, Usage};
 /// 真实评测把 EvalCase 的 provider 换成真实模型即可(量真实成功率/成本)。
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    use tracing_subscriber::{fmt, EnvFilter};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+
     let cases = vec![
         EvalCase::new("build-green", "make the build pass", pass_provider()),
         EvalCase::new(

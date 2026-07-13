@@ -18,6 +18,7 @@ use provider::{AnthropicProvider, LlmProvider, OpenAiProvider};
 ///   RIDGE_BASE_URL   API base(缺省用官方地址)
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    init_tracing();
     let (task, cwd) = parse_args();
     if let Some(dir) = &cwd {
         std::env::set_current_dir(dir)?;
@@ -112,6 +113,16 @@ async fn run_demo() -> anyhow::Result<()> {
         println!("  step {:>2} -> next {:?}", c.step, c.frontier);
     }
     Ok(())
+}
+
+/// 全链路可观测:`RUST_LOG=langgraph=debug,agent=debug ridge ...` 看每一步。默认只报 warn。
+fn init_tracing() {
+    use tracing_subscriber::{fmt, EnvFilter};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
 }
 
 fn print_report(messages: &[String], approved: bool, steps: usize, tokens: usize) {
