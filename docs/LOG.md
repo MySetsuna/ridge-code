@@ -4,6 +4,12 @@
 
 ---
 
+## 2026-07-13 · ridge CLI:接真实 provider,成为可运行工具
+
+- 重写 `crates/agent/src/main.rs`:解析任务 + `--cwd`;按环境变量(`RIDGE_API_KEY`/`RIDGE_PROVIDER`/`RIDGE_MODEL`/`RIDGE_BASE_URL`)装配真实 Anthropic/OpenAI provider → `build_llm_agent` 用结构化 tool_call 驱动真实 shell/文件工具;无 key 时降级跑离线脚本 demo。密钥绝不打印。
+- demo 路径实测通过(approved=true steps=3,打印 checkpoint)。有 key 即真实 LLM 在 `--cwd` 目标项目里干活。
+- 至此 ridge 从「demo」变成**可运行的编码 agent 工具**。
+
 ## 2026-07-13 · M5 起步:规划器(目标→子任务)
 
 - `plan(provider, task)`:让 provider 把目标拆成有序子任务(JSON 数组),`parse_subtasks` 容忍模型包裹的解释文字(取首 `[` 到末 `]`);解析失败/出错**降级**为单个子任务(绝不返回空)。
