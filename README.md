@@ -62,7 +62,8 @@ let out = g.compile()?.invoke(S { n: 0 }).await?; // out.n == 1
 | M2 MCP 协议(客户端 + agent 命名空间路由) | ✅ 核心 |
 | M3 耐用执行(checkpoint 落盘 + resume) | ✅ 起步(JSONL;bincode 待优化) |
 | M4 独立模型 checker(抓作弊) | ✅ |
-| M5 规划器(目标→子任务) | ✅ 核心(分解;子任务 DAG 编排待接) |
+| M5 规划器 + 执行(`run_planned` orchestrator-workers) | ✅ |
 | 停机护栏(回合上限 / 预算 / 无进展) | ✅ |
+| 可运行 CLI(`ridge`,接真实 provider + `--cwd`) | ✅ |
 
-待接:MCP 真实 stdio(可换官方 `rmcp`)、子任务并行编排、沙箱隔离、流式 TUI、eval harness。详见 `docs/WORKFLOW.md` 与 `docs/iterations/`。
+待做(生产硬化,均在既有接缝后):MCP 真实 stdio 换官方 `rmcp`、子任务 **并行** 编排(引擎 fan-out 已支持)、沙箱隔离、流式 TUI、`bincode` checkpoint、eval harness(批量跑真实任务测成功率/成本)。详见 `docs/WORKFLOW.md` 与 `docs/iterations/`。
