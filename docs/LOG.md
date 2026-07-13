@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-07-13 · M2 起步:最小 MCP 客户端(crates/mcp)
+
+- 新增 `crates/mcp`:MCP = JSON-RPC 2.0。`McpClient` 做 initialize / tools/list / tools/call + `<server>__<tool>` 命名空间;`McpTransport` trait 把传输与协议解耦;`StdioTransport`(tokio 子进程,按 id 关联、跳通知)是生产传输。
+- 离线测:`FakeTransport` 校验握手/列举/调用 + RPC 错误映射。协议核心 100% 离线可测。
+- **对抗评审**:NotebookLM 荐官方 `rmcp` SDK,但其 stdio 传输离线无法单测、是重依赖 → 本轮先落可测的协议核心 + 最小 stdio 传输;要上生产把 `StdioTransport` 换 rmcp 即可(`McpTransport` 不变)。留待:把 MCP 工具并入 agent 的 `builtin_tool_specs` + 在 act 里按 `server__tool` 路由(async)。
+- `cargo test --workspace` = **27 项全绿**,clippy/fmt 干净。工作区现 **5 crate**。
+
 ## 2026-07-13 · Iteration 03 P2(成本护栏 + 无进展检测 / 停机是设计的一半)
 
 - provider `Completion` 加 `Usage`(prompt/completion tokens),两个 parse_response 从响应读用量。

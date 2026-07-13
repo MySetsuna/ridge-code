@@ -1,0 +1,13 @@
+[package]
+name = "mcp"
+description = "最小 MCP 客户端(JSON-RPC 2.0):initialize / tools/list / tools/call + 命名空间;传输可插拔"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }

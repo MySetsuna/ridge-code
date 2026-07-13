@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/langgraph", "crates/agent", "crates/tools", "crates/provider"]
+members = ["crates/langgraph", "crates/agent", "crates/tools", "crates/provider", "crates/mcp"]
 
 [workspace.package]
 edition = "2021"
@@ -9,7 +9,7 @@ license = "MIT"
 
 # 依赖版本统一在此管理,子 crate 用 `dep.workspace = true`。
 [workspace.dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util"] }
 thiserror = "1"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
