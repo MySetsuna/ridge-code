@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-07-13 · M2 接线:MCP 工具接进 agent
+
+- agent 依赖 mcp;新增 `resolve_mcp(clients)`(各 initialize+list_tools,归一化成 ToolSpec + 命名空间路由表,降级不崩)+ `build_llm_agent_with(provider, McpTools)`。
+- reason 把 内置 + MCP 工具一起 offer 给 LLM;act 按 `<server>__<tool>` 命名空间路由到对应 MCP 客户端(async),否则走内置工具。
+- mcp 加 `FnTransport`(闭包充当传输,免 async-trait 造假服务器)。
+- 端到端离线测:LLM 发 `ci__check` → act 路由到假 MCP 服务器 → 返回 `tests: passed` → verify approved。
+- `cargo test --workspace` = **28 项全绿**,clippy/fmt 干净。**M2 从独立 crate 变成 agent 真能用的能力**。
+
 ## 2026-07-13 · M2 起步:最小 MCP 客户端(crates/mcp)
 
 - 新增 `crates/mcp`:MCP = JSON-RPC 2.0。`McpClient` 做 initialize / tools/list / tools/call + `<server>__<tool>` 命名空间;`McpTransport` trait 把传输与协议解耦;`StdioTransport`(tokio 子进程,按 id 关联、跳通知)是生产传输。

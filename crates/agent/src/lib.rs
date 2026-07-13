@@ -16,10 +16,12 @@
 //!
 //! `Brain` 是接真实 LLM 的接缝;这里给一个离线 `ScriptedBrain`,零联网即可跑通闭环。
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 
 use langgraph::{CompiledGraph, GraphError, GraphState, StateGraph, END};
+use mcp::McpClient;
 use provider::{CompletionRequest, LlmProvider, Message, Role, ToolCall, ToolSpec};
 
 /// 到达此回合数强制收尾 —— 成本 / 防死循环护栏。
@@ -307,13 +309,60 @@ fn to_messages(s: &AgentState) -> Vec<Message> {
     msgs
 }
 
-/// 用**真实 LLM provider** 装配 agent 图:reason 节点问 provider 要结构化 tool_call,
-/// act 节点用 [`execute_tool_call`] 调真实工具,verify 认确定性信号。这是通往「媲美 Claude Code」的主路径。
+/// 已连好的 MCP 工具:暴露给 LLM 的 [`ToolSpec`] + 「命名空间名 → (客户端, 原始工具名)」路由表。
+#[derive(Default)]
+pub struct McpTools {
+    specs: Vec<ToolSpec>,
+    router: HashMap<String, (Arc<McpClient>, String)>,
+}
+
+impl McpTools {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+}
+
+/// 连上一批 MCP 客户端:各自 initialize + list_tools,把工具归一化成 [`ToolSpec`](命名空间)+ 建路由表。
+/// **降级不崩**:单个服务器连不上/列不出工具 → 跳过,其余照常。
+pub async fn resolve_mcp(clients: Vec<Arc<McpClient>>) -> McpTools {
+    let mut out = McpTools::empty();
+    for client in clients {
+        if client.initialize().await.is_err() {
+            continue;
+        }
+        let Ok(tools) = client.list_tools().await else {
+            continue;
+        };
+        for t in tools {
+            let ns = client.namespaced(&t.name);
+            out.specs.push(ToolSpec {
+                name: ns.clone(),
+                description: t.description,
+                schema: t.input_schema,
+            });
+            out.router.insert(ns, (client.clone(), t.name));
+        }
+    }
+    out
+}
+
+/// 用**真实 LLM provider** 装配 agent 图(不接 MCP)。见 [`build_llm_agent_with`]。
 pub fn build_llm_agent(
     provider: Arc<dyn LlmProvider>,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
+    build_llm_agent_with(provider, McpTools::empty())
+}
+
+/// 装配 agent 图,并把 MCP 工具并入:reason 把 内置 + MCP 工具一起 offer 给 LLM,
+/// act 按 `<server>__<tool>` 命名空间路由到对应 MCP 客户端(否则走内置工具)。
+pub fn build_llm_agent_with(
+    provider: Arc<dyn LlmProvider>,
+    mcp: McpTools,
+) -> Result<CompiledGraph<AgentState>, GraphError> {
     let mut g = StateGraph::<AgentState>::new();
-    let specs = builtin_tool_specs();
+    let mut specs = builtin_tool_specs();
+    specs.extend(mcp.specs);
+    let router = Arc::new(mcp.router);
 
     let provider_c = provider.clone();
     g.add_node("reason", move |s: AgentState| {
@@ -358,26 +407,38 @@ pub fn build_llm_agent(
         }
     });
 
-    g.add_node("act", |s: AgentState| async move {
-        let patch = match &s.pending_call {
-            Some(call) => {
-                let obs = execute_tool_call(call);
-                // 无进展检测:工具输出与上一轮相同则 stall+1,否则清零。
-                let stall = if s.tool_output.as_deref() == Some(obs.as_str()) {
-                    s.stall + 1
-                } else {
-                    0
-                };
-                Patch::Batch(vec![
-                    Patch::Message(format!("act: {} -> {}", call.name, obs)),
-                    Patch::SetStall(stall),
-                    Patch::ToolOutput(Some(obs)),
-                    Patch::PendingCall(None),
-                ])
-            }
-            None => Patch::Message("act: no pending tool_call".to_string()),
-        };
-        Ok::<_, Infallible>(patch)
+    let router_c = router.clone();
+    g.add_node("act", move |s: AgentState| {
+        let router = router_c.clone();
+        async move {
+            let patch = match &s.pending_call {
+                Some(call) => {
+                    // 命名空间命中 → 路由到 MCP 服务器;否则走内置工具。
+                    let obs = if let Some((client, raw)) = router.get(&call.name) {
+                        match client.call_tool(raw, call.arguments.clone()).await {
+                            Ok(t) => t,
+                            Err(e) => format!("mcp error: {e}"),
+                        }
+                    } else {
+                        execute_tool_call(call)
+                    };
+                    // 无进展检测:工具输出与上一轮相同则 stall+1,否则清零。
+                    let stall = if s.tool_output.as_deref() == Some(obs.as_str()) {
+                        s.stall + 1
+                    } else {
+                        0
+                    };
+                    Patch::Batch(vec![
+                        Patch::Message(format!("act: {} -> {}", call.name, obs)),
+                        Patch::SetStall(stall),
+                        Patch::ToolOutput(Some(obs)),
+                        Patch::PendingCall(None),
+                    ])
+                }
+                None => Patch::Message("act: no pending tool_call".to_string()),
+            };
+            Ok::<_, Infallible>(patch)
+        }
     });
 
     g.add_node("verify", verify_node);
@@ -545,5 +606,49 @@ mod tests {
             "no-progress熔断应早于回合上限: steps={}",
             out.steps
         );
+    }
+
+    /// M2 端到端:LLM 发一个**命名空间**工具调用 → act 路由到 MCP 服务器 → verify 认其结果 → approved。
+    /// 用离线 FnTransport 站位真实 MCP 服务器,零联网。
+    #[tokio::test]
+    async fn llm_agent_routes_tool_call_to_mcp_server() {
+        use mcp::FnTransport;
+        use provider::{Completion, ScriptedProvider};
+
+        // 假 MCP 服务器:有一个 check 工具,调用返回成功信号 "tests: passed"。
+        let transport = FnTransport(|method: &str, _p: &serde_json::Value| match method {
+            "initialize" => Ok(serde_json::json!({})),
+            "tools/list" => Ok(serde_json::json!({"tools": [
+                {"name": "check", "description": "run project checks", "inputSchema": {"type": "object"}}
+            ]})),
+            "tools/call" => {
+                Ok(serde_json::json!({"content": [{"type": "text", "text": "tests: passed"}]}))
+            }
+            m => Err(mcp::McpError::BadResponse(m.to_string())),
+        });
+        let client = Arc::new(McpClient::new("ci", Box::new(transport)));
+        let mcp_tools = resolve_mcp(vec![client]).await;
+
+        // LLM:第 1 轮调命名空间工具 ci__check;第 2 轮收尾。
+        let scripted = ScriptedProvider::new(vec![
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "1".to_string(),
+                    name: "ci__check".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                text: "done".to_string(),
+                ..Default::default()
+            },
+        ]);
+        let app = build_llm_agent_with(Arc::new(scripted), mcp_tools).unwrap();
+        let out = app.invoke(AgentState::new("run ci")).await.unwrap();
+
+        assert!(out.approved, "MCP 工具返回 passed 应满足确定性闸");
+        assert!(out.messages.iter().any(|m| m.contains("ci__check")));
+        assert_eq!(out.tool_output.as_deref(), Some("tests: passed"));
     }
 }

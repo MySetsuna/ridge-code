@@ -115,6 +115,20 @@ impl McpClient {
     }
 }
 
+/// 用闭包充当传输(stub / 测试):`Fn(method, &params) -> Result<result, McpError>`。
+/// 让上层无需 async-trait 就能造一个假 MCP 服务器。
+pub struct FnTransport<F>(pub F);
+
+#[async_trait::async_trait]
+impl<F> McpTransport for FnTransport<F>
+where
+    F: Fn(&str, &Value) -> Result<Value, McpError> + Send + Sync,
+{
+    async fn request(&self, method: &str, params: Value) -> Result<Value, McpError> {
+        (self.0)(method, &params)
+    }
+}
+
 /// 真实 stdio 子进程传输:把 JSON-RPC 一行一条写进子进程 stdin,从 stdout 读回。
 ///
 /// ⚠ Windows 坑:bare `npx`/`uvx` 可能 ENOENT,用绝对路径或 `cmd /c` 包裹。
