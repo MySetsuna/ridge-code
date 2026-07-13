@@ -1,0 +1,10 @@
+[package]
+name = "langgraph"
+description = "手搓的 Rust 版 LangGraph:强类型 StateGraph + Pregel 超步执行环 + checkpoint 时间旅行"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+thiserror = { workspace = true }

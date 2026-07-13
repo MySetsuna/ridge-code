@@ -1,0 +1,11 @@
+[package]
+name = "provider"
+description = "LLM provider 边界:归一化 Anthropic(tool_use)/ OpenAI(tool_calls)到统一 Completion + 工具调用"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }

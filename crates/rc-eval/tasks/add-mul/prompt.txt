@@ -1,6 +1,0 @@
-在当前 Rust 库 crate(crate 名 add_mul)中,于 src/lib.rs 实现两个公共函数,签名必须严格如下:
-
-    pub fn add(a: i64, b: i64) -> i64   // 返回 a + b
-    pub fn mul(a: i64, b: i64) -> i64   // 返回 a * b
-
-要求代码能通过 cargo build。完成后用一句中文总结并停止。

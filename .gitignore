@@ -17,6 +17,5 @@
 # SDD 进度 ledger(本地 scratch,不入库)
 /.superpowers/
 
-# eval fixture seed 的构建产物(不入库;根 Cargo.lock 仍跟踪)
+# 各 crate 的构建产物(不入库;根 Cargo.lock 仍跟踪)
 **/target/
-crates/rc-eval/tasks/*/seed/Cargo.lock

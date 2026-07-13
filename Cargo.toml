@@ -1,29 +1,17 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = ["crates/langgraph", "crates/agent", "crates/tools", "crates/provider"]
 
 [workspace.package]
 edition = "2021"
-version = "0.1.1"
+version = "0.1.0"
+license = "MIT"
 
+# 依赖版本统一在此管理,子 crate 用 `dep.workspace = true`。
 [workspace.dependencies]
-tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+thiserror = "1"
+anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-clap = { version = "4", features = ["derive"] }
-anyhow = "1"
 async-trait = "0.1"
-toml = "0.8"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-dotenvy = "0.15"
-# MCP 客户端(M4):只启 client + 子进程 stdio 传输,不需要 server/macros。
-rmcp = { version = "2", default-features = false, features = ["client", "transport-child-process"] }
-# 终端实时视图(M4):ratatui 自带 crossterm re-export,跨平台。
-ratatui = "0.30"
-
-# 发布构建:瘦身单二进制(strip 符号 + thin LTO),利于跨平台分发(PLAN §0)。
-[profile.release]
-strip = true
-lto = "thin"

@@ -1,0 +1,9 @@
+[package]
+name = "tools"
+description = "agent 的真实工具集:文件读写 + 跨平台 shell 执行(M1 物理闭环)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# std-only:M1 先跑通物理闭环,沙箱/超时留到 harness 阶段再上依赖。

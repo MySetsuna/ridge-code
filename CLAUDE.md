@@ -1,151 +1,61 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+给 Claude Code 在本仓库干活的指引。与仓库既有文档一致,本文件用中文。
 
-> 与本仓库的既有文档保持一致,本文件用中文。架构与方向的「为什么」见 `PLAN.md`,从零动手的步骤见 `HANDOFF.md`,使用说明见 `README.md`——本文件只补充它们没讲清的「怎么干活」。
+> 「为什么这么设计」与来源见 `docs/REPORT-langgraph-rust.md`;上手看 `README.md`。本文件只补「怎么干活」。
 
 ## 这是什么
 
-成本优化的**编码 agent CLI**(Rust workspace,单二进制交付)。核心赌注:编码领域有免费的客观验证器(编译/测试/lint),所以可以「弱模型扛执行量 + 强模型管规划/修复/评审 + 客观验证做免费质量闸 + 级联路由压成本」。省钱主要来自级联(弱先做,验证不过才升强),而非多开 agent。详见 `PLAN.md §1-2`。
-
-里程碑现状:**M0–M4 全部完成**(walking skeleton → 验证器+修复循环 → 强/弱编排大脑 → eval 闭环 → MCP 客户端 → ratatui 实时视图);`rc-eval` 是 eval harness(基线 vs 编排对比、真实/离线两套运行);`rc-mcp` 是 MCP 客户端(rmcp,子进程 stdio + tools);`--tui` 是 ratatui 实时视图(编排发 `Event` → TUI 渲染 DAG/进度/成本,见 `rc-cli/src/tui.rs`)。跨平台打包走 `.github/workflows/release.yml`(打 `v*` 标签),已发 v0.1.0。
+手搓的 **Rust 版 LangGraph** 引擎 + 跑在它上面的最小**编码 agent**(单二进制 `ridge`)。
+核心赌注:agent 的「大脑」本质是一台**有状态的图状态机**,先把这台引擎做对(Pregel 超步 + BSP + checkpoint),
+agent 就只是引擎上的一组节点与边。开发顺序刻意分两层:`langgraph`(不含 LLM 概念)→ `agent`(装配 reason/act/verify)。
 
 ## 常用命令
 
 ```bash
-cargo build                        # 全 workspace 构建
-cargo test                         # 全 workspace 测试(rc-types/rc-providers/rc-core/rc-verify/rc-eval 均有单测 + rc-eval 离线集成测试)
-cargo test -p rc-verify            # 跑单个 crate 的测试
-cargo test -p rc-verify passing_check   # 跑单个测试函数
-cargo clippy                       # lint
-
-# 运行 agent(注意:二进制叫 ridge-code,但它住在 crates/rc-cli;package 名就是 ridge-code)
-cargo run -p ridge-code -- --cwd /path/to/target/project "实现 add/mul 并各写一个单元测试"
-RUST_LOG=debug cargo run -p ridge-code -- "..."   # 详细日志(看清 DAG/工具每一步)
-
-# 运行 eval(M3):基线 vs 编排的成本-质量对照
-cargo run -p rc-eval -- --offline   # 离线假模型,零联网零成本(CI 验证管道)
-cargo run -p rc-eval                # 真实 provider,量真实成本(读 ~/.ridge/config.toml + key)
+cargo build --workspace
+cargo test --workspace              # 6 引擎 + 2 agent + 1 doctest
+cargo test -p langgraph             # 只测引擎
+cargo test -p agent                 # 只测 agent
+cargo run -p agent --bin ridge      # 跑 agent 闭环 demo
+cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings   # CI 会卡这两个
 ```
 
-**易踩的坑:** `-p ridge-code`(不是 `-p rc-cli`)——目录是 `rc-cli`,但 `crates/rc-cli/Cargo.toml` 里的 package 名是 `ridge-code`。
+⚠️ 二进制名是 **`ridge`**,但它住在 `crates/agent`(package 名 `agent`)。跑 demo 用 `-p agent --bin ridge`。
 
-## 运行前置(配置 + 密钥)
-
-1. **全局配置** `~/.ridge/config.toml`(模板见仓库根 `config.example.toml`)。两种写法:
-   - 混合(推荐):`[strong]` + `[weak]` 两段,可指向不同 provider/模型;
-   - 兼容:单 `[provider]` 段(强=弱都用它)。
-   解析逻辑:`strong` 缺省回退到 `provider`;`weak` 缺省回退到 `provider`,再缺省复用 `strong`(见 `rc-cli/src/main.rs`)。
-2. **密钥**按此顺序解析(`resolve_api_key`):provider 段里的 `api_key` → `api_key_env` 指定的环境变量 → 默认环境变量 `RIDGE_API_KEY`。
-3. **`.env.local` / `.env`** 在启动时自动加载(`dotenvy`),且**在 `--cwd` 切换目录之前**加载——所以这两个文件按「你敲命令的目录」查找,不是目标项目目录。已导出的环境变量优先于文件。
-4. **模型必须支持 tool calling**,别用纯推理型(如 `*-r1`),否则工具循环跑不起来。
-
-目标项目可放 `ridge.toml` 声明验证命令;否则按 `Cargo.toml`/`package.json` 自动探测(`rc-verify::resolve_plan`):
-```toml
-[verify]
-build = "cargo build"
-test  = "cargo test"
-# lint = "cargo clippy"
-```
-
-## MCP 接入(M4,`rc-mcp`)
-
-全局 config 里声明 `[[mcp]]` 外部服务器,启动时连上并把其工具接进 Worker 工具集:
-
-```toml
-[[mcp]]
-name = "git"                 # 命名空间前缀,需唯一
-command = "uvx"
-args = ["mcp-server-git"]
-# env = { KEY = "value" }    # 可选附加环境变量
-```
-
-关键点(改动时心里有数):
-- **只做子进程 stdio + tools**:暂不接 resources/prompts,暂不做 SSE/HTTP 传输。
-- **工具名命名空间** `<name>__<tool>`,防多服务器/与内置工具重名;调用**按哈希表路由**(不解析工具名),路由表在 `McpHub::connect` 时构建。
-- **降级不崩**:单个服务器连不上/列不出工具 → 告警跳过,编排照常只用内置工具。
-- **只进 Worker,不进 Reviewer**:MCP 工具并入 `Orchestrator.tools`(Worker/修复/基线用),**不**进 `read_tools`(评审只读、避免触发副作用工具)。接线在 `rc-core`:`Orchestrator::with_mcp(hub)` + `run_agent` 的 `dispatch_tool`(先查 MCP、再落内置)+ `Orchestrator::shutdown()`。
-- **rmcp 边界**:rmcp 的 wire 类型只在 `rc-mcp` 内部使用,对上归一化成 `rc_types::{ToolSpec, ToolCall}`(同 provider 边界原则)。
-- ⚠️ **Windows 坑**:bare `npx`/`uvx` 可能 ENOENT(需 shell 解析),改用绝对路径可执行文件或 `cmd /c` 包裹。
-
-## 多供应商 / 多模型 / 原生 Anthropic
-
-config 支持三种写法(自上而下优先):① `[[providers]]` 命名注册表 + `[roles]`;② `[strong]`+`[weak]`;③ 单 `[provider]`。后两者为向后兼容(`kind` 缺省 openai,旧配置零改动)。
-
-```toml
-[[providers]]
-name = "claude"
-kind = "anthropic"                       # 原生 Anthropic Messages API
-base_url = "https://api.anthropic.com/v1"
-model = "claude-sonnet-4-6"
-api_key_env = "ANTHROPIC_KEY"
-[[providers]]
-name = "deepseek"                        # kind 缺省 openai
-base_url = "https://api.deepseek.com/v1"
-model = "deepseek-chat"
-api_key_env = "DEEPSEEK_KEY"
-[roles]
-strong = "claude"                        # planner/reviewer/修复/基线 + 默认 hard worker
-weak   = "deepseek"                      # 默认 trivial/moderate worker
-[routing]                                # 可选:按难度覆盖 worker 模型(用上第 3 个模型)
-hard = "claude"
-moderate = "deepseek"
-```
-
-关键点(改动时心里有数):
-- **N 模型路由**:`[routing]` 按难度(trivial/moderate/hard)把 worker 覆盖到任意命名 provider;接线在 `rc-core`:`Orchestrator::with_worker_models(HashMap<Difficulty, Box<dyn LlmProvider>>)` + `work()` 命中覆盖优先、否则回落 strong/weak。装配在 `rc-cli`(`resolve_tiers` / `resolve_worker_models`)。
-- **Cost 仍按难度 tier(强/弱)记账**:命名模型是「身份」、tier 是「成本分类」,两者解耦——`work` 用哪个命名模型,成本仍按 `route_tier(difficulty)` 记,`eval` 的「强 token 占比」语义不变。
-- **原生 Anthropic**(`rc-providers::anthropic`):第二个 `LlmProvider` 实现,`kind="anthropic"` 走 `/messages`。归一化三处关键差异——system 抽成顶层参数、tool 结果是 user 消息的 `tool_result` 块、工具调用是 assistant 的 `tool_use` 块(input 是对象),且**合并相邻同角色**(Anthropic 要求角色交替)。`max_tokens` 必填(默认 8192)。wire 类型私有,纯翻译函数离线单测。
-- 详见 `docs/superpowers/specs/2026-07-05-provider-registry-design.md`。
-
-## 架构:编排流水线
-
-入口 `rc-cli` 是**薄壳**(读配置 → 造两个 provider → 构造 `Orchestrator` → 跑 → 打印成本账单),全部编排逻辑在 `rc-core::Orchestrator::run`:
+## 架构:两层
 
 ```
-① Planner(强)   把任务分解成 2-5 个有序子任务(要 JSON 数组);解析失败降级为单个 Hard 子任务
-② Router+Worker  逐个子任务按难度路由:Difficulty::Hard → 强,其余 → 弱;Worker 跑工具循环改代码
-③ Verify+Repair  跑 ridge.toml/探测出的检查 → Pass/Uncertain 收工;Fail 则【强模型】带诊断修复,最多 max_repairs 轮
-④ Reviewer(强)  只读工具(read_file/list_dir)评审是否满足任务,要 JSON {approved, issues};未通过则强模型据评审修一轮再复验
-            ↓
-        输出报告 + 成本账单(关键指标:强模型 token 占比,越低越省钱)
+crates/langgraph  (纯图引擎,零 LLM 依赖)
+  state.rs       GraphState trait(State + reducer:节点返回 Update,apply 合并)
+  graph.rs       StateGraph 构建器 + CompiledGraph + Pregel 超步执行环(invoke_with)
+  checkpoint.rs  Checkpointer trait + MemoryCheckpointer(append-only,时间旅行)
+        ▲
+        │ depends on
+        │
+crates/agent      (装配 agent 图 + 二进制 ridge)
+  lib.rs         AgentState/Patch(reducer)、Brain trait(接 LLM 的接缝)、build_agent
+  main.rs        demo:跑通闭环 + 打印每个超步的 checkpoint
 ```
 
-`run_agent` 是通用工具循环:调模型 → 若无 tool_calls 则返回最终文本,否则执行每个工具调用、把结果回灌、循环到 `max_steps`。每步按档位累加 `Cost`。
+## 引擎的关键设计(改动时心里有数)
 
-**贯穿设计的成本杠杆(改编排时别破坏):** 级联而非平铺并发;执行者(弱)≠ 验证者(强);难任务直接给强,跳过「弱做→打回」;修复/规划/评审一律走强模型;review 选择性、不逐字深读(否则吃掉省的钱)。
+- **reducer 显式**:`GraphState::apply` 强制每种状态声明合并语义(默认覆盖会在并发下丢更新)。
+- **BSP 超步**:`invoke_with` 每超步先 `state.clone()` 成快照,frontier 里所有节点吃**同一份快照**并 `tokio::spawn` 并发跑,跑完在**同步点**统一 `apply`,再据合并后状态路由。别让节点中途脏读同级更新。
+- **条件边优先于静态边**;节点无出边则隐式 END。
+- **防跑飞**:`RunConfig.max_supersteps` → `GraphError::StepLimit`。
+- **checkpoint 时间旅行**:每超步落 `Checkpoint{step, frontier, state}`;`MemoryCheckpointer::get(step)` 可回读任意历史步。要跨进程持久化就在 `save` 里加 serde+bincode 落盘,trait 不用改。
+- **错误**:库层用 `thiserror`(`GraphError`),节点错误归一化成 `BoxError`;应用层用 `anyhow`。
 
-### M2 的已知简化(改动时心里有数)
+## agent 的关键设计
 
-- 子任务**按规划顺序串行执行**;`Subtask.deps` 已记录但尚未用于并行调度(并行 + git worktree 隔离留待后续)。
-- `write_file` 是**整文件覆盖**(无结构化 patch 工具),所以 Worker 的 system prompt 强调「先读出再保留」。
-- build/test 闸盖不住「能编译但偏离规格」;Reviewer 自身也可能误判——语义正确性靠 M3 eval 度量(`rc-eval` 已落地,见下方 crate 表)。
-- 模型输出的 JSON 用 `extract_between`(取首个 `[`/`{` 到末个 `]`/`}`)抠出来,容忍模型包裹的解释文字。
+- **maker ≠ checker**:`reason`/`act` 生成,`verify` **独立**判定且只认确定性信号(工具输出的 `tests: passed`),不信模型自述。
+- **双保险停机**:`MAX_STEPS` 硬上限 + `approved` 闸门。
+- **`Brain` trait** 是接真实 LLM provider 的接缝 —— 换实现,图不动。当前是离线 `ScriptedBrain`(零联网可测)。
 
-## Crate 布局与依赖方向
+## 工程约定
 
-依赖自底向上(改下层留意上层影响):
-
-```
-rc-types  →  { rc-providers, rc-tools, rc-verify }  →  rc-core  →  { rc-cli, rc-eval }
-```
-
-| crate | 角色 | 关键约束 |
-|---|---|---|
-| `rc-types` | 纯数据 + serde,**零业务逻辑** | 所有 crate 依赖它;保持无业务依赖 |
-| `rc-providers` | `LlmProvider` trait + OpenAI 兼容 + 原生 Anthropic 实现 + StubProvider | 见下方「provider 边界」「多供应商/多模型」 |
-| `rc-tools` | 内置工具 read_file/write_file/list_dir/run_shell | 工具错误转成给模型看的文本(让它自我纠正),不向上抛 |
-| `rc-verify` | 验证 runner:跑命令、解析输出成 `Diagnostic`、产出 `Verdict` | 失败输出截断保留**末尾** `MAX_DETAIL` 字符(编译错误结论在尾部) |
-| `rc-core` | 编排大脑(上面的流水线) | 只依赖 `LlmProvider` trait,不碰具体 provider |
-| `rc-cli` | 二进制入口(薄壳) | package 名 = `ridge-code` |
-| `rc-eval` | eval harness:基线 vs 编排成本-质量对照(`tasks`/`runner`/`reporter` + bin),真实/离线两套 provider | 独立 bin(`cargo run -p rc-eval`);离线 `StubProvider` 零联网零成本;隐藏验收注入 seed 副本跑 `cargo test` |
-| `rc-mcp` | MCP 客户端(rmcp,子进程 stdio + tools):`McpHub` 连接/列举/归一化/路由/关闭 | rmcp wire 类型不外泄(归一化成 `rc_types::{ToolSpec,ToolCall}`);工具名 `<server>__<tool>` 命名空间 + 哈希表路由;纯函数(命名/路由/结果渲染)离线单测。见「MCP 接入」 |
-
-## 工程约定(来自 HANDOFF.md §5,落地时遵守)
-
-- **provider 边界(最重要):** 第三方多 provider crate 必须包在自己的 `LlmProvider` trait 后面,**绝不让 `rc-core` 直接依赖**——保证可替换、可对单个 provider 降级到裸 reqwest 自己拼。工具调用的归一化(Anthropic `tool_use` vs OpenAI `tool_calls`)统一成 `rc-types` 的内部表示,wire 格式类型在 `rc-providers` 内部私有。
-- **依赖版本统一在根 `Cargo.toml` 的 `[workspace.dependencies]`** 管;子 crate 用 `dep.workspace = true`。
-- **可观测性走 `tracing`**,别用 `println!` 调试编排(`println!` 只用于最终报告)。关键编排步骤已打 info/debug 日志。
-- **错误:** 约定库层用 `thiserror`、应用层用 `anyhow`(当前实现普遍用 `anyhow`,新增库级错误类型时按约定走 thiserror)。
-- **密钥永不写日志。**
-- **provider 层测试**用录制的固定响应做离线测试,避免每跑一次就烧 key。
+- 依赖版本统一在根 `Cargo.toml` 的 `[workspace.dependencies]`,子 crate 用 `dep.workspace = true`。
+- 可观测走 `tracing`(暂未接),别用 `println!` 调试;`println!` 只用于 demo 的最终报告。
+- provider 边界(未来接 LLM/MCP 时):第三方 SDK 包在自己的 trait 后,别让引擎直接依赖具体实现。
+- 新代码必须 `cargo fmt` + `clippy -D warnings` 干净(CI 卡)。非平凡逻辑留一个可跑的测试。
