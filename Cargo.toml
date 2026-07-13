@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/langgraph", "crates/agent", "crates/tools", "crates/provider", "crates/mcp"]
+members = ["crates/langgraph", "crates/agent", "crates/tools", "crates/provider", "crates/mcp", "crates/eval"]
 
 [workspace.package]
 edition = "2021"

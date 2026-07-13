@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-07-13 · Eval harness(评测基础设施 / verification-first)
+
+- 新增 `crates/eval`:`run_eval(cases)` 批量跑 agent,按确定性闸判 pass,聚合成功率 + token 成本;`EvalReport::pass_rate()`。bin `ridge-eval` 打印每 case PASS/FAIL + 总成功率。
+- case 的 provider 可离线(CI 确定性)或真实模型(量真实成功率/成本)。
+- 测试:2 case(一过一卡)→ pass_rate=0.5。`ridge-eval` demo:2/3 passed 67%。
+- 工作区现 **6 crate**,`cargo test --workspace` = **34 项全绿**。
+
 ## 2026-07-13 · M5 完整:plan-and-execute 编排器(orchestrator-workers)
 
 - `run_planned(planner, worker, task)`:planner(强模型)拆子任务,worker 逐个执行(build_llm_agent),聚合成 `PlanReport`(每个子任务的 approved/steps/tokens + 整体)。成本杠杆:planner≠worker。
