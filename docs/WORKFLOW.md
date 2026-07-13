@@ -13,7 +13,8 @@
 4. **写带时间戳的迭代报告**:`docs/iterations/{YYYY-MM-DD}-iteration-{N}.md`,含:做了什么、测试状态、能力对照(距 Claude Code 差什么)、开放问题、请 NotebookLM 定夺的点。
 5. **上传当来源**:把报告(必要时加 `trace.json`/报错日志)上传到 NotebookLM 笔记本「手搓agent」(`source_add`,`source_type=file`)。
 6. **取下一步计划**:`notebook_query` 让 NotebookLM 结合全部来源给「下一迭代优先级 + 确定性验收信号 + 里程碑」,原文归档为 `docs/iterations/{date}-notebooklm-guidance-{N}.md`。
-7. **归档 + 落下一份 contract**:据指导写 `CONTRACT-iteration-{N+1}.md`;在 `docs/LOG.md` 追加一条本轮记录。
+7. **对抗评审(关键步,别跳)**:**不要全信 NotebookLM**——它是计划的 maker,不是裁判,会硬凑不相关引用、把概念放错层、给过度设计。对每条关键建议做独立 checker:核对引用是否真支撑结论、用第一性原理 + 当前代码现实检验、高影响决策另起干净上下文(子 agent)当对抗评审员找反例。把「采纳/驳回 + 理由」写进 guidance 归档或 contract。
+8. **归档 + 落下一份 contract**:据(经对抗评审后的)结论写 `CONTRACT-iteration-{N+1}.md`;在 `docs/LOG.md` 追加一条本轮记录(含驳回了哪些建议)。
 
 ## 三类文件(artifacts / contracts / logs)
 
@@ -29,7 +30,8 @@
 - **maker ≠ checker**:生成的 agent 不给自己打分;验证只认确定性信号。
 - **授权阶梯当前 = Level 2 (Draft)**:改动在分支/worktree,人做物理信号验证后合并,不 auto-merge。往上爬一级要等当前级稳定产出「本来就会手动合的」质量。
 - **每轮都留熔断记录**:硬回合上限 / 预算 / 无进展检测触发的情况写进报告——这是判断引擎健壮性的核心指标。
-- **NotebookLM 是规划器与根因分析器,不是执行器**:它读来源给方向;代码由本仓库的开发环写。
+- **NotebookLM 是规划器与根因分析器,不是执行器,也不是裁判**:它读来源给方向;代码由本仓库的开发环写。它**会出错**——受限于来源、会张冠李戴引用、把概念放错层。关键决策一律过 step 7 对抗评审。
+  - 已发生的实例(记着当反面教材):NotebookLM 曾建议把成本预算做成 `GraphError::BudgetExceeded`(把 app 层的预算塞进通用图引擎的错误类型),并给「成本记账」引了一篇不相关的 IoT 中间件论文当依据。→ **驳回**:预算/成本是 agent 层的事,不进 langgraph 引擎;引用不成立。
 
 ## 里程碑地图(来自 NotebookLM 指导,详见 `docs/iterations/2026-07-13-notebooklm-guidance-01.md`)
 

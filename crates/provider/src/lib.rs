@@ -4,9 +4,9 @@
 //! - Anthropic:工具调用是 assistant 的 `tool_use` 块(`input` 是对象);
 //! - OpenAI:工具调用是 `tool_calls` 数组(`function.arguments` 是 **JSON 字符串**)。
 //!
-//! 两边都归一化成 [`ToolCall`] { name, arguments(Value) }。wire 解析是**纯函数**,可离线单测,
-//! 不烧 key(见 `openai::parse_response` / `anthropic::parse_response`)。真实 HTTP 客户端是
-//! 这层之上的一薄层(下一迭代接),trait 与归一化不变。
+//! 两边都归一化成 [`ToolCall`] { name, arguments(Value) }。wire 解析/构建是**纯函数**,可离线单测,
+//! 不烧 key(见 `openai` / `anthropic` 模块)。真实 HTTP 客户端([`OpenAiProvider`]/[`AnthropicProvider`])
+//! 是这层之上的一薄层,把传输([`http::HttpClient`])与归一化解耦,测试用捕获替身零联网校验。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -281,6 +281,159 @@ pub mod anthropic {
     }
 }
 
+/// HTTP 传输层 —— 与「归一化」解耦(NotebookLM 建议:`LlmProvider` 不硬编码 reqwest)。
+/// 测试可注入 stub / mock server,CI 保持离线绿。
+pub mod http {
+    use super::ProviderError;
+    use serde_json::Value;
+
+    /// 只做「POST JSON 拿 JSON」这一件事,便于测试替身注入。
+    #[async_trait::async_trait]
+    pub trait HttpClient: Send + Sync {
+        async fn post_json(
+            &self,
+            url: &str,
+            headers: &[(String, String)],
+            body: &Value,
+        ) -> Result<Value, ProviderError>;
+    }
+
+    /// 生产用的真实客户端(reqwest)。
+    pub struct ReqwestClient {
+        client: reqwest::Client,
+    }
+
+    impl ReqwestClient {
+        pub fn new() -> Self {
+            Self {
+                client: reqwest::Client::new(),
+            }
+        }
+    }
+
+    impl Default for ReqwestClient {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HttpClient for ReqwestClient {
+        async fn post_json(
+            &self,
+            url: &str,
+            headers: &[(String, String)],
+            body: &Value,
+        ) -> Result<Value, ProviderError> {
+            let mut rb = self.client.post(url).json(body);
+            for (k, v) in headers {
+                rb = rb.header(k.as_str(), v.as_str());
+            }
+            let resp = rb.send().await?;
+            let status = resp.status();
+            let val: Value = resp.json().await?;
+            if !status.is_success() {
+                return Err(format!("http {status}: {val}").into());
+            }
+            Ok(val)
+        }
+    }
+}
+
+use http::{HttpClient, ReqwestClient};
+use std::sync::Arc;
+
+/// OpenAI 兼容 provider:`build_request` → HTTP → `parse_response`,全走归一化层。
+pub struct OpenAiProvider {
+    base_url: String,
+    model: String,
+    api_key: String,
+    http: Arc<dyn HttpClient>,
+}
+
+impl OpenAiProvider {
+    pub fn new(
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+        api_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            base_url: base_url.into(),
+            model: model.into(),
+            api_key: api_key.into(),
+            http: Arc::new(ReqwestClient::new()),
+        }
+    }
+
+    /// 注入自定义传输(测试用 stub / mock)。
+    pub fn with_http(mut self, http: Arc<dyn HttpClient>) -> Self {
+        self.http = http;
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for OpenAiProvider {
+    async fn complete(&self, req: &CompletionRequest) -> Result<Completion, ProviderError> {
+        let body = openai::build_request(&self.model, req);
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let headers = [
+            (
+                "Authorization".to_string(),
+                format!("Bearer {}", self.api_key),
+            ),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ];
+        let resp = self.http.post_json(&url, &headers, &body).await?;
+        openai::parse_response(&resp)
+    }
+}
+
+/// 原生 Anthropic Messages provider。
+pub struct AnthropicProvider {
+    base_url: String,
+    model: String,
+    api_key: String,
+    max_tokens: u32,
+    http: Arc<dyn HttpClient>,
+}
+
+impl AnthropicProvider {
+    pub fn new(
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+        api_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            base_url: base_url.into(),
+            model: model.into(),
+            api_key: api_key.into(),
+            max_tokens: 4096,
+            http: Arc::new(ReqwestClient::new()),
+        }
+    }
+
+    pub fn with_http(mut self, http: Arc<dyn HttpClient>) -> Self {
+        self.http = http;
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for AnthropicProvider {
+    async fn complete(&self, req: &CompletionRequest) -> Result<Completion, ProviderError> {
+        let body = anthropic::build_request(&self.model, self.max_tokens, req);
+        let url = format!("{}/messages", self.base_url.trim_end_matches('/'));
+        let headers = [
+            ("x-api-key".to_string(), self.api_key.clone()),
+            ("anthropic-version".to_string(), "2023-06-01".to_string()),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ];
+        let resp = self.http.post_json(&url, &headers, &body).await?;
+        anthropic::parse_response(&resp)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,5 +545,139 @@ mod tests {
         assert_eq!(msgs[2]["content"][0]["type"], "tool_result");
         assert_eq!(msgs[2]["content"][0]["tool_use_id"], "c1");
         assert_eq!(msgs[2]["content"][1]["text"], "and now?");
+    }
+
+    /// 注入 stub 传输:完整走 build_request → (假)HTTP → parse_response,零网络。
+    struct StubHttp(Value);
+
+    #[async_trait::async_trait]
+    impl HttpClient for StubHttp {
+        async fn post_json(
+            &self,
+            _url: &str,
+            _headers: &[(String, String)],
+            _body: &Value,
+        ) -> Result<Value, ProviderError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_provider_full_path_with_stub_http() {
+        let canned = json!({"choices":[{"message":{"content":"","tool_calls":[{
+            "id":"c1","type":"function",
+            "function":{"name":"run_shell","arguments":"{\"cmd\":\"cargo build\"}"}
+        }]}}]});
+        let p = OpenAiProvider::new("http://unused", "gpt-x", "key")
+            .with_http(Arc::new(StubHttp(canned)));
+        let req = CompletionRequest {
+            messages: vec![Message::user("build it")],
+            tools: vec![],
+        };
+        let c = p.complete(&req).await.unwrap();
+        assert_eq!(c.tool_calls[0].name, "run_shell");
+        assert_eq!(c.tool_calls[0].arguments, json!({"cmd": "cargo build"}));
+    }
+
+    /// 记录 provider 实际发出的一次请求。
+    #[derive(Clone)]
+    struct SeenRequest {
+        url: String,
+        headers: Vec<(String, String)>,
+        body: Value,
+    }
+
+    /// 捕获型传输替身:记录 provider 拼出的请求,并回一个 canned 响应。
+    /// 用它校验「provider 把请求拼对了」——比起真打本地 server(在有系统代理的机器上会挂起),
+    /// 这是确定性、零网络、瞬时的,覆盖同样的东西(auth 头 / url / 请求体)。
+    struct CapturingHttp {
+        seen: std::sync::Mutex<Option<SeenRequest>>,
+        reply: Value,
+    }
+
+    impl CapturingHttp {
+        fn new(reply: Value) -> Self {
+            Self {
+                seen: std::sync::Mutex::new(None),
+                reply,
+            }
+        }
+
+        fn seen(&self) -> SeenRequest {
+            self.seen.lock().unwrap().clone().unwrap()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HttpClient for CapturingHttp {
+        async fn post_json(
+            &self,
+            url: &str,
+            headers: &[(String, String)],
+            body: &Value,
+        ) -> Result<Value, ProviderError> {
+            *self.seen.lock().unwrap() = Some(SeenRequest {
+                url: url.to_string(),
+                headers: headers.to_vec(),
+                body: body.clone(),
+            });
+            Ok(self.reply.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_provider_sends_bearer_auth_and_correct_url() {
+        let cap = Arc::new(CapturingHttp::new(
+            json!({"choices":[{"message":{"content":"ok"}}]}),
+        ));
+        let p = OpenAiProvider::new("https://api.example.com", "gpt-x", "sk-test")
+            .with_http(cap.clone());
+        let c = p
+            .complete(&CompletionRequest {
+                messages: vec![Message::user("hi")],
+                tools: vec![],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(c.text, "ok");
+        let seen = cap.seen();
+        assert_eq!(seen.url, "https://api.example.com/chat/completions");
+        assert!(seen
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v == "Bearer sk-test"));
+        assert_eq!(seen.body["messages"][0]["role"], "user");
+    }
+
+    #[tokio::test]
+    async fn anthropic_provider_sends_api_key_version_and_system_top_level() {
+        let cap = Arc::new(CapturingHttp::new(
+            json!({"content":[{"type":"text","text":"ok"}]}),
+        ));
+        let p = AnthropicProvider::new("https://api.anthropic.com/v1", "claude-x", "sk-ant")
+            .with_http(cap.clone());
+        let c = p
+            .complete(&CompletionRequest {
+                messages: vec![Message::system("be terse"), Message::user("hi")],
+                tools: vec![],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(c.text, "ok");
+        let seen = cap.seen();
+        assert_eq!(seen.url, "https://api.anthropic.com/v1/messages");
+        assert!(seen
+            .headers
+            .iter()
+            .any(|(k, v)| k == "x-api-key" && v == "sk-ant"));
+        assert!(seen
+            .headers
+            .iter()
+            .any(|(k, v)| k == "anthropic-version" && !v.is_empty()));
+        // system 抽成顶层参数,不混进 messages。
+        assert_eq!(seen.body["system"], "be terse");
+        assert_eq!(seen.body["messages"][0]["role"], "user");
     }
 }

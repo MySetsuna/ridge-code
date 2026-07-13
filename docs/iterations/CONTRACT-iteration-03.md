@@ -13,7 +13,7 @@
 | 优先级 | 任务 | 确定性验收信号 | 状态 |
 |---|---|---|---|
 | **P0** | provider 侧多轮消息构建:`Message` 支持 assistant `tool_calls` 与 `role=tool` 结果;`openai::build_request` / `anthropic::build_request` 把统一历史铺成各自 wire(OpenAI `role=tool`+`tool_call_id`;Anthropic `tool_use`/`tool_result` 块 + 合并相邻同角色 + system 顶层),纯函数 | `cargo test -p provider`:给定含 tool_call+tool_result 的多轮历史,两个 build_request 产出正确的角色/块序列 | ✅ 本轮完成 |
-| **P1** | 真实 HTTP provider 客户端:切分「传输」与「归一化」,`reqwest` 打 Anthropic `/messages` + OpenAI `/chat/completions` | 用 `mockito` mock server 返回录制的 200 响应,客户端解析出正确 `ToolCall`;CI 默认只跑 mock(exit 0),真实网络测项加 `#[ignore]` | ⬜ 下轮 |
+| **P1** | 真实 HTTP provider 客户端:切分「传输」与「归一化」,`reqwest` 打 Anthropic `/messages` + OpenAI `/chat/completions` | `cargo test -p provider` 全绿:捕获替身校验 auth 头/url/请求体;OpenAiProvider/AnthropicProvider 端到端解析 | ✅ 本轮完成 |
 | **P2** | 成本记账 + 预算熔断:从响应 usage 累加 token/费用,超预算 → `GraphError::BudgetExceeded` 停机 + 落快照 | 单测:预算设很低时,运行到超预算触发熔断错误,不继续烧 | ⬜ 下轮 |
 | **P3** | serde/bincode checkpoint 落盘 + 跨进程恢复(M3 起步) | 中途 kill,重启从 bincode 文件恢复 state 且 superstep 连续 | ⬜ 下轮 |
 | **P2** | 无进展检测(agent 层):verify 维护 `stagnation_counter`,连续 N 轮工具输出/报错不变 → 强制 END | 单测:工具输出连续 N 轮相同 → 在到 MAX_STEPS 之前就停机并标注原因 | ⬜ 下轮 |
@@ -28,6 +28,11 @@
 ## 停机 / 预算
 
 沿用 `MAX_STEPS`;P2 加 token 预算熔断 + 无进展检测,形成 loop engineering 要求的「多层独立退出」。
+
+## 对抗评审留痕(不全信 NotebookLM)
+
+- NotebookLM 荐 `mockito` 真打本地 server 测 HTTP。**实测在本机(有系统代理)请求挂起 ~127s 后 EOF**。→ 驳回真实 socket 测,改用**捕获型 `HttpClient` 替身**:同样校验 auth 头/url/请求体,但确定性、零网络、瞬时。移除 `mockito` 依赖。
+- NotebookLM 荐 `GraphError::BudgetExceeded`(把 app 层预算塞进通用引擎错误)+ 给成本记账引了不相关 IoT 论文。→ 驳回,预算/成本归 agent 层,不进 langgraph。
 
 ## 授权阶梯
 
