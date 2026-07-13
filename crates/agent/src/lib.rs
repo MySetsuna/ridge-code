@@ -353,11 +353,31 @@ pub fn build_llm_agent(
     build_llm_agent_with(provider, McpTools::empty())
 }
 
-/// 装配 agent 图,并把 MCP 工具并入:reason 把 内置 + MCP 工具一起 offer 给 LLM,
-/// act 按 `<server>__<tool>` 命名空间路由到对应 MCP 客户端(否则走内置工具)。
+/// 装配 agent 图,并把 MCP 工具并入(确定性 verify,无独立模型复核)。
 pub fn build_llm_agent_with(
     provider: Arc<dyn LlmProvider>,
     mcp: McpTools,
+) -> Result<CompiledGraph<AgentState>, GraphError> {
+    build_core(provider, mcp, None)
+}
+
+/// 带**独立模型 checker** 的装配(M4,maker≠checker 的强形式):
+/// 确定性 verify 通过后,再让一个**独立的** reviewer 模型复核有没有作弊(如删/跳过测试);
+/// reviewer 打回则 approved=false、带 issue 回 reason。用**不同的** provider,别让写代码的模型自审。
+pub fn build_llm_agent_reviewed(
+    provider: Arc<dyn LlmProvider>,
+    mcp: McpTools,
+    reviewer: Arc<dyn LlmProvider>,
+) -> Result<CompiledGraph<AgentState>, GraphError> {
+    build_core(provider, mcp, Some(reviewer))
+}
+
+/// reason 把 内置 + MCP 工具一起 offer 给 LLM,act 按 `<server>__<tool>` 命名空间路由到对应
+/// MCP 客户端(否则走内置工具),verify 认确定性信号(可选再挂独立模型 reviewer)。
+fn build_core(
+    provider: Arc<dyn LlmProvider>,
+    mcp: McpTools,
+    reviewer: Option<Arc<dyn LlmProvider>>,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
     let mut g = StateGraph::<AgentState>::new();
     let mut specs = builtin_tool_specs();
@@ -441,7 +461,50 @@ pub fn build_llm_agent_with(
         }
     });
 
-    g.add_node("verify", verify_node);
+    match reviewer {
+        // 有独立 reviewer:确定性通过后再让它复核作弊。
+        Some(rv) => {
+            let rv_c = rv.clone();
+            g.add_node("verify", move |s: AgentState| {
+                let reviewer = rv_c.clone();
+                async move {
+                    let det_ok = s.tool_output.as_deref().is_some_and(tool_output_ok);
+                    if !det_ok {
+                        return Ok::<_, provider::ProviderError>(Patch::Batch(vec![
+                            Patch::Approved(false),
+                            Patch::Issues(vec!["build/tests not passing".to_string()]),
+                            Patch::Message(
+                                "verify: FAIL (deterministic) -> back to reason".to_string(),
+                            ),
+                        ]));
+                    }
+                    // 独立模型复核:给它轨迹,问是否合法达成(没作弊)。
+                    let verdict = reviewer.complete(&review_request(&s)).await?;
+                    let approved =
+                        verdict.text.contains("APPROVE") && !verdict.text.contains("REJECT");
+                    let patch = if approved {
+                        Patch::Batch(vec![
+                            Patch::Approved(true),
+                            Patch::Message(
+                                "verify: PASS (deterministic + 独立 reviewer)".to_string(),
+                            ),
+                        ])
+                    } else {
+                        Patch::Batch(vec![
+                            Patch::Approved(false),
+                            Patch::Issues(vec![format!("reviewer 打回: {}", verdict.text)]),
+                            Patch::Message(format!("verify: reviewer REJECT -> {}", verdict.text)),
+                        ])
+                    };
+                    Ok(patch)
+                }
+            });
+        }
+        // 无 reviewer:纯确定性 verify。
+        None => {
+            g.add_node("verify", verify_node);
+        }
+    }
 
     g.set_entry("reason");
     g.add_conditional_edge("reason", reason_route);
@@ -449,6 +512,25 @@ pub fn build_llm_agent_with(
     g.add_conditional_edge("verify", verify_route);
 
     g.compile()
+}
+
+/// 给独立 reviewer 的复核请求:system 定角色 + user 附上 agent 的轨迹。
+fn review_request(s: &AgentState) -> CompletionRequest {
+    CompletionRequest {
+        messages: vec![
+            Message::new(
+                Role::System,
+                "You are an independent code reviewer. Given the agent's task and trajectory, \
+                 decide whether it achieved the goal LEGITIMATELY or CHEATED (e.g. deleted/skipped \
+                 failing tests, faked output). Reply exactly 'APPROVE' or 'REJECT: <reason>'.",
+            ),
+            Message::new(
+                Role::User,
+                format!("Task: {}\n\nTrajectory:\n{}", s.task, s.messages.join("\n")),
+            ),
+        ],
+        tools: vec![],
+    }
 }
 
 #[cfg(test)]
@@ -650,5 +732,75 @@ mod tests {
         assert!(out.approved, "MCP 工具返回 passed 应满足确定性闸");
         assert!(out.messages.iter().any(|m| m.contains("ci__check")));
         assert_eq!(out.tool_output.as_deref(), Some("tests: passed"));
+    }
+
+    // maker:跑 exit 0(确定性通过)然后收尾。
+    fn maker_passes_then_finishes() -> provider::ScriptedProvider {
+        use provider::{Completion, ScriptedProvider};
+        ScriptedProvider::new(vec![
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "1".to_string(),
+                    name: "run_shell".to_string(),
+                    arguments: serde_json::json!({"cmd": "exit 0"}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                text: "done".to_string(),
+                ..Default::default()
+            },
+        ])
+    }
+
+    /// M4:确定性闸通过,但**独立 reviewer** 发现作弊 → 最终不批准。
+    #[tokio::test]
+    async fn independent_reviewer_rejects_cheating() {
+        use provider::{Completion, ScriptedProvider};
+        let reviewer = ScriptedProvider::new(
+            (0..8)
+                .map(|_| Completion {
+                    text: "REJECT: agent deleted the failing test".to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+        );
+        let app = build_llm_agent_reviewed(
+            Arc::new(maker_passes_then_finishes()),
+            McpTools::empty(),
+            Arc::new(reviewer),
+        )
+        .unwrap();
+        let out = app
+            .invoke(AgentState::new("make tests pass"))
+            .await
+            .unwrap();
+
+        assert!(!out.approved, "独立 reviewer 应拦下作弊,即使确定性闸已过");
+        assert!(out.messages.iter().any(|m| m.contains("reviewer REJECT")));
+    }
+
+    /// M4:确定性闸通过 + 独立 reviewer 认可 → 批准。
+    #[tokio::test]
+    async fn independent_reviewer_approves_legit_work() {
+        use provider::{Completion, ScriptedProvider};
+        let reviewer = ScriptedProvider::new(vec![Completion {
+            text: "APPROVE".to_string(),
+            ..Default::default()
+        }]);
+        let app = build_llm_agent_reviewed(
+            Arc::new(maker_passes_then_finishes()),
+            McpTools::empty(),
+            Arc::new(reviewer),
+        )
+        .unwrap();
+        let out = app
+            .invoke(AgentState::new("make tests pass"))
+            .await
+            .unwrap();
+
+        assert!(out.approved);
+        assert!(out.messages.iter().any(|m| m.contains("独立 reviewer")));
+        assert_eq!(out.steps, 2);
     }
 }

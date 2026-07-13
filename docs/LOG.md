@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-07-13 · M4:独立模型 checker(maker≠checker 强形式)
+
+- `build_llm_agent_reviewed(provider, mcp, reviewer)`:确定性 verify 通过后,再让一个**独立的** reviewer 模型看轨迹复核有没有作弊(删/跳测试、伪造输出),打回则 approved=false 回 reason。用**不同的** provider,别让写代码的模型自审。
+- `build_core` 统一装配,verify 节点按有无 reviewer 分支;`review_request` 给 reviewer 铺 system(角色)+ user(任务+轨迹)。
+- 测试:确定性闸通过但 reviewer REJECT(发现删测试)→ 最终不批准;reviewer APPROVE → 批准。
+- `cargo test --workspace` = **30 项全绿**,clippy/fmt 干净。里程碑 M4 达成。
+
 ## 2026-07-13 · M2 接线:MCP 工具接进 agent
 
 - agent 依赖 mcp;新增 `resolve_mcp(clients)`(各 initialize+list_tools,归一化成 ToolSpec + 命名空间路由表,降级不崩)+ `build_llm_agent_with(provider, McpTools)`。
