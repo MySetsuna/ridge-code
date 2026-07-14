@@ -10,6 +10,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true }
+tokio = { workspace = true }  # detect_net 用 join! + time::timeout 并发探针
 
 [dev-dependencies]
 tokio = { workspace = true }

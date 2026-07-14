@@ -449,13 +449,24 @@ pub mod search {
         Restricted,
     }
 
-    /// 探测:能 GET 通 Google 的 `generate_204`(小而快、返回 204)就算能直连国际网络。
-    /// ponytail: 单探针启发式。墙内带 VPN → 判 International(也确实该用国际引擎,符合意图);
-    /// 探针超时/被限速 → 保守判 Restricted。升级路径:多探针并发取快者 + captive-portal 甄别。
+    /// 探测能否直连国际网络:**并发**探两个国际端点(Google / gstatic 的 `generate_204`),
+    /// 每个 3s 超时,**任一通** → International;都不通 → Restricted。比单探针更抗抖动、收敛更快
+    /// (单个端点被限速/抽风不至于误判),且 3s 上限避免卡住 15s 的 HTTP 超时。
+    /// ponytail: 2 探针够用;captive-portal(返 200 假页)仍可能误判,升级路径 = 校验响应体特征。
     pub async fn detect_net(fetch: &dyn WebFetch) -> NetEnv {
-        match fetch.get_text("https://www.google.com/generate_204").await {
-            Ok(_) => NetEnv::International,
-            Err(_) => NetEnv::Restricted,
+        async fn reachable(fetch: &dyn WebFetch, url: &str) -> bool {
+            let timed =
+                tokio::time::timeout(std::time::Duration::from_secs(3), fetch.get_text(url)).await;
+            matches!(timed, Ok(Ok(_)))
+        }
+        let (a, b) = tokio::join!(
+            reachable(fetch, "https://www.google.com/generate_204"),
+            reachable(fetch, "https://www.gstatic.com/generate_204"),
+        );
+        if a || b {
+            NetEnv::International
+        } else {
+            NetEnv::Restricted
         }
     }
 
@@ -739,6 +750,23 @@ pub mod search {
             assert_eq!(detect_net(&f).await, NetEnv::International);
             f.probe_ok = false;
             assert_eq!(detect_net(&f).await, NetEnv::Restricted);
+        }
+
+        #[tokio::test]
+        async fn detect_net_international_if_any_probe_ok() {
+            // google 探针失败、gstatic 成功 → 仍判直连(多探针 OR 语义)。
+            struct MixedProbe;
+            #[async_trait::async_trait]
+            impl WebFetch for MixedProbe {
+                async fn get_text(&self, url: &str) -> Result<String, ProviderError> {
+                    if url.contains("gstatic") {
+                        Ok(String::new())
+                    } else {
+                        Err("blocked".into())
+                    }
+                }
+            }
+            assert_eq!(detect_net(&MixedProbe).await, NetEnv::International);
         }
 
         #[tokio::test]
