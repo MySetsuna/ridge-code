@@ -14,4 +14,9 @@ NotebookLM 驱动的迭代循环产出物都放这里。命名规范:
 |---|---|---|---|
 | 01 | (无,首轮推倒重来) | `2026-07-13-iteration-01.md` | `2026-07-13-notebooklm-guidance-01.md` |
 | 02 | `CONTRACT-iteration-02.md` | `2026-07-13-iteration-02.md` | `2026-07-13-notebooklm-guidance-02.md` |
-| 03 | `CONTRACT-iteration-03.md` | (进行中,P0 已完成) | (待) |
+| 03 | `CONTRACT-iteration-03.md` | (P0-P2 完成) | — |
+| 04 | — | `2026-07-14-iteration-04.md`(GLM 实测) | `2026-07-14-notebooklm-guidance-04.md` |
+| 05 | `CONTRACT-iteration-05.md` | `2026-07-14-iteration-05.md`(REPL) | `2026-07-14-notebooklm-guidance-05.md` |
+| 06 | `CONTRACT-iteration-06.md` | (MCP 接入/trace/compact) | — |
+| 07 | — | `2026-07-14-iteration-07.md`(转向通用框架+Skills) | `2026-07-14-notebooklm-guidance-07.md` |
+| 08 | `CONTRACT-iteration-08.md` | (待) | (待) |
