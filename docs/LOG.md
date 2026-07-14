@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-07-14 · Iteration 11 续²:LLM token 逐字流式(SSE)
+
+- **CONTRACT-11 P1 token 流式落地**(最大块):provider 加 `complete_streaming`(默认回落 `complete` 整段 emit,**零风险降级**)、`HttpClient::post_json_stream`(reqwest `resp.chunk()` 增量读、切 SSE `data:` 行、默认报错让降级)、`openai::StreamAcc`+`accumulate_stream`(文本增量拼 + **分片工具调用按 index 拼装** + usage via `include_usage`)。**回调收 owned `String`** 避 async_trait+HRTB 的 `&str` 生命周期坑。
+- **CLI 侧**:`TokenBus`(`Arc<Mutex<Option<Sender>>>`)+ `null_token_bus`;`build_llm_agent_full` 接总线,reason 节点 `complete_streaming` 边收边发;`run_streamed` 的 printer 一个 `select!` 里协调 spinner + 逐字 token + 节点事件,流式期间不转 spinner、末尾不重复整段打(抑制 `(final)` 双打)。
+- **测试**:假流式 HttpClient(**非 mockito**)喂 SSE 帧 → 逐字拼接==全文、工具调用/usage 正确;降级路径也测。**GLM 实测**:多句问答逐字出、🤖 恰好 1 次(无重复)、approved、usage 到账。
+- `cargo test --workspace` = **78 全绿**(76→78),clippy/fmt 干净。提交 `4d45452`。
+- CONTRACT-11 剩:TODO 可视化、`@file` 引用、Ctrl-C 中断(均 P2)。
+
 ## 2026-07-14 · Iteration 11 续:--resume 会话恢复(kill-9)
 
 - **CONTRACT-11 P1 kill-9 恢复落地**:REPL 每轮把对话 `history` 落盘(`RIDGE_SESSION` 或 `~/.ridge/session.json`,serde_json);`--resume`/`--continue` 启动读回,`/reset` 也落盘清空。像 Claude Code 续接会话。选了**会话级 history 持久化**(用户可见价值 = 对话不丢),而非引擎级 mid-graph resume(那是另一码事,引擎 `FileCheckpointer` 已具备,列后续)。
