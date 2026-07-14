@@ -730,6 +730,11 @@ impl McpTools {
     pub fn empty() -> Self {
         Self::default()
     }
+
+    /// 已接入的 MCP 工具名(命名空间形式,如 `nlm__notebook_list`)。供 `/tools` 列举。
+    pub fn tool_names(&self) -> Vec<String> {
+        self.specs.iter().map(|s| s.name.clone()).collect()
+    }
 }
 
 /// 连上一批 MCP 客户端:各自 initialize + list_tools,把工具归一化成 [`ToolSpec`](命名空间)+ 建路由表。

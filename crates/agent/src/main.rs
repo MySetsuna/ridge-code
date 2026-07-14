@@ -2,13 +2,21 @@ use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 
 use agent::{
-    build_agent, build_llm_agent_full, compact_history, default_tool, expand_mentions, load_skills,
-    null_token_bus, render_todos, resolve_mcp, scripted, write_trace, AgentState, Approver,
-    AutoApprove, Color, Config, McpTools, RichOutput, Skill, Todo, TokenBus,
+    build_agent, build_llm_agent_full, builtin_tool_specs, compact_history, default_tool,
+    expand_mentions, load_skills, null_token_bus, render_todos, resolve_mcp, scripted, write_trace,
+    AgentState, Approver, AutoApprove, Color, Config, McpTools, RichOutput, Skill, Todo, TokenBus,
 };
 use langgraph::{CompiledGraph, RunConfig, StreamEvent};
 use mcp::{McpClient, StdioTransport};
 use provider::{AnthropicProvider, LlmProvider, Message, OpenAiProvider};
+
+/// REPL 展示用元信息(`/tools` `/model` 命令用)。
+struct ReplMeta {
+    tools: Vec<String>,
+    provider: String,
+    model: String,
+    base_url: String,
+}
 
 /// ridgecode —— 通用 agent CLI(产品名 RidgeCode)。
 ///
@@ -74,7 +82,20 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         Vec::new()
                     };
-                    repl(p, mcp, skills, skip_danger, budget, initial).await // 交互式
+                    let (provider_kind, model, base_url) = resolve_model_info(&cfg);
+                    let mut tools: Vec<String> = builtin_tool_specs()
+                        .iter()
+                        .map(|s| s.name.clone())
+                        .collect();
+                    tools.extend(mcp.tool_names()); // 读工具名(在 mcp 被移入 repl 前)
+                    let meta = ReplMeta {
+                        tools,
+                        provider: provider_kind,
+                        model,
+                        base_url,
+                    };
+                    repl(p, mcp, skills, skip_danger, budget, initial, meta).await
+                    // 交互式
                 }
             }
         }
@@ -208,11 +229,9 @@ fn parse_args() -> (Option<String>, Option<String>, bool, bool) {
     (task, cwd, skip_danger, resume)
 }
 
-/// 装配真实 provider:**env > config > 默认**。没有 key(只从 env 读)就返回 None(走 demo)。密钥绝不打印。
-fn real_provider(cfg: &Config) -> Option<Arc<dyn LlmProvider>> {
-    let key = std::env::var("RIDGE_API_KEY")
-        .ok()
-        .filter(|k| !k.is_empty())?;
+/// 解析实际生效的 `(provider 类型, model, base_url)`:**env > config > 默认**。
+/// provider 装配与 `/model` 命令共用,保证显示的就是真在用的。
+fn resolve_model_info(cfg: &Config) -> (String, String, String) {
     let kind = std::env::var("RIDGE_PROVIDER")
         .ok()
         .or_else(|| cfg.provider.clone())
@@ -223,17 +242,27 @@ fn real_provider(cfg: &Config) -> Option<Arc<dyn LlmProvider>> {
     let base = std::env::var("RIDGE_BASE_URL")
         .ok()
         .or_else(|| cfg.base_url.clone());
+    let (def_model, def_base) = if kind == "anthropic" {
+        ("claude-sonnet-4-6", "https://api.anthropic.com/v1")
+    } else {
+        ("gpt-4o", "https://api.openai.com/v1")
+    };
+    (
+        kind,
+        model.unwrap_or_else(|| def_model.to_string()),
+        base.unwrap_or_else(|| def_base.to_string()),
+    )
+}
+
+/// 装配真实 provider:没有 key(只从 env 读)就返回 None(走 demo)。密钥绝不打印。
+fn real_provider(cfg: &Config) -> Option<Arc<dyn LlmProvider>> {
+    let key = std::env::var("RIDGE_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())?;
+    let (kind, model, base) = resolve_model_info(cfg);
     match kind.as_str() {
-        "anthropic" => {
-            let base = base.unwrap_or_else(|| "https://api.anthropic.com/v1".to_string());
-            let model = model.unwrap_or_else(|| "claude-sonnet-4-6".to_string());
-            Some(Arc::new(AnthropicProvider::new(base, model, key)))
-        }
-        _ => {
-            let base = base.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-            let model = model.unwrap_or_else(|| "gpt-4o".to_string());
-            Some(Arc::new(OpenAiProvider::new(base, model, key)))
-        }
+        "anthropic" => Some(Arc::new(AnthropicProvider::new(base, model, key))),
+        _ => Some(Arc::new(OpenAiProvider::new(base, model, key))),
     }
 }
 
@@ -256,6 +285,7 @@ async fn run_once(
 
 /// 交互式 REPL:跨轮携带 history,有副作用的工具执行前 stdin 确认。`/exit` `/reset` `/compact` `/help`。
 /// `skip_danger` = true 时用 [`AutoApprove`],工具自动放行、不再 [y/N](像 Claude 的 skip-permissions)。
+#[allow(clippy::too_many_arguments)]
 async fn repl(
     provider: Arc<dyn LlmProvider>,
     mcp: McpTools,
@@ -263,6 +293,7 @@ async fn repl(
     skip_danger: bool,
     budget: usize,
     mut history: Vec<Message>,
+    meta: ReplMeta,
 ) -> anyhow::Result<()> {
     let title = RichOutput::new().with_color(Color::BrightCyan).bold();
     println!(
@@ -306,7 +337,18 @@ async fn repl(
             "" => continue,
             "/exit" | "/quit" => break,
             "/help" => {
-                println!("命令:/exit 退出 · /reset 清空上下文 · /compact 压缩上下文 · /help 本帮助\n直接输入自然语言即为任务。");
+                println!("命令:/exit 退出 · /reset 清空上下文 · /compact 压缩上下文 · /tools 列可用工具 · /model 看当前模型 · /help 本帮助\n输入 @path 引用文件;Ctrl-C 中断任务;直接输入自然语言即为任务。");
+                continue;
+            }
+            "/tools" => {
+                println!("可用工具({}):{}", meta.tools.len(), meta.tools.join(", "));
+                continue;
+            }
+            "/model" => {
+                println!(
+                    "provider={} · model={} · base_url={}",
+                    meta.provider, meta.model, meta.base_url
+                );
                 continue;
             }
             "/reset" => {
