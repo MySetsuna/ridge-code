@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-07-14 · Iteration 06:MCP 接入真实 server + trace + /compact + 通用 verify
+
+- **DoD① 达成(真实第三方 MCP server)**:`mcp` 加 `notify`(补 `notifications/initialized` 握手);`examples/connect.rs` 连真实 `notebooklm-mcp.exe` → **握手 + tools/list 拿到 39 个真实工具**。CLI 加 `RIDGE_MCP_CMD`/`RIDGE_MCP_NAME` 接入。ridge(GLM)一次性任务实测:调 `nlm__notebook_list` → 路由到真实 notebooklm server → trace.json 里有真实笔记本数据(`手搓agent`/`source_count`)。
+- **DoD⑥ trace.json**:每轮写审计(task/approved/steps/tokens/人读轨迹/多轮 history)。
+- **DoD② /compact**:`compact_history` 保留首条+摘要+最近 N;REPL `/compact` 命令。
+- **实测发现 + 修复**:MCP 信息类任务(列笔记本)无 `exit 0`/`passed` 信号 → verify 空转到上限烧 85k token。修:`verify_ok` —— 模型 finish 且**无失败信号**即接受(编码任务仍严卡 exit 0),让 ridge 对开放式任务也通用(像 Claude Code)。
+- `cargo test --workspace` = **40 项全绿**,clippy/fmt 干净。
+- ⚠ 用户的智谱 key 明文在对话里,提醒轮换。
+
 ## 2026-07-14 · Iteration 06 起步:安全硬门槛 —— 危险命令拦截
 
 - NotebookLM 给 Iteration 06 计划 + 6 条 Definition of Done。**对抗评审**:驳回它把 rmcp 当 P0(DoD① 要的是「能调真实 MCP server」不等于「必须 rmcp」);采纳它列的硬门槛「危险命令拦截」为最高优先(便宜、离线可测)。归档 guidance-05。

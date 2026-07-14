@@ -38,6 +38,12 @@ pub struct McpTool {
 #[async_trait::async_trait]
 pub trait McpTransport: Send + Sync {
     async fn request(&self, method: &str, params: Value) -> Result<Value, McpError>;
+
+    /// 发一个**通知**(无 id、无响应)。MCP 握手要求 initialize 后发 `notifications/initialized`。
+    /// 默认空实现(离线假传输不需要)。
+    async fn notify(&self, _method: &str, _params: Value) -> Result<(), McpError> {
+        Ok(())
+    }
 }
 
 /// MCP 客户端:协议逻辑,纯、离线可测。
@@ -63,7 +69,7 @@ impl McpClient {
         format!("{}__{}", self.namespace, tool)
     }
 
-    /// 握手。
+    /// 握手:initialize 请求 + `notifications/initialized` 通知(MCP 规范要求,真实 server 常校验)。
     pub async fn initialize(&self) -> Result<(), McpError> {
         self.transport
             .request(
@@ -74,6 +80,9 @@ impl McpClient {
                     "clientInfo": {"name": "ridge", "version": "0.1.0"}
                 }),
             )
+            .await?;
+        self.transport
+            .notify("notifications/initialized", json!({}))
             .await?;
         Ok(())
     }
@@ -218,6 +227,27 @@ impl McpTransport for StdioTransport {
                 return Ok(v["result"].clone());
             }
         }
+    }
+
+    async fn notify(&self, method: &str, params: Value) -> Result<(), McpError> {
+        use tokio::io::AsyncWriteExt;
+        let mut line = serde_json::to_string(&json!({
+            "jsonrpc": "2.0", "method": method, "params": params
+        }))
+        .map_err(|e| McpError::Transport(e.to_string()))?;
+        line.push('\n');
+        let mut guard = self.io.lock().await;
+        guard
+            .stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| McpError::Transport(e.to_string()))?;
+        guard
+            .stdin
+            .flush()
+            .await
+            .map_err(|e| McpError::Transport(e.to_string()))?;
+        Ok(())
     }
 }
 

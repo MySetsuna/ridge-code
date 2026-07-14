@@ -148,9 +148,28 @@ fn stalled(s: &AgentState) -> bool {
     s.stall >= MAX_STALL
 }
 
-/// 验证器的确定性判据:工具输出里出现客观成功信号(shell `exit 0` 或测试 `passed`)。
+/// 确定性**成功**信号(编码任务:shell `exit 0` 或测试 `passed`)。
 fn tool_output_ok(o: &str) -> bool {
     o.contains("exit 0") || (o.contains("passed") && !o.contains("failed"))
+}
+
+/// 确定性**失败**信号(编译/测试出错、非 0 退出、被拦截/拒绝)。
+fn tool_output_failed(o: &str) -> bool {
+    o.contains("failed")
+        || o.contains("error")
+        || o.contains("BLOCKED")
+        || o.contains("permission denied")
+        || (o.starts_with("exit ") && !o.starts_with("exit 0"))
+}
+
+/// verify 判据(通用 agent):
+/// - 有确定性成功信号(编码任务)→ 通过;
+/// - **模型 finish 且没有失败信号**(开放式/信息类任务,如调 MCP 查数据)→ 接受完成,不空转到回合上限。
+/// 编码任务仍严格卡 `exit 0`;只对「模型自己收尾且无客观失败」放行,兼顾通用性与 maker≠checker。
+fn verify_ok(s: &AgentState) -> bool {
+    let out = s.tool_output.as_deref();
+    out.is_some_and(tool_output_ok)
+        || (s.last_action.as_deref() == Some("finish") && !out.is_some_and(tool_output_failed))
 }
 
 /// 多层独立退出:到回合上限 / 超预算 / 无进展任一命中,循环都该停(loop engineering:停机是设计的一半)。
@@ -270,9 +289,9 @@ pub fn build_agent(
     g.compile()
 }
 
-/// verify 节点(scripted / llm 两条路径共用):独立 checker,只认 [`tool_output_ok`] 的确定性信号。
+/// verify 节点(scripted / llm 两条路径共用):独立 checker,按 [`verify_ok`] 判定。
 async fn verify_node(s: AgentState) -> Result<Patch, Infallible> {
-    let ok = s.tool_output.as_deref().is_some_and(tool_output_ok);
+    let ok = verify_ok(&s);
     let patch = if ok {
         Patch::Batch(vec![
             Patch::Approved(true),
@@ -528,7 +547,7 @@ fn build_core(
             g.add_node("verify", move |s: AgentState| {
                 let reviewer = rv_c.clone();
                 async move {
-                    let det_ok = s.tool_output.as_deref().is_some_and(tool_output_ok);
+                    let det_ok = verify_ok(&s);
                     if !det_ok {
                         return Ok::<_, provider::ProviderError>(Patch::Batch(vec![
                             Patch::Approved(false),
@@ -614,6 +633,36 @@ pub async fn plan(provider: &dyn LlmProvider, task: &str) -> Vec<String> {
         Err(_) => return vec![task.to_string()],
     };
     parse_subtasks(&text).unwrap_or_else(|| vec![task.to_string()])
+}
+
+/// 上下文压缩(`/compact`,DoD②):历史太长时,保留**首条(原始任务)**+ 一条摘要标记 + **最近 `keep` 条**,
+/// 其余压掉。防长会话「上下文腐烂」(Ralph 式,但用确定性截断,不烧一次 LLM)。
+pub fn compact_history(history: Vec<Message>, keep: usize) -> Vec<Message> {
+    if history.len() <= keep + 1 {
+        return history;
+    }
+    let dropped = history.len() - keep - 1;
+    let mut out = Vec::with_capacity(keep + 2);
+    out.push(history[0].clone()); // 原始任务
+    out.push(Message::user(format!(
+        "[上下文已压缩:省略 {dropped} 条早期消息]"
+    )));
+    out.extend(history[history.len() - keep..].iter().cloned());
+    out
+}
+
+/// 写一轮的审计轨迹到 `trace.json`(DoD⑥:客观证据,含工具输出/退出码 + 多轮 history)。密钥不入 trace。
+pub fn write_trace(out: &AgentState, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+    let record = serde_json::json!({
+        "task": out.task,
+        "approved": out.approved,
+        "steps": out.steps,
+        "tokens": out.total_tokens,
+        "trace": out.messages,   // 人读轨迹(含 act 的 exit code / 工具输出)
+        "history": out.history,  // 模型面向多轮(含 role=tool 结果)
+    });
+    let json = serde_json::to_string_pretty(&record).map_err(std::io::Error::other)?;
+    std::fs::write(path, json)
 }
 
 /// 从模型输出里抠出首个 `[` 到末个 `]` 的 JSON 数组(容忍模型包裹的解释文字)。
@@ -999,6 +1048,21 @@ mod tests {
         assert_eq!(subs, vec!["add fn", "write test", "run cargo test"]);
     }
 
+    /// DoD②:/compact 压缩历史 —— 长度显著减少,保留首条(任务)+ 最近 keep 条。
+    #[test]
+    fn compact_history_shrinks_but_keeps_task_and_recent() {
+        let hist: Vec<Message> = (0..10).map(|i| Message::user(format!("m{i}"))).collect();
+        let compacted = compact_history(hist, 4);
+        // 1(首)+ 1(摘要)+ 4(最近) = 6 < 10
+        assert_eq!(compacted.len(), 6);
+        assert_eq!(compacted[0].content, "m0"); // 原始任务保留
+        assert!(compacted[1].content.contains("压缩")); // 摘要标记
+        assert_eq!(compacted.last().unwrap().content, "m9"); // 最近保留
+                                                             // 短历史不动。
+        let short: Vec<Message> = (0..3).map(|i| Message::user(format!("s{i}"))).collect();
+        assert_eq!(compact_history(short.clone(), 4).len(), short.len());
+    }
+
     /// M5:模型没给出可解析的数组 → 降级为单个子任务(绝不返回空)。
     #[tokio::test]
     async fn planner_falls_back_when_unparseable() {
@@ -1009,6 +1073,37 @@ mod tests {
         }]);
         let subs = plan(&provider, "do the thing").await;
         assert_eq!(subs, vec!["do the thing"]);
+    }
+
+    /// 通用性:开放式任务(工具输出无 exit0/passed 也无失败信号)+ 模型 finish → 接受完成,不空转到上限。
+    /// (修复 MCP 信息类任务空转烧 token 的问题。)
+    #[tokio::test]
+    async fn open_ended_finish_accepted_when_no_failure_signal() {
+        use provider::{Completion, ScriptedProvider};
+        let mut path = std::env::temp_dir();
+        path.push("ridge_open_ended.txt");
+        std::fs::write(&path, "neutral content, no success or failure signal").unwrap();
+
+        let scripted = ScriptedProvider::new(vec![
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": path.to_str().unwrap()}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                text: "here is the content".to_string(),
+                ..Default::default()
+            },
+        ]);
+        let app = build_llm_agent(Arc::new(scripted)).unwrap();
+        let out = app.invoke(AgentState::new("read the file")).await.unwrap();
+
+        assert!(out.approved, "模型 finish 且无失败信号 → 接受,不该空转");
+        assert_eq!(out.steps, 2);
+        std::fs::remove_file(&path).ok();
     }
 
     /// 安全硬门槛:危险命令即使走到 execute_tool_call 也被拦下,不执行。

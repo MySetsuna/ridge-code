@@ -2,10 +2,11 @@ use std::io::Write;
 use std::sync::Arc;
 
 use agent::{
-    build_agent, build_llm_agent, build_llm_agent_gated, default_tool, scripted, AgentState,
-    Approver, McpTools,
+    build_agent, build_llm_agent_gated, compact_history, default_tool, resolve_mcp, scripted,
+    write_trace, AgentState, Approver, AutoApprove, McpTools,
 };
 use langgraph::{CompiledGraph, RunConfig, StreamEvent};
+use mcp::{McpClient, StdioTransport};
 use provider::{AnthropicProvider, LlmProvider, Message, OpenAiProvider};
 
 /// ridge —— 编码 agent CLI。
@@ -24,16 +25,42 @@ async fn main() -> anyhow::Result<()> {
         std::env::set_current_dir(dir)?;
     }
 
-    match (real_provider(), task) {
-        (Some(p), Some(t)) => run_once(p, &t).await, // 一次性
-        (Some(p), None) => repl(p).await,            // 交互式
-        (None, _) => {
+    match real_provider() {
+        Some(p) => {
+            let mcp = resolve_configured_mcp().await; // 可选接入 MCP 服务器
+            match task {
+                Some(t) => run_once(p, mcp, &t).await, // 一次性
+                None => repl(p, mcp).await,            // 交互式
+            }
+        }
+        None => {
             eprintln!(
                 "[ridge] 未检测到 RIDGE_API_KEY,跑离线脚本 demo(设置密钥即用真实 LLM / REPL)。\n"
             );
             run_demo().await
         }
     }
+}
+
+/// 按 env 接入 MCP 服务器:`RIDGE_MCP_CMD`(stdio 服务器可执行文件)+ `RIDGE_MCP_NAME`(命名空间)。
+/// 降级不崩:没配 / 起不来 → 空,agent 只用内置工具。
+async fn resolve_configured_mcp() -> McpTools {
+    let cmd = match std::env::var("RIDGE_MCP_CMD") {
+        Ok(c) if !c.is_empty() => c,
+        _ => return McpTools::empty(),
+    };
+    let name = std::env::var("RIDGE_MCP_NAME").unwrap_or_else(|_| "mcp".to_string());
+    let transport = match StdioTransport::spawn(&cmd, &[]) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("[ridge] MCP 启动失败 {cmd}: {e}");
+            return McpTools::empty();
+        }
+    };
+    let client = Arc::new(McpClient::new(name.clone(), Box::new(transport)));
+    let tools = resolve_mcp(vec![client]).await;
+    eprintln!("[ridge] 已接入 MCP `{name}`");
+    tools
 }
 
 /// 解析参数:非 flag 拼成任务(无 → REPL);`--cwd <dir>` 切换工作目录。
@@ -79,19 +106,19 @@ fn real_provider() -> Option<Arc<dyn LlmProvider>> {
     }
 }
 
-/// 一次性任务:一律放行,跑完打印结果。
-async fn run_once(provider: Arc<dyn LlmProvider>, task: &str) -> anyhow::Result<()> {
-    let app = build_llm_agent(provider)?;
+/// 一次性任务:一律放行,跑完写 trace.json + 打印结果。
+async fn run_once(provider: Arc<dyn LlmProvider>, mcp: McpTools, task: &str) -> anyhow::Result<()> {
+    let app = build_llm_agent_gated(provider, mcp, Arc::new(AutoApprove))?;
     let out = run_streamed(&app, AgentState::new(task)).await?;
-    print_report(&out);
+    trace_and_report(&out);
     Ok(())
 }
 
-/// 交互式 REPL:跨轮携带 history,有副作用的工具执行前 stdin 确认。`/exit` `/reset` `/help`。
-async fn repl(provider: Arc<dyn LlmProvider>) -> anyhow::Result<()> {
+/// 交互式 REPL:跨轮携带 history,有副作用的工具执行前 stdin 确认。`/exit` `/reset` `/compact` `/help`。
+async fn repl(provider: Arc<dyn LlmProvider>, mcp: McpTools) -> anyhow::Result<()> {
     println!("ridge REPL —— 输入任务开跑;/help 看命令,/exit 退出。危险操作会先问你 [y/N]。\n");
     let approver: Arc<dyn Approver> = Arc::new(StdinApprover);
-    let app = build_llm_agent_gated(provider, McpTools::empty(), approver)?;
+    let app = build_llm_agent_gated(provider, mcp, approver)?;
     let mut history: Vec<Message> = Vec::new();
 
     loop {
@@ -106,12 +133,18 @@ async fn repl(provider: Arc<dyn LlmProvider>) -> anyhow::Result<()> {
             "" => continue,
             "/exit" | "/quit" => break,
             "/help" => {
-                println!("命令:/exit 退出 · /reset 清空对话上下文 · /help 本帮助\n直接输入自然语言即为任务。");
+                println!("命令:/exit 退出 · /reset 清空上下文 · /compact 压缩上下文 · /help 本帮助\n直接输入自然语言即为任务。");
                 continue;
             }
             "/reset" => {
                 history.clear();
                 println!("(上下文已清空)");
+                continue;
+            }
+            "/compact" => {
+                let before = history.len();
+                history = compact_history(std::mem::take(&mut history), 4);
+                println!("(上下文已压缩:{before} → {} 条)", history.len());
                 continue;
             }
             _ => {}
@@ -123,13 +156,22 @@ async fn repl(provider: Arc<dyn LlmProvider>) -> anyhow::Result<()> {
         match run_streamed(&app, state).await {
             Ok(out) => {
                 history = out.history.clone();
-                print_report(&out);
+                trace_and_report(&out);
             }
             Err(e) => eprintln!("[ridge] 出错:{e}"),
         }
     }
     println!("bye.");
     Ok(())
+}
+
+/// 写审计轨迹 trace.json(best-effort)+ 打印结果。
+fn trace_and_report(out: &AgentState) {
+    match write_trace(out, "trace.json") {
+        Ok(()) => eprintln!("[ridge] 审计轨迹已写 trace.json"),
+        Err(e) => eprintln!("[ridge] 写 trace.json 失败: {e}"),
+    }
+    print_report(out);
 }
 
 /// 跑 agent + 实时把「哪个节点在跑」流式打到 stderr(P2:引擎 StreamEvent)。
