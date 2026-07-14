@@ -9,12 +9,13 @@ use langgraph::{CompiledGraph, RunConfig, StreamEvent};
 use mcp::{McpClient, StdioTransport};
 use provider::{AnthropicProvider, LlmProvider, Message, OpenAiProvider};
 
-/// ridge —— 编码 agent CLI。
+/// ridgecode —— 通用 agent CLI(产品名 RidgeCode)。
 ///
 /// 用法:
-///   ridge                                # 交互式 REPL(有 key);/exit /reset /help
-///   ridge "修复编译错误"                  # 一次性任务
-///   ridge --cwd /path/to/project "..."    # 在目标项目里跑
+///   ridgecode                                # 交互式 REPL(有 key);/exit /reset /help
+///   ridgecode "修复编译错误"                  # 一次性任务
+///   ridgecode --cwd /path/to/project "..."    # 在目标项目里跑
+///   ridgecode --yolo "..."                    # skip-danger:工具自动放行不问 [y/N]
 ///
 /// 配置(环境变量):RIDGE_API_KEY / RIDGE_PROVIDER(anthropic|openai)/ RIDGE_MODEL / RIDGE_BASE_URL
 #[tokio::main]
@@ -36,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
         }
         None => {
             eprintln!(
-                "[ridge] 未检测到 RIDGE_API_KEY,跑离线脚本 demo(设置密钥即用真实 LLM / REPL)。\n"
+                "[ridgecode] 未检测到 RIDGE_API_KEY,跑离线脚本 demo(设置密钥即用真实 LLM / REPL)。\n"
             );
             run_demo().await
         }
@@ -54,13 +55,13 @@ async fn resolve_configured_mcp() -> McpTools {
     let transport = match StdioTransport::spawn(&cmd, &[]) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("[ridge] MCP 启动失败 {cmd}: {e}");
+            eprintln!("[ridgecode] MCP 启动失败 {cmd}: {e}");
             return McpTools::empty();
         }
     };
     let client = Arc::new(McpClient::new(name.clone(), Box::new(transport)));
     let tools = resolve_mcp(vec![client]).await;
-    eprintln!("[ridge] 已接入 MCP `{name}`");
+    eprintln!("[ridgecode] 已接入 MCP `{name}`");
     tools
 }
 
@@ -76,7 +77,7 @@ fn load_configured_skills() -> Vec<Skill> {
     if !skills.is_empty() {
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         eprintln!(
-            "[ridge] 已加载 {} 个 skill:{}",
+            "[ridgecode] 已加载 {} 个 skill:{}",
             skills.len(),
             names.join(", ")
         );
@@ -179,7 +180,7 @@ async fn repl(
     let mut history: Vec<Message> = Vec::new();
 
     loop {
-        print!("ridge> ");
+        print!("ridgecode> ");
         std::io::stdout().flush().ok();
         let mut line = String::new();
         if std::io::stdin().read_line(&mut line)? == 0 {
@@ -215,7 +216,7 @@ async fn repl(
                 history = out.history.clone();
                 trace_and_report(&out);
             }
-            Err(e) => eprintln!("[ridge] 出错:{e}"),
+            Err(e) => eprintln!("[ridgecode] 出错:{e}"),
         }
     }
     println!("bye.");
@@ -225,8 +226,8 @@ async fn repl(
 /// 写审计轨迹 trace.json(best-effort)+ 打印结果。
 fn trace_and_report(out: &AgentState) {
     match write_trace(out, "trace.json") {
-        Ok(()) => eprintln!("[ridge] 审计轨迹已写 trace.json"),
-        Err(e) => eprintln!("[ridge] 写 trace.json 失败: {e}"),
+        Ok(()) => eprintln!("[ridgecode] 审计轨迹已写 trace.json"),
+        Err(e) => eprintln!("[ridgecode] 写 trace.json 失败: {e}"),
     }
     print_report(out);
 }

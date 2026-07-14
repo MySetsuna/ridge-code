@@ -9,7 +9,7 @@ license.workspace = true
 path = "src/lib.rs"
 
 [[bin]]
-name = "ridge-eval"
+name = "ridgecode-eval"
 path = "src/main.rs"
 
 [dependencies]

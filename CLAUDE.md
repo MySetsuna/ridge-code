@@ -6,7 +6,7 @@
 
 ## 这是什么(北极星)
 
-Ridge 是一个**模块化、跨领域可扩展的通用 agent 框架**(单二进制 `ridge`),既能像 Claude Code 写代码,又能做**编程以外**的事。
+RidgeCode 是一个**模块化、跨领域可扩展的通用 agent 框架**(单二进制 `ridgecode`),既能像 Claude Code 写代码,又能做**编程以外**的事。
 **加新能力 = 加一个 MCP server 配置 或 一个 `SKILL.md`,而不是改 Rust 源码。** 四层解耦:
 内核(`langgraph-rs` 引擎)→ 协议(MCP 接万物)→ 知识(声明式 Skills)→ 协作(多智能体 maker-checker)+ 安全(权限门/危险命令拦截,沙箱待做)。详见 `docs/DIRECTION.md`。
 底层赌注不变:agent 的「大脑」是一台**有状态图状态机**,引擎(`langgraph`,不含 LLM)与 agent(`reason/act/verify`)分层。
@@ -18,11 +18,11 @@ cargo build --workspace
 cargo test --workspace              # 6 引擎 + 2 agent + 1 doctest
 cargo test -p langgraph             # 只测引擎
 cargo test -p agent                 # 只测 agent
-cargo run -p agent --bin ridge      # 跑 agent 闭环 demo
+cargo run -p agent --bin ridgecode  # 跑 agent 闭环 demo
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings   # CI 会卡这两个
 ```
 
-⚠️ 二进制名是 **`ridge`**,但它住在 `crates/agent`(package 名 `agent`)。跑 demo 用 `-p agent --bin ridge`。
+⚠️ 产品名 **RidgeCode**,二进制/命令是 **`ridgecode`**,但它住在 `crates/agent`(package 名 `agent`)。跑 demo 用 `-p agent --bin ridgecode`。环境变量前缀仍是 `RIDGE_*`(不改,避免破坏现有配置)。
 
 ## 架构:两层
 

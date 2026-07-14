@@ -1,4 +1,4 @@
-# 跨平台发布:打 `v*` 标签(如 v0.1.0)即为五个目标构建 ridge 单二进制,
+# 跨平台发布:打 `v*` 标签(如 v0.1.0)即为五个目标构建 ridgecode 单二进制,
 # 归档成 .tar.gz(类 Unix)/ .zip(Windows)并上传到对应 GitHub Release。
 name: release
 
@@ -41,10 +41,10 @@ jobs:
       - name: Build and upload
         uses: taiki-e/upload-rust-binary-action@v1
         with:
-          bin: ridge
+          bin: ridgecode
           target: ${{ matrix.target }}
-          # 归档命名:ridge-<target>.tar.gz / .zip
-          archive: ridge-$target
+          # 归档命名:ridgecode-<target>.tar.gz / .zip
+          archive: ridgecode-$target
           tar: unix
           zip: windows
           # 一起打包进归档的附带文件(仓库暂无 LICENSE,加了再补进来)

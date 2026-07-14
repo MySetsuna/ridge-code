@@ -7,7 +7,7 @@
 - **`crates/provider`** —— `LlmProvider` trait + Anthropic/OpenAI 工具调用归一化 + 多轮请求构建 + token 用量 + 真实 HTTP 客户端(传输/归一化解耦)+ 离线 `ScriptedProvider`。
 - **`crates/tools`** —— 真实文件读写 + 跨平台 shell。
 - **`crates/mcp`** —— 最小 MCP 客户端(JSON-RPC:initialize/tools/list/tools/call + `server__tool` 命名空间)+ 可插拔传输。
-- **`crates/agent`** —— ReAct 循环(reason → act → verify),装配成 langgraph 图。二进制 `ridge`。
+- **`crates/agent`** —— ReAct 循环(reason → act → verify),装配成 langgraph 图。二进制 `ridgecode`(产品名 RidgeCode)。
   - 结构化 tool_call 驱动真实工具 + MCP 工具;**maker≠checker**(确定性闸 + 可选独立模型 reviewer 抓作弊);
   - 多层停机:回合上限 / token 预算熔断 / 无进展检测;`plan()` 目标→子任务分解。
 
@@ -17,7 +17,7 @@
 
 ```bash
 cargo test --workspace          # 全部单测(32 项:引擎/provider/tools/mcp/agent + doctest)
-cargo run -p agent --bin ridge  # 跑通 agent 闭环,打印轨迹 + 每个超步的 checkpoint
+cargo run -p agent --bin ridgecode  # 跑通 agent 闭环,打印轨迹 + 每个超步的 checkpoint
 ```
 
 预期输出(节选):
@@ -64,13 +64,13 @@ let out = g.compile()?.invoke(S { n: 0 }).await?; // out.n == 1
 | M4 独立模型 checker(抓作弊) | ✅ |
 | M5 规划器 + 执行(`run_planned` orchestrator-workers) | ✅ |
 | 停机护栏(回合上限 / 预算 / 无进展) | ✅ |
-| 可运行 CLI(`ridge`,接真实 provider + `--cwd`) | ✅ |
+| 可运行 CLI(`ridgecode`,接真实 provider + `--cwd`) | ✅ |
 | Eval harness(`ridge-eval`,批量测成功率 + 成本) | ✅ |
 | 可观测(`tracing` 全链路,`RUST_LOG` 控制) | ✅ |
 
 待做(生产硬化,均在既有接缝后):MCP 真实 stdio 换官方 `rmcp`、子任务 **并行** 编排(引擎 fan-out 已支持)、沙箱隔离(Docker/gVisor/WASM)、流式 TUI(引擎 `StreamEvent` 已就绪)、`bincode` checkpoint。详见 `docs/WORKFLOW.md` 与 `docs/iterations/`。
 
 ```bash
-cargo run -p eval --bin ridge-eval           # 离线 eval demo:每 case PASS/FAIL + 总成功率
-RUST_LOG=langgraph=debug,agent=debug ridge …  # 全链路结构化日志
+cargo run -p eval --bin ridgecode-eval       # 离线 eval demo:每 case PASS/FAIL + 总成功率
+RUST_LOG=langgraph=debug,agent=debug ridgecode …  # 全链路结构化日志
 ```
