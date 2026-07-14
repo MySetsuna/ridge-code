@@ -35,6 +35,29 @@ impl ShellResult {
     }
 }
 
+/// 危险命令拦截:**即使用户批准也拒绝**执行的灾难性命令(无沙箱阶段的安全硬门槛)。
+/// 返回 `Some(原因)` 表示危险。保守的 denylist —— 不求完备,只拦最灾难的那几类,宁可漏拦不误伤日常命令。
+pub fn is_dangerous_command(cmd: &str) -> Option<&'static str> {
+    // 归一化:小写 + 压缩空白,挡住 `rm   -rf    /` 之类的绕过。
+    let c = cmd.to_lowercase();
+    let c: String = c.split_whitespace().collect::<Vec<_>>().join(" ");
+    const DENY: &[(&str, &str)] = &[
+        ("rm -rf /", "递归删除根目录"),
+        ("rm -rf /*", "递归删除根目录"),
+        ("rm -rf ~", "递归删除 home"),
+        ("mkfs", "格式化文件系统"),
+        ("dd of=/dev/", "直写块设备"),
+        (":(){", "fork 炸弹"),
+        ("> /dev/sd", "覆写块设备"),
+        ("chmod -r 777 /", "破坏系统权限"),
+        ("format c:", "格式化 C 盘"),
+        ("del /f /s /q c:", "删空 C 盘"),
+    ];
+    DENY.iter()
+        .find(|(pat, _)| c.contains(pat))
+        .map(|(_, why)| *why)
+}
+
 /// 跨平台执行一条 shell 命令:Windows 走 `cmd /C`,其余走 `sh -c`。
 pub fn run_shell(cmd: &str) -> io::Result<ShellResult> {
     let output = if cfg!(windows) {
@@ -80,5 +103,17 @@ mod tests {
         let out = run_shell("echo ridge").unwrap();
         assert_eq!(out.code, 0);
         assert!(out.stdout.contains("ridge"));
+    }
+
+    #[test]
+    fn dangerous_commands_are_flagged() {
+        assert!(is_dangerous_command("rm -rf /").is_some());
+        assert!(is_dangerous_command("RM   -RF   /").is_some()); // 大小写/空白绕过
+        assert!(is_dangerous_command("sudo mkfs.ext4 /dev/sda1").is_some());
+        assert!(is_dangerous_command(":(){ :|:& };:").is_some());
+        // 日常命令不误伤。
+        assert!(is_dangerous_command("cargo build").is_none());
+        assert!(is_dangerous_command("rm -rf target/debug").is_none());
+        assert!(is_dangerous_command("git status").is_none());
     }
 }

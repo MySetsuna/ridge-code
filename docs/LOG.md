@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-07-14 · Iteration 06 起步:安全硬门槛 —— 危险命令拦截
+
+- NotebookLM 给 Iteration 06 计划 + 6 条 Definition of Done。**对抗评审**:驳回它把 rmcp 当 P0(DoD① 要的是「能调真实 MCP server」不等于「必须 rmcp」);采纳它列的硬门槛「危险命令拦截」为最高优先(便宜、离线可测)。归档 guidance-05。
+- **P0 危险命令拦截**:`tools::is_dangerous_command`(denylist:`rm -rf /`/`mkfs`/fork 炸弹/`dd of=/dev/`/`format c:` 等,归一化大小写+空白防绕过)+ `execute_tool_call` 强制拦截——**即使用户批准也拒绝**。日常命令(`cargo build`/`rm -rf target/debug`)不误伤。
+- DoD 现状:REPL/多轮/权限门/role=tool/危险拦截/serde 检查点 = ✅;待补:trace.json 审计、/compact、真实 MCP server 验证。
+- `cargo test --workspace` = **39 项全绿**(agent 16 + tools 4 + …),clippy/fmt 干净。
+
 ## 2026-07-14 · Iteration 05:变成「像 Claude Code 的 CLI」(REPL + 流式 + 权限门)
 
 - **P0a** provider 剥 `<think>` 标签(实测 GLM 会漏 `</think>` 进 content)。

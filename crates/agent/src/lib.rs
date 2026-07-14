@@ -313,10 +313,17 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
 pub fn execute_tool_call(call: &ToolCall) -> String {
     let arg = |k: &str| call.arguments.get(k).and_then(|v| v.as_str()).unwrap_or("");
     match call.name.as_str() {
-        "run_shell" => match tools::run_shell(arg("cmd")) {
-            Ok(r) => format!("exit {}: {}{}", r.code, r.stdout.trim(), r.stderr.trim()),
-            Err(e) => format!("shell error: {e}"),
-        },
+        "run_shell" => {
+            let cmd = arg("cmd");
+            // 危险命令拦截:即使用户批准也拒绝(无沙箱阶段的安全硬门槛)。
+            if let Some(why) = tools::is_dangerous_command(cmd) {
+                return format!("BLOCKED (dangerous: {why}) —— 拒绝执行 `{cmd}`");
+            }
+            match tools::run_shell(cmd) {
+                Ok(r) => format!("exit {}: {}{}", r.code, r.stdout.trim(), r.stderr.trim()),
+                Err(e) => format!("shell error: {e}"),
+            }
+        }
         "write_file" => {
             let contents = arg("contents");
             match tools::write_file(arg("path"), contents) {
@@ -1002,6 +1009,18 @@ mod tests {
         }]);
         let subs = plan(&provider, "do the thing").await;
         assert_eq!(subs, vec!["do the thing"]);
+    }
+
+    /// 安全硬门槛:危险命令即使走到 execute_tool_call 也被拦下,不执行。
+    #[test]
+    fn dangerous_shell_command_is_blocked() {
+        let call = ToolCall {
+            id: "x".to_string(),
+            name: "run_shell".to_string(),
+            arguments: serde_json::json!({"cmd": "rm -rf /"}),
+        };
+        let obs = execute_tool_call(&call);
+        assert!(obs.starts_with("BLOCKED"), "{obs}");
     }
 
     /// P3 权限门:AutoDeny → 有副作用的工具不执行,观察为 permission denied,拿不到成功信号。
