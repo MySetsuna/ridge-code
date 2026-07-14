@@ -37,6 +37,84 @@ pub fn edit_file(path: impl AsRef<Path>, old: &str, new: &str) -> io::Result<()>
     }
 }
 
+/// 批量编辑里的一处:某文件的一次唯一匹配替换(同 [`edit_file`] 语义)。
+#[derive(Debug, Clone)]
+pub struct Edit {
+    pub path: String,
+    pub old: String,
+    pub new: String,
+}
+
+impl Edit {
+    pub fn new(path: impl Into<String>, old: impl Into<String>, new: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            old: old.into(),
+            new: new.into(),
+        }
+    }
+}
+
+/// 跨文件**原子**批量编辑:先把所有编辑在内存里校验 + 应用(每处唯一匹配,同文件按序叠加),
+/// **全部通过才逐个落盘**;写盘中途失败 → 回滚已写的文件。返回改动的文件数。
+/// 这让 agent 一次改多处/多文件、只确认一份汇总 diff、要么全成要么全不动(不留半成品破坏编译)。
+/// ponytail: 回滚靠重写原文,非事务级;极端并发/掉电下仍可能不一致 —— 单机 agent 场景够用。
+pub fn apply_edits(edits: &[Edit]) -> Result<usize, String> {
+    use std::collections::BTreeMap;
+    // 涉及的每个文件读一次原文。
+    let mut content: BTreeMap<&str, String> = BTreeMap::new();
+    for e in edits {
+        if !content.contains_key(e.path.as_str()) {
+            let text = read_file(&e.path).map_err(|err| format!("读 {} 失败: {err}", e.path))?;
+            content.insert(&e.path, text);
+        }
+    }
+    let originals = content.clone();
+    // 按序把每处编辑叠加到对应文件内容(同文件多处 = 顺序 apply)。全体校验唯一匹配。
+    for e in edits {
+        let c = content.get_mut(e.path.as_str()).unwrap();
+        match c.matches(&e.old).count() {
+            1 => *c = c.replacen(&e.old, &e.new, 1),
+            0 => return Err(format!("{}: old_string 未找到", e.path)),
+            n => return Err(format!("{}: old_string 匹配 {n} 处,需唯一", e.path)),
+        }
+    }
+    // 全 OK → 落盘;任一写失败 → 回滚已写的,报错。
+    let mut written: Vec<&str> = Vec::new();
+    for (path, text) in &content {
+        if let Err(err) = write_file(path, text) {
+            for wp in &written {
+                let _ = write_file(wp, &originals[wp]);
+            }
+            return Err(format!(
+                "写 {path} 失败: {err};已回滚 {} 个文件",
+                written.len()
+            ));
+        }
+        written.push(path);
+    }
+    Ok(content.len())
+}
+
+/// 把一批编辑渲染成**汇总 diff**(按文件分组,每处 `-` 旧 / `+` 新),给权限门一次确认。
+pub fn edits_diff(edits: &[Edit]) -> String {
+    let mut s = String::new();
+    let mut last_path = "";
+    for e in edits {
+        if e.path != last_path {
+            s.push_str(&format!("--- {}\n", e.path));
+            last_path = &e.path;
+        }
+        for l in e.old.lines() {
+            s.push_str(&format!("  - {l}\n"));
+        }
+        for l in e.new.lines() {
+            s.push_str(&format!("  + {l}\n"));
+        }
+    }
+    s
+}
+
 /// 读文件的一段:从第 `offset` 行(1 起)读至多 `limit` 行。大文件不必整读,省上下文。
 pub fn read_file_range(path: impl AsRef<Path>, offset: usize, limit: usize) -> io::Result<String> {
     let content = read_file(path)?;
@@ -222,6 +300,66 @@ mod tests {
         assert!(edit_file(&path, "dup", "x").is_err()); // 2 处 → 不唯一
         assert_eq!(read_file(&path).unwrap(), "dup\ndup\n"); // 报错时原文不动
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn apply_edits_multi_file_atomic() {
+        let dir = std::env::temp_dir().join("ridge_batch_edit");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.rs");
+        let b = dir.join("b.rs");
+        write_file(&a, "let x = 1;\n").unwrap();
+        write_file(&b, "let y = 2;\n").unwrap();
+
+        // 跨 2 文件各改一处 → 都生效,返回 2。
+        let edits = vec![
+            Edit::new(a.to_str().unwrap(), "let x = 1;", "let x = 10;"),
+            Edit::new(b.to_str().unwrap(), "let y = 2;", "let y = 20;"),
+        ];
+        assert_eq!(apply_edits(&edits).unwrap(), 2);
+        assert_eq!(read_file(&a).unwrap(), "let x = 10;\n");
+        assert_eq!(read_file(&b).unwrap(), "let y = 20;\n");
+
+        // 原子性:一处 old 不存在 → 整批不落盘,两文件都不变。
+        let bad = vec![
+            Edit::new(a.to_str().unwrap(), "let x = 10;", "let x = 99;"),
+            Edit::new(b.to_str().unwrap(), "MISSING", "nope"),
+        ];
+        assert!(apply_edits(&bad).is_err());
+        assert_eq!(
+            read_file(&a).unwrap(),
+            "let x = 10;\n",
+            "失败批次不得改动任何文件"
+        );
+        assert_eq!(read_file(&b).unwrap(), "let y = 20;\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_edits_same_file_sequential() {
+        let mut path = std::env::temp_dir();
+        path.push("ridge_batch_same.rs");
+        write_file(&path, "a\nb\n").unwrap();
+        let edits = vec![
+            Edit::new(path.to_str().unwrap(), "a", "AA"),
+            Edit::new(path.to_str().unwrap(), "b", "BB"),
+        ];
+        assert_eq!(apply_edits(&edits).unwrap(), 1, "同文件 2 处 = 1 个文件");
+        assert_eq!(read_file(&path).unwrap(), "AA\nBB\n");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn edits_diff_renders_grouped_hunks() {
+        let edits = vec![
+            Edit::new("x.rs", "old1", "new1"),
+            Edit::new("x.rs", "old2", "new2"),
+        ];
+        let d = edits_diff(&edits);
+        assert!(d.contains("--- x.rs"));
+        assert!(d.contains("- old1") && d.contains("+ new1") && d.contains("- old2"));
+        assert_eq!(d.matches("--- x.rs").count(), 1, "同文件只出一次文件头");
     }
 
     #[test]

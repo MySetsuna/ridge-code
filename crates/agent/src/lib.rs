@@ -240,6 +240,14 @@ pub fn preview_call(call: &ToolCall) -> String {
                 c.len()
             )
         }
+        "apply_edits" => {
+            let edits = parse_edits(call);
+            format!(
+                "批量编辑 {} 处:\n{}",
+                edits.len(),
+                tools::edits_diff(&edits)
+            )
+        }
         "run_shell" => arg("cmd").to_string(),
         _ => call.arguments.to_string(),
     }
@@ -547,6 +555,11 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
             schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"]}),
         },
         ToolSpec {
+            name: "apply_edits".to_string(),
+            description: "**跨文件批量**精准编辑:一次给多处 {path, old_string, new_string},汇总成一份 diff 一次确认、**原子应用**(全成或全不改,不留半成品破坏编译)。重构/多文件改动用它,省得逐个 edit_file 反复确认".to_string(),
+            schema: serde_json::json!({"type":"object","properties":{"edits":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"]}}},"required":["edits"]}),
+        },
+        ToolSpec {
             name: "read_file".to_string(),
             description: "读取文件。可选 offset(起始行,1 起)+ limit(行数)只读一段,大文件别整读".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}),
@@ -567,6 +580,23 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
             schema: serde_json::json!({"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}),
         },
     ]
+}
+
+/// 从 `apply_edits` 的参数里抽出 `edits` 数组 → [`tools::Edit`] 列表(字段缺失→跳过)。
+fn parse_edits(call: &ToolCall) -> Vec<tools::Edit> {
+    let Some(arr) = call.arguments.get("edits").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|e| {
+            let s = |k: &str| e.get(k).and_then(|v| v.as_str());
+            Some(tools::Edit::new(
+                s("path")?,
+                s("old_string")?,
+                s("new_string")?,
+            ))
+        })
+        .collect()
 }
 
 /// 执行一个结构化工具调用,返回给模型看的观察结果(observation)。用真实的 `tools` crate 干活。
@@ -595,6 +625,16 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
             Ok(()) => format!("edited {}", arg("path")),
             Err(e) => format!("edit error: {e}"),
         },
+        "apply_edits" => {
+            let edits = parse_edits(call);
+            if edits.is_empty() {
+                return "apply_edits error: 缺少 edits".to_string();
+            }
+            match tools::apply_edits(&edits) {
+                Ok(n) => format!("applied {n} 个文件的批量编辑"),
+                Err(e) => format!("apply_edits error: {e}"),
+            }
+        }
         "read_file" => {
             let num = |k: &str| call.arguments.get(k).and_then(|v| v.as_u64());
             let (off, lim) = (num("offset"), num("limit"));
@@ -1122,6 +1162,38 @@ mod tests {
         assert!(obs.starts_with("edited"), "{obs}");
         assert_eq!(tools::read_file(&path).unwrap(), "let n = 99;\n");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// 多文件批量编辑:一个 apply_edits 调用改 2 个文件,原子生效;preview 是一份汇总 diff。
+    #[test]
+    fn apply_edits_batches_multiple_files() {
+        let dir = std::env::temp_dir().join("ridge_agent_batch");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        tools::write_file(&a, "one\n").unwrap();
+        tools::write_file(&b, "two\n").unwrap();
+        let call = ToolCall {
+            id: "b".to_string(),
+            name: "apply_edits".to_string(),
+            arguments: serde_json::json!({"edits": [
+                {"path": a.to_str().unwrap(), "old_string": "one", "new_string": "1"},
+                {"path": b.to_str().unwrap(), "old_string": "two", "new_string": "2"},
+            ]}),
+        };
+        // preview:一份汇总 diff,一次确认。
+        let p = preview_call(&call);
+        assert!(
+            p.contains("批量编辑 2 处") && p.contains("- one") && p.contains("+ 2"),
+            "{p}"
+        );
+        // 执行:两文件都改。
+        let obs = execute_tool_call(&call);
+        assert!(obs.contains("applied 2"), "{obs}");
+        assert_eq!(tools::read_file(&a).unwrap(), "1\n");
+        assert_eq!(tools::read_file(&b).unwrap(), "2\n");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 用户交互:权限门看到的是**diff 预览**而非生 JSON —— 用户看着改动批准。
