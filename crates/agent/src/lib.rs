@@ -133,9 +133,57 @@ impl Approver for AutoDeny {
     }
 }
 
-/// 只读工具不需要批准(read_file / search 不碰外部世界)。
+/// 只读工具不需要批准(read_file / search 只读本地;web_search 只查公共搜索引擎)。
 fn needs_approval(tool: &str) -> bool {
-    !matches!(tool, "read_file" | "search")
+    !matches!(tool, "read_file" | "search" | "web_search")
+}
+
+/// web_search 的观察结果:懒探测一次网络环境(缓存)→ 选引擎 → 搜 → 排版给模型看。
+/// `fetch`/`net` 从 [`build_core`] 注入,测试可用假抓取器。
+async fn web_search_obs(
+    fetch: &dyn provider::search::WebFetch,
+    net: &std::sync::OnceLock<provider::search::NetEnv>,
+    call: &ToolCall,
+) -> String {
+    use provider::search::{detect_net, engine_for, web_search, NetEnv};
+    let query = call
+        .arguments
+        .get("query")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if query.is_empty() {
+        return "web_search error: 缺少 query".to_string();
+    }
+    // 网络环境只探一次,整个会话复用(ponytail: 进程级缓存;网络切换需重启)。
+    let env = match net.get() {
+        Some(e) => *e,
+        None => {
+            let e = detect_net(fetch).await;
+            let _ = net.set(e);
+            e
+        }
+    };
+    let label = match env {
+        NetEnv::International => "直连国际",
+        NetEnv::Restricted => "受限(GFW 内)",
+    };
+    match web_search(fetch, query, env).await {
+        Ok(rs) if rs.is_empty() => format!("网络:{label} · 引擎:{} · (无结果)", engine_for(env)),
+        Ok(rs) => {
+            let mut s = format!("网络:{label} · 引擎:{}\n", engine_for(env));
+            for (i, r) in rs.iter().enumerate() {
+                s.push_str(&format!(
+                    "{}. {} — {}\n   {}\n",
+                    i + 1,
+                    r.title,
+                    r.url,
+                    r.snippet
+                ));
+            }
+            s
+        }
+        Err(e) => format!("web_search error: {e}"),
+    }
 }
 
 /// 给权限门一个**人类可读的预览**,而非生糊 JSON:让用户「看着 diff 批准」而非盲批。
@@ -440,6 +488,11 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
             description: "在目录树下按文件名 glob(如 *.rs)搜含 pattern 子串的行,返回 路径:行号:内容。找代码/定位用它,别 run_shell grep(不可移植)".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"}},"required":["pattern"]}),
         },
+        ToolSpec {
+            name: "web_search".to_string(),
+            description: "联网搜索:自动探测网络环境(能否直连国际网络/是否在 GFW 内)并据此选引擎(直连→DuckDuckGo,受限→Bing 中国版),返回标题/链接/摘要。查实时信息或外部资料用它。注意:query 会发给外部搜索引擎".to_string(),
+            schema: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+        },
     ]
 }
 
@@ -662,11 +715,21 @@ fn build_core(
         }
     });
 
+    // web_search 依赖:真实抓取器 + 网络环境缓存(整会话懒探测一次)。
+    let fetch: Arc<dyn provider::search::WebFetch> =
+        Arc::new(provider::search::ReqwestFetch::new());
+    let net: Arc<std::sync::OnceLock<provider::search::NetEnv>> =
+        Arc::new(std::sync::OnceLock::new());
+
     let router_c = router.clone();
     let approver_c = approver.clone();
+    let fetch_c = fetch.clone();
+    let net_c = net.clone();
     g.add_node("act", move |s: AgentState| {
         let router = router_c.clone();
         let approver = approver_c.clone();
+        let fetch = fetch_c.clone();
+        let net = net_c.clone();
         async move {
             let patch = match &s.pending_call {
                 Some(call) => {
@@ -675,6 +738,8 @@ fn build_core(
                         && !approver.approve(&call.name, &preview_call(call))
                     {
                         format!("permission denied by user: {}", call.name)
+                    } else if call.name == "web_search" {
+                        web_search_obs(fetch.as_ref(), &net, call).await
                     } else if let Some((client, raw)) = router.get(&call.name) {
                         // 命名空间命中 → 路由到 MCP 服务器。
                         match client.call_tool(raw, call.arguments.clone()).await {
@@ -999,14 +1064,64 @@ mod tests {
         assert!(p.contains("- old") && p.contains("+ new"), "diff 形态: {p}");
     }
 
-    /// 只读工具(read_file / search)不走权限门;有副作用的走。
+    /// 只读工具(read_file / search / web_search)不走权限门;有副作用的走。
     #[test]
     fn readonly_tools_skip_approval() {
         assert!(!needs_approval("read_file"));
         assert!(!needs_approval("search"));
+        assert!(!needs_approval("web_search"));
         assert!(needs_approval("edit_file"));
         assert!(needs_approval("write_file"));
         assert!(needs_approval("run_shell"));
+    }
+
+    /// web_search:探测网络环境 → 选引擎 → 排版结果,全程走假抓取器(不联网)。
+    #[tokio::test]
+    async fn web_search_obs_detects_env_and_picks_engine() {
+        use provider::search::{NetEnv, WebFetch};
+
+        // 探针失败 → Restricted → 该用 bing-cn;返回一条结果。
+        struct RestrictedFetch;
+        #[async_trait::async_trait]
+        impl WebFetch for RestrictedFetch {
+            async fn get_text(&self, url: &str) -> Result<String, provider::ProviderError> {
+                if url.contains("generate_204") {
+                    return Err("blocked".into());
+                }
+                assert!(url.contains("bing"), "受限环境应打 bing,实际:{url}");
+                Ok(r#"<li class="b_algo"><h2><a href="https://ex.com/">标题</a></h2><p>摘要文本</p></li>"#.to_string())
+            }
+        }
+        let net = std::sync::OnceLock::new();
+        let call = ToolCall {
+            id: "w".to_string(),
+            name: "web_search".to_string(),
+            arguments: serde_json::json!({"query": "rust 教程"}),
+        };
+        let obs = web_search_obs(&RestrictedFetch, &net, &call).await;
+        assert!(obs.contains("受限(GFW 内)"), "{obs}");
+        assert!(obs.contains("bing-cn"), "{obs}");
+        assert!(
+            obs.contains("标题") && obs.contains("https://ex.com/"),
+            "{obs}"
+        );
+        assert_eq!(net.get(), Some(&NetEnv::Restricted)); // 探测结果被缓存
+
+        // 缺 query → 明确报错,不打网络。
+        struct NeverFetch;
+        #[async_trait::async_trait]
+        impl WebFetch for NeverFetch {
+            async fn get_text(&self, _url: &str) -> Result<String, provider::ProviderError> {
+                panic!("不该联网");
+            }
+        }
+        let bad = ToolCall {
+            id: "w2".to_string(),
+            name: "web_search".to_string(),
+            arguments: serde_json::json!({}),
+        };
+        let obs = web_search_obs(&NeverFetch, &std::sync::OnceLock::new(), &bad).await;
+        assert!(obs.contains("缺少 query"), "{obs}");
     }
 
     /// P1 端到端:provider 吐结构化 tool_call → act 调**真实** shell → verify 认真实 `exit 0` → approved。

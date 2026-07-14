@@ -392,6 +392,326 @@ pub mod http {
     }
 }
 
+/// Web 搜索 —— 先**探测网络环境**(能否直连国际网络 / 是否在 GFW 内),据此**换搜索引擎**:
+/// 直连 → DuckDuckGo;受限(墙内)→ Bing 中国版(`cn.bing.com`,墙内可达且静态 HTML 好解析,
+/// 而 DuckDuckGo/Google 在墙内不可达)。HTTP 只走 [`WebFetch`] 接缝,测试注入假抓取器 → 不联网可测。
+pub mod search {
+    use super::ProviderError;
+    use std::time::Duration;
+
+    /// 抓文本(GET)的最小接缝:网页/JSON 都走它,便于测试替身注入。
+    #[async_trait::async_trait]
+    pub trait WebFetch: Send + Sync {
+        async fn get_text(&self, url: &str) -> Result<String, ProviderError>;
+    }
+
+    /// 生产用真实抓取器(reqwest,带浏览器 UA + 超时,躲最基础的反爬、防卡死)。
+    pub struct ReqwestFetch {
+        client: reqwest::Client,
+    }
+    impl ReqwestFetch {
+        pub fn new() -> Self {
+            let client = reqwest::Client::builder()
+                .user_agent(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                     (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+                )
+                .timeout(Duration::from_secs(15))
+                .build()
+                .unwrap_or_default();
+            Self { client }
+        }
+    }
+    impl Default for ReqwestFetch {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+    #[async_trait::async_trait]
+    impl WebFetch for ReqwestFetch {
+        async fn get_text(&self, url: &str) -> Result<String, ProviderError> {
+            let resp = self.client.get(url).send().await?;
+            let status = resp.status();
+            let text = resp.text().await?;
+            if !status.is_success() {
+                return Err(format!("http {status}").into());
+            }
+            Ok(text)
+        }
+    }
+
+    /// 网络环境。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum NetEnv {
+        /// 能直连国际网络(裸连或带 VPN/代理)。
+        International,
+        /// 受限(GFW 内,连不到国际端点)。
+        Restricted,
+    }
+
+    /// 探测:能 GET 通 Google 的 `generate_204`(小而快、返回 204)就算能直连国际网络。
+    /// ponytail: 单探针启发式。墙内带 VPN → 判 International(也确实该用国际引擎,符合意图);
+    /// 探针超时/被限速 → 保守判 Restricted。升级路径:多探针并发取快者 + captive-portal 甄别。
+    pub async fn detect_net(fetch: &dyn WebFetch) -> NetEnv {
+        match fetch.get_text("https://www.google.com/generate_204").await {
+            Ok(_) => NetEnv::International,
+            Err(_) => NetEnv::Restricted,
+        }
+    }
+
+    /// 该环境用哪个搜索引擎(展示/审计用)。
+    pub fn engine_for(env: NetEnv) -> &'static str {
+        match env {
+            NetEnv::International => "duckduckgo",
+            NetEnv::Restricted => "bing-cn",
+        }
+    }
+
+    /// 一条搜索结果。
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct SearchResult {
+        pub title: String,
+        pub url: String,
+        pub snippet: String,
+    }
+
+    /// 搜索:按 `env` 选引擎 → 构造 URL → GET → 解析 → 返回结果(已裁到 top 8)。
+    /// ponytail: 无 key 抓 HTML,脆弱(引擎改版即失效);工业级升级路径 = 接 API key 后端
+    /// (Brave/Serper/Tavily,env 配 key)。本层留好 [`WebFetch`] 接缝,换后端不动上层。
+    pub async fn web_search(
+        fetch: &dyn WebFetch,
+        query: &str,
+        env: NetEnv,
+    ) -> Result<Vec<SearchResult>, ProviderError> {
+        let q = urlencode(query);
+        let (url, parse): (String, fn(&str) -> Vec<SearchResult>) = match env {
+            NetEnv::International => (
+                format!("https://html.duckduckgo.com/html/?q={q}"),
+                parse_duckduckgo,
+            ),
+            NetEnv::Restricted => (format!("https://cn.bing.com/search?q={q}"), parse_bing),
+        };
+        let html = fetch.get_text(&url).await?;
+        let mut results = parse(&html);
+        results.truncate(8);
+        Ok(results)
+    }
+
+    /// 解析 DuckDuckGo html 端点:结果锚点 `class="result__a"` + 摘要 `class="result__snippet"`。
+    fn parse_duckduckgo(html: &str) -> Vec<SearchResult> {
+        let mut out = Vec::new();
+        for chunk in html.split("class=\"result__a\"").skip(1) {
+            // chunk 形如: ` href="//duckduckgo.com/l/?uddg=...">Title</a> ... result__snippet ...>Snippet</a>`
+            let href = attr(chunk, "href=\"").unwrap_or_default();
+            let title = between(chunk, ">", "</a>")
+                .map(strip_tags)
+                .unwrap_or_default();
+            let url = clean_ddg_url(&href);
+            let snippet = chunk
+                .find("result__snippet")
+                .and_then(|p| between(&chunk[p..], ">", "</a>"))
+                .map(strip_tags)
+                .unwrap_or_default();
+            if !title.is_empty() && !url.is_empty() {
+                out.push(SearchResult {
+                    title,
+                    url,
+                    snippet,
+                });
+            }
+        }
+        out
+    }
+
+    /// 解析 Bing 静态 HTML:每条结果 `<li class="b_algo">`,标题在 `<h2><a href>`,摘要在 `<p>`。
+    fn parse_bing(html: &str) -> Vec<SearchResult> {
+        let mut out = Vec::new();
+        for chunk in html.split("class=\"b_algo\"").skip(1) {
+            let Some(h2) = chunk.find("<h2") else {
+                continue;
+            };
+            let url = attr(&chunk[h2..], "href=\"").unwrap_or_default();
+            let title = between(&chunk[h2..], ">", "</a>")
+                .map(strip_tags)
+                .unwrap_or_default();
+            let snippet = chunk
+                .find("<p")
+                .and_then(|p| between(&chunk[p..], ">", "</p>"))
+                .map(strip_tags)
+                .unwrap_or_default();
+            if !title.is_empty() && !url.is_empty() {
+                out.push(SearchResult {
+                    title,
+                    url,
+                    snippet,
+                });
+            }
+        }
+        out
+    }
+
+    /// 取 `hay` 中 `start` 之后到 `end` 之前的片段(找不到 → None)。
+    fn between<'a>(hay: &'a str, start: &str, end: &str) -> Option<&'a str> {
+        let i = hay.find(start)? + start.len();
+        let rest = &hay[i..];
+        let j = rest.find(end)?;
+        Some(&rest[..j])
+    }
+
+    /// 取 `key`(如 `href="`)后到下一个 `"` 之前的属性值。
+    fn attr(hay: &str, key: &str) -> Option<String> {
+        between(hay, key, "\"").map(|s| s.to_string())
+    }
+
+    /// DuckDuckGo 的 href 是跳转链接 `//duckduckgo.com/l/?uddg=<编码真实 URL>&rut=...` —— 解出真实 URL。
+    fn clean_ddg_url(href: &str) -> String {
+        let h = href.replace("&amp;", "&");
+        if let Some(v) = h.split("uddg=").nth(1) {
+            return percent_decode(v.split('&').next().unwrap_or(v));
+        }
+        if let Some(rest) = h.strip_prefix("//") {
+            return format!("https://{rest}");
+        }
+        h
+    }
+
+    /// 去掉 `<...>` 标签 + 解一点常见 HTML 实体。ponytail: 非完整 HTML 解析,够抽标题/摘要用。
+    fn strip_tags(s: &str) -> String {
+        let mut out = String::new();
+        let mut in_tag = false;
+        for c in s.chars() {
+            match c {
+                '<' => in_tag = true,
+                '>' => in_tag = false,
+                _ if !in_tag => out.push(c),
+                _ => {}
+            }
+        }
+        out.replace("&amp;", "&")
+            .replace("&#39;", "'")
+            .replace("&quot;", "\"")
+            .replace("&nbsp;", " ")
+            .trim()
+            .to_string()
+    }
+
+    /// 极简 percent-encode(RFC3986 unreserved 之外全转义)。
+    fn urlencode(s: &str) -> String {
+        let mut out = String::new();
+        for b in s.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(b as char)
+                }
+                b' ' => out.push_str("%20"),
+                _ => out.push_str(&format!("%{b:02X}")),
+            }
+        }
+        out
+    }
+
+    /// 极简 percent-decode(`%XX` → 字节,`+` → 空格)。
+    fn percent_decode(s: &str) -> String {
+        let bytes = s.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                if let Some(b) = std::str::from_utf8(&bytes[i + 1..i + 3])
+                    .ok()
+                    .and_then(|h| u8::from_str_radix(h, 16).ok())
+                {
+                    out.push(b);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// 记录被请求的 URL、按 URL 回不同 HTML 的假抓取器(不联网)。
+        struct FakeFetch {
+            duck: String,
+            bing: String,
+            probe_ok: bool,
+        }
+        #[async_trait::async_trait]
+        impl WebFetch for FakeFetch {
+            async fn get_text(&self, url: &str) -> Result<String, ProviderError> {
+                if url.contains("generate_204") {
+                    return if self.probe_ok {
+                        Ok(String::new())
+                    } else {
+                        Err("blocked".into())
+                    };
+                }
+                if url.contains("duckduckgo") {
+                    Ok(self.duck.clone())
+                } else if url.contains("bing") {
+                    Ok(self.bing.clone())
+                } else {
+                    Err("unexpected url".into())
+                }
+            }
+        }
+
+        fn fake() -> FakeFetch {
+            FakeFetch {
+                duck: r#"<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.rust-lang.org%2F&amp;rut=x">Rust 语言</a>
+                    <a class="result__snippet" href="//x">A language empowering everyone.</a>"#.to_string(),
+                bing: r#"<li class="b_algo"><h2><a href="https://doc.rust-lang.org/book/">The Rust Book</a></h2><p class="b_lineclamp2">学 Rust 的书。</p></li>"#.to_string(),
+                probe_ok: true,
+            }
+        }
+
+        #[tokio::test]
+        async fn detect_net_reads_probe() {
+            let mut f = fake();
+            f.probe_ok = true;
+            assert_eq!(detect_net(&f).await, NetEnv::International);
+            f.probe_ok = false;
+            assert_eq!(detect_net(&f).await, NetEnv::Restricted);
+        }
+
+        #[tokio::test]
+        async fn international_uses_duckduckgo_and_decodes_url() {
+            let r = web_search(&fake(), "rust 语言", NetEnv::International)
+                .await
+                .unwrap();
+            assert_eq!(r.len(), 1);
+            assert_eq!(r[0].title, "Rust 语言");
+            assert_eq!(r[0].url, "https://www.rust-lang.org/"); // uddg 解码
+            assert!(r[0].snippet.contains("empowering"));
+        }
+
+        #[tokio::test]
+        async fn restricted_uses_bing() {
+            let r = web_search(&fake(), "rust", NetEnv::Restricted)
+                .await
+                .unwrap();
+            assert_eq!(r.len(), 1);
+            assert_eq!(r[0].title, "The Rust Book");
+            assert_eq!(r[0].url, "https://doc.rust-lang.org/book/");
+            assert!(r[0].snippet.contains("Rust"));
+        }
+
+        #[test]
+        fn urlencode_and_decode_roundtrip() {
+            assert_eq!(urlencode("a b&c"), "a%20b%26c");
+            assert_eq!(percent_decode("https%3A%2F%2Fx.com%2F"), "https://x.com/");
+            assert_eq!(engine_for(NetEnv::International), "duckduckgo");
+            assert_eq!(engine_for(NetEnv::Restricted), "bing-cn");
+        }
+    }
+}
+
 use http::{HttpClient, ReqwestClient};
 use std::sync::Arc;
 
