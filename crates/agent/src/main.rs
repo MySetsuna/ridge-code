@@ -2,9 +2,9 @@ use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 
 use agent::{
-    build_agent, build_llm_agent_full, compact_history, default_tool, load_skills, resolve_mcp,
-    scripted, write_trace, AgentState, Approver, AutoApprove, Color, Config, McpTools, RichOutput,
-    Skill,
+    build_agent, build_llm_agent_full, compact_history, default_tool, load_skills, null_token_bus,
+    resolve_mcp, scripted, write_trace, AgentState, Approver, AutoApprove, Color, Config, McpTools,
+    RichOutput, Skill, TokenBus,
 };
 use langgraph::{CompiledGraph, RunConfig, StreamEvent};
 use mcp::{McpClient, StdioTransport};
@@ -214,8 +214,9 @@ async fn run_once(
     task: &str,
     budget: usize,
 ) -> anyhow::Result<()> {
-    let app = build_llm_agent_full(provider, mcp, Arc::new(AutoApprove), skills)?;
-    let out = run_streamed(&app, AgentState::new(task).with_budget(budget)).await?;
+    let bus = null_token_bus();
+    let app = build_llm_agent_full(provider, mcp, Arc::new(AutoApprove), skills, bus.clone())?;
+    let out = run_streamed(&app, AgentState::new(task).with_budget(budget), &bus).await?;
     trace_and_report(&out);
     Ok(())
 }
@@ -257,7 +258,8 @@ async fn repl(
         Arc::new(StdinApprover)
     };
     println!();
-    let app = build_llm_agent_full(provider, mcp, approver, skills)?;
+    let bus = null_token_bus(); // 逐字流式总线:REPL 每回合注册 sender
+    let app = build_llm_agent_full(provider, mcp, approver, skills, bus.clone())?;
 
     loop {
         print!("ridgecode> ");
@@ -294,7 +296,7 @@ async fn repl(
         let state = AgentState::new(input)
             .with_history(history.clone())
             .with_budget(budget);
-        match run_streamed(&app, state).await {
+        match run_streamed(&app, state, &bus).await {
             Ok(out) => {
                 history = out.history.clone();
                 save_session(&session_path(), &history); // 每轮落盘 → kill-9 后 --resume 可恢复
@@ -322,34 +324,53 @@ fn trace_and_report(out: &AgentState) {
 async fn run_streamed(
     app: &CompiledGraph<AgentState>,
     state: AgentState,
+    token_bus: &TokenBus,
 ) -> anyhow::Result<AgentState> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent<AgentState>>();
+    // 逐字流式:注册一个 token sender 到总线;reason 节点边收边发,printer 边收边显。
+    let (ttx, mut trx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    *token_bus.lock().unwrap() = Some(ttx);
     let tty = std::io::stderr().is_terminal();
     let printer = tokio::spawn(async move {
         const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let spin = RichOutput::new().with_color(Color::BrightBlue);
         let dim = RichOutput::new().with_color(Color::Cyan);
+        let answer = RichOutput::new().with_color(Color::BrightWhite).bold();
         let mut frame = 0usize;
         let mut printed = 0usize; // 已打印到第几条 message
         let mut status = String::from("推理中");
+        let mut streaming = false; // 本超步是否正在逐字流式(流式期间不转 spinner、末尾不重复打)
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(90));
         loop {
             tokio::select! {
-                _ = ticker.tick(), if tty => {
+                _ = ticker.tick(), if tty && !streaming => {
                     frame = (frame + 1) % FRAMES.len();
                     eprint!("\r\x1b[K{} {}", spin.format(FRAMES[frame]), dim.format(&status));
+                    std::io::stderr().flush().ok();
+                }
+                Some(tok) = trx.recv() => {
+                    if !streaming {
+                        if tty { eprint!("\r\x1b[K"); } // 清 spinner,起头
+                        eprint!("{}", answer.format("🤖 "));
+                        streaming = true;
+                    }
+                    eprint!("{}", answer.format(&tok)); // 逐字追加(加粗白)
                     std::io::stderr().flush().ok();
                 }
                 ev = rx.recv() => match ev {
                     Some(StreamEvent::NodeFinished { node, .. }) => status = node_label(&node),
                     Some(StreamEvent::Superstep { state, .. }) => {
                         for m in state.messages.iter().skip(printed) {
-                            if tty {
-                                eprint!("\r\x1b[K"); // 清掉 spinner 行再打内容
+                            // 若本超步已逐字流式打过最终答案,则不再重复整段打,只补个换行收尾。
+                            if streaming && m.contains("(final) ") {
+                                eprintln!();
+                            } else {
+                                if tty { eprint!("\r\x1b[K"); }
+                                eprintln!("{}", format_event(m));
                             }
-                            eprintln!("{}", format_event(m));
                         }
                         printed = state.messages.len();
+                        streaming = false; // 超步收尾 → 下个超步 spinner 恢复
                     }
                     None => break,
                 }
@@ -365,6 +386,7 @@ async fn run_streamed(
         .invoke_with(state, &RunConfig::default(), None, Some(&tx))
         .await?;
     drop(tx);
+    *token_bus.lock().unwrap() = None; // 关闭 token 通道 → printer 收尾
     let _ = printer.await;
     Ok(out)
 }

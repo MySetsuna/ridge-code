@@ -716,6 +716,15 @@ pub async fn resolve_mcp(clients: Vec<Arc<McpClient>>) -> McpTools {
     out
 }
 
+/// 流式 token 总线:REPL 每回合把一个 sender 塞进来,reason 节点边收 provider 的增量文本
+/// 边往里发,REPL 侧就能**逐字显示**(像 Claude Code)。`None` = 该回合不流式。
+pub type TokenBus = Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>;
+
+/// 一个「永不流式」的空总线(测试 / 非交互装配用)。
+pub fn null_token_bus() -> TokenBus {
+    Arc::new(std::sync::Mutex::new(None))
+}
+
 /// 用**真实 LLM provider** 装配 agent 图(不接 MCP)。见 [`build_llm_agent_with`]。
 pub fn build_llm_agent(
     provider: Arc<dyn LlmProvider>,
@@ -728,7 +737,14 @@ pub fn build_llm_agent_with(
     provider: Arc<dyn LlmProvider>,
     mcp: McpTools,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
-    build_core(provider, mcp, None, Arc::new(AutoApprove), Vec::new())
+    build_core(
+        provider,
+        mcp,
+        None,
+        Arc::new(AutoApprove),
+        Vec::new(),
+        null_token_bus(),
+    )
 }
 
 /// 带**独立模型 checker** 的装配(M4,maker≠checker 的强形式):
@@ -745,6 +761,7 @@ pub fn build_llm_agent_reviewed(
         Some(reviewer),
         Arc::new(AutoApprove),
         Vec::new(),
+        null_token_bus(),
     )
 }
 
@@ -754,17 +771,19 @@ pub fn build_llm_agent_gated(
     mcp: McpTools,
     approver: Arc<dyn Approver>,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
-    build_core(provider, mcp, None, approver, Vec::new())
+    build_core(provider, mcp, None, approver, Vec::new(), null_token_bus())
 }
 
-/// **全装配**(模块化框架):MCP 工具 + 权限门 + 声明式 Skills(注入 system prompt)。CLI 用它。
+/// **全装配**(模块化框架):MCP 工具 + 权限门 + 声明式 Skills + 流式 token 总线。CLI 用它。
+/// `token_bus` 传 [`null_token_bus`] 即不流式;REPL 传真实总线以逐字显示。
 pub fn build_llm_agent_full(
     provider: Arc<dyn LlmProvider>,
     mcp: McpTools,
     approver: Arc<dyn Approver>,
     skills: Vec<Skill>,
+    token_bus: TokenBus,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
-    build_core(provider, mcp, None, approver, skills)
+    build_core(provider, mcp, None, approver, skills, token_bus)
 }
 
 /// reason 把 内置 + MCP 工具一起 offer 给 LLM,act 按 `<server>__<tool>` 命名空间路由到对应
@@ -776,6 +795,7 @@ fn build_core(
     reviewer: Option<Arc<dyn LlmProvider>>,
     approver: Arc<dyn Approver>,
     skills: Vec<Skill>,
+    token_bus: TokenBus,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
     let mut g = StateGraph::<AgentState>::new();
     let mut specs = builtin_tool_specs();
@@ -789,12 +809,19 @@ fn build_core(
         let provider = provider_c.clone();
         let tools = specs.clone();
         let system = system_c.clone();
+        let bus = token_bus.clone();
         async move {
             let req = CompletionRequest {
                 messages: to_messages(&system, &s),
                 tools,
             };
-            let completion = provider.complete(&req).await?;
+            // 流式:provider 每吐一段文本就发进总线,REPL 侧逐字显示。无总线 sender 则等同整段。
+            let on_token = move |t: String| {
+                if let Some(tx) = bus.lock().unwrap().as_ref() {
+                    let _ = tx.send(t);
+                }
+            };
+            let completion = provider.complete_streaming(&req, &on_token).await?;
             let tokens = completion.usage.total() as usize; // 成本记账
             let asst_text = completion.text.clone();
             let patch = if let Some(call) = completion.tool_calls.into_iter().next() {

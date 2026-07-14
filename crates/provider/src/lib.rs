@@ -141,6 +141,22 @@ pub(crate) fn strip_thinking(text: &str) -> String {
 #[async_trait::async_trait]
 pub trait LlmProvider: Send + Sync {
     async fn complete(&self, req: &CompletionRequest) -> Result<Completion, ProviderError>;
+
+    /// 流式补全:每收到一段文本就调 `on_token`,供 REPL 逐字显示(像 Claude Code)。
+    /// 回调收**owned `String`**(而非 `&str`)—— 避开 `async_trait` + HRTB 的生命周期坑,
+    /// 每段一次小分配,SSE 场景可忽略。**默认回落到 [`complete`](LlmProvider::complete)**
+    /// (整段拿到后一次性 emit),不支持流式的 provider 无需改动、坏路径也自动降级。
+    async fn complete_streaming(
+        &self,
+        req: &CompletionRequest,
+        on_token: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<Completion, ProviderError> {
+        let c = self.complete(req).await?;
+        if !c.text.is_empty() {
+            on_token(c.text.clone());
+        }
+        Ok(c)
+    }
 }
 
 /// 离线脚本 provider:按顺序吐预设的 [`Completion`],零联网、确定性,用于 demo / 测试。
@@ -241,6 +257,85 @@ pub mod openai {
             tool_calls,
             usage,
         })
+    }
+
+    /// 流式增量的累加器:SSE 每帧的 `delta` 往里叠(文本直接拼,工具调用按 index 拼片段)。
+    #[derive(Default)]
+    pub struct StreamAcc {
+        pub text: String,
+        pub tool_calls: Vec<ToolCallAcc>,
+        pub usage: Usage,
+    }
+
+    /// 工具调用在流式里是**分片**来的:首帧带 id/name,后续帧只带 arguments 的片段。
+    #[derive(Default)]
+    pub struct ToolCallAcc {
+        pub id: String,
+        pub name: String,
+        pub args: String,
+    }
+
+    /// 把一帧 SSE delta 叠进累加器;文本增量顺带回调 `on_token`(供逐字显示)。
+    /// `on_token` 收 owned `String`(避 async_trait+HRTB 坑);`?Sized` 便于传 `&dyn Fn`。
+    pub fn accumulate_stream<F: Fn(String) + ?Sized>(acc: &mut StreamAcc, v: &Value, on_token: &F) {
+        let delta = &v["choices"][0]["delta"];
+        if let Some(content) = delta["content"].as_str() {
+            if !content.is_empty() {
+                on_token(content.to_string());
+                acc.text.push_str(content);
+            }
+        }
+        if let Some(tcs) = delta["tool_calls"].as_array() {
+            for tc in tcs {
+                let idx = tc["index"].as_u64().unwrap_or(0) as usize;
+                while acc.tool_calls.len() <= idx {
+                    acc.tool_calls.push(ToolCallAcc::default());
+                }
+                let slot = &mut acc.tool_calls[idx];
+                if let Some(id) = tc["id"].as_str() {
+                    if !id.is_empty() {
+                        slot.id = id.to_string();
+                    }
+                }
+                if let Some(name) = tc["function"]["name"].as_str() {
+                    if !name.is_empty() {
+                        slot.name = name.to_string();
+                    }
+                }
+                if let Some(args) = tc["function"]["arguments"].as_str() {
+                    slot.args.push_str(args);
+                }
+            }
+        }
+        // usage 通常在最后一帧(choices 为空)带回(需请求里开 stream_options.include_usage)。
+        if let Some(u) = v.get("usage") {
+            if !u.is_null() {
+                acc.usage.prompt_tokens = u["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+                acc.usage.completion_tokens = u["completion_tokens"].as_u64().unwrap_or(0) as u32;
+            }
+        }
+    }
+
+    impl StreamAcc {
+        /// 收尾:组装成最终 [`Completion`](剥思考标签、把工具调用 arguments 片段解析回对象)。
+        pub fn into_completion(self) -> Completion {
+            let tool_calls = self
+                .tool_calls
+                .into_iter()
+                .filter(|t| !t.name.is_empty())
+                .map(|t| ToolCall {
+                    id: t.id,
+                    name: t.name,
+                    arguments: serde_json::from_str(&t.args)
+                        .unwrap_or_else(|_| Value::Object(Default::default())),
+                })
+                .collect();
+            Completion {
+                text: strip_thinking(&self.text),
+                tool_calls,
+                usage: self.usage,
+            }
+        }
     }
 }
 
@@ -348,6 +443,19 @@ pub mod http {
             headers: &[(String, String)],
             body: &Value,
         ) -> Result<Value, ProviderError>;
+
+        /// POST 后**逐行**读 SSE 响应,每条 `data:` 行(去掉前缀、跳过 `[DONE]`)喂给 `on_line`。
+        /// 回调收 owned `String`(避 HRTB 坑)。默认不支持(报错)—— 只有真实 [`ReqwestClient`]
+        /// 与流式测试替身实现它;provider 会据错降级到整段。
+        async fn post_json_stream(
+            &self,
+            _url: &str,
+            _headers: &[(String, String)],
+            _body: &Value,
+            _on_line: &(dyn Fn(String) + Send + Sync),
+        ) -> Result<(), ProviderError> {
+            Err("this HttpClient does not support streaming".into())
+        }
     }
 
     /// 生产用的真实客户端(reqwest)。
@@ -388,6 +496,42 @@ pub mod http {
                 return Err(format!("http {status}: {val}").into());
             }
             Ok(val)
+        }
+
+        async fn post_json_stream(
+            &self,
+            url: &str,
+            headers: &[(String, String)],
+            body: &Value,
+            on_line: &(dyn Fn(String) + Send + Sync),
+        ) -> Result<(), ProviderError> {
+            let mut rb = self.client.post(url).json(body);
+            for (k, v) in headers {
+                rb = rb.header(k.as_str(), v.as_str());
+            }
+            let mut resp = rb.send().await?;
+            let status = resp.status();
+            if !status.is_success() {
+                let t = resp.text().await.unwrap_or_default();
+                return Err(format!("http {status}: {t}").into());
+            }
+            // `chunk()` 增量读 body(无需 reqwest "stream" feature),按 \n 切出完整 SSE 行。
+            let mut buf = String::new();
+            while let Some(bytes) = resp.chunk().await? {
+                buf.push_str(&String::from_utf8_lossy(&bytes));
+                while let Some(nl) = buf.find('\n') {
+                    let line = buf[..nl].trim().to_string();
+                    buf.drain(..=nl);
+                    if let Some(data) = line.strip_prefix("data:") {
+                        let data = data.trim();
+                        if data == "[DONE]" {
+                            return Ok(());
+                        }
+                        on_line(data.to_string());
+                    }
+                }
+            }
+            Ok(())
         }
     }
 }
@@ -982,6 +1126,45 @@ impl LlmProvider for OpenAiProvider {
         let resp = self.http.post_json(&url, &headers, &body).await?;
         openai::parse_response(&resp)
     }
+
+    async fn complete_streaming(
+        &self,
+        req: &CompletionRequest,
+        on_token: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<Completion, ProviderError> {
+        let mut body = openai::build_request(&self.model, req);
+        body["stream"] = Value::Bool(true);
+        body["stream_options"] = serde_json::json!({ "include_usage": true });
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let headers = [
+            (
+                "Authorization".to_string(),
+                format!("Bearer {}", self.api_key),
+            ),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ];
+        let acc = std::sync::Mutex::new(openai::StreamAcc::default());
+        let on_line = |data: String| {
+            if let Ok(v) = serde_json::from_str::<Value>(&data) {
+                openai::accumulate_stream(&mut acc.lock().unwrap(), &v, on_token);
+            }
+        };
+        match self
+            .http
+            .post_json_stream(&url, &headers, &body, &on_line)
+            .await
+        {
+            Ok(()) => Ok(acc.into_inner().unwrap().into_completion()),
+            // 传输不支持流式(或流式失败)→ 降级到整段 complete(不丢功能)。
+            Err(_) => {
+                let c = self.complete(req).await?;
+                if !c.text.is_empty() {
+                    on_token(c.text.clone());
+                }
+                Ok(c)
+            }
+        }
+    }
 }
 
 /// 原生 Anthropic Messages provider。
@@ -1188,6 +1371,80 @@ mod tests {
         let c = p.complete(&req).await.unwrap();
         assert_eq!(c.tool_calls[0].name, "run_shell");
         assert_eq!(c.tool_calls[0].arguments, json!({"cmd": "cargo build"}));
+    }
+
+    /// 假流式传输:把预设的 SSE `data:` 帧逐条喂给 on_line(不用 mockito、零网络)。
+    struct FakeStream(Vec<String>);
+    #[async_trait::async_trait]
+    impl HttpClient for FakeStream {
+        async fn post_json(
+            &self,
+            _u: &str,
+            _h: &[(String, String)],
+            _b: &Value,
+        ) -> Result<Value, ProviderError> {
+            Err("only streaming".into())
+        }
+        async fn post_json_stream(
+            &self,
+            _u: &str,
+            _h: &[(String, String)],
+            _b: &Value,
+            on_line: &(dyn Fn(String) + Send + Sync),
+        ) -> Result<(), ProviderError> {
+            for frame in &self.0 {
+                on_line(frame.clone());
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_streaming_assembles_text_tokens_toolcalls_usage() {
+        // 文本分 3 帧 + 一个分片工具调用(name 首帧、arguments 两帧)+ 末帧 usage。
+        let frames: Vec<String> = vec![
+            r#"{"choices":[{"delta":{"content":"你好"}}]}"#.into(),
+            r#"{"choices":[{"delta":{"content":",世界"}}]}"#.into(),
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"run_shell","arguments":"{\"cmd\":"}}]}}]}"#.into(),
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"ls\"}"}}]}}]}"#.into(),
+            r#"{"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7}}"#.into(),
+        ];
+        let p = OpenAiProvider::new("http://unused", "gpt-x", "key")
+            .with_http(Arc::new(FakeStream(frames)));
+        let req = CompletionRequest {
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+        };
+        let streamed = std::sync::Mutex::new(String::new());
+        let on_token = |t: String| streamed.lock().unwrap().push_str(&t);
+        let c = p.complete_streaming(&req, &on_token).await.unwrap();
+        // 逐字回调拼起来 == 完整文本。
+        assert_eq!(*streamed.lock().unwrap(), "你好,世界");
+        assert_eq!(c.text, "你好,世界");
+        // 分片工具调用被拼装回完整对象。
+        assert_eq!(c.tool_calls.len(), 1);
+        assert_eq!(c.tool_calls[0].name, "run_shell");
+        assert_eq!(c.tool_calls[0].arguments, json!({"cmd": "ls"}));
+        assert_eq!(c.usage.total(), 18);
+    }
+
+    /// 默认 provider(无流式实现)+ 不支持流式的传输 → complete_streaming 降级到整段,一次性 emit。
+    #[tokio::test]
+    async fn streaming_falls_back_to_whole_text() {
+        let canned = json!({"choices":[{"message":{"content":"整段回答"}}]});
+        let p = OpenAiProvider::new("http://unused", "gpt-x", "key")
+            .with_http(Arc::new(StubHttp(canned))); // StubHttp 没实现 post_json_stream → 默认报错 → 降级
+        let req = CompletionRequest {
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+        };
+        let got = std::sync::Mutex::new(String::new());
+        let c = p
+            .complete_streaming(&req, &|t: String| got.lock().unwrap().push_str(&t))
+            .await
+            .unwrap();
+        assert_eq!(c.text, "整段回答");
+        assert_eq!(*got.lock().unwrap(), "整段回答");
     }
 
     /// 记录 provider 实际发出的一次请求。
