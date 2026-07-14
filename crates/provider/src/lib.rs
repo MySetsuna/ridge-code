@@ -621,6 +621,10 @@ pub mod search {
         for chunk in html.split("class=\"result__a\"").skip(1) {
             // chunk 形如: ` href="//duckduckgo.com/l/?uddg=...">Title</a> ... result__snippet ...>Snippet</a>`
             let href = attr(chunk, "href=\"").unwrap_or_default();
+            // 跳过广告位:DuckDuckGo 的赞助结果走 `/y.js?ad_domain=…` 跳转,不是自然结果。
+            if href.contains("/y.js") || href.contains("ad_domain=") {
+                continue;
+            }
             let title = between(chunk, ">", "</a>")
                 .map(strip_tags)
                 .unwrap_or_default();
@@ -862,6 +866,16 @@ pub mod search {
             );
             // 块级标签转了换行 → 段落分行,不会糊成一坨。
             assert!(text.lines().count() >= 3, "应按段分行: {text}");
+        }
+
+        #[test]
+        fn parse_duckduckgo_skips_ads() {
+            let html = r#"
+                <a class="result__a" href="//duckduckgo.com/y.js?ad_domain=spam.com&ad_provider=bing">广告</a>
+                <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Freal.com%2F">真实结果</a>"#;
+            let r = parse_duckduckgo(html);
+            assert_eq!(r.len(), 1, "广告位应被过滤: {r:?}");
+            assert_eq!(r[0].url, "https://real.com/");
         }
 
         #[tokio::test]
