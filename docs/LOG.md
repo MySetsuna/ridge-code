@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-07-14 · Iteration 08:驾驭工程 + 用户交互(补上「像 Claude Code」最缺两块)
+
+- **用户 steer 重排**:用户直接指出「离 Claude Code 差距主要在**驾驭工程**和**用户交互**」→ 据「用户方向 > NotebookLM 计划」,本轮把原 CONTRACT-08(config.toml + 多 MCP)顺延 Iter09,改做工程能力 + 交互体验。
+- **驾驭工程(工具集 3→6)**:`tools` 加 `edit_file`(唯一匹配替换,0/多处报错,Claude Code Edit 语义)、`read_file_range`(分段读大文件)、`search`(递归 glob + 子串,跳 target/.git,**Windows 无 grep 的可移植找代码接缝**,上限 200 行)。`agent` 加 3 个 tool_spec + `execute_tool_call` 分支;`read_file` 支持 offset/limit;BASE_SYSTEM 引导「改文件优先 edit_file、先 search/读再改」。
+- **用户交互(权限门 diff 预览)**:`preview_call` —— edit_file 渲染 `-/+` diff、write_file 给规模、run_shell 给命令原文;用户**看着改动批准**而非盲批 JSON。search/read_file 归只读、不打扰审批。
+- **GLM 实测(零改代码)**:`ridge "改 config.rs 的 port 8080→9090"` → 模型自主 **search×2 → read_file×2 → edit_file×1、零 write_file**,单行精准改、其余不动、approved。trace 佐证工具链。
+- `cargo test --workspace` = **50 项全绿**(42→50,tools +5 / agent +3),clippy/fmt 干净。提交 `e7def41`。
+- **NotebookLM Iter09 指导 + 对抗评审**:采纳多文件批量编辑(P0)、config.toml+多 MCP(P1)、TODO 可视化/Skills 匹配;**再次驳回 rmcp 当硬门槛**(自写 stdio 已连真实 server,兼容性来自协议非 SDK);**下调流式输出**为体验项(NBLM 自家 Iter05 note 就评「低」,前后不一致)。归档 guidance-08 + CONTRACT-09。
+- ⚠ 用户智谱 key 明文在对话里,再次提醒轮换。
+
 ## 2026-07-14 · Iteration 07:方向转向 —— 模块化通用框架 + Skills 知识层
 
 - **新方向(读了 NotebookLM Studio 13 篇 notes 得出)**:Ridge 从「编码 CLI」升级为**模块化、跨领域可扩展的通用 agent 框架** —— 加新能力 = 加一个 MCP 配置 或 一个 SKILL.md,不改 Rust 源码。四层解耦:内核(引擎)+ 协议(MCP)+ 知识(Skills)+ 协作(多智能体)+ 安全(权限门/拦截,沙箱待做)。写进 `docs/DIRECTION.md` + CLAUDE.md 北极星。

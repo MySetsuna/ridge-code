@@ -1,5 +1,7 @@
 # CONTRACT —— Iteration 08:插件式扩展(config + 多 MCP + Skills 匹配)
 
+> ⚠️ **本合同已被用户 steer 顺延到 Iteration 09。** 用户 2026-07-14 直接指出「离 Claude Code 的差距主要在**驾驭工程**和**用户交互**」,据「用户方向 > NotebookLM 计划」原则,实际交付的 Iteration 08 改为**工程能力(精准 edit_file/search/分段读)+ 交互体验(权限门 diff 预览)**,见 `2026-07-14-iteration-08.md`。本文件的 config.toml + 多 MCP 内容作为 **Iteration 09** 待办保留。
+
 - **开工时间戳**: 2026-07-14
 - **里程碑**: 通用框架「插件式扩展」可交付(Beta)
 - **依据**: `docs/iterations/2026-07-14-notebooklm-guidance-07.md`(NotebookLM + 对抗评审)
