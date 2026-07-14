@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-07-14 · Iteration 10 收尾:config.toml/多 MCP + AnySearch 调研(插件式扩展实证)
+
+- **`~/.ridge/config.toml` + 多 MCP(CONTRACT-10 P2 完成)**:`Config`/`McpServerCfg`(serde+toml)、`Config::parse/load`(坏 TOML/缺文件→默认空,降级 env 不崩)。main:`load_config`(`RIDGE_CONFIG` 或 `~/.ridge/config.toml`)、`real_provider` env>config>默认、`resolve_configured_mcp` 起 config 多 `[[mcp]]` + 兼容旧 env 单 server、skills_dir/预算/skip_danger 从 config 读。**密钥不进 config,只走 `RIDGE_API_KEY` env**。GLM 实测:仅给 key,provider/model/base_url 全来自 config → 应答 approved。提交 `6a2403e`。
+- **AnySearch 调研(用户问:能否作更优网页工具)**:AnySearch = **AI agent 搜索基建 MCP server**,结构化输出(title/url/context+JSON)、batch/extract/垂直域,匿名可用/免费 key。**关键**:它是 MCP server → RidgeCode 的 config.toml 多 MCP **零改源码**即接入。**live 实测通过**:config 里加 `[[mcp]] anysearch (cmd /c npx -y mcp-remote https://api.anysearch.com/mcp)` → `已接入 1 个 MCP server` → 模型可用 `anysearch__search/extract/batch_search/get_sub_domains`。**这实证了北极星「加能力=加 MCP 配置不改源码」**。结论:内置零依赖当默认,AnySearch 当可选结构化升级。写入 `docs/web-search-and-anysearch.md`。⚠ Windows 需 `cmd="cmd" args=["/c","npx",…]`(Rust Command 不解析 npx.cmd)。
+- **顺手修 bug**:内置 web_search 实测混进 DuckDuckGo 广告位 `y.js` 脏链 → `parse_duckduckgo` 过滤 `/y.js`/`ad_domain=`。提交 `189c4f5`。
+- `cargo test --workspace` = **71 全绿**,clippy/fmt 干净。**CONTRACT-10 全部完成。**
+
 ## 2026-07-14 · Iteration 10 续:rename ridgecode + RAG 闭环 + 搜索硬化
 
 - **全量 rename `ridge` → `ridgecode`(用户选 B)**:Cargo `[[bin]]`(含 `ridge-eval`→`ridgecode-eval`)、release.yml 归档名、REPL 提示符 `ridgecode>`、日志前缀 `[ridgecode]`、CLI 用法/横幅、README + CLAUDE.md。**env 前缀仍 `RIDGE_*`**(不破坏现有配置)。提交 `0961e11`。

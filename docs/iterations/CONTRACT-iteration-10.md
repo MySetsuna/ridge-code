@@ -15,7 +15,7 @@
 | **P0** | **`fetch_url(url)`**:抓网页 → 去脚本/样式/标签 → 返回正文纯文本(截断防爆),喂模型做 RAG。复用 `WebFetch` + `strip_tags` | fake html → 干净正文;**live** example.com 正文非空含关键词 | ✅ `0df7a09` |
 | ~~P1~~ | ~~**API key 搜索后端**(Brave/Tavily)~~ → **用户驳回付费 API**。改为**无 key 多引擎 fallback 链**:某引擎报错/空 → 自动落下一个(International=[duckduckgo, bing]、Restricted=[bing-cn]) | 单测:DDG 返回空 → 落到 Bing 拿到结果;GLM live DDG 正常 | ✅ `a7b632d` |
 | **P1** | **网络探测更稳**:多探针并发 | 单测:一探针 Err 另一 Ok → International(3s 超时上限) | ✅ `c91640b`(TTL 缓存 = YAGNI,会话级永久缓存够用) |
-| **P2** | `~/.ridge/config.toml`(provider/model/预算/多 `[[mcp]]`/skills;env 覆盖)+ 多 MCP 并接(现有 `StdioTransport`) | 单测:解析含 2 个 `[[mcp]]` 的 config → 对应 spec/设置;起 2 假 server → `list_tools` 并集、命名空间不撞 | ⬜ 下一步 |
+| **P2** | `~/.ridge/config.toml`(provider/model/预算/多 `[[mcp]]`/skills;env 覆盖)+ 多 MCP 并接(现有 `StdioTransport`) | 单测:解析含 2 个 `[[mcp]]` 的 config ✅;**live**:仅 RIDGE_API_KEY,provider/model/base_url 全来自 config → GLM 应答 ✅;**实测接入真实远程 MCP(AnySearch)零改源码 ✅** | ✅ `6a2403e` |
 | **P2** | 搜索结果**去重**(同 URL 物理合并) | 单测:含重复 URL → 去重后唯一 | ✅ `ec41364` |
 
 ## 「工业级 web + 媲美 Claude Code」Definition of Done
@@ -24,9 +24,11 @@
 - [x] **完整 Research 闭环**:`web_search` → `fetch_url`(正文)→ 据原文作答 —— `0df7a09`
 - [x] **无 key 稳健搜索**:环境感知 + **多引擎 fallback**(不接付费 API)+ 去重 —— `a7b632d`/`ec41364`
 - [x] **探测鲁棒**:多探针并发(TTL = YAGNI) —— `c91640b`
-- [ ] **生产级配置**:LLM key/多 MCP 在 config.toml/env 统一管理(下一步 P2)
-- [ ] 插件式扩展:config 加 MCP 不改源码即见新工具(下一步 P2)
+- [x] **生产级配置**:provider/model/预算/多 MCP/skills 在 `config.toml` 统一管理(env 覆盖;key 只走 env)—— `6a2403e`
+- [x] **插件式扩展:config 加 MCP 不改源码即见新工具** —— 实测接入远程 AnySearch MCP,零改源码得 4 个工具(见 `docs/web-search-and-anysearch.md`)
 - [ ] 批量工程:多文件 EditBuffer + 汇总 diff 一次确认(顺延自 CONTRACT-09,backlog)
+
+> **CONTRACT-10 全部完成。** web 研究闭环 + 无 key 稳健搜索 + 探测鲁棒 + 去重/去广告 + config.toml/多 MCP 插件式扩展均已交付并实测。
 
 ## 已知限制(Beta 可先发,对抗评审后明确)
 
