@@ -145,9 +145,9 @@ impl Approver for AutoDeny {
     }
 }
 
-/// 只读工具不需要批准(read_file / search 只读本地;web_search 只查公共搜索引擎)。
+/// 只读工具不需要批准(read_file / search 只读本地;web_search / fetch_url 只读公共网页)。
 fn needs_approval(tool: &str) -> bool {
-    !matches!(tool, "read_file" | "search" | "web_search")
+    !matches!(tool, "read_file" | "search" | "web_search" | "fetch_url")
 }
 
 /// web_search 的观察结果:懒探测一次网络环境(缓存)→ 选引擎 → 搜 → 排版给模型看。
@@ -195,6 +195,23 @@ async fn web_search_obs(
             s
         }
         Err(e) => format!("web_search error: {e}"),
+    }
+}
+
+/// fetch_url 的观察结果:抓网页正文喂给模型(RAG 闭环的「读」)。`fetch` 从 [`build_core`] 注入。
+async fn fetch_url_obs(fetch: &dyn provider::search::WebFetch, call: &ToolCall) -> String {
+    let url = call
+        .arguments
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if url.is_empty() {
+        return "fetch_url error: 缺少 url".to_string();
+    }
+    match provider::search::fetch_url(fetch, url).await {
+        Ok(text) if text.is_empty() => format!("(空正文) {url}"),
+        Ok(text) => format!("正文 {url}:\n{text}"),
+        Err(e) => format!("fetch_url error: {e}"),
     }
 }
 
@@ -283,8 +300,9 @@ fn parse_skill(text: &str) -> Option<Skill> {
 const BASE_SYSTEM: &str = "You are a capable agent. Use the provided tools to accomplish the \
      user's task. To change existing files, prefer edit_file (surgical, unique-match replace) over \
      rewriting the whole file with write_file; use search and ranged read_file to explore before \
-     editing. When there is an objective way to verify (compiler exit code, tests), rely on it and \
-     don't trust your own claim. When done, stop.";
+     editing. For external/real-time info, web_search to find links then fetch_url to read the \
+     actual page — trust the page text, not just the snippet. When there is an objective way to \
+     verify (compiler exit code, tests), rely on it and don't trust your own claim. When done, stop.";
 
 /// 把技能注入 system prompt(知识层 → 大脑偏好)。
 fn build_system_prompt(skills: &[Skill]) -> String {
@@ -504,6 +522,11 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
             name: "web_search".to_string(),
             description: "联网搜索:自动探测网络环境(能否直连国际网络/是否在 GFW 内)并据此选引擎(直连→DuckDuckGo,受限→Bing 中国版),返回标题/链接/摘要。查实时信息或外部资料用它。注意:query 会发给外部搜索引擎".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+        },
+        ToolSpec {
+            name: "fetch_url".to_string(),
+            description: "抓取一个网页并返回**可读正文**(去脚本/样式/标签)。配合 web_search:先搜到链接,再用它读正文、据原文作答,别只凭摘要猜".to_string(),
+            schema: serde_json::json!({"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}),
         },
     ]
 }
@@ -752,6 +775,8 @@ fn build_core(
                         format!("permission denied by user: {}", call.name)
                     } else if call.name == "web_search" {
                         web_search_obs(fetch.as_ref(), &net, call).await
+                    } else if call.name == "fetch_url" {
+                        fetch_url_obs(fetch.as_ref(), call).await
                     } else if let Some((client, raw)) = router.get(&call.name) {
                         // 命名空间命中 → 路由到 MCP 服务器。
                         match client.call_tool(raw, call.arguments.clone()).await {
@@ -1076,15 +1101,46 @@ mod tests {
         assert!(p.contains("- old") && p.contains("+ new"), "diff 形态: {p}");
     }
 
-    /// 只读工具(read_file / search / web_search)不走权限门;有副作用的走。
+    /// 只读工具(read_file / search / web_search / fetch_url)不走权限门;有副作用的走。
     #[test]
     fn readonly_tools_skip_approval() {
         assert!(!needs_approval("read_file"));
         assert!(!needs_approval("search"));
         assert!(!needs_approval("web_search"));
+        assert!(!needs_approval("fetch_url"));
         assert!(needs_approval("edit_file"));
         assert!(needs_approval("write_file"));
         assert!(needs_approval("run_shell"));
+    }
+
+    /// fetch_url:抓网页 → 抽正文喂模型(RAG 的「读」),走假抓取器不联网。
+    #[tokio::test]
+    async fn fetch_url_obs_returns_page_text() {
+        use provider::search::WebFetch;
+        struct Page;
+        #[async_trait::async_trait]
+        impl WebFetch for Page {
+            async fn get_text(&self, _url: &str) -> Result<String, provider::ProviderError> {
+                Ok("<body><script>x()</script><p>正文内容在此。</p></body>".to_string())
+            }
+        }
+        let call = ToolCall {
+            id: "f".to_string(),
+            name: "fetch_url".to_string(),
+            arguments: serde_json::json!({"url": "https://ex.com"}),
+        };
+        let obs = fetch_url_obs(&Page, &call).await;
+        assert!(
+            obs.contains("正文内容在此") && !obs.contains("x()"),
+            "{obs}"
+        );
+
+        let bad = ToolCall {
+            id: "f2".to_string(),
+            name: "fetch_url".to_string(),
+            arguments: serde_json::json!({}),
+        };
+        assert!(fetch_url_obs(&Page, &bad).await.contains("缺少 url"));
     }
 
     /// web_search:探测网络环境 → 选引擎 → 排版结果,全程走假抓取器(不联网)。

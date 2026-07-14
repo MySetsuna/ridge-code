@@ -497,6 +497,67 @@ pub mod search {
         Ok(results)
     }
 
+    /// 抓一个网页并抽成**可读正文**(供 RAG:web_search 拿链接 → fetch_url 读正文 → 据原文作答)。
+    pub async fn fetch_url(fetch: &dyn WebFetch, url: &str) -> Result<String, ProviderError> {
+        let html = fetch.get_text(url).await?;
+        Ok(html_to_text(&html))
+    }
+
+    /// HTML → 正文:先删 script/style 等整块,块级结束标签转换行,再去标签、压缩空白、截断防爆。
+    /// ponytail: 非 readability 级正文抽取,够喂模型;升级路径 = 接 readability/dom 解析。
+    fn html_to_text(html: &str) -> String {
+        let cleaned = strip_blocks(html, &["script", "style", "noscript", "head", "svg"]);
+        let mut buf = cleaned;
+        for tag in [
+            "</p>", "</div>", "</li>", "</h1>", "</h2>", "</h3>", "</h4>", "</tr>", "<br>",
+            "<br/>", "<br />",
+        ] {
+            buf = buf.replace(tag, "\n");
+        }
+        let text = strip_tags(&buf); // 去剩余标签 + 解实体(保留我插入的 \n)
+        let mut out = String::new();
+        let mut blank = false;
+        for line in text.lines() {
+            let t = line.split_whitespace().collect::<Vec<_>>().join(" ");
+            if t.is_empty() {
+                if !blank {
+                    out.push('\n');
+                }
+                blank = true;
+            } else {
+                out.push_str(&t);
+                out.push('\n');
+                blank = false;
+            }
+        }
+        let out = out.trim();
+        if out.chars().count() > 4000 {
+            let head: String = out.chars().take(4000).collect();
+            format!("{head}\n…(正文截断)")
+        } else {
+            out.to_string()
+        }
+    }
+
+    /// 删掉 `<tag ...>…</tag>` 整块(ASCII 大小写不敏感,字节布局不变→索引安全)。无闭合则删到结尾。
+    fn strip_blocks(html: &str, tags: &[&str]) -> String {
+        let mut s = html.to_string();
+        for tag in tags {
+            let open = format!("<{tag}");
+            let close = format!("</{tag}>");
+            loop {
+                let lower = s.to_ascii_lowercase(); // ASCII fold 不改字节长度,索引对 s 有效
+                let Some(a) = lower.find(&open) else { break };
+                let end = match lower[a..].find(&close) {
+                    Some(rel) => a + rel + close.len(),
+                    None => s.len(),
+                };
+                s.replace_range(a..end, " ");
+            }
+        }
+        s
+    }
+
     /// 解析 DuckDuckGo html 端点:结果锚点 `class="result__a"` + 摘要 `class="result__snippet"`。
     fn parse_duckduckgo(html: &str) -> Vec<SearchResult> {
         let mut out = Vec::new();
@@ -700,6 +761,39 @@ pub mod search {
             assert_eq!(r[0].title, "The Rust Book");
             assert_eq!(r[0].url, "https://doc.rust-lang.org/book/");
             assert!(r[0].snippet.contains("Rust"));
+        }
+
+        #[tokio::test]
+        async fn fetch_url_extracts_readable_text() {
+            struct PageFetch;
+            #[async_trait::async_trait]
+            impl WebFetch for PageFetch {
+                async fn get_text(&self, _url: &str) -> Result<String, ProviderError> {
+                    Ok(
+                        r#"<html><head><title>T</title><style>.x{color:red}</style></head>
+                        <body><script>alert('nope')</script>
+                        <h1>标题</h1><p>第一段正文。</p><p>第二段正文。</p></body></html>"#
+                            .to_string(),
+                    )
+                }
+            }
+            let text = fetch_url(&PageFetch, "https://x.com").await.unwrap();
+            assert!(
+                text.contains("标题") && text.contains("第一段正文"),
+                "{text}"
+            );
+            assert!(
+                !text.contains("alert") && !text.contains("color:red"),
+                "脚本/样式应被剔除: {text}"
+            );
+            // 块级标签转了换行 → 段落分行,不会糊成一坨。
+            assert!(text.lines().count() >= 3, "应按段分行: {text}");
+        }
+
+        #[test]
+        fn strip_blocks_removes_script_case_insensitive() {
+            let out = strip_blocks("<BODY>keep<SCRIPT>drop</SCRIPT>keep2</BODY>", &["script"]);
+            assert!(out.contains("keep") && out.contains("keep2") && !out.contains("drop"));
         }
 
         #[test]
