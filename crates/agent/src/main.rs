@@ -22,7 +22,7 @@ use provider::{AnthropicProvider, LlmProvider, Message, OpenAiProvider};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
-    let (task, cwd, cli_skip_danger) = parse_args();
+    let (task, cwd, cli_skip_danger, resume) = parse_args();
     if let Some(dir) = &cwd {
         std::env::set_current_dir(dir)?;
     }
@@ -36,7 +36,15 @@ async fn main() -> anyhow::Result<()> {
             let skip_danger = cli_skip_danger || cfg.skip_danger.unwrap_or(false);
             match task {
                 Some(t) => run_once(p, mcp, skills, &t, budget).await, // 一次性
-                None => repl(p, mcp, skills, skip_danger, budget).await, // 交互式
+                None => {
+                    // --resume:kill-9 / 关掉重开后恢复上一会话的多轮 history。
+                    let initial = if resume {
+                        load_session(&session_path())
+                    } else {
+                        Vec::new()
+                    };
+                    repl(p, mcp, skills, skip_danger, budget, initial).await // 交互式
+                }
             }
         }
         None => {
@@ -65,6 +73,30 @@ fn ridge_home() -> String {
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_default();
     format!("{home}/.ridge")
+}
+
+/// 会话持久化文件:`RIDGE_SESSION` 或 `~/.ridge/session.json`。存 REPL 的对话 history,
+/// 供 `--resume` 在 kill-9 / 关掉重开后**恢复多轮上下文**(像 Claude Code 的续接会话)。
+fn session_path() -> String {
+    std::env::var("RIDGE_SESSION").unwrap_or_else(|_| format!("{}/session.json", ridge_home()))
+}
+
+/// 把对话 history 落盘(best-effort,失败不打断使用)。
+fn save_session(path: &str, history: &[Message]) {
+    if let Some(dir) = std::path::Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_string(history) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+/// 读回落盘的对话 history(读不到/坏 → 空)。
+fn load_session(path: &str) -> Vec<Message> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 /// 接入 MCP 服务器:**config 里的多个 `[[mcp]]`** + 兼容旧的单个 env `RIDGE_MCP_CMD`。
@@ -118,9 +150,10 @@ fn load_configured_skills(cfg: &Config) -> Vec<Skill> {
 /// 解析参数:非 flag 拼成任务(无 → REPL);`--cwd <dir>` 切换工作目录;
 /// `--yolo` / `--skip-permissions` / `--dangerously-skip-permissions` 或 env `RIDGE_SKIP_PERMISSIONS=1`
 /// 开 skip-danger 模式(工具自动放行,不再 [y/N])。
-fn parse_args() -> (Option<String>, Option<String>, bool) {
+fn parse_args() -> (Option<String>, Option<String>, bool, bool) {
     let mut task = String::new();
     let mut cwd = None;
+    let mut resume = false;
     let mut skip_danger = std::env::var("RIDGE_SKIP_PERMISSIONS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -131,6 +164,7 @@ fn parse_args() -> (Option<String>, Option<String>, bool) {
             "--yolo" | "--skip-permissions" | "--dangerously-skip-permissions" => {
                 skip_danger = true
             }
+            "--resume" | "--continue" => resume = true,
             _ => {
                 if !task.is_empty() {
                     task.push(' ');
@@ -140,7 +174,7 @@ fn parse_args() -> (Option<String>, Option<String>, bool) {
         }
     }
     let task = if task.is_empty() { None } else { Some(task) };
-    (task, cwd, skip_danger)
+    (task, cwd, skip_danger, resume)
 }
 
 /// 装配真实 provider:**env > config > 默认**。没有 key(只从 env 读)就返回 None(走 demo)。密钥绝不打印。
@@ -194,12 +228,21 @@ async fn repl(
     skills: Vec<Skill>,
     skip_danger: bool,
     budget: usize,
+    mut history: Vec<Message>,
 ) -> anyhow::Result<()> {
     let title = RichOutput::new().with_color(Color::BrightCyan).bold();
     println!(
         "{}",
         title.format("RidgeCode —— 输入任务开跑;/help 看命令,/exit 退出。")
     );
+    if !history.is_empty() {
+        println!(
+            "{}",
+            RichOutput::new()
+                .with_color(Color::Green)
+                .format(&format!("(已恢复上次会话:{} 条消息)", history.len()))
+        );
+    }
     let approver: Arc<dyn Approver> = if skip_danger {
         println!(
             "{}",
@@ -215,7 +258,6 @@ async fn repl(
     };
     println!();
     let app = build_llm_agent_full(provider, mcp, approver, skills)?;
-    let mut history: Vec<Message> = Vec::new();
 
     loop {
         print!("ridgecode> ");
@@ -234,6 +276,7 @@ async fn repl(
             }
             "/reset" => {
                 history.clear();
+                save_session(&session_path(), &history); // 清空也落盘,--resume 不再带回旧会话
                 println!("(上下文已清空)");
                 continue;
             }
@@ -254,6 +297,7 @@ async fn repl(
         match run_streamed(&app, state).await {
             Ok(out) => {
                 history = out.history.clone();
+                save_session(&session_path(), &history); // 每轮落盘 → kill-9 后 --resume 可恢复
                 trace_and_report(&out);
             }
             Err(e) => eprintln!("[ridgecode] 出错:{e}"),
@@ -444,5 +488,20 @@ mod tests {
     fn truncate_caps_long_text() {
         assert_eq!(truncate("abc", 10), "abc");
         assert!(truncate(&"x".repeat(50), 10).ends_with("… (截断)"));
+    }
+
+    /// 会话持久化:存 history → 读回内容一致(kill-9 后 --resume 的基础)。缺文件 → 空。
+    #[test]
+    fn session_roundtrips_history() {
+        let p = std::env::temp_dir().join("ridge_session_test.json");
+        let p = p.to_str().unwrap();
+        let history = vec![Message::user("你好"), Message::assistant("在的")];
+        save_session(p, &history);
+        let loaded = load_session(p);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].content, "你好");
+        assert_eq!(loaded[1].content, "在的");
+        let _ = std::fs::remove_file(p);
+        assert!(load_session("C:/no/such/ridge-session-xyz.json").is_empty());
     }
 }
