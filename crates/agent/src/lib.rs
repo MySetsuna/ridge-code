@@ -15,6 +15,12 @@
 //! - **停机是设计的一半**:硬回合上限 `MAX_STEPS` + approved 闸门,双保险防跑飞。
 //!
 //! `Brain` 是接真实 LLM 的接缝;这里给一个离线 `ScriptedBrain`,零联网即可跑通闭环。
+//!
+//! 富文本输出支持:
+//! - 彩色格式化输出（ANSI 颜色）
+//! - 表格和结构化展示
+//! - 图片/视频/文件路径的直接展示
+//! - 交互式输出增强
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -23,6 +29,12 @@ use std::sync::Arc;
 use langgraph::{CompiledGraph, GraphError, GraphState, StateGraph, END};
 use mcp::McpClient;
 use provider::{CompletionRequest, LlmProvider, Message, Role, ToolCall, ToolSpec};
+
+/// 富文本输出层(彩色 / 表格 / 媒体展示)—— 见 [`rich_output`]。
+mod rich_output;
+pub use rich_output::{
+    Color, Formatter, MediaDisplay, MediaInfo, MediaType, RichOutput, TableDisplay,
+};
 
 /// 到达此回合数强制收尾 —— 成本 / 防死循环护栏。
 pub const MAX_STEPS: usize = 8;

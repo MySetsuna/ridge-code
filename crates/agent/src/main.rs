@@ -1,9 +1,9 @@
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 
 use agent::{
     build_agent, build_llm_agent_full, compact_history, default_tool, load_skills, resolve_mcp,
-    scripted, write_trace, AgentState, Approver, AutoApprove, McpTools, Skill,
+    scripted, write_trace, AgentState, Approver, AutoApprove, Color, McpTools, RichOutput, Skill,
 };
 use langgraph::{CompiledGraph, RunConfig, StreamEvent};
 use mcp::{McpClient, StdioTransport};
@@ -20,7 +20,7 @@ use provider::{AnthropicProvider, LlmProvider, Message, OpenAiProvider};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
-    let (task, cwd) = parse_args();
+    let (task, cwd, skip_danger) = parse_args();
     if let Some(dir) = &cwd {
         std::env::set_current_dir(dir)?;
     }
@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
             let skills = load_configured_skills(); // 声明式技能(领域知识)
             match task {
                 Some(t) => run_once(p, mcp, skills, &t).await, // 一次性
-                None => repl(p, mcp, skills).await,            // 交互式
+                None => repl(p, mcp, skills, skip_danger).await, // 交互式
             }
         }
         None => {
@@ -84,14 +84,22 @@ fn load_configured_skills() -> Vec<Skill> {
     skills
 }
 
-/// 解析参数:非 flag 拼成任务(无 → REPL);`--cwd <dir>` 切换工作目录。
-fn parse_args() -> (Option<String>, Option<String>) {
+/// 解析参数:非 flag 拼成任务(无 → REPL);`--cwd <dir>` 切换工作目录;
+/// `--yolo` / `--skip-permissions` / `--dangerously-skip-permissions` 或 env `RIDGE_SKIP_PERMISSIONS=1`
+/// 开 skip-danger 模式(工具自动放行,不再 [y/N])。
+fn parse_args() -> (Option<String>, Option<String>, bool) {
     let mut task = String::new();
     let mut cwd = None;
+    let mut skip_danger = std::env::var("RIDGE_SKIP_PERMISSIONS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--cwd" => cwd = args.next(),
+            "--yolo" | "--skip-permissions" | "--dangerously-skip-permissions" => {
+                skip_danger = true
+            }
             _ => {
                 if !task.is_empty() {
                     task.push(' ');
@@ -101,7 +109,7 @@ fn parse_args() -> (Option<String>, Option<String>) {
         }
     }
     let task = if task.is_empty() { None } else { Some(task) };
-    (task, cwd)
+    (task, cwd, skip_danger)
 }
 
 /// 按环境变量装配真实 provider;没有 key 就返回 None(走 demo)。密钥绝不打印。
@@ -141,13 +149,32 @@ async fn run_once(
 }
 
 /// 交互式 REPL:跨轮携带 history,有副作用的工具执行前 stdin 确认。`/exit` `/reset` `/compact` `/help`。
+/// `skip_danger` = true 时用 [`AutoApprove`],工具自动放行、不再 [y/N](像 Claude 的 skip-permissions)。
 async fn repl(
     provider: Arc<dyn LlmProvider>,
     mcp: McpTools,
     skills: Vec<Skill>,
+    skip_danger: bool,
 ) -> anyhow::Result<()> {
-    println!("ridge REPL —— 输入任务开跑;/help 看命令,/exit 退出。危险操作会先问你 [y/N]。\n");
-    let approver: Arc<dyn Approver> = Arc::new(StdinApprover);
+    let title = RichOutput::new().with_color(Color::BrightCyan).bold();
+    println!(
+        "{}",
+        title.format("RidgeCode —— 输入任务开跑;/help 看命令,/exit 退出。")
+    );
+    let approver: Arc<dyn Approver> = if skip_danger {
+        println!(
+            "{}",
+            RichOutput::new()
+                .with_color(Color::BrightRed)
+                .bold()
+                .format("⚠ skip-danger 模式:工具自动执行,不再询问 [y/N](灾难命令仍被硬拦截)。")
+        );
+        Arc::new(AutoApprove)
+    } else {
+        println!("危险操作会先问你 [y/N]。");
+        Arc::new(StdinApprover)
+    };
+    println!();
     let app = build_llm_agent_full(provider, mcp, approver, skills)?;
     let mut history: Vec<Message> = Vec::new();
 
@@ -204,20 +231,49 @@ fn trace_and_report(out: &AgentState) {
     print_report(out);
 }
 
-/// 跑 agent + 实时把「哪个节点在跑」流式打到 stderr(P2:引擎 StreamEvent)。
+/// 跑 agent 并**实时把内容渲染到终端**:等待时转 spinner,每个超步一合并就把新产生的
+/// 推理 / 工具调用 / 结果 / 校验**彩色打出来** —— 让用户直接在 shell 里看到输出,而非去翻 trace.json。
+/// 非 TTY(管道/重定向)时不转 spinner,只顺序输出内容。
 async fn run_streamed(
     app: &CompiledGraph<AgentState>,
     state: AgentState,
 ) -> anyhow::Result<AgentState> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent<AgentState>>();
+    let tty = std::io::stderr().is_terminal();
     let printer = tokio::spawn(async move {
-        while let Some(ev) = rx.recv().await {
-            if let StreamEvent::NodeFinished { node, superstep } = ev {
-                eprint!("· {node}#{superstep} ");
-                std::io::stderr().flush().ok();
+        const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let spin = RichOutput::new().with_color(Color::BrightBlue);
+        let dim = RichOutput::new().with_color(Color::Cyan);
+        let mut frame = 0usize;
+        let mut printed = 0usize; // 已打印到第几条 message
+        let mut status = String::from("推理中");
+        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(90));
+        loop {
+            tokio::select! {
+                _ = ticker.tick(), if tty => {
+                    frame = (frame + 1) % FRAMES.len();
+                    eprint!("\r\x1b[K{} {}", spin.format(FRAMES[frame]), dim.format(&status));
+                    std::io::stderr().flush().ok();
+                }
+                ev = rx.recv() => match ev {
+                    Some(StreamEvent::NodeFinished { node, .. }) => status = node_label(&node),
+                    Some(StreamEvent::Superstep { state, .. }) => {
+                        for m in state.messages.iter().skip(printed) {
+                            if tty {
+                                eprint!("\r\x1b[K"); // 清掉 spinner 行再打内容
+                            }
+                            eprintln!("{}", format_event(m));
+                        }
+                        printed = state.messages.len();
+                    }
+                    None => break,
+                }
             }
         }
-        eprintln!();
+        if tty {
+            eprint!("\r\x1b[K");
+            std::io::stderr().flush().ok();
+        }
     });
 
     let out = app
@@ -228,12 +284,63 @@ async fn run_streamed(
     Ok(out)
 }
 
+/// spinner 旁边显示的当前阶段。
+fn node_label(node: &str) -> String {
+    match node {
+        "reason" => "推理中",
+        "act" => "执行工具",
+        "verify" => "校验中",
+        other => other,
+    }
+    .to_string()
+}
+
+/// 把一条内部事件 message 渲染成彩色终端行(按前缀分类上色)。
+fn format_event(m: &str) -> String {
+    let ro = |c: Color| RichOutput::new().with_color(c);
+    if let Some(i) = m.find("(final) ") {
+        // 模型的最终回答 —— 高亮加粗,最显眼。
+        let ans = &m[i + "(final) ".len()..];
+        return ro(Color::BrightWhite)
+            .bold()
+            .format(&format!("\n🤖 {ans}\n"));
+    }
+    if m.starts_with("reason#") {
+        // 推理 / 发起工具调用 —— 暗色旁白。
+        let body = m.split_once(": ").map_or(m, |x| x.1);
+        return ro(Color::Cyan).format(&format!("  ⋯ {body}"));
+    }
+    if let Some(rest) = m.strip_prefix("act: ") {
+        return ro(Color::Yellow).format(&format!("  ▸ {}", truncate(rest, 500)));
+    }
+    if m.starts_with("verify: PASS") {
+        return ro(Color::Green).bold().format(&format!("  ✓ {m}"));
+    }
+    if m.starts_with("verify: FAIL") {
+        return ro(Color::Red).format(&format!("  ✗ {m}"));
+    }
+    ro(Color::White).format(m)
+}
+
+/// 按字符截断长文本(工具输出可能很长,别刷屏)。
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max).collect();
+        format!("{head}… (截断)")
+    }
+}
+
 /// 离线 demo:脚本大脑 + 假工具,零联网跑通闭环。
 async fn run_demo() -> anyhow::Result<()> {
     let app = build_agent(scripted(), default_tool())?;
     let out = app
         .invoke(AgentState::new("make the test suite pass"))
         .await?;
+    if let Some(last) = out.messages.last() {
+        println!("\n{last}");
+    }
     print_report(&out);
     Ok(())
 }
@@ -253,13 +360,21 @@ impl Approver for StdinApprover {
 }
 
 fn print_report(out: &AgentState) {
-    if let Some(last) = out.messages.last() {
-        println!("\n{last}");
-    }
-    println!(
-        "[approved={} steps={} tokens={}]",
-        out.approved, out.steps, out.total_tokens
-    );
+    let status = if out.approved {
+        RichOutput::new()
+            .with_color(Color::Green)
+            .bold()
+            .format("✓ approved")
+    } else {
+        RichOutput::new()
+            .with_color(Color::Red)
+            .bold()
+            .format("✗ not approved")
+    };
+    let stats = RichOutput::new()
+        .with_color(Color::Cyan)
+        .format(&format!("steps={} tokens={}", out.steps, out.total_tokens));
+    println!("\n{status}  {stats}");
 }
 
 /// 全链路可观测:`RUST_LOG=langgraph=debug,agent=debug ridge ...`。默认只报 warn。
@@ -270,4 +385,24 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_event_colorizes_by_kind() {
+        let fin = format_event("reason#2: (final) 你好世界");
+        assert!(fin.contains("你好世界") && fin.contains("🤖") && fin.contains("\x1b[0m"));
+        assert!(format_event("act: web_search -> ok").contains("\x1b[33m")); // 黄
+        assert!(format_event("verify: PASS (deterministic gate)").contains("\x1b[32m"));
+        // 绿
+    }
+
+    #[test]
+    fn truncate_caps_long_text() {
+        assert_eq!(truncate("abc", 10), "abc");
+        assert!(truncate(&"x".repeat(50), 10).ends_with("… (截断)"));
+    }
 }
