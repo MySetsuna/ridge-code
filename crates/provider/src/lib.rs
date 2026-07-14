@@ -520,8 +520,7 @@ pub mod search {
     /// HTML → 正文:先删 script/style 等整块,块级结束标签转换行,再去标签、压缩空白、截断防爆。
     /// ponytail: 非 readability 级正文抽取,够喂模型;升级路径 = 接 readability/dom 解析。
     fn html_to_text(html: &str) -> String {
-        let cleaned = strip_blocks(html, &["script", "style", "noscript", "head", "svg"]);
-        let mut buf = cleaned;
+        let mut buf = strip_blocks(html, &["script", "style", "noscript", "head", "svg"]);
         for tag in [
             "</p>", "</div>", "</li>", "</h1>", "</h2>", "</h3>", "</h4>", "</tr>", "<br>",
             "<br/>", "<br />",
