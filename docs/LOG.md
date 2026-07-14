@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-07-14 · Iteration 10:富文本 REPL(彩色实时输出 + spinner + skip-danger)
+
+- **用户 steer**:输出要直接在 shell 里直观彩色呈现(而非翻 trace.json)、要 skip-danger 模式、等待时有 loading 动画;并澄清 web_search 不必用 Brave/Tavily(内置无 key 方案即可)、本轮先不做多模态;产物暂定名 **RidgeCode**。
+- **接手并行工具 mimocode 的 WIP**:仓库里发现未提交的 `rich_output.rs`(彩色/媒体/表格/formatter)+ lib/main 改动,但漏写 `mod rich_output;` → **整个 crate 编译不过**;MediaType 缺 PartialEq、format_progress 测试自相矛盾。按用户「接手并完善」补齐修好。
+- **实时彩色输出**:`run_streamed` 重写 —— 等待转 spinner(braille,`is_terminal` 门控,非 TTY 不刷屏),每超步把新推理/工具调用/结果/校验彩色流式打到终端(reason 青、act 黄、final 加粗白带 🤖、verify 绿/红)。`print_report` 彩色状态行。
+- **skip-danger 模式**:`--yolo`/`--skip-permissions`/`--dangerously-skip-permissions` 或 env `RIDGE_SKIP_PERMISSIONS=1` → AutoApprove、不再 [y/N](灾难命令仍硬拦截),红横幅提示。
+- **品牌**:REPL 横幅改 `RidgeCode`(二进制命令暂仍 `ridge`,全量 rename 待确认拼写)。
+- **GLM 实测**:①一次性 "解释 Rust 所有权" → 🤖 加粗答案 + 绿 verify + 青 stats;②`--yolo` 管道 "创建 hello.txt" → 红横幅 + 彩色工具链 + 文件自动创建、未卡 [y/N]。`cargo test --workspace` = **62 全绿**(55→62),clippy/fmt 干净。提交 `32c8684`。
+- ⚠ 用户智谱 key 明文在对话里,再次提醒轮换。⚠ 仓库有并行工具 mimocode 会留破损 WIP,动 agent crate 前先编译确认基线。
+
 ## 2026-07-14 · Iteration 09:web_search —— 探网络(GFW)自动换搜索引擎
 
 - **用户 steer 插队**:用户要一个 web search 工具,要能**检查网络环境、判断是不是在 GFW 内、据此用不同搜索引擎**,并「继续迭代直到工业级」。据「用户方向 > 计划」,插到原 CONTRACT-09(多文件批量编辑)前面。
