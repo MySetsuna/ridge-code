@@ -22,4 +22,5 @@ NotebookLM 驱动的迭代循环产出物都放这里。命名规范:
 | 08 | `CONTRACT-iteration-08.md`(config 部分顺延 09) | `2026-07-14-iteration-08.md`(驾驭工程+用户交互) | `2026-07-14-notebooklm-guidance-08.md` |
 | 09 | `CONTRACT-iteration-09.md`(批量编辑顺延 10) | `2026-07-14-iteration-09.md`(web_search + GFW 探测) | `2026-07-14-notebooklm-guidance-09.md` |
 | 10 | `CONTRACT-iteration-10.md`(全部完成) | `2026-07-14-iteration-10.md`(UX+web闭环+config+AnySearch) | `2026-07-14-notebooklm-guidance-10.md` |
-| 11 | `CONTRACT-iteration-11.md` | (进行中:P0 批量编辑✅) | (待) |
+| 11 | `CONTRACT-iteration-11.md`(6/6 全完成) | `2026-07-15-iteration-11.md`(Claude Code UX 全套达成) | `2026-07-15-notebooklm-guidance-11.md` |
+| 12 | `CONTRACT-iteration-12.md`(发布打磨) | (进行中:--help/--version+样例✅) | (含于 guidance-11) |

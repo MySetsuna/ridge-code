@@ -18,7 +18,7 @@
 | **P2** | **任务清单/TODO 可视化**:planner 拆的子任务在 REPL 渲染 `[x]/[ ]`,边做边勾 | 单测:3 子任务 + 完成 1 → 渲染 1 勾 2 空 | ⬜ |
 | **P2** | **`@file` 上下文引用**:输入里 `@path` 自动注入文件正文(存在才注、同路径一次、截断防爆) | 单测:`@存在文件`→注入正文+来源标注、`@不存在`原样留;GLM 实测 `@note.txt`→模型不调工具一步答出文件里的密标 | ✅ `57db13c` |
 | **P2** | **Ctrl-C 中断**:任务跑一半 Ctrl-C → 取消回提示符(不杀 REPL) | run_streamed 与 `tokio::signal::ctrl_c()` 竞速;正常两轮回归验证 | ✅ `685ea97` |
-| **P2** | 任务清单/TODO 可视化 | (待:加 `todo_write` 工具 Claude Code 式 + REPL 渲染 `[x]/[ ]`) | ⬜ 最后一项 |
+| **P2** | **任务清单/TODO 可视化**:`todo_write` 工具(Claude Code 式)+ REPL 渲染 `[x]/[~]/[ ]` | 单测:parse/render/只读;GLM 实测多步任务→模型列清单、逐步 `[ ]→[~]→[x]` 实时渲染 | ✅ `71e069b` |
 
 ## 「媲美 Claude Code 全部用户体验」Definition of Done
 
@@ -34,7 +34,9 @@
 - [ ] **进度全透明 TODO 清单**(本轮 P2)
 - [x] **精准上下文注入 `@file`**(输入 `@path` 注入文件正文)—— `57db13c`
 - [x] **Ctrl-C 中断当前任务**(回提示符不杀 REPL)—— `685ea97`
-- [ ] TODO 清单可视化(最后一项:`todo_write` 工具 + 渲染)
+- [x] **TODO 清单可视化**(`todo_write` + `[x]/[~]/[ ]` 渲染)—— `71e069b`
+
+> **✅ CONTRACT-11 全部 6 项完成。** RidgeCode 已具备 Claude Code 的核心用户体验全套:多文件批量原子编辑、token 逐字流式、kill-9 `--resume`、`@file` 上下文、Ctrl-C 中断、TODO 清单 —— 叠加此前的彩色 REPL/spinner、权限门+diff+skip-danger、精准编辑+搜索、web 研究闭环、MCP/Skills 插件式扩展、config.toml、/compact、trace 审计。`cargo test --workspace` = 80 全绿。
 
 ## 已知限制
 

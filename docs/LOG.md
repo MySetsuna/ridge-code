@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-07-15 · Iteration 11 完成 + Iteration 12 起步(发布打磨)
+
+- **🎉 CONTRACT-11 全部 6 项完成 —— Claude Code 核心用户体验全套达成**:多文件批量原子编辑、token 逐字流式、`--resume` 崩溃恢复、`@file` 引用、Ctrl-C 中断、`todo_write` TODO 清单可视化(GLM 实测多步任务 `[ ]→[~]→[x]` 实时渲染)。叠加此前:彩色 REPL/spinner、权限门+diff+skip-danger、精准+批量编辑、web 研究闭环、MCP/Skills 插件化、config.toml、/compact、trace 审计。写 `2026-07-15-iteration-11.md` 上传 NotebookLM。
+- **NotebookLM Iter12 指导 + 对抗评审**:NBLM 荐转「硬化+发布」(P0 Docker 沙箱 / P1 标准存储库 / P2 rmcp / P3 发布打磨)。**驳回 Docker 沙箱当 P0**(gVisor 仅 Linux、当前 Windows、重量级平台相关、**无法离线/自主验收**;危险命令拦截+权限门+diff 已顶 80%)、**再驳 rmcp**(自写已连真实 server,可选升级)。→ 转**安全可自主的发布打磨轨**。归档 guidance-11 + CONTRACT-12。
+- **Iteration 12 P0 落地(发布打磨)**:`--help/--version`(读 CARGO_PKG_VERSION)+ **官方样例** `samples/`(skills/researcher + skills/rust-fixer + config.toml 带注释 + README)—— 让「加 SKILL.md/MCP 配置不改源码」有开箱即用范例。单测守住样例可解析。`cargo test`=**81 全绿**。提交 `c1fccda`。
+- **交付状态:用户目标(媲美 Claude Code 全部用户体验)已达成。** 剩余沙箱/rmcp/子智能体并行 = 需用户环境/决策的框架轨,标已知限制。
+
 ## 2026-07-15 · Iteration 11 续⁴:Ctrl-C 中断当前任务
 
 - **CONTRACT-11 P2 Ctrl-C 落地**:REPL 里 `run_streamed` 与 `tokio::signal::ctrl_c()` `select!` 竞速 —— 任务跑一半按 Ctrl-C → 取消该任务、清 token sender、回提示符(像 Claude Code),不再杀整个会话。tokio 加 `signal` feature。
