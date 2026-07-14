@@ -470,11 +470,51 @@ pub mod search {
         }
     }
 
-    /// 该环境用哪个搜索引擎(展示/审计用)。
+    /// 该环境的**首选**搜索引擎名(展示/审计用;实际是引擎链的第一个)。
     pub fn engine_for(env: NetEnv) -> &'static str {
+        engines(env).first().map(|e| e.name).unwrap_or("none")
+    }
+
+    /// 一个**无 key** 搜索引擎:query(已 urlencode)→ 请求 URL,HTML → 结果解析。
+    struct Engine {
+        name: &'static str,
+        url: fn(&str) -> String,
+        parse: fn(&str) -> Vec<SearchResult>,
+    }
+
+    fn ddg_url(q: &str) -> String {
+        format!("https://html.duckduckgo.com/html/?q={q}")
+    }
+    fn bing_url(q: &str) -> String {
+        format!("https://www.bing.com/search?q={q}")
+    }
+    fn bing_cn_url(q: &str) -> String {
+        format!("https://cn.bing.com/search?q={q}")
+    }
+
+    /// 按网络环境给出**有序引擎链**:首选打头,其余作 fallback(某引擎改版/抽风/被限流 →
+    /// 自动换下一个)。**全是无 key 直抓 HTML,不依赖任何第三方付费 API**(Brave/Tavily 等)。
+    fn engines(env: NetEnv) -> &'static [Engine] {
+        const INTL: &[Engine] = &[
+            Engine {
+                name: "duckduckgo",
+                url: ddg_url,
+                parse: parse_duckduckgo,
+            },
+            Engine {
+                name: "bing",
+                url: bing_url,
+                parse: parse_bing,
+            },
+        ];
+        const CN: &[Engine] = &[Engine {
+            name: "bing-cn",
+            url: bing_cn_url,
+            parse: parse_bing,
+        }];
         match env {
-            NetEnv::International => "duckduckgo",
-            NetEnv::Restricted => "bing-cn",
+            NetEnv::International => INTL,
+            NetEnv::Restricted => CN,
         }
     }
 
@@ -486,29 +526,33 @@ pub mod search {
         pub snippet: String,
     }
 
-    /// 搜索:按 `env` 选引擎 → 构造 URL → GET → 解析 → 返回结果(已裁到 top 8)。
-    /// ponytail: 无 key 抓 HTML,脆弱(引擎改版即失效);工业级升级路径 = 接 API key 后端
-    /// (Brave/Serper/Tavily,env 配 key)。本层留好 [`WebFetch`] 接缝,换后端不动上层。
+    /// 搜索:按 env 取**引擎链**,**依次**尝试直到拿到非空结果(每条去重、裁 top 8)。
+    /// 某引擎报错/返回空 → 自动落到下一个;全失败才返回错(全空则返回空列表)。
+    /// ponytail: 全程无 key 直抓 HTML,靠多引擎 fallback 抗单点失效;仍怕全体同时改版,
+    /// 升级路径 = 往 [`engines`] 里加更多无 key 引擎(Mojeek / SearXNG 公共实例),**不接付费 API**。
     pub async fn web_search(
         fetch: &dyn WebFetch,
         query: &str,
         env: NetEnv,
     ) -> Result<Vec<SearchResult>, ProviderError> {
         let q = urlencode(query);
-        let (url, parse): (String, fn(&str) -> Vec<SearchResult>) = match env {
-            NetEnv::International => (
-                format!("https://html.duckduckgo.com/html/?q={q}"),
-                parse_duckduckgo,
-            ),
-            NetEnv::Restricted => (format!("https://cn.bing.com/search?q={q}"), parse_bing),
-        };
-        let html = fetch.get_text(&url).await?;
-        let mut results = parse(&html);
-        // 按 URL 去重(保序):同一结果被引擎重复列出时只留一条。
-        let mut seen = std::collections::HashSet::new();
-        results.retain(|r| seen.insert(r.url.clone()));
-        results.truncate(8);
-        Ok(results)
+        let mut last_err = None;
+        for eng in engines(env) {
+            match fetch.get_text(&(eng.url)(&q)).await {
+                Ok(html) => {
+                    let mut results = (eng.parse)(&html);
+                    // 按 URL 去重(保序):同一结果被引擎重复列出时只留一条。
+                    let mut seen = std::collections::HashSet::new();
+                    results.retain(|r| seen.insert(r.url.clone()));
+                    results.truncate(8);
+                    if !results.is_empty() {
+                        return Ok(results);
+                    }
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        last_err.map_or(Ok(Vec::new()), Err)
     }
 
     /// 抓一个网页并抽成**可读正文**(供 RAG:web_search 拿链接 → fetch_url 读正文 → 据原文作答)。
@@ -818,6 +862,29 @@ pub mod search {
             );
             // 块级标签转了换行 → 段落分行,不会糊成一坨。
             assert!(text.lines().count() >= 3, "应按段分行: {text}");
+        }
+
+        #[tokio::test]
+        async fn web_search_falls_back_when_primary_empty() {
+            // 首选 DuckDuckGo 返回无结果 → 自动落到 Bing(无 key fallback,不依赖付费 API)。
+            struct FallbackFetch;
+            #[async_trait::async_trait]
+            impl WebFetch for FallbackFetch {
+                async fn get_text(&self, url: &str) -> Result<String, ProviderError> {
+                    if url.contains("duckduckgo") {
+                        Ok("<html>no results here</html>".to_string())
+                    } else if url.contains("bing") {
+                        Ok(r#"<li class="b_algo"><h2><a href="https://b.com/">命中</a></h2><p>摘要</p></li>"#.to_string())
+                    } else {
+                        Err("unexpected".into())
+                    }
+                }
+            }
+            let r = web_search(&FallbackFetch, "q", NetEnv::International)
+                .await
+                .unwrap();
+            assert_eq!(r.len(), 1, "DDG 空 → 应落到 Bing: {r:?}");
+            assert_eq!(r[0].url, "https://b.com/");
         }
 
         #[tokio::test]
