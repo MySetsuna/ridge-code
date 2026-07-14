@@ -2,8 +2,8 @@ use std::io::Write;
 use std::sync::Arc;
 
 use agent::{
-    build_agent, build_llm_agent_gated, compact_history, default_tool, resolve_mcp, scripted,
-    write_trace, AgentState, Approver, AutoApprove, McpTools,
+    build_agent, build_llm_agent_full, compact_history, default_tool, load_skills, resolve_mcp,
+    scripted, write_trace, AgentState, Approver, AutoApprove, McpTools, Skill,
 };
 use langgraph::{CompiledGraph, RunConfig, StreamEvent};
 use mcp::{McpClient, StdioTransport};
@@ -28,9 +28,10 @@ async fn main() -> anyhow::Result<()> {
     match real_provider() {
         Some(p) => {
             let mcp = resolve_configured_mcp().await; // 可选接入 MCP 服务器
+            let skills = load_configured_skills(); // 声明式技能(领域知识)
             match task {
-                Some(t) => run_once(p, mcp, &t).await, // 一次性
-                None => repl(p, mcp).await,            // 交互式
+                Some(t) => run_once(p, mcp, skills, &t).await, // 一次性
+                None => repl(p, mcp, skills).await,            // 交互式
             }
         }
         None => {
@@ -61,6 +62,26 @@ async fn resolve_configured_mcp() -> McpTools {
     let tools = resolve_mcp(vec![client]).await;
     eprintln!("[ridge] 已接入 MCP `{name}`");
     tools
+}
+
+/// 加载 Skills:`RIDGE_SKILLS_DIR` 或默认 `~/.ridge/skills`。让 agent 靠 SKILL.md 做编程外的领域任务,不改源码。
+fn load_configured_skills() -> Vec<Skill> {
+    let dir = std::env::var("RIDGE_SKILLS_DIR").unwrap_or_else(|_| {
+        let home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_default();
+        format!("{home}/.ridge/skills")
+    });
+    let skills = load_skills(&dir);
+    if !skills.is_empty() {
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        eprintln!(
+            "[ridge] 已加载 {} 个 skill:{}",
+            skills.len(),
+            names.join(", ")
+        );
+    }
+    skills
 }
 
 /// 解析参数:非 flag 拼成任务(无 → REPL);`--cwd <dir>` 切换工作目录。
@@ -107,18 +128,27 @@ fn real_provider() -> Option<Arc<dyn LlmProvider>> {
 }
 
 /// 一次性任务:一律放行,跑完写 trace.json + 打印结果。
-async fn run_once(provider: Arc<dyn LlmProvider>, mcp: McpTools, task: &str) -> anyhow::Result<()> {
-    let app = build_llm_agent_gated(provider, mcp, Arc::new(AutoApprove))?;
+async fn run_once(
+    provider: Arc<dyn LlmProvider>,
+    mcp: McpTools,
+    skills: Vec<Skill>,
+    task: &str,
+) -> anyhow::Result<()> {
+    let app = build_llm_agent_full(provider, mcp, Arc::new(AutoApprove), skills)?;
     let out = run_streamed(&app, AgentState::new(task)).await?;
     trace_and_report(&out);
     Ok(())
 }
 
 /// 交互式 REPL:跨轮携带 history,有副作用的工具执行前 stdin 确认。`/exit` `/reset` `/compact` `/help`。
-async fn repl(provider: Arc<dyn LlmProvider>, mcp: McpTools) -> anyhow::Result<()> {
+async fn repl(
+    provider: Arc<dyn LlmProvider>,
+    mcp: McpTools,
+    skills: Vec<Skill>,
+) -> anyhow::Result<()> {
     println!("ridge REPL —— 输入任务开跑;/help 看命令,/exit 退出。危险操作会先问你 [y/N]。\n");
     let approver: Arc<dyn Approver> = Arc::new(StdinApprover);
-    let app = build_llm_agent_gated(provider, mcp, approver)?;
+    let app = build_llm_agent_full(provider, mcp, approver, skills)?;
     let mut history: Vec<Message> = Vec::new();
 
     loop {

@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-07-14 · Iteration 07:方向转向 —— 模块化通用框架 + Skills 知识层
+
+- **新方向(读了 NotebookLM Studio 13 篇 notes 得出)**:Ridge 从「编码 CLI」升级为**模块化、跨领域可扩展的通用 agent 框架** —— 加新能力 = 加一个 MCP 配置 或 一个 SKILL.md,不改 Rust 源码。四层解耦:内核(引擎)+ 协议(MCP)+ 知识(Skills)+ 协作(多智能体)+ 安全(权限门/拦截,沙箱待做)。写进 `docs/DIRECTION.md` + CLAUDE.md 北极星。
+- **知识层落地(Skills 系统)**:`Skill` + `load_skills`(扫 `~/.ridge/skills/*/SKILL.md`,解析 frontmatter+正文)+ `build_system_prompt`(注入 system)。CLI `RIDGE_SKILLS_DIR` / 默认 `~/.ridge/skills`;`build_llm_agent_full` 全装配(MCP + 权限门 + Skills)。
+- **GLM 实测(非编程任务)**:放一个 haiku SKILL.md → `ridge "写首关于 Rust 的诗"` → 模型按 skill 写出严格俳句 + 签名「— ridge」→ approved。**加 SKILL.md 就会做新事,零改代码。**
+- `cargo test --workspace` = **42 项全绿**,clippy/fmt 干净。
+- ⚠ 用户智谱 key 明文在对话里,提醒轮换。
+
 ## 2026-07-14 · Iteration 06:MCP 接入真实 server + trace + /compact + 通用 verify
 
 - **DoD① 达成(真实第三方 MCP server)**:`mcp` 加 `notify`(补 `notifications/initialized` 握手);`examples/connect.rs` 连真实 `notebooklm-mcp.exe` → **握手 + tools/list 拿到 39 个真实工具**。CLI 加 `RIDGE_MCP_CMD`/`RIDGE_MCP_NAME` 接入。ridge(GLM)一次性任务实测:调 `nlm__notebook_list` → 路由到真实 notebooklm server → trace.json 里有真实笔记本数据(`手搓agent`/`source_count`)。

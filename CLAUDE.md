@@ -2,13 +2,14 @@
 
 给 Claude Code 在本仓库干活的指引。与仓库既有文档一致,本文件用中文。
 
-> 「为什么这么设计」与来源见 `docs/REPORT-langgraph-rust.md`;上手看 `README.md`。本文件只补「怎么干活」。
+> 「为什么这么设计」与来源见 `docs/REPORT-langgraph-rust.md`;**方向/北极星见 `docs/DIRECTION.md`**;上手看 `README.md`。本文件只补「怎么干活」。
 
-## 这是什么
+## 这是什么(北极星)
 
-手搓的 **Rust 版 LangGraph** 引擎 + 跑在它上面的最小**编码 agent**(单二进制 `ridge`)。
-核心赌注:agent 的「大脑」本质是一台**有状态的图状态机**,先把这台引擎做对(Pregel 超步 + BSP + checkpoint),
-agent 就只是引擎上的一组节点与边。开发顺序刻意分两层:`langgraph`(不含 LLM 概念)→ `agent`(装配 reason/act/verify)。
+Ridge 是一个**模块化、跨领域可扩展的通用 agent 框架**(单二进制 `ridge`),既能像 Claude Code 写代码,又能做**编程以外**的事。
+**加新能力 = 加一个 MCP server 配置 或 一个 `SKILL.md`,而不是改 Rust 源码。** 四层解耦:
+内核(`langgraph-rs` 引擎)→ 协议(MCP 接万物)→ 知识(声明式 Skills)→ 协作(多智能体 maker-checker)+ 安全(权限门/危险命令拦截,沙箱待做)。详见 `docs/DIRECTION.md`。
+底层赌注不变:agent 的「大脑」是一台**有状态图状态机**,引擎(`langgraph`,不含 LLM)与 agent(`reason/act/verify`)分层。
 
 ## 常用命令
 

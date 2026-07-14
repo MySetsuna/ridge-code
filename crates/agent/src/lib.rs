@@ -138,6 +138,78 @@ fn needs_approval(tool: &str) -> bool {
     tool != "read_file"
 }
 
+/// 声明式技能(知识层):一份 `SKILL.md` = 某领域的知识/行为,注入 system prompt,
+/// 让 agent 做**编程以外**的事(做饭/日程/电商/调研)而不改 Rust 源码 —— 模块化框架的核心。
+#[derive(Clone, Debug, PartialEq)]
+pub struct Skill {
+    pub name: String,
+    pub description: String,
+    pub body: String,
+}
+
+/// 扫描一个技能目录(`<dir>/<skill>/SKILL.md`),解析成 [`Skill`] 列表。目录不存在 → 空。
+pub fn load_skills(dir: impl AsRef<std::path::Path>) -> Vec<Skill> {
+    let mut skills = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return skills;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path().join("SKILL.md");
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Some(s) = parse_skill(&text) {
+                skills.push(s);
+            }
+        }
+    }
+    skills
+}
+
+/// 解析 `SKILL.md`:YAML frontmatter(`name` / `description`)+ 正文。无 name → 无效。
+fn parse_skill(text: &str) -> Option<Skill> {
+    let rest = text.strip_prefix("---")?;
+    let end = rest.find("\n---")?;
+    let front = &rest[..end];
+    let body = rest[end + 4..]
+        .trim_start_matches(['-', '\n'])
+        .trim()
+        .to_string();
+    let (mut name, mut description) = (String::new(), String::new());
+    for line in front.lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("name:") {
+            name = v.trim().to_string();
+        } else if let Some(v) = line.strip_prefix("description:") {
+            description = v.trim().to_string();
+        }
+    }
+    (!name.is_empty()).then_some(Skill {
+        name,
+        description,
+        body,
+    })
+}
+
+/// 通用 agent 的基础 system prompt(不再只面向编码)。
+const BASE_SYSTEM: &str = "You are a capable agent. Use the provided tools to accomplish the \
+     user's task. When there is an objective way to verify (compiler exit code, tests), rely on \
+     it and don't trust your own claim. When done, stop.";
+
+/// 把技能注入 system prompt(知识层 → 大脑偏好)。
+fn build_system_prompt(skills: &[Skill]) -> String {
+    if skills.is_empty() {
+        return BASE_SYSTEM.to_string();
+    }
+    let mut s = String::from(BASE_SYSTEM);
+    s.push_str("\n\n# Skills — domain knowledge to apply\n");
+    for sk in skills {
+        s.push_str(&format!(
+            "\n## {} — {}\n{}\n",
+            sk.name, sk.description, sk.body
+        ));
+    }
+    s
+}
+
 /// 超预算?(0 预算 = 不限)
 fn over_budget(s: &AgentState) -> bool {
     s.budget_tokens > 0 && s.total_tokens >= s.budget_tokens
@@ -359,13 +431,10 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
     }
 }
 
-/// 把当前状态铺成给 provider 的消息序列:system + **真实多轮 history**
+/// 把当前状态铺成给 provider 的消息序列:system(含注入的技能)+ **真实多轮 history**
 /// (user / assistant(带 tool_calls) / role=tool 结果),而非把轨迹当 assistant 文本糊上去。
-fn to_messages(s: &AgentState) -> Vec<Message> {
-    let mut msgs = vec![Message::new(
-        Role::System,
-        "You are a coding agent. Use the provided tools to make the build/tests pass, then stop.",
-    )];
+fn to_messages(system: &str, s: &AgentState) -> Vec<Message> {
+    let mut msgs = vec![Message::new(Role::System, system)];
     msgs.extend(s.history.iter().cloned());
     msgs
 }
@@ -419,7 +488,7 @@ pub fn build_llm_agent_with(
     provider: Arc<dyn LlmProvider>,
     mcp: McpTools,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
-    build_core(provider, mcp, None, Arc::new(AutoApprove))
+    build_core(provider, mcp, None, Arc::new(AutoApprove), Vec::new())
 }
 
 /// 带**独立模型 checker** 的装配(M4,maker≠checker 的强形式):
@@ -430,7 +499,13 @@ pub fn build_llm_agent_reviewed(
     mcp: McpTools,
     reviewer: Arc<dyn LlmProvider>,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
-    build_core(provider, mcp, Some(reviewer), Arc::new(AutoApprove))
+    build_core(
+        provider,
+        mcp,
+        Some(reviewer),
+        Arc::new(AutoApprove),
+        Vec::new(),
+    )
 }
 
 /// 带**权限门**的装配:有副作用的工具执行前过 [`Approver`](REPL 用它做 y/n 确认)。
@@ -439,29 +514,44 @@ pub fn build_llm_agent_gated(
     mcp: McpTools,
     approver: Arc<dyn Approver>,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
-    build_core(provider, mcp, None, approver)
+    build_core(provider, mcp, None, approver, Vec::new())
+}
+
+/// **全装配**(模块化框架):MCP 工具 + 权限门 + 声明式 Skills(注入 system prompt)。CLI 用它。
+pub fn build_llm_agent_full(
+    provider: Arc<dyn LlmProvider>,
+    mcp: McpTools,
+    approver: Arc<dyn Approver>,
+    skills: Vec<Skill>,
+) -> Result<CompiledGraph<AgentState>, GraphError> {
+    build_core(provider, mcp, None, approver, skills)
 }
 
 /// reason 把 内置 + MCP 工具一起 offer 给 LLM,act 按 `<server>__<tool>` 命名空间路由到对应
-/// MCP 客户端(否则走内置工具),执行前过权限门,verify 认确定性信号(可选再挂独立模型 reviewer)。
+/// MCP 客户端(否则走内置工具),执行前过权限门,verify 认确定性信号(可选再挂独立模型 reviewer);
+/// system prompt 注入 Skills(领域知识)。
 fn build_core(
     provider: Arc<dyn LlmProvider>,
     mcp: McpTools,
     reviewer: Option<Arc<dyn LlmProvider>>,
     approver: Arc<dyn Approver>,
+    skills: Vec<Skill>,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
     let mut g = StateGraph::<AgentState>::new();
     let mut specs = builtin_tool_specs();
     specs.extend(mcp.specs);
     let router = Arc::new(mcp.router);
+    let system = Arc::new(build_system_prompt(&skills));
 
     let provider_c = provider.clone();
+    let system_c = system.clone();
     g.add_node("reason", move |s: AgentState| {
         let provider = provider_c.clone();
         let tools = specs.clone();
+        let system = system_c.clone();
         async move {
             let req = CompletionRequest {
-                messages: to_messages(&s),
+                messages: to_messages(&system, &s),
                 tools,
             };
             let completion = provider.complete(&req).await?;
@@ -1047,6 +1137,34 @@ mod tests {
         }]);
         let subs = plan(&provider, "implement add").await;
         assert_eq!(subs, vec!["add fn", "write test", "run cargo test"]);
+    }
+
+    /// 知识层:扫 SKILL.md 解析成 Skill 并注入 system prompt(让 agent 做编程外的事)。
+    #[test]
+    fn load_skills_and_inject_into_system_prompt() {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("ridge_skills_{}", std::process::id()));
+        let sk_dir = dir.join("cooking");
+        std::fs::create_dir_all(&sk_dir).unwrap();
+        std::fs::write(
+            sk_dir.join("SKILL.md"),
+            "---\nname: cooking\ndescription: how to cook pasta\n---\nBoil water, add pasta, wait 9 minutes.\n",
+        )
+        .unwrap();
+
+        let skills = load_skills(&dir);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "cooking");
+        assert_eq!(skills[0].description, "how to cook pasta");
+        assert!(skills[0].body.contains("Boil water"));
+
+        let prompt = build_system_prompt(&skills);
+        assert!(prompt.contains("cooking"));
+        assert!(prompt.contains("Boil water")); // 领域知识进了 system prompt
+
+        // 空目录 → 无技能,用基础 prompt。
+        assert_eq!(build_system_prompt(&[]), BASE_SYSTEM);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// DoD②:/compact 压缩历史 —— 长度显著减少,保留首条(任务)+ 最近 keep 条。
