@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-07-14 · Iteration 11 续:--resume 会话恢复(kill-9)
+
+- **CONTRACT-11 P1 kill-9 恢复落地**:REPL 每轮把对话 `history` 落盘(`RIDGE_SESSION` 或 `~/.ridge/session.json`,serde_json);`--resume`/`--continue` 启动读回,`/reset` 也落盘清空。像 Claude Code 续接会话。选了**会话级 history 持久化**(用户可见价值 = 对话不丢),而非引擎级 mid-graph resume(那是另一码事,引擎 `FileCheckpointer` 已具备,列后续)。
+- **GLM 实测(真·跨进程)**:进程1「记住幸运数字 42」→ 落盘退出;**全新进程 `--resume`** →「已恢复上次会话:2 条消息」→ 问幸运数字答 **42**。
+- `cargo test --workspace` = **76 全绿**(75→76),clippy/fmt 干净。提交 `dd6dd9b`。
+- CONTRACT-11 剩:token 逐字流式(provider SSE,假流式 HttpClient 测)、TODO 可视化、`@file`/Ctrl-C。
+
 ## 2026-07-14 · Iteration 11 起步:多文件原子批量编辑(apply_edits)
 
 - **NotebookLM 定 Iteration 11 + 对抗评审**:计划 P0 多文件批量编辑、P1 token 流式/kill-9 resume、P2 TODO/@file。**揪出张冠李戴**:P0 引用 `[1]`/沙箱 `[22]` 指向无关营销页(Ruh.AI「AI Workforce」脏来源),忽略;**驳回 mockito 测 SSE**(本项目早弃用,改假流式 HttpClient)。归档 guidance-10 + CONTRACT-11。
