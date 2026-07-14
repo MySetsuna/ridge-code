@@ -143,7 +143,7 @@ async fn repl(provider: Arc<dyn LlmProvider>, mcp: McpTools) -> anyhow::Result<(
             }
             "/compact" => {
                 let before = history.len();
-                history = compact_history(std::mem::take(&mut history), 4);
+                history = compact_history(history, 4);
                 println!("(上下文已压缩:{before} → {} 条)", history.len());
                 continue;
             }

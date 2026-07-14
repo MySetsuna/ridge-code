@@ -165,6 +165,7 @@ fn tool_output_failed(o: &str) -> bool {
 /// verify 判据(通用 agent):
 /// - 有确定性成功信号(编码任务)→ 通过;
 /// - **模型 finish 且没有失败信号**(开放式/信息类任务,如调 MCP 查数据)→ 接受完成,不空转到回合上限。
+///
 /// 编码任务仍严格卡 `exit 0`;只对「模型自己收尾且无客观失败」放行,兼顾通用性与 maker≠checker。
 fn verify_ok(s: &AgentState) -> bool {
     let out = s.tool_output.as_deref();
