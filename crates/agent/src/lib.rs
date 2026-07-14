@@ -133,9 +133,39 @@ impl Approver for AutoDeny {
     }
 }
 
-/// 只读工具不需要批准。
+/// 只读工具不需要批准(read_file / search 不碰外部世界)。
 fn needs_approval(tool: &str) -> bool {
-    tool != "read_file"
+    !matches!(tool, "read_file" | "search")
+}
+
+/// 给权限门一个**人类可读的预览**,而非生糊 JSON:让用户「看着 diff 批准」而非盲批。
+/// edit_file → `-/+` diff;write_file → 路径+规模;run_shell → 命令原文;其余回落到参数。
+pub fn preview_call(call: &ToolCall) -> String {
+    let arg = |k: &str| call.arguments.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    match call.name.as_str() {
+        "edit_file" => {
+            let minus: String = arg("old_string")
+                .lines()
+                .map(|l| format!("\n    - {l}"))
+                .collect();
+            let plus: String = arg("new_string")
+                .lines()
+                .map(|l| format!("\n    + {l}"))
+                .collect();
+            format!("{}{}{}", arg("path"), minus, plus)
+        }
+        "write_file" => {
+            let c = arg("contents");
+            format!(
+                "{} ({} 行, {} 字节)",
+                arg("path"),
+                c.lines().count(),
+                c.len()
+            )
+        }
+        "run_shell" => arg("cmd").to_string(),
+        _ => call.arguments.to_string(),
+    }
 }
 
 /// 声明式技能(知识层):一份 `SKILL.md` = 某领域的知识/行为,注入 system prompt,
@@ -191,8 +221,10 @@ fn parse_skill(text: &str) -> Option<Skill> {
 
 /// 通用 agent 的基础 system prompt(不再只面向编码)。
 const BASE_SYSTEM: &str = "You are a capable agent. Use the provided tools to accomplish the \
-     user's task. When there is an objective way to verify (compiler exit code, tests), rely on \
-     it and don't trust your own claim. When done, stop.";
+     user's task. To change existing files, prefer edit_file (surgical, unique-match replace) over \
+     rewriting the whole file with write_file; use search and ranged read_file to explore before \
+     editing. When there is an objective way to verify (compiler exit code, tests), rely on it and \
+     don't trust your own claim. When done, stop.";
 
 /// 把技能注入 system prompt(知识层 → 大脑偏好)。
 fn build_system_prompt(skills: &[Skill]) -> String {
@@ -390,13 +422,23 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "write_file".to_string(),
-            description: "把内容整文件写入路径(覆盖)".to_string(),
+            description: "把内容整文件写入路径(覆盖)。仅用于**新建文件**;改动已有文件请用 edit_file".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"contents":{"type":"string"}},"required":["path","contents"]}),
         },
         ToolSpec {
+            name: "edit_file".to_string(),
+            description: "精准编辑:把文件里**唯一**出现的 old_string 换成 new_string(需带足够上下文保证唯一)。改动已有文件优先用它,而非整文件覆写".to_string(),
+            schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"]}),
+        },
+        ToolSpec {
             name: "read_file".to_string(),
-            description: "读取一个文件的全文".to_string(),
-            schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
+            description: "读取文件。可选 offset(起始行,1 起)+ limit(行数)只读一段,大文件别整读".to_string(),
+            schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}),
+        },
+        ToolSpec {
+            name: "search".to_string(),
+            description: "在目录树下按文件名 glob(如 *.rs)搜含 pattern 子串的行,返回 路径:行号:内容。找代码/定位用它,别 run_shell grep(不可移植)".to_string(),
+            schema: serde_json::json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"}},"required":["pattern"]}),
         },
     ]
 }
@@ -423,10 +465,42 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
                 Err(e) => format!("write error: {e}"),
             }
         }
-        "read_file" => match tools::read_file(arg("path")) {
-            Ok(c) => c,
-            Err(e) => format!("read error: {e}"),
+        "edit_file" => match tools::edit_file(arg("path"), arg("old_string"), arg("new_string")) {
+            Ok(()) => format!("edited {}", arg("path")),
+            Err(e) => format!("edit error: {e}"),
         },
+        "read_file" => {
+            let num = |k: &str| call.arguments.get(k).and_then(|v| v.as_u64());
+            let (off, lim) = (num("offset"), num("limit"));
+            let res = if off.is_some() || lim.is_some() {
+                tools::read_file_range(
+                    arg("path"),
+                    off.unwrap_or(1).max(1) as usize,
+                    lim.unwrap_or(2000) as usize,
+                )
+            } else {
+                tools::read_file(arg("path"))
+            };
+            match res {
+                Ok(c) => c,
+                Err(e) => format!("read error: {e}"),
+            }
+        }
+        "search" => {
+            let or = |k: &str, d: &'static str| {
+                let v = arg(k);
+                if v.is_empty() {
+                    d.to_string()
+                } else {
+                    v.to_string()
+                }
+            };
+            match tools::search(or("path", "."), arg("pattern"), &or("glob", "*")) {
+                Ok(s) if s.is_empty() => "(no matches)".to_string(),
+                Ok(s) => s,
+                Err(e) => format!("search error: {e}"),
+            }
+        }
         other => format!("unknown tool `{other}`"),
     }
 }
@@ -598,7 +672,7 @@ fn build_core(
                 Some(call) => {
                     // 权限门:有副作用的工具执行前征询批准。
                     let obs = if needs_approval(&call.name)
-                        && !approver.approve(&call.name, &call.arguments.to_string())
+                        && !approver.approve(&call.name, &preview_call(call))
                     {
                         format!("permission denied by user: {}", call.name)
                     } else if let Some((client, raw)) = router.get(&call.name) {
@@ -887,6 +961,52 @@ mod tests {
         assert!(obs.contains("wrote"), "{obs}");
         assert_eq!(tools::read_file(&path).unwrap(), "physical closure");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// 驾驭工程:结构化 edit_file tool_call → 精准替换真实文件(而非整文件覆写)。
+    #[test]
+    fn execute_tool_call_edits_real_file() {
+        let mut path = std::env::temp_dir();
+        path.push("ridge_llm_edit.txt");
+        tools::write_file(&path, "let n = 1;\n").unwrap();
+        let call = ToolCall {
+            id: "e".to_string(),
+            name: "edit_file".to_string(),
+            arguments: serde_json::json!({
+                "path": path.to_str().unwrap(),
+                "old_string": "let n = 1;",
+                "new_string": "let n = 99;"
+            }),
+        };
+        let obs = execute_tool_call(&call);
+        assert!(obs.starts_with("edited"), "{obs}");
+        assert_eq!(tools::read_file(&path).unwrap(), "let n = 99;\n");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 用户交互:权限门看到的是**diff 预览**而非生 JSON —— 用户看着改动批准。
+    #[test]
+    fn preview_call_renders_edit_diff() {
+        let call = ToolCall {
+            id: "p".to_string(),
+            name: "edit_file".to_string(),
+            arguments: serde_json::json!({
+                "path": "src/x.rs", "old_string": "old", "new_string": "new"
+            }),
+        };
+        let p = preview_call(&call);
+        assert!(p.contains("src/x.rs"), "{p}");
+        assert!(p.contains("- old") && p.contains("+ new"), "diff 形态: {p}");
+    }
+
+    /// 只读工具(read_file / search)不走权限门;有副作用的走。
+    #[test]
+    fn readonly_tools_skip_approval() {
+        assert!(!needs_approval("read_file"));
+        assert!(!needs_approval("search"));
+        assert!(needs_approval("edit_file"));
+        assert!(needs_approval("write_file"));
+        assert!(needs_approval("run_shell"));
     }
 
     /// P1 端到端:provider 吐结构化 tool_call → act 调**真实** shell → verify 认真实 `exit 0` → approved。

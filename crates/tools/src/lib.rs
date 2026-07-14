@@ -20,6 +20,104 @@ pub fn write_file(path: impl AsRef<Path>, contents: &str) -> io::Result<()> {
     std::fs::write(path, contents)
 }
 
+/// 精准编辑:把文件里**唯一**出现的 `old` 换成 `new`(Claude Code 的 Edit 语义)。
+/// 0 处或多处匹配都报错 —— 逼调用方带足够上下文保证唯一,避免整文件覆写丢内容、省 token。
+pub fn edit_file(path: impl AsRef<Path>, old: &str, new: &str) -> io::Result<()> {
+    let content = read_file(&path)?;
+    match content.matches(old).count() {
+        0 => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "old_string 未找到 —— 先 read_file 核对原文",
+        )),
+        1 => write_file(path, &content.replacen(old, new, 1)),
+        n => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("old_string 匹配 {n} 处,需唯一 —— 带上更多上下文"),
+        )),
+    }
+}
+
+/// 读文件的一段:从第 `offset` 行(1 起)读至多 `limit` 行。大文件不必整读,省上下文。
+pub fn read_file_range(path: impl AsRef<Path>, offset: usize, limit: usize) -> io::Result<String> {
+    let content = read_file(path)?;
+    Ok(content
+        .lines()
+        .skip(offset.saturating_sub(1))
+        .take(limit)
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// 递归搜索时跳过的噪声目录 —— 别把 target/.git 也扫了。
+const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".codegraph"];
+/// 单次搜索最多返回的命中行数,防爆上下文。
+const SEARCH_CAP: usize = 200;
+
+/// 跨平台代码搜索:在 `root` 下递归找**文件名匹配 `glob`**(如 `*.rs`)、**内容含 `needle` 子串**
+/// 的行,返回 `相对路径:行号:内容`。Windows 无 grep,这是 agent 找代码的可移植接缝。
+/// ponytail: 子串匹配非正则、glob 只认单个前/后缀 `*`;命中上限 [`SEARCH_CAP`] 行,超出截断。
+pub fn search(root: impl AsRef<Path>, needle: &str, glob: &str) -> io::Result<String> {
+    let root = root.as_ref();
+    let mut out = Vec::new();
+    search_dir(root, root, needle, glob, &mut out)?;
+    let truncated = out.len() > SEARCH_CAP;
+    out.truncate(SEARCH_CAP);
+    if truncated {
+        out.push(format!(
+            "… (命中超过 {SEARCH_CAP} 行,已截断;缩小范围或用更精确的 pattern)"
+        ));
+    }
+    Ok(out.join("\n"))
+}
+
+fn search_dir(
+    base: &Path,
+    dir: &Path,
+    needle: &str,
+    glob: &str,
+    out: &mut Vec<String>,
+) -> io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let path = entry.path();
+        if ft.is_dir() {
+            if !SKIP_DIRS.contains(&name.as_ref()) {
+                search_dir(base, &path, needle, glob, out)?;
+            }
+        } else if ft.is_file() && glob_match(glob, &name) {
+            // 读不成 UTF-8(二进制)就跳过,别把搜索搞挂。
+            if let Ok(content) = read_file(&path) {
+                let rel = path.strip_prefix(base).unwrap_or(&path);
+                for (i, line) in content.lines().enumerate() {
+                    if line.contains(needle) {
+                        out.push(format!("{}:{}:{}", rel.display(), i + 1, line.trim_end()));
+                        if out.len() > SEARCH_CAP {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 极简 glob:`*` / `*.rs`(后缀)/ `main.*`(前缀)/ 精确名。ponytail: 只认单个 `*`,够用即可。
+fn glob_match(pat: &str, name: &str) -> bool {
+    if pat == "*" || pat.is_empty() {
+        true
+    } else if let Some(suffix) = pat.strip_prefix('*') {
+        name.ends_with(suffix)
+    } else if let Some(prefix) = pat.strip_suffix('*') {
+        name.starts_with(prefix)
+    } else {
+        name == pat
+    }
+}
+
 /// 一次 shell 执行的结果。`code` 是退出码(被信号杀掉时为 -1)。
 #[derive(Debug, Clone)]
 pub struct ShellResult {
@@ -103,6 +201,59 @@ mod tests {
         let out = run_shell("echo ridge").unwrap();
         assert_eq!(out.code, 0);
         assert!(out.stdout.contains("ridge"));
+    }
+
+    #[test]
+    fn edit_file_replaces_unique_occurrence() {
+        let mut path = std::env::temp_dir();
+        path.push("ridge_edit_unique.txt");
+        write_file(&path, "let x = 1;\nlet y = 2;\n").unwrap();
+        edit_file(&path, "let x = 1;", "let x = 42;").unwrap();
+        assert_eq!(read_file(&path).unwrap(), "let x = 42;\nlet y = 2;\n");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn edit_file_rejects_missing_and_ambiguous() {
+        let mut path = std::env::temp_dir();
+        path.push("ridge_edit_reject.txt");
+        write_file(&path, "dup\ndup\n").unwrap();
+        assert!(edit_file(&path, "nope", "x").is_err()); // 0 处
+        assert!(edit_file(&path, "dup", "x").is_err()); // 2 处 → 不唯一
+        assert_eq!(read_file(&path).unwrap(), "dup\ndup\n"); // 报错时原文不动
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_file_range_reads_slice() {
+        let mut path = std::env::temp_dir();
+        path.push("ridge_read_range.txt");
+        write_file(&path, "l1\nl2\nl3\nl4\nl5\n").unwrap();
+        assert_eq!(read_file_range(&path, 2, 2).unwrap(), "l2\nl3");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn search_finds_matching_lines_by_glob() {
+        let dir = std::env::temp_dir().join("ridge_search_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_file(dir.join("a.rs"), "fn needle() {}\nother\n").unwrap();
+        write_file(dir.join("b.txt"), "needle here too\n").unwrap();
+        let hits = search(&dir, "needle", "*.rs").unwrap();
+        assert!(hits.contains("a.rs:1:"), "命中 .rs 行: {hits}");
+        assert!(!hits.contains("b.txt"), "glob 应过滤掉 .txt: {hits}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn glob_match_covers_common_shapes() {
+        assert!(glob_match("*", "anything.rs"));
+        assert!(glob_match("*.rs", "main.rs"));
+        assert!(!glob_match("*.rs", "main.txt"));
+        assert!(glob_match("Cargo.*", "Cargo.toml"));
+        assert!(glob_match("Cargo.toml", "Cargo.toml"));
+        assert!(!glob_match("Cargo.toml", "cargo.toml"));
     }
 
     #[test]
