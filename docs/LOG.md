@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-07-14 · Iteration 10 续:rename ridgecode + RAG 闭环 + 搜索硬化
+
+- **全量 rename `ridge` → `ridgecode`(用户选 B)**:Cargo `[[bin]]`(含 `ridge-eval`→`ridgecode-eval`)、release.yml 归档名、REPL 提示符 `ridgecode>`、日志前缀 `[ridgecode]`、CLI 用法/横幅、README + CLAUDE.md。**env 前缀仍 `RIDGE_*`**(不破坏现有配置)。提交 `0961e11`。
+- **`fetch_url`(RAG 闭环的「读」)**:`provider::search` 加 `fetch_url` + `html_to_text`(删 script/style/head 块、块级标签转换行、去标签、压缩、截断 4000)+ `strip_blocks`(ASCII 大小写不敏感、字节布局不变索引安全)。agent 加 tool_spec + act 异步分支 + `fetch_url_obs`,归只读;BASE_SYSTEM 引导 `web_search 找链接 → fetch_url 读正文 → 据原文作答`。GLM 实测抓 example.com 正文作答。提交 `0df7a09`。
+- **`detect_net` 多探针**:单探针 → 并发探 google + gstatic 的 generate_204(`tokio::join!` + 每探针 3s `timeout`),任一通即 International,更抗抖动、避免卡 15s。provider 加 tokio 常规依赖。提交 `c91640b`。
+- **搜索结果按 URL 去重**(保序)。提交 `ec41364`。
+- `cargo test --workspace` = **67 全绿**(55→67),clippy/fmt 干净。CONTRACT-10 剩:API key 搜索后端(**live 需用户给 Brave/Tavily key**,无 key 回落现有 HTML)、config.toml + 多 MCP。
+- ⚠ 仓库有并行工具 mimocode 会留破损 WIP,动 agent crate 前先编译确认基线。⚠ 用户智谱 key 明文,提醒轮换。宿主进程 `ridge.exe` 勿杀(会话 host,PID 会变)。
+
 ## 2026-07-14 · Iteration 10:富文本 REPL(彩色实时输出 + spinner + skip-danger)
 
 - **用户 steer**:输出要直接在 shell 里直观彩色呈现(而非翻 trace.json)、要 skip-danger 模式、等待时有 loading 动画;并澄清 web_search 不必用 Brave/Tavily(内置无 key 方案即可)、本轮先不做多模态;产物暂定名 **RidgeCode**。
