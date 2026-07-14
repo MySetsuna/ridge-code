@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-07-14 · Iteration 09:web_search —— 探网络(GFW)自动换搜索引擎
+
+- **用户 steer 插队**:用户要一个 web search 工具,要能**检查网络环境、判断是不是在 GFW 内、据此用不同搜索引擎**,并「继续迭代直到工业级」。据「用户方向 > 计划」,插到原 CONTRACT-09(多文件批量编辑)前面。
+- **能力**:给 agent 补上查外部实时信息的手。全放 `provider::search`(复用 reqwest,**零新依赖**)。`WebFetch` GET 接缝(假抓取器不联网可测)。`detect_net`:GET Google `generate_204` 探针 —— 通→`International`(直连/带 VPN)、不通→`Restricted`(墙内)。`web_search`:直连→**DuckDuckGo**(解 `uddg` 跳转拿真实 URL);受限→**Bing 中国版 cn.bing.com**(墙内可达、静态 HTML 好解析,DuckDuckGo/Google 墙内不可达)。HTML 解析纯 std(`strip_tags`/`urlencode`/`percent_decode`),不引 scraper/regex。
+- **接入 agent**:`web_search` tool_spec + act 节点异步分支 + `web_search_obs`(懒探测一次、缓存网络环境、排版标题/链接/摘要);归**只读工具**不打扰权限门。
+- **GLM + 真实网络实测(零改代码)**:`ridge "web_search 查 Rust 官网"` → 探测=**直连国际** → 引擎=**duckduckgo** → 返回 `rust-lang.org`/`github.com/rust-lang/rust`/`doc.rust-lang.org` 等真实链接(uddg 已解码)、approved。trace 记录「网络:直连国际·引擎:duckduckgo」决策透明。
+- `cargo test --workspace` = **55 全绿**(50→55,provider +4 / agent +1),clippy/fmt 干净。提交 `9ee63c6`。
+- **NotebookLM Iter10 指导 + 对抗评审**:采纳 `fetch_url`(RAG 闭环,**重排为 P0**,可 live 实测)、API key 搜索后端(env-first + 无 key 回落 HTML)、探测更稳(多探针+TTL);**驳回**「确定性引用审计」当 DoD 硬门槛(引用正确性不可确定性机检),并揪出其引用 `[10]` 是**无关的 awesome-MCP-servers 清单**(张冠李戴)。config.toml 降为 P2(key 可先走 env)。归档 guidance-09 + CONTRACT-10。
+- ⚠ 用户智谱 key 明文在对话里,再次提醒轮换;**搜索 API 后端的 live 实测需用户提供 Brave/Tavily key**。
+
 ## 2026-07-14 · Iteration 08:驾驭工程 + 用户交互(补上「像 Claude Code」最缺两块)
 
 - **用户 steer 重排**:用户直接指出「离 Claude Code 差距主要在**驾驭工程**和**用户交互**」→ 据「用户方向 > NotebookLM 计划」,本轮把原 CONTRACT-08(config.toml + 多 MCP)顺延 Iter09,改做工程能力 + 交互体验。

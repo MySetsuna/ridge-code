@@ -1,5 +1,7 @@
 # CONTRACT —— Iteration 09:继续压「驾驭工程 + 用户交互」
 
+> ⚠️ **本合同的 P0(多文件批量编辑)被用户 steer 插队顺延。** 用户 2026-07-14 直接要求先做 **web_search**(网络环境探测 + 引擎切换),已作为实际的 Iteration 09 交付,见 `2026-07-14-iteration-09.md`。本文件的批量编辑 / config.toml / TODO / 流式等条目**整体顺延到 Iteration 10**(见 `CONTRACT-iteration-10.md`)。
+
 - **开工时间戳**: 2026-07-14
 - **里程碑**: 从「修单点」跃迁到「重构级工程 + Claude Code 式交互」
 - **依据**: `docs/iterations/2026-07-14-notebooklm-guidance-08.md`(NotebookLM + 对抗评审)+ 用户 steer(差距在驾驭工程/用户交互)
