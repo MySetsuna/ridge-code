@@ -120,6 +120,23 @@ pub struct CompletionRequest {
     pub tools: Vec<ToolSpec>,
 }
 
+/// 剥掉思考模型漏进正文的 `<think>...</think>` 块与游离标签(如 GLM 会把 `</think>` 漏进 content)。
+pub(crate) fn strip_thinking(text: &str) -> String {
+    let mut s = text.to_string();
+    // 成对的 <think>...</think> 块整段删掉。
+    while let (Some(a), Some(b)) = (s.find("<think>"), s.find("</think>")) {
+        if b > a {
+            s.replace_range(a..b + "</think>".len(), "");
+        } else {
+            break; // 闭合早于开启 → 交给下面的游离标签清理
+        }
+    }
+    s.replace("<think>", "")
+        .replace("</think>", "")
+        .trim()
+        .to_string()
+}
+
 /// LLM provider 抽象。真实实现(Anthropic/OpenAI HTTP)与离线 [`ScriptedProvider`] 都藏在这后面。
 #[async_trait::async_trait]
 pub trait LlmProvider: Send + Sync {
@@ -148,7 +165,10 @@ impl LlmProvider for ScriptedProvider {
 
 /// OpenAI 兼容响应的归一化(纯函数,离线可测)。
 pub mod openai {
-    use super::{Completion, CompletionRequest, Message, ProviderError, Role, ToolCall, Usage};
+    use super::{
+        strip_thinking, Completion, CompletionRequest, Message, ProviderError, Role, ToolCall,
+        Usage,
+    };
     use serde_json::{json, Value};
 
     /// 把统一历史铺成 OpenAI `/chat/completions` 请求体(纯函数,离线可测)。
@@ -199,7 +219,7 @@ pub mod openai {
     /// OpenAI 的 `function.arguments` 是 JSON **字符串**,这里解开成对象。
     pub fn parse_response(v: &Value) -> Result<Completion, ProviderError> {
         let msg = &v["choices"][0]["message"];
-        let text = msg["content"].as_str().unwrap_or("").to_string();
+        let text = strip_thinking(msg["content"].as_str().unwrap_or(""));
         let mut tool_calls = Vec::new();
         if let Some(arr) = msg["tool_calls"].as_array() {
             for tc in arr {
@@ -226,7 +246,9 @@ pub mod openai {
 
 /// Anthropic Messages 响应的归一化(纯函数,离线可测)。
 pub mod anthropic {
-    use super::{Completion, CompletionRequest, ProviderError, Role, ToolCall, Usage};
+    use super::{
+        strip_thinking, Completion, CompletionRequest, ProviderError, Role, ToolCall, Usage,
+    };
     use serde_json::{json, Value};
 
     /// 把统一历史铺成 Anthropic `/messages` 请求体(纯函数,离线可测)。
@@ -304,7 +326,7 @@ pub mod anthropic {
             completion_tokens: v["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32,
         };
         Ok(Completion {
-            text,
+            text: strip_thinking(&text),
             tool_calls,
             usage,
         })
@@ -508,6 +530,22 @@ mod tests {
         let c = openai::parse_response(&wire).unwrap();
         assert_eq!(c.text, "all done");
         assert!(c.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn strips_thinking_tags_from_content() {
+        // 成对块。
+        assert_eq!(strip_thinking("<think>reasoning here</think>pong"), "pong");
+        // GLM 实测:游离的 </think> 漏进正文。
+        assert_eq!(
+            strip_thinking("\nresult\n</think>\nThe answer"),
+            "result\n\nThe answer".trim()
+        );
+        // 无标签原样(去首尾空白)。
+        assert_eq!(strip_thinking("  clean  "), "clean");
+
+        let wire = json!({"choices": [{"message": {"content": "<think>x</think>done"}}]});
+        assert_eq!(openai::parse_response(&wire).unwrap().text, "done");
     }
 
     /// 多轮工具历史 → OpenAI wire:assistant 带 tool_calls,工具结果是 role=tool + tool_call_id。

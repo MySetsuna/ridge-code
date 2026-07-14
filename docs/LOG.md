@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-07-14 · Iteration 05:变成「像 Claude Code 的 CLI」(REPL + 流式 + 权限门)
+
+- **P0a** provider 剥 `<think>` 标签(实测 GLM 会漏 `</think>` 进 content)。
+- **P0b** 多轮 `role=tool` 正确回灌:`AgentState.history: Vec<Message>`,reason 推 assistant(带 tool_calls)、act 推 tool_result,`to_messages = [system]+history`。
+- **P1** 交互式 REPL(`ridge` 无参进对话循环,跨轮携带 history,`/exit` `/reset` `/help`)。
+- **P2** REPL 实时流式进度(接引擎 `StreamEvent`,`· reason#1 · act#2 …` 边跑边显)。
+- **P3** 权限门 `Approver` trait(`AutoApprove`/`AutoDeny`/REPL 的 `StdinApprover`),有副作用工具执行前 `[y/N]`。
+- **对抗评审**:拆分「流式」(只做引擎事件流,LLM token 流延后)、沙箱延后(权限门先),都写进 guidance-04。
+- **GLM 真实 REPL 实测**:`ridge>` → 任务 → `run_shell {"cmd":"cargo build"}` 前 `[y/N]` 确认 → `· reason/act/verify` 流式 → `verify PASS, approved=true, tokens=861` → `/exit`。**用起来已经像 Claude Code**。
+- `cargo test --workspace` = **37 项全绿**(agent 15 + provider 14 + …),clippy/fmt 干净。
+- backlog(交付前):沙箱、LLM token 流、`~/.ridge/config.toml`、`/compact`、TUI、rmcp、子任务并行。
+
 ## 2026-07-13 · Eval harness(评测基础设施 / verification-first)
 
 - 新增 `crates/eval`:`run_eval(cases)` 批量跑 agent,按确定性闸判 pass,聚合成功率 + token 成本;`EvalReport::pass_rate()`。bin `ridge-eval` 打印每 case PASS/FAIL + 总成功率。

@@ -45,12 +45,17 @@ pub struct AgentState {
     pub budget_tokens: usize,
     /// 连续「无进展」轮数(工具输出与上一轮相同)。到 [`MAX_STALL`] 就熔断。
     pub stall: usize,
+    /// **模型面向**的多轮对话历史(system 之外的部分):user / assistant(可带 tool_calls)/ tool 结果。
+    /// 这是发给 provider 的真身;REPL 跨轮携带它实现多轮上下文。
+    pub history: Vec<Message>,
 }
 
 impl AgentState {
     pub fn new(task: impl Into<String>) -> Self {
+        let task = task.into();
         Self {
-            task: task.into(),
+            history: vec![Message::user(task.clone())],
+            task,
             ..Default::default()
         }
     }
@@ -58,6 +63,12 @@ impl AgentState {
     /// 设 token 预算(loop engineering 的经济护栏之一)。
     pub fn with_budget(mut self, tokens: usize) -> Self {
         self.budget_tokens = tokens;
+        self
+    }
+
+    /// 用已有对话历史续跑(REPL 多轮携带上下文)。
+    pub fn with_history(mut self, history: Vec<Message>) -> Self {
+        self.history = history;
         self
     }
 }
@@ -73,6 +84,7 @@ pub enum Patch {
     PendingCall(Option<ToolCall>),
     AddTokens(usize),
     SetStall(usize),
+    PushHistory(Message),
     BumpStep,
     Batch(Vec<Patch>),
 }
@@ -89,6 +101,7 @@ impl GraphState for AgentState {
             Patch::PendingCall(c) => self.pending_call = c,
             Patch::AddTokens(n) => self.total_tokens += n,
             Patch::SetStall(n) => self.stall = n,
+            Patch::PushHistory(m) => self.history.push(m),
             Patch::BumpStep => self.steps += 1,
             Patch::Batch(v) => v.into_iter().for_each(|p| self.apply(p)),
         }
@@ -97,6 +110,33 @@ impl GraphState for AgentState {
 
 /// 连续无进展多少轮就熔断(no-progress detection)。
 pub const MAX_STALL: usize = 3;
+
+/// 权限门:执行**有副作用的**工具(shell / 写文件 / MCP)前征询批准(human-in-the-loop)。
+/// REPL 用 stdin y/n;测试用 [`AutoApprove`] / [`AutoDeny`]。`read_file` 等只读工具不走它。
+pub trait Approver: Send + Sync {
+    fn approve(&self, action: &str, detail: &str) -> bool;
+}
+
+/// 一律放行(默认;非交互 / 一次性任务用)。
+pub struct AutoApprove;
+impl Approver for AutoApprove {
+    fn approve(&self, _action: &str, _detail: &str) -> bool {
+        true
+    }
+}
+
+/// 一律拒绝(测试用)。
+pub struct AutoDeny;
+impl Approver for AutoDeny {
+    fn approve(&self, _action: &str, _detail: &str) -> bool {
+        false
+    }
+}
+
+/// 只读工具不需要批准。
+fn needs_approval(tool: &str) -> bool {
+    tool != "read_file"
+}
 
 /// 超预算?(0 预算 = 不限)
 fn over_budget(s: &AgentState) -> bool {
@@ -292,20 +332,14 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
     }
 }
 
-/// 把当前状态铺成给 provider 的消息序列(system + task + 轨迹)。
+/// 把当前状态铺成给 provider 的消息序列:system + **真实多轮 history**
+/// (user / assistant(带 tool_calls) / role=tool 结果),而非把轨迹当 assistant 文本糊上去。
 fn to_messages(s: &AgentState) -> Vec<Message> {
-    let mut msgs = vec![
-        Message::new(
-            Role::System,
-            "You are a coding agent. Use the provided tools to make the build/tests pass, then stop.",
-        ),
-        Message::new(Role::User, s.task.clone()),
-    ];
-    msgs.extend(
-        s.messages
-            .iter()
-            .map(|m| Message::new(Role::Assistant, m.clone())),
-    );
+    let mut msgs = vec![Message::new(
+        Role::System,
+        "You are a coding agent. Use the provided tools to make the build/tests pass, then stop.",
+    )];
+    msgs.extend(s.history.iter().cloned());
     msgs
 }
 
@@ -353,12 +387,12 @@ pub fn build_llm_agent(
     build_llm_agent_with(provider, McpTools::empty())
 }
 
-/// 装配 agent 图,并把 MCP 工具并入(确定性 verify,无独立模型复核)。
+/// 装配 agent 图,并把 MCP 工具并入(确定性 verify,无独立模型复核,一律放行)。
 pub fn build_llm_agent_with(
     provider: Arc<dyn LlmProvider>,
     mcp: McpTools,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
-    build_core(provider, mcp, None)
+    build_core(provider, mcp, None, Arc::new(AutoApprove))
 }
 
 /// 带**独立模型 checker** 的装配(M4,maker≠checker 的强形式):
@@ -369,15 +403,25 @@ pub fn build_llm_agent_reviewed(
     mcp: McpTools,
     reviewer: Arc<dyn LlmProvider>,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
-    build_core(provider, mcp, Some(reviewer))
+    build_core(provider, mcp, Some(reviewer), Arc::new(AutoApprove))
+}
+
+/// 带**权限门**的装配:有副作用的工具执行前过 [`Approver`](REPL 用它做 y/n 确认)。
+pub fn build_llm_agent_gated(
+    provider: Arc<dyn LlmProvider>,
+    mcp: McpTools,
+    approver: Arc<dyn Approver>,
+) -> Result<CompiledGraph<AgentState>, GraphError> {
+    build_core(provider, mcp, None, approver)
 }
 
 /// reason 把 内置 + MCP 工具一起 offer 给 LLM,act 按 `<server>__<tool>` 命名空间路由到对应
-/// MCP 客户端(否则走内置工具),verify 认确定性信号(可选再挂独立模型 reviewer)。
+/// MCP 客户端(否则走内置工具),执行前过权限门,verify 认确定性信号(可选再挂独立模型 reviewer)。
 fn build_core(
     provider: Arc<dyn LlmProvider>,
     mcp: McpTools,
     reviewer: Option<Arc<dyn LlmProvider>>,
+    approver: Arc<dyn Approver>,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
     let mut g = StateGraph::<AgentState>::new();
     let mut specs = builtin_tool_specs();
@@ -395,8 +439,10 @@ fn build_core(
             };
             let completion = provider.complete(&req).await?;
             let tokens = completion.usage.total() as usize; // 成本记账
+            let asst_text = completion.text.clone();
             let patch = if let Some(call) = completion.tool_calls.into_iter().next() {
-                // maker 想用工具 → 交给 act 执行。
+                // maker 想用工具 → 记 assistant(带 tool_calls)进 history,交给 act 执行。
+                let hist = Message::assistant(asst_text).with_tool_calls(vec![call.clone()]);
                 Patch::Batch(vec![
                     Patch::BumpStep,
                     Patch::AddTokens(tokens),
@@ -406,6 +452,7 @@ fn build_core(
                         call.name,
                         call.arguments
                     )),
+                    Patch::PushHistory(hist),
                     Patch::PendingCall(Some(call)),
                     Patch::Action(Some("tool".to_string())),
                 ])
@@ -414,11 +461,8 @@ fn build_core(
                 Patch::Batch(vec![
                     Patch::BumpStep,
                     Patch::AddTokens(tokens),
-                    Patch::Message(format!(
-                        "reason#{}: (final) {}",
-                        s.steps + 1,
-                        completion.text
-                    )),
+                    Patch::Message(format!("reason#{}: (final) {}", s.steps + 1, asst_text)),
+                    Patch::PushHistory(Message::assistant(asst_text)),
                     Patch::PendingCall(None),
                     Patch::Action(Some("finish".to_string())),
                 ])
@@ -428,13 +472,20 @@ fn build_core(
     });
 
     let router_c = router.clone();
+    let approver_c = approver.clone();
     g.add_node("act", move |s: AgentState| {
         let router = router_c.clone();
+        let approver = approver_c.clone();
         async move {
             let patch = match &s.pending_call {
                 Some(call) => {
-                    // 命名空间命中 → 路由到 MCP 服务器;否则走内置工具。
-                    let obs = if let Some((client, raw)) = router.get(&call.name) {
+                    // 权限门:有副作用的工具执行前征询批准。
+                    let obs = if needs_approval(&call.name)
+                        && !approver.approve(&call.name, &call.arguments.to_string())
+                    {
+                        format!("permission denied by user: {}", call.name)
+                    } else if let Some((client, raw)) = router.get(&call.name) {
+                        // 命名空间命中 → 路由到 MCP 服务器。
                         match client.call_tool(raw, call.arguments.clone()).await {
                             Ok(t) => t,
                             Err(e) => format!("mcp error: {e}"),
@@ -450,6 +501,8 @@ fn build_core(
                     };
                     Patch::Batch(vec![
                         Patch::Message(format!("act: {} -> {}", call.name, obs)),
+                        // 工具结果按 role=tool 正确回灌(匹配 tool_call_id)。
+                        Patch::PushHistory(Message::tool_result(call.id.clone(), obs.clone())),
                         Patch::SetStall(stall),
                         Patch::ToolOutput(Some(obs)),
                         Patch::PendingCall(None),
@@ -726,6 +779,40 @@ mod tests {
         assert!(out.messages.iter().any(|m| m.contains("run_shell")));
     }
 
+    /// P0b:一次工具调用后,模型面向的 history 里应出现 role=tool 结果(匹配 tool_call_id)+ 带 tool_calls 的 assistant。
+    #[tokio::test]
+    async fn history_carries_role_tool_after_tool_call() {
+        use provider::{Completion, Role, ScriptedProvider};
+        let scripted = ScriptedProvider::new(vec![
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "run_shell".to_string(),
+                    arguments: serde_json::json!({"cmd": "exit 0"}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                text: "done".to_string(),
+                ..Default::default()
+            },
+        ]);
+        let app = build_llm_agent(Arc::new(scripted)).unwrap();
+        let out = app.invoke(AgentState::new("build")).await.unwrap();
+
+        // history = [user(build), assistant(tool_calls), tool_result(call_1), assistant(done)]
+        assert!(out
+            .history
+            .iter()
+            .any(|m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some("call_1")));
+        assert!(out
+            .history
+            .iter()
+            .any(|m| m.role == Role::Assistant && !m.tool_calls.is_empty()));
+        // to_messages 会在最前面加 system;history 首条是 user 任务。
+        assert_eq!(out.history.first().map(|m| &m.role), Some(&Role::User));
+    }
+
     // 一个「永不收工、每轮都调同一个失败命令」的 provider 步骤,带可配的 token 用量。
     fn stuck_step(tokens: u32) -> provider::Completion {
         provider::Completion {
@@ -915,6 +1002,32 @@ mod tests {
         }]);
         let subs = plan(&provider, "do the thing").await;
         assert_eq!(subs, vec!["do the thing"]);
+    }
+
+    /// P3 权限门:AutoDeny → 有副作用的工具不执行,观察为 permission denied,拿不到成功信号。
+    #[tokio::test]
+    async fn permission_gate_blocks_denied_tool() {
+        use provider::{Completion, ScriptedProvider};
+        let scripted = ScriptedProvider::new(vec![
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "1".to_string(),
+                    name: "run_shell".to_string(),
+                    arguments: serde_json::json!({"cmd": "exit 0"}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                text: "done".to_string(),
+                ..Default::default()
+            },
+        ]);
+        let app = build_llm_agent_gated(Arc::new(scripted), McpTools::empty(), Arc::new(AutoDeny))
+            .unwrap();
+        let out = app.invoke(AgentState::new("build")).await.unwrap();
+
+        assert!(out.messages.iter().any(|m| m.contains("permission denied")));
+        assert!(!out.approved, "被拒的工具没真跑,拿不到 exit 0");
     }
 
     /// M5 完整:planner 拆 2 个子任务 → worker 逐个执行到 approved → 聚合整体通过。
