@@ -1340,6 +1340,23 @@ mod tests {
         assert!(p.contains("- old") && p.contains("+ new"), "diff 形态: {p}");
     }
 
+    /// 官方样例 skills 必须能被 load_skills 正确解析(守住 samples/ 不腐坏)。
+    #[test]
+    fn sample_skills_parse() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../samples/skills");
+        let skills = load_skills(dir);
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"researcher"), "样例 skill: {names:?}");
+        assert!(names.contains(&"rust-fixer"), "样例 skill: {names:?}");
+        for s in &skills {
+            assert!(
+                !s.description.is_empty() && !s.body.is_empty(),
+                "{}",
+                s.name
+            );
+        }
+    }
+
     /// todo_write:解析 todos + 渲染 checklist + 只读不走权限门。
     #[test]
     fn todo_write_parses_and_renders() {

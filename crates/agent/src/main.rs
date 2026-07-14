@@ -19,8 +19,39 @@ use provider::{AnthropicProvider, LlmProvider, Message, OpenAiProvider};
 ///   ridgecode --yolo "..."                    # skip-danger:工具自动放行不问 [y/N]
 ///
 /// 配置(环境变量):RIDGE_API_KEY / RIDGE_PROVIDER(anthropic|openai)/ RIDGE_MODEL / RIDGE_BASE_URL
+/// `--help` / `--version` 帮助与版本(1.0 级 CLI 该有的),命中就打印并返回 true(不进主流程)。
+fn handle_meta_flags() -> bool {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("ridgecode {}", env!("CARGO_PKG_VERSION"));
+        return true;
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "RidgeCode —— 模块化通用 agent CLI(二进制 ridgecode)\n\n\
+             用法:\n  \
+             ridgecode                      交互式 REPL(需 RIDGE_API_KEY)\n  \
+             ridgecode \"任务\"               一次性任务\n  \
+             ridgecode --resume             恢复上次会话(kill-9/关掉重开后续接)\n\n\
+             选项:\n  \
+             --cwd <dir>                    在目标项目目录里跑\n  \
+             --yolo/--skip-permissions      skip-danger:工具自动放行不问 [y/N](灾难命令仍拦)\n  \
+             --resume/--continue            恢复上次 REPL 会话\n  \
+             -h/--help、-V/--version        本帮助 / 版本\n\n\
+             REPL 内:@path 引用文件、Ctrl-C 中断任务;/help /reset /compact /exit\n\n\
+             配置:~/.ridge/config.toml(provider/model/预算/多 [[mcp]]/skills;env 覆盖);\
+             密钥只走 RIDGE_API_KEY env。~/.ridge/skills/*/SKILL.md 加领域技能不改源码。"
+        );
+        return true;
+    }
+    false
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if handle_meta_flags() {
+        return Ok(());
+    }
     init_tracing();
     let (task, cwd, cli_skip_danger, resume) = parse_args();
     if let Some(dir) = &cwd {
