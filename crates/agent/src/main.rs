@@ -299,13 +299,25 @@ async fn repl(
         let state = AgentState::new(input)
             .with_history(history.clone())
             .with_budget(budget);
-        match run_streamed(&app, state, &bus).await {
-            Ok(out) => {
-                history = out.history.clone();
-                save_session(&session_path(), &history); // 每轮落盘 → kill-9 后 --resume 可恢复
-                trace_and_report(&out);
+        // Ctrl-C 中断:任务跑一半按 Ctrl-C → 取消当前任务、回提示符(不杀整个 REPL,像 Claude Code)。
+        tokio::select! {
+            r = run_streamed(&app, state, &bus) => match r {
+                Ok(out) => {
+                    history = out.history.clone();
+                    save_session(&session_path(), &history); // 每轮落盘 → kill-9 后 --resume 可恢复
+                    trace_and_report(&out);
+                }
+                Err(e) => eprintln!("[ridgecode] 出错:{e}"),
+            },
+            _ = tokio::signal::ctrl_c() => {
+                *bus.lock().unwrap() = None; // 清掉可能残留的 token sender
+                println!(
+                    "\n{}",
+                    RichOutput::new()
+                        .with_color(Color::Yellow)
+                        .format("(已中断当前任务,回到提示符。/exit 退出)")
+                );
             }
-            Err(e) => eprintln!("[ridgecode] 出错:{e}"),
         }
     }
     println!("bye.");
