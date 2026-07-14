@@ -298,9 +298,8 @@ fn node_label(node: &str) -> String {
 /// 把一条内部事件 message 渲染成彩色终端行(按前缀分类上色)。
 fn format_event(m: &str) -> String {
     let ro = |c: Color| RichOutput::new().with_color(c);
-    if let Some(i) = m.find("(final) ") {
+    if let Some((_, ans)) = m.split_once("(final) ") {
         // 模型的最终回答 —— 高亮加粗,最显眼。
-        let ans = &m[i + "(final) ".len()..];
         return ro(Color::BrightWhite)
             .bold()
             .format(&format!("\n🤖 {ans}\n"));
