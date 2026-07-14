@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-07-14 · Iteration 11 续³:@file 上下文引用
+
+- **CONTRACT-11 P2 `@file` 落地**:`expand_mentions`(纯函数)—— 输入里 `@path` 引用**存在的**文件 → 正文注入进消息(模型直接看到、不必自己 read_file);不存在的 `@xxx` 原样留;同路径只注一次、截断 20000 字防爆。REPL + 一次性任务都接。
+- **GLM 实测**:`@note.txt 里 RIDGE_SECRET_MARKER 的值` → 模型**不调工具、一步**答出「紫色大象在跳舞」(证明文件正文已注入)。
+- `cargo test --workspace` = **79 全绿**(78→79),clippy/fmt 干净。提交 `57db13c`。
+- CONTRACT-11 剩:TODO 清单可视化(需把 planner 接进 REPL)+ Ctrl-C 中断(需 tokio signal + 取消语义)—— 均较大/难离线测,下轮再评估。
+
 ## 2026-07-14 · Iteration 11 续²:LLM token 逐字流式(SSE)
 
 - **CONTRACT-11 P1 token 流式落地**(最大块):provider 加 `complete_streaming`(默认回落 `complete` 整段 emit,**零风险降级**)、`HttpClient::post_json_stream`(reqwest `resp.chunk()` 增量读、切 SSE `data:` 行、默认报错让降级)、`openai::StreamAcc`+`accumulate_stream`(文本增量拼 + **分片工具调用按 index 拼装** + usage via `include_usage`)。**回调收 owned `String`** 避 async_trait+HRTB 的 `&str` 生命周期坑。

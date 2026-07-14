@@ -16,7 +16,8 @@
 | **P1** | **LLM token 逐字流式**:provider 层读 SSE → 增量经 TokenBus 转发,REPL 边到边显(而非节点级) | 单测:**假流式 HttpClient**(喂 SSE 帧,**不用 mockito**)→ 文本逐字拼接==全文 + 分片工具调用/usage 正确;不支持流式→降级整段。**GLM 实测**逐字出、🤖 1 次无重复 | ✅ `4d45452` |
 | **P1** | **kill-9 恢复**:`ridgecode --resume`——REPL 每轮把对话 history 落盘(`RIDGE_SESSION`/`~/.ridge/session.json`),重启读回 | 单测:save→load history 内容一致、缺文件→空;**GLM 实测**:进程1 记住事实→落盘;全新进程 `--resume`→「已恢复 N 条」→ 答对 | ✅ `dd6dd9b` |
 | **P2** | **任务清单/TODO 可视化**:planner 拆的子任务在 REPL 渲染 `[x]/[ ]`,边做边勾 | 单测:3 子任务 + 完成 1 → 渲染 1 勾 2 空 | ⬜ |
-| **P2** | **`@file` 上下文引用** + **Ctrl-C 中断**(捕获 SIGINT→落 checkpoint→回提示符) | 单测:`@src/x.rs` 解析→读该文件注入 user message;Ctrl-C→引擎 `Interrupted`+存档不崩 | ⬜ |
+| **P2** | **`@file` 上下文引用**:输入里 `@path` 自动注入文件正文(存在才注、同路径一次、截断防爆) | 单测:`@存在文件`→注入正文+来源标注、`@不存在`原样留;GLM 实测 `@note.txt`→模型不调工具一步答出文件里的密标 | ✅ `57db13c` |
+| **P2** | 任务清单/TODO 可视化 + Ctrl-C 中断 | (待:TODO 需把 planner 接进 REPL;Ctrl-C 需 tokio signal + 取消语义) | ⬜ |
 
 ## 「媲美 Claude Code 全部用户体验」Definition of Done
 
@@ -30,7 +31,8 @@
 - [x] **零延迟 token 逐字流式**(SSE + TokenBus,graceful 降级)—— `4d45452`
 - [x] **崩溃级恢复 `--resume`**(kill-9/重开续接会话)—— `dd6dd9b`
 - [ ] **进度全透明 TODO 清单**(本轮 P2)
-- [ ] **精准上下文注入 `@file`** + Ctrl-C 中断(本轮 P2)
+- [x] **精准上下文注入 `@file`**(输入 `@path` 注入文件正文)—— `57db13c`
+- [ ] TODO 清单可视化 + Ctrl-C 中断(剩余 P2 打磨)
 
 ## 已知限制
 
