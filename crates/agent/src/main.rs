@@ -2,9 +2,9 @@ use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 
 use agent::{
-    build_agent, build_llm_agent_full, compact_history, default_tool, load_skills, null_token_bus,
-    resolve_mcp, scripted, write_trace, AgentState, Approver, AutoApprove, Color, Config, McpTools,
-    RichOutput, Skill, TokenBus,
+    build_agent, build_llm_agent_full, compact_history, default_tool, expand_mentions, load_skills,
+    null_token_bus, resolve_mcp, scripted, write_trace, AgentState, Approver, AutoApprove, Color,
+    Config, McpTools, RichOutput, Skill, TokenBus,
 };
 use langgraph::{CompiledGraph, RunConfig, StreamEvent};
 use mcp::{McpClient, StdioTransport};
@@ -216,7 +216,9 @@ async fn run_once(
 ) -> anyhow::Result<()> {
     let bus = null_token_bus();
     let app = build_llm_agent_full(provider, mcp, Arc::new(AutoApprove), skills, bus.clone())?;
-    let out = run_streamed(&app, AgentState::new(task).with_budget(budget), &bus).await?;
+    // `@path` 引用 → 注入文件正文(一次性任务也支持)。
+    let state = AgentState::new(expand_mentions(task)).with_budget(budget);
+    let out = run_streamed(&app, state, &bus).await?;
     trace_and_report(&out);
     Ok(())
 }
@@ -292,7 +294,8 @@ async fn repl(
         }
 
         // 带上历史续跑;跑完把更新后的 history 存回,实现多轮。
-        history.push(Message::user(input));
+        // `@path` 引用 → 注入文件正文(像 Claude Code);任务字段仍留原文供显示。
+        history.push(Message::user(expand_mentions(input)));
         let state = AgentState::new(input)
             .with_history(history.clone())
             .with_budget(budget);

@@ -716,6 +716,37 @@ pub async fn resolve_mcp(clients: Vec<Arc<McpClient>>) -> McpTools {
     out
 }
 
+/// 单个 `@file` 注入的正文上限(超出截断,防爆上下文)。
+const MENTION_CAP: usize = 20_000;
+
+/// 展开输入里的 `@path` 引用(像 Claude Code):把每个**存在的**文件正文注入进消息,
+/// 让模型直接看到文件内容而不必自己 read_file。不存在的 `@xxx` 原样留着(模型当普通文本看)。
+/// ponytail: 路径 = `@` 后一串非空白(去尾部标点);同一路径只注一次;单文件截断到 [`MENTION_CAP`]。
+pub fn expand_mentions(input: &str) -> String {
+    let mut extra = String::new();
+    let mut seen = std::collections::HashSet::new();
+    for token in input.split_whitespace() {
+        let Some(raw) = token.strip_prefix('@') else {
+            continue;
+        };
+        let path = raw.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '，', '。']);
+        if path.is_empty() || !seen.insert(path.to_string()) {
+            continue;
+        }
+        if let Ok(mut content) = std::fs::read_to_string(path) {
+            if content.chars().count() > MENTION_CAP {
+                content = content.chars().take(MENTION_CAP).collect::<String>() + "\n…(截断)";
+            }
+            extra.push_str(&format!("\n\n[文件 @{path}]:\n{content}"));
+        }
+    }
+    if extra.is_empty() {
+        input.to_string()
+    } else {
+        format!("{input}{extra}")
+    }
+}
+
 /// 流式 token 总线:REPL 每回合把一个 sender 塞进来,reason 节点边收 provider 的增量文本
 /// 边往里发,REPL 侧就能**逐字显示**(像 Claude Code)。`None` = 该回合不流式。
 pub type TokenBus = Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>;
@@ -1236,6 +1267,22 @@ mod tests {
         let p = preview_call(&call);
         assert!(p.contains("src/x.rs"), "{p}");
         assert!(p.contains("- old") && p.contains("+ new"), "diff 形态: {p}");
+    }
+
+    /// `@file` 引用:存在的文件注入正文,不存在的原样留着。
+    #[test]
+    fn expand_mentions_injects_existing_files() {
+        let mut path = std::env::temp_dir();
+        path.push("ridge_mention_test.txt");
+        std::fs::write(&path, "文件正文ABC").unwrap();
+        let p = path.to_str().unwrap();
+        let out = expand_mentions(&format!("看看 @{p} 说了什么,还有 @/no/such/file"));
+        assert!(out.contains("文件正文ABC"), "应注入存在文件: {out}");
+        assert!(out.contains(&format!("[文件 @{p}]")), "带来源标注: {out}");
+        assert!(out.contains("@/no/such/file"), "不存在的原样留着");
+        // 无 @ → 原样返回。
+        assert_eq!(expand_mentions("普通输入"), "普通输入");
+        let _ = std::fs::remove_file(&path);
     }
 
     /// 只读工具(read_file / search / web_search / fetch_url)不走权限门;有副作用的走。
