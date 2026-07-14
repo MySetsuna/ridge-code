@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-07-15 · Iteration 12 续:斜杠命令 /tools /model
+
+- **CONTRACT-12 P2 斜杠命令落地**:`/tools` 列所有可用工具(内置 + MCP)、`/model` 显示当前 `provider/model/base_url`。抽 `resolve_model_info`(env>config>默认)给装配与 `/model` 共用 → 显示即真在用;`McpTools::tool_names()`;`/help` 补新命令 + 提示 `@path`/Ctrl-C。
+- **GLM 实测**:`/tools`→9 个工具(run_shell…todo_write)、`/model`→`openai·glm-4.5-air·bigmodel url`。
+- `cargo test`=**81 全绿**,clippy/fmt 干净。提交 `d50eaeb`。
+- (发布打磨轨可继续:更多样例技能、标准存储库;框架加固沙箱/rmcp 仍待用户决策。)
+
 ## 2026-07-15 · Iteration 11 完成 + Iteration 12 起步(发布打磨)
 
 - **🎉 CONTRACT-11 全部 6 项完成 —— Claude Code 核心用户体验全套达成**:多文件批量原子编辑、token 逐字流式、`--resume` 崩溃恢复、`@file` 引用、Ctrl-C 中断、`todo_write` TODO 清单可视化(GLM 实测多步任务 `[ ]→[~]→[x]` 实时渲染)。叠加此前:彩色 REPL/spinner、权限门+diff+skip-danger、精准+批量编辑、web 研究闭环、MCP/Skills 插件化、config.toml、/compact、trace 审计。写 `2026-07-15-iteration-11.md` 上传 NotebookLM。

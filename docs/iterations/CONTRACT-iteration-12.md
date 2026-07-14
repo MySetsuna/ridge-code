@@ -14,7 +14,7 @@ UX 不再是瓶颈。本轮做**安全、离线可测、能自主验收**的发�
 |---|---|---|---|
 | **P0** | `--help`/`--version` + **官方样例** skills/config | `--version` 打印版本;`--help` 打印用法;单测 load_skills 解析 `samples/skills` | ✅ `c1fccda` |
 | **P1** | 更多**官方样例技能**(如 triage / summarize / 翻译)+ README/DIRECTION 打磨 | 单测:新增样例被 load_skills 解析、desc/body 非空 | ⬜ |
-| **P2** | 更丰富**斜杠命令**(如 `/tools` 列可用工具、`/todos` 看清单、`/model` 看当前模型) | 单测:命令解析 + 输出含预期内容 | ⬜ |
+| **P2** | 更丰富**斜杠命令**:`/tools`(列内置+MCP 工具)、`/model`(当前 provider/model/base_url) | GLM 实测:`/tools`→9 工具、`/model`→openai·glm-4.5-air·url | ✅ `d50eaeb` |
 | **P2** | (可选)**标准存储库**:任务结束在 `.ridge/runs/<id>/` 落 contract/signals(loop-engineering 底座) | 单测:跑一个任务 → 目录物理生成、含结构化文件 | ⬜ |
 
 ## 已知限制(需**用户环境/决策**,不在自主 loop 内盲做)
