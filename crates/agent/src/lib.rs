@@ -296,6 +296,44 @@ fn parse_skill(text: &str) -> Option<Skill> {
     })
 }
 
+/// `~/.ridge/config.toml`:一处配 provider/model/预算/多 MCP/skills(env 仍可覆盖)。
+/// **密钥不进 config**(明文风险)—— API key 只从 `RIDGE_API_KEY` env 读。
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+#[serde(default)]
+pub struct Config {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub base_url: Option<String>,
+    pub budget_tokens: Option<usize>,
+    pub skills_dir: Option<String>,
+    pub skip_danger: Option<bool>,
+    /// 要并接的多个 MCP(stdio)服务器。
+    pub mcp: Vec<McpServerCfg>,
+}
+
+/// 一个要并接的 MCP 服务器(stdio):可执行文件 + 参数 + 命名空间名。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct McpServerCfg {
+    pub name: String,
+    pub cmd: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+impl Config {
+    /// 从 TOML 文本解析;**解析失败 → 默认空配置**(降级到 env,不崩)。
+    pub fn parse(text: &str) -> Self {
+        toml::from_str(text).unwrap_or_default()
+    }
+
+    /// 从路径加载(读不到 → 默认空配置)。
+    pub fn load(path: impl AsRef<std::path::Path>) -> Self {
+        std::fs::read_to_string(path)
+            .map(|t| Self::parse(&t))
+            .unwrap_or_default()
+    }
+}
+
 /// 通用 agent 的基础 system prompt(不再只面向编码)。
 const BASE_SYSTEM: &str = "You are a capable agent. Use the provided tools to accomplish the \
      user's task. To change existing files, prefer edit_file (surgical, unique-match replace) over \
@@ -1111,6 +1149,45 @@ mod tests {
         assert!(needs_approval("edit_file"));
         assert!(needs_approval("write_file"));
         assert!(needs_approval("run_shell"));
+    }
+
+    /// config.toml:解析含 2 个 `[[mcp]]` 的配置 → 2 个 server + provider 设置(CONTRACT-10 P2 验收)。
+    #[test]
+    fn config_parses_two_mcp_and_provider() {
+        let cfg = Config::parse(
+            r#"
+            provider = "openai"
+            model = "glm-4.5-air"
+            budget_tokens = 50000
+            skip_danger = true
+
+            [[mcp]]
+            name = "nlm"
+            cmd = "notebooklm-mcp.exe"
+
+            [[mcp]]
+            name = "fs"
+            cmd = "fs-server"
+            args = ["--root", "/tmp"]
+        "#,
+        );
+        assert_eq!(cfg.provider.as_deref(), Some("openai"));
+        assert_eq!(cfg.model.as_deref(), Some("glm-4.5-air"));
+        assert_eq!(cfg.budget_tokens, Some(50000));
+        assert_eq!(cfg.skip_danger, Some(true));
+        assert_eq!(cfg.mcp.len(), 2);
+        assert_eq!(cfg.mcp[0].name, "nlm");
+        assert_eq!(cfg.mcp[1].cmd, "fs-server");
+        assert_eq!(cfg.mcp[1].args, vec!["--root", "/tmp"]);
+    }
+
+    /// 坏 TOML / 缺文件 → 降级到默认空配置(不崩,回落 env)。
+    #[test]
+    fn config_bad_toml_degrades_to_default() {
+        let cfg = Config::parse("这不是合法 toml {{{");
+        assert!(cfg.provider.is_none() && cfg.mcp.is_empty());
+        let missing = Config::load("C:/no/such/ridge-config-xyz.toml");
+        assert!(missing.mcp.is_empty());
     }
 
     /// fetch_url:抓网页 → 抽正文喂模型(RAG 的「读」),走假抓取器不联网。

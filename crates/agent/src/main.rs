@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use agent::{
     build_agent, build_llm_agent_full, compact_history, default_tool, load_skills, resolve_mcp,
-    scripted, write_trace, AgentState, Approver, AutoApprove, Color, McpTools, RichOutput, Skill,
+    scripted, write_trace, AgentState, Approver, AutoApprove, Color, Config, McpTools, RichOutput,
+    Skill,
 };
 use langgraph::{CompiledGraph, RunConfig, StreamEvent};
 use mcp::{McpClient, StdioTransport};
@@ -21,18 +22,21 @@ use provider::{AnthropicProvider, LlmProvider, Message, OpenAiProvider};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
-    let (task, cwd, skip_danger) = parse_args();
+    let (task, cwd, cli_skip_danger) = parse_args();
     if let Some(dir) = &cwd {
         std::env::set_current_dir(dir)?;
     }
+    let cfg = load_config(); // ~/.ridge/config.toml(env 仍覆盖)
 
-    match real_provider() {
+    match real_provider(&cfg) {
         Some(p) => {
-            let mcp = resolve_configured_mcp().await; // 可选接入 MCP 服务器
-            let skills = load_configured_skills(); // 声明式技能(领域知识)
+            let mcp = resolve_configured_mcp(&cfg).await; // config 多 server + 兼容旧 env 单 server
+            let skills = load_configured_skills(&cfg); // 声明式技能(领域知识)
+            let budget = cfg.budget_tokens.unwrap_or(0); // 0 = 不限
+            let skip_danger = cli_skip_danger || cfg.skip_danger.unwrap_or(false);
             match task {
-                Some(t) => run_once(p, mcp, skills, &t).await, // 一次性
-                None => repl(p, mcp, skills, skip_danger).await, // 交互式
+                Some(t) => run_once(p, mcp, skills, &t, budget).await, // 一次性
+                None => repl(p, mcp, skills, skip_danger, budget).await, // 交互式
             }
         }
         None => {
@@ -44,35 +48,61 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// 按 env 接入 MCP 服务器:`RIDGE_MCP_CMD`(stdio 服务器可执行文件)+ `RIDGE_MCP_NAME`(命名空间)。
-/// 降级不崩:没配 / 起不来 → 空,agent 只用内置工具。
-async fn resolve_configured_mcp() -> McpTools {
-    let cmd = match std::env::var("RIDGE_MCP_CMD") {
-        Ok(c) if !c.is_empty() => c,
-        _ => return McpTools::empty(),
-    };
-    let name = std::env::var("RIDGE_MCP_NAME").unwrap_or_else(|_| "mcp".to_string());
-    let transport = match StdioTransport::spawn(&cmd, &[]) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("[ridgecode] MCP 启动失败 {cmd}: {e}");
-            return McpTools::empty();
+/// 加载配置:`RIDGE_CONFIG` 指定路径,否则 `~/.ridge/config.toml`。读不到/坏 → 默认空配置(回落 env)。
+fn load_config() -> Config {
+    let path =
+        std::env::var("RIDGE_CONFIG").unwrap_or_else(|_| format!("{}/config.toml", ridge_home()));
+    let cfg = Config::load(&path);
+    if cfg.provider.is_some() || !cfg.mcp.is_empty() {
+        eprintln!("[ridgecode] 已加载 config {path}");
+    }
+    cfg
+}
+
+/// `~/.ridge` 目录(env 配置与 skills 的家)。
+fn ridge_home() -> String {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+    format!("{home}/.ridge")
+}
+
+/// 接入 MCP 服务器:**config 里的多个 `[[mcp]]`** + 兼容旧的单个 env `RIDGE_MCP_CMD`。
+/// 降级不崩:单个起不来 → 跳过;都没有 → 空,agent 只用内置工具。
+async fn resolve_configured_mcp(cfg: &Config) -> McpTools {
+    let mut clients = Vec::new();
+    // config 声明的多 server。
+    for m in &cfg.mcp {
+        match StdioTransport::spawn(&m.cmd, &m.args) {
+            Ok(t) => clients.push(Arc::new(McpClient::new(m.name.clone(), Box::new(t)))),
+            Err(e) => eprintln!("[ridgecode] MCP 启动失败 {} ({}): {e}", m.name, m.cmd),
         }
-    };
-    let client = Arc::new(McpClient::new(name.clone(), Box::new(transport)));
-    let tools = resolve_mcp(vec![client]).await;
-    eprintln!("[ridgecode] 已接入 MCP `{name}`");
+    }
+    // 兼容旧 env 单 server。
+    if let Ok(cmd) = std::env::var("RIDGE_MCP_CMD") {
+        if !cmd.is_empty() {
+            let name = std::env::var("RIDGE_MCP_NAME").unwrap_or_else(|_| "mcp".to_string());
+            match StdioTransport::spawn(&cmd, &[]) {
+                Ok(t) => clients.push(Arc::new(McpClient::new(name, Box::new(t)))),
+                Err(e) => eprintln!("[ridgecode] MCP 启动失败 {cmd}: {e}"),
+            }
+        }
+    }
+    if clients.is_empty() {
+        return McpTools::empty();
+    }
+    let n = clients.len();
+    let tools = resolve_mcp(clients).await;
+    eprintln!("[ridgecode] 已接入 {n} 个 MCP server");
     tools
 }
 
-/// 加载 Skills:`RIDGE_SKILLS_DIR` 或默认 `~/.ridge/skills`。让 agent 靠 SKILL.md 做编程外的领域任务,不改源码。
-fn load_configured_skills() -> Vec<Skill> {
-    let dir = std::env::var("RIDGE_SKILLS_DIR").unwrap_or_else(|_| {
-        let home = std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOME"))
-            .unwrap_or_default();
-        format!("{home}/.ridge/skills")
-    });
+/// 加载 Skills:`RIDGE_SKILLS_DIR` env > config `skills_dir` > 默认 `~/.ridge/skills`。
+fn load_configured_skills(cfg: &Config) -> Vec<Skill> {
+    let dir = std::env::var("RIDGE_SKILLS_DIR")
+        .ok()
+        .or_else(|| cfg.skills_dir.clone())
+        .unwrap_or_else(|| format!("{}/skills", ridge_home()));
     let skills = load_skills(&dir);
     if !skills.is_empty() {
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
@@ -113,23 +143,29 @@ fn parse_args() -> (Option<String>, Option<String>, bool) {
     (task, cwd, skip_danger)
 }
 
-/// 按环境变量装配真实 provider;没有 key 就返回 None(走 demo)。密钥绝不打印。
-fn real_provider() -> Option<Arc<dyn LlmProvider>> {
+/// 装配真实 provider:**env > config > 默认**。没有 key(只从 env 读)就返回 None(走 demo)。密钥绝不打印。
+fn real_provider(cfg: &Config) -> Option<Arc<dyn LlmProvider>> {
     let key = std::env::var("RIDGE_API_KEY")
         .ok()
         .filter(|k| !k.is_empty())?;
-    let kind = std::env::var("RIDGE_PROVIDER").unwrap_or_else(|_| "openai".to_string());
-    let model = std::env::var("RIDGE_MODEL").ok();
+    let kind = std::env::var("RIDGE_PROVIDER")
+        .ok()
+        .or_else(|| cfg.provider.clone())
+        .unwrap_or_else(|| "openai".to_string());
+    let model = std::env::var("RIDGE_MODEL")
+        .ok()
+        .or_else(|| cfg.model.clone());
+    let base = std::env::var("RIDGE_BASE_URL")
+        .ok()
+        .or_else(|| cfg.base_url.clone());
     match kind.as_str() {
         "anthropic" => {
-            let base = std::env::var("RIDGE_BASE_URL")
-                .unwrap_or_else(|_| "https://api.anthropic.com/v1".to_string());
+            let base = base.unwrap_or_else(|| "https://api.anthropic.com/v1".to_string());
             let model = model.unwrap_or_else(|| "claude-sonnet-4-6".to_string());
             Some(Arc::new(AnthropicProvider::new(base, model, key)))
         }
         _ => {
-            let base = std::env::var("RIDGE_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+            let base = base.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
             let model = model.unwrap_or_else(|| "gpt-4o".to_string());
             Some(Arc::new(OpenAiProvider::new(base, model, key)))
         }
@@ -142,9 +178,10 @@ async fn run_once(
     mcp: McpTools,
     skills: Vec<Skill>,
     task: &str,
+    budget: usize,
 ) -> anyhow::Result<()> {
     let app = build_llm_agent_full(provider, mcp, Arc::new(AutoApprove), skills)?;
-    let out = run_streamed(&app, AgentState::new(task)).await?;
+    let out = run_streamed(&app, AgentState::new(task).with_budget(budget)).await?;
     trace_and_report(&out);
     Ok(())
 }
@@ -156,6 +193,7 @@ async fn repl(
     mcp: McpTools,
     skills: Vec<Skill>,
     skip_danger: bool,
+    budget: usize,
 ) -> anyhow::Result<()> {
     let title = RichOutput::new().with_color(Color::BrightCyan).bold();
     println!(
@@ -210,7 +248,9 @@ async fn repl(
 
         // 带上历史续跑;跑完把更新后的 history 存回,实现多轮。
         history.push(Message::user(input));
-        let state = AgentState::new(input).with_history(history.clone());
+        let state = AgentState::new(input)
+            .with_history(history.clone())
+            .with_budget(budget);
         match run_streamed(&app, state).await {
             Ok(out) => {
                 history = out.history.clone();
