@@ -17,7 +17,8 @@
 | **P1** | **kill-9 恢复**:`ridgecode --resume`——REPL 每轮把对话 history 落盘(`RIDGE_SESSION`/`~/.ridge/session.json`),重启读回 | 单测:save→load history 内容一致、缺文件→空;**GLM 实测**:进程1 记住事实→落盘;全新进程 `--resume`→「已恢复 N 条」→ 答对 | ✅ `dd6dd9b` |
 | **P2** | **任务清单/TODO 可视化**:planner 拆的子任务在 REPL 渲染 `[x]/[ ]`,边做边勾 | 单测:3 子任务 + 完成 1 → 渲染 1 勾 2 空 | ⬜ |
 | **P2** | **`@file` 上下文引用**:输入里 `@path` 自动注入文件正文(存在才注、同路径一次、截断防爆) | 单测:`@存在文件`→注入正文+来源标注、`@不存在`原样留;GLM 实测 `@note.txt`→模型不调工具一步答出文件里的密标 | ✅ `57db13c` |
-| **P2** | 任务清单/TODO 可视化 + Ctrl-C 中断 | (待:TODO 需把 planner 接进 REPL;Ctrl-C 需 tokio signal + 取消语义) | ⬜ |
+| **P2** | **Ctrl-C 中断**:任务跑一半 Ctrl-C → 取消回提示符(不杀 REPL) | run_streamed 与 `tokio::signal::ctrl_c()` 竞速;正常两轮回归验证 | ✅ `685ea97` |
+| **P2** | 任务清单/TODO 可视化 | (待:加 `todo_write` 工具 Claude Code 式 + REPL 渲染 `[x]/[ ]`) | ⬜ 最后一项 |
 
 ## 「媲美 Claude Code 全部用户体验」Definition of Done
 
@@ -32,7 +33,8 @@
 - [x] **崩溃级恢复 `--resume`**(kill-9/重开续接会话)—— `dd6dd9b`
 - [ ] **进度全透明 TODO 清单**(本轮 P2)
 - [x] **精准上下文注入 `@file`**(输入 `@path` 注入文件正文)—— `57db13c`
-- [ ] TODO 清单可视化 + Ctrl-C 中断(剩余 P2 打磨)
+- [x] **Ctrl-C 中断当前任务**(回提示符不杀 REPL)—— `685ea97`
+- [ ] TODO 清单可视化(最后一项:`todo_write` 工具 + 渲染)
 
 ## 已知限制
 

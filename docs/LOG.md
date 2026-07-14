@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-07-15 · Iteration 11 续⁴:Ctrl-C 中断当前任务
+
+- **CONTRACT-11 P2 Ctrl-C 落地**:REPL 里 `run_streamed` 与 `tokio::signal::ctrl_c()` `select!` 竞速 —— 任务跑一半按 Ctrl-C → 取消该任务、清 token sender、回提示符(像 Claude Code),不再杀整个会话。tokio 加 `signal` feature。
+- **回归验证**:REPL 两轮 piped 均正常完成 + `/exit`(证明 select! 未破坏正常流程)。中断路径为竞速取消(简单;SIGINT 难离线/管道实测,正常路径已验证)。已知:tokio 装 handler 后提示符处 Ctrl-C 被吞,用 `/exit`/Ctrl-D 退(与 Claude Code 拦 Ctrl-C 一致)。
+- `cargo test --workspace` = **79 全绿**,clippy/fmt 干净。提交 `685ea97`。
+- **CONTRACT-11 仅剩 TODO 清单可视化**(最后一项,拟加 `todo_write` 工具 + REPL 渲染)。
+
 ## 2026-07-14 · Iteration 11 续³:@file 上下文引用
 
 - **CONTRACT-11 P2 `@file` 落地**:`expand_mentions`(纯函数)—— 输入里 `@path` 引用**存在的**文件 → 正文注入进消息(模型直接看到、不必自己 read_file);不存在的 `@xxx` 原样留;同路径只注一次、截断 20000 字防爆。REPL + 一次性任务都接。
