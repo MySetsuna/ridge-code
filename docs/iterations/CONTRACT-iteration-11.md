@@ -1,0 +1,42 @@
+# CONTRACT —— Iteration 11:媲美 Claude Code 的全部用户体验
+
+- **开工时间戳**: 2026-07-14
+- **里程碑**: 从「交互原子化」到「工程整体化」—— 批量编辑 + 逐字流式 + 崩溃恢复 + 进度透明
+- **依据**: `docs/iterations/2026-07-14-notebooklm-guidance-10.md`(NotebookLM + 对抗评审)
+
+## 目标(End State)
+
+补齐距 Claude Code **用户体验**的最后几块:重构级批量改动一次确认、答案 token 级流式、kill-9 后能续、计划进度可见。
+
+## 任务与验收信号
+
+| 优先级 | 任务 | 确定性/可离线单测验收信号 | 状态 |
+|---|---|---|---|
+| **P0** | **多文件批量编辑**:`apply_edits` 跨文件多处、汇总 diff 一次确认、**原子**(全成/全不改) | 单测:2 文件各改一处→都改、返回 2;一处 old 缺失→整批不落盘;同文件多处顺序叠加;`edits_diff` 按文件分组 | ✅ `00a3903`(GLM 实测一次 apply_edits 改 2 文件) |
+| **P1** | **LLM token 逐字流式**:provider 层读 SSE → 增量经 `StreamEvent`/回调转发,REPL 边到边显(而非节点级) | 单测:**假流式 HttpClient**(喂 chunk 序列,**不用 mockito**)→ 解析出 ≥2 个增量文本且拼接==完整回复,不破坏 history。ponytail:provider 无流式则回落整段 | ⬜ |
+| **P1** | **kill-9 恢复**:`ridgecode --resume <session>`——引擎 `FileCheckpointer`+`resume` 已具备,接会话:落盘 history/超步,重启续跑 | 单测/CLI:跑一半落盘→`--resume` 加载 `AgentState.history` + 超步计数,回 `ridgecode>` 而非从头 | ⬜ |
+| **P2** | **任务清单/TODO 可视化**:planner 拆的子任务在 REPL 渲染 `[x]/[ ]`,边做边勾 | 单测:3 子任务 + 完成 1 → 渲染 1 勾 2 空 | ⬜ |
+| **P2** | **`@file` 上下文引用** + **Ctrl-C 中断**(捕获 SIGINT→落 checkpoint→回提示符) | 单测:`@src/x.rs` 解析→读该文件注入 user message;Ctrl-C→引擎 `Interrupted`+存档不崩 | ⬜ |
+
+## 「媲美 Claude Code 全部用户体验」Definition of Done
+
+- [x] REPL 彩色流式(节点级)+ spinner —— Iter10
+- [x] 权限门 + diff 预览 + skip-danger —— Iter08/10
+- [x] 精准 edit_file + search + 分段读 —— Iter08
+- [x] **多文件批量编辑 + 汇总 diff 一次确认** —— 本轮 P0 `00a3903`
+- [x] web 研究闭环(web_search/fetch_url)+ 无 key 多引擎 + 环境感知 —— Iter09/10
+- [x] MCP/Skills 插件式扩展 + config.toml —— Iter07/10
+- [x] trace 审计 + /compact —— Iter06
+- [ ] **零延迟 token 逐字流式**(本轮 P1)
+- [ ] **崩溃级恢复 `--resume`**(本轮 P1)
+- [ ] **进度全透明 TODO 清单**(本轮 P2)
+- [ ] **精准上下文注入 `@file`** + Ctrl-C 中断(本轮 P2)
+
+## 已知限制
+
+- **重量级沙箱**(Docker/gVisor)—— 权限门 + 危险命令拦截 + diff 确认先顶着,标已知限制。
+- **rmcp 替换自写 stdio**、子任务并行 = backlog。
+
+## 边界
+
+不破坏现有 75 测试 + clippy/fmt 干净;密钥不写 trace/日志/config;批量编辑必须原子;流式测试**不引 mockito**(用假流式 HttpClient)。

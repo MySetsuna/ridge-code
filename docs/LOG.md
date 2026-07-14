@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-07-14 · Iteration 11 起步:多文件原子批量编辑(apply_edits)
+
+- **NotebookLM 定 Iteration 11 + 对抗评审**:计划 P0 多文件批量编辑、P1 token 流式/kill-9 resume、P2 TODO/@file。**揪出张冠李戴**:P0 引用 `[1]`/沙箱 `[22]` 指向无关营销页(Ruh.AI「AI Workforce」脏来源),忽略;**驳回 mockito 测 SSE**(本项目早弃用,改假流式 HttpClient)。归档 guidance-10 + CONTRACT-11。
+- **P0 多文件批量编辑落地**:`tools::apply_edits`(跨文件多处、每文件读一次、同文件按序叠加、全体校验唯一匹配、**全过才落盘、写失败回滚**)+ `edits_diff`(汇总 `-/+`)。agent:`apply_edits` tool_spec + `parse_edits` + execute 分支 + `preview_call` 渲染**汇总 diff 一次确认**(非逐个 [y/N])。
+- **GLM 实测**:`把两文件的 8080 改 9090` → 模型一次 `apply_edits`(2 处)→ `applied 2`、两文件原子改完、approved。
+- `cargo test --workspace` = **75 全绿**(71→75),clippy/fmt 干净。提交 `00a3903`。
+- CONTRACT-11 剩:token 逐字流式(假流式 HttpClient 测)、kill-9 `--resume`、TODO 可视化、`@file`/Ctrl-C。
+
 ## 2026-07-14 · Iteration 10 收尾:config.toml/多 MCP + AnySearch 调研(插件式扩展实证)
 
 - **`~/.ridge/config.toml` + 多 MCP(CONTRACT-10 P2 完成)**:`Config`/`McpServerCfg`(serde+toml)、`Config::parse/load`(坏 TOML/缺文件→默认空,降级 env 不崩)。main:`load_config`(`RIDGE_CONFIG` 或 `~/.ridge/config.toml`)、`real_provider` env>config>默认、`resolve_configured_mcp` 起 config 多 `[[mcp]]` + 兼容旧 env 单 server、skills_dir/预算/skip_danger 从 config 读。**密钥不进 config,只走 `RIDGE_API_KEY` env**。GLM 实测:仅给 key,provider/model/base_url 全来自 config → 应答 approved。提交 `6a2403e`。
