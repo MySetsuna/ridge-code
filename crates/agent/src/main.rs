@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use agent::{
     build_agent, build_llm_agent_full, compact_history, default_tool, expand_mentions, load_skills,
-    null_token_bus, resolve_mcp, scripted, write_trace, AgentState, Approver, AutoApprove, Color,
-    Config, McpTools, RichOutput, Skill, TokenBus,
+    null_token_bus, render_todos, resolve_mcp, scripted, write_trace, AgentState, Approver,
+    AutoApprove, Color, Config, McpTools, RichOutput, Skill, Todo, TokenBus,
 };
 use langgraph::{CompiledGraph, RunConfig, StreamEvent};
 use mcp::{McpClient, StdioTransport};
@@ -355,6 +355,7 @@ async fn run_streamed(
         let mut printed = 0usize; // 已打印到第几条 message
         let mut status = String::from("推理中");
         let mut streaming = false; // 本超步是否正在逐字流式(流式期间不转 spinner、末尾不重复打)
+        let mut last_todos: Vec<Todo> = Vec::new(); // 任务清单变了才重渲染
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(90));
         loop {
             tokio::select! {
@@ -386,6 +387,13 @@ async fn run_streamed(
                         }
                         printed = state.messages.len();
                         streaming = false; // 超步收尾 → 下个超步 spinner 恢复
+                        // 任务清单有变化 → 渲染 [x]/[~]/[ ] 给用户看进度。
+                        if state.todos != last_todos {
+                            if !state.todos.is_empty() {
+                                eprintln!("{}", render_todos(&state.todos));
+                            }
+                            last_todos = state.todos.clone();
+                        }
                     }
                     None => break,
                 }

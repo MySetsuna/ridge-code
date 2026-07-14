@@ -39,6 +39,13 @@ pub use rich_output::{
 /// 到达此回合数强制收尾 —— 成本 / 防死循环护栏。
 pub const MAX_STEPS: usize = 8;
 
+/// 一条任务清单项(像 Claude Code 的 TodoWrite):`status` ∈ `pending` / `in_progress` / `completed`。
+#[derive(Clone, Debug, PartialEq)]
+pub struct Todo {
+    pub content: String,
+    pub status: String,
+}
+
 /// agent 的共享状态。`messages` 是事件轨迹(reducer 追加),其余字段覆盖。
 #[derive(Clone, Debug, Default)]
 pub struct AgentState {
@@ -60,6 +67,8 @@ pub struct AgentState {
     /// **模型面向**的多轮对话历史(system 之外的部分):user / assistant(可带 tool_calls)/ tool 结果。
     /// 这是发给 provider 的真身;REPL 跨轮携带它实现多轮上下文。
     pub history: Vec<Message>,
+    /// 当前任务清单(模型经 `todo_write` 维护),REPL 渲染成 `[x]/[~]/[ ]` 给用户看进度。
+    pub todos: Vec<Todo>,
 }
 
 impl AgentState {
@@ -97,6 +106,7 @@ pub enum Patch {
     AddTokens(usize),
     SetStall(usize),
     PushHistory(Message),
+    SetTodos(Vec<Todo>),
     BumpStep,
     Batch(Vec<Patch>),
 }
@@ -114,6 +124,7 @@ impl GraphState for AgentState {
             Patch::AddTokens(n) => self.total_tokens += n,
             Patch::SetStall(n) => self.stall = n,
             Patch::PushHistory(m) => self.history.push(m),
+            Patch::SetTodos(t) => self.todos = t,
             Patch::BumpStep => self.steps += 1,
             Patch::Batch(v) => v.into_iter().for_each(|p| self.apply(p)),
         }
@@ -145,9 +156,13 @@ impl Approver for AutoDeny {
     }
 }
 
-/// 只读工具不需要批准(read_file / search 只读本地;web_search / fetch_url 只读公共网页)。
+/// 只读工具不需要批准(read_file / search 只读本地;web_search / fetch_url 只读公共网页;
+/// todo_write 只更新内部清单,无外部副作用)。
 fn needs_approval(tool: &str) -> bool {
-    !matches!(tool, "read_file" | "search" | "web_search" | "fetch_url")
+    !matches!(
+        tool,
+        "read_file" | "search" | "web_search" | "fetch_url" | "todo_write"
+    )
 }
 
 /// web_search 的观察结果:懒探测一次网络环境(缓存)→ 选引擎 → 搜 → 排版给模型看。
@@ -579,6 +594,11 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
             description: "抓取一个网页并返回**可读正文**(去脚本/样式/标签)。配合 web_search:先搜到链接,再用它读正文、据原文作答,别只凭摘要猜".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}),
         },
+        ToolSpec {
+            name: "todo_write".to_string(),
+            description: "维护任务清单(像 Claude Code 的 TodoWrite):把当前计划拆成若干条 {content, status},status ∈ pending|in_progress|completed。**多步/复杂任务**开始时列清单、每完成一步就更新对应项状态,让用户看到进度。简单单步任务不必用".to_string(),
+            schema: serde_json::json!({"type":"object","properties":{"todos":{"type":"array","items":{"type":"object","properties":{"content":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]}},"required":["content","status"]}}},"required":["todos"]}),
+        },
     ]
 }
 
@@ -595,6 +615,24 @@ fn parse_edits(call: &ToolCall) -> Vec<tools::Edit> {
                 s("old_string")?,
                 s("new_string")?,
             ))
+        })
+        .collect()
+}
+
+/// 从 `todo_write` 的参数里抽出 `todos` 数组 → [`Todo`] 列表(status 缺省 `pending`)。
+fn parse_todos(call: &ToolCall) -> Vec<Todo> {
+    let Some(arr) = call.arguments.get("todos").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|t| {
+            let content = t.get("content").and_then(|v| v.as_str())?.to_string();
+            let status = t
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("pending")
+                .to_string();
+            Some(Todo { content, status })
         })
         .collect()
 }
@@ -667,6 +705,8 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
                 Err(e) => format!("search error: {e}"),
             }
         }
+        // 状态更新在 act 节点(发 SetTodos patch);这里只回个观察摘要。
+        "todo_write" => format!("已更新任务清单:{} 项", parse_todos(call).len()),
         other => format!("unknown tool `{other}`"),
     }
 }
@@ -745,6 +785,32 @@ pub fn expand_mentions(input: &str) -> String {
     } else {
         format!("{input}{extra}")
     }
+}
+
+/// 把任务清单渲染成彩色 checklist(供 REPL 显示进度):完成 `[x]` 绿、进行中 `[~]` 黄、待办 `[ ]`。
+/// 空清单 → 空串。
+pub fn render_todos(todos: &[Todo]) -> String {
+    if todos.is_empty() {
+        return String::new();
+    }
+    let mut s = RichOutput::new()
+        .with_color(Color::BrightCyan)
+        .bold()
+        .format("📋 任务清单:");
+    for t in todos {
+        let (mark, color) = match t.status.as_str() {
+            "completed" => ("[x]", Color::Green),
+            "in_progress" => ("[~]", Color::Yellow),
+            _ => ("[ ]", Color::White),
+        };
+        s.push('\n');
+        s.push_str(
+            &RichOutput::new()
+                .with_color(color)
+                .format(&format!("  {mark} {}", t.content)),
+        );
+    }
+    s
 }
 
 /// 流式 token 总线:REPL 每回合把一个 sender 塞进来,reason 节点边收 provider 的增量文本
@@ -928,14 +994,19 @@ fn build_core(
                     } else {
                         0
                     };
-                    Patch::Batch(vec![
+                    let mut patches = vec![
                         Patch::Message(format!("act: {} -> {}", call.name, obs)),
                         // 工具结果按 role=tool 正确回灌(匹配 tool_call_id)。
                         Patch::PushHistory(Message::tool_result(call.id.clone(), obs.clone())),
                         Patch::SetStall(stall),
                         Patch::ToolOutput(Some(obs)),
                         Patch::PendingCall(None),
-                    ])
+                    ];
+                    // todo_write:把清单写进状态(REPL 会渲染 [x]/[~]/[ ])。
+                    if call.name == "todo_write" {
+                        patches.push(Patch::SetTodos(parse_todos(call)));
+                    }
+                    Patch::Batch(patches)
                 }
                 None => Patch::Message("act: no pending tool_call".to_string()),
             };
@@ -1267,6 +1338,32 @@ mod tests {
         let p = preview_call(&call);
         assert!(p.contains("src/x.rs"), "{p}");
         assert!(p.contains("- old") && p.contains("+ new"), "diff 形态: {p}");
+    }
+
+    /// todo_write:解析 todos + 渲染 checklist + 只读不走权限门。
+    #[test]
+    fn todo_write_parses_and_renders() {
+        let call = ToolCall {
+            id: "t".to_string(),
+            name: "todo_write".to_string(),
+            arguments: serde_json::json!({"todos": [
+                {"content": "读代码", "status": "completed"},
+                {"content": "改 bug", "status": "in_progress"},
+                {"content": "跑测试", "status": "pending"},
+            ]}),
+        };
+        let todos = parse_todos(&call);
+        assert_eq!(todos.len(), 3);
+        assert_eq!(todos[0].status, "completed");
+        assert!(execute_tool_call(&call).contains("3 项"));
+        assert!(!needs_approval("todo_write"), "内部清单更新不打扰用户");
+        // 渲染:完成打 [x]、进行中 [~]、待办 [ ]。
+        let r = render_todos(&todos);
+        assert!(
+            r.contains("[x] 读代码") && r.contains("[~] 改 bug") && r.contains("[ ] 跑测试"),
+            "{r}"
+        );
+        assert!(render_todos(&[]).is_empty(), "空清单 → 空串");
     }
 
     /// `@file` 引用:存在的文件注入正文,不存在的原样留着。
