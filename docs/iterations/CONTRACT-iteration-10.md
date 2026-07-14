@@ -12,26 +12,25 @@
 
 | 优先级 | 任务 | 确定性验收信号 | 状态 |
 |---|---|---|---|
-| **P0** | **`fetch_url(url)`**:抓网页 → 去脚本/样式/标签 → 返回正文纯文本(截断防爆),喂模型做 RAG。复用 `WebFetch` + `strip_tags` | 单测:fake html(含 `<script>`/`<style>`/标签)→ 返回干净正文、无标签;**live**:抓一个真实公开页(如 example.com / rust 文档)→ 正文非空且含预期关键词 | ⬜ |
-| **P1** | **API key 搜索后端**(Brave 或 Tavily;env `RIDGE_SEARCH_BACKEND` + `RIDGE_SEARCH_KEY`;**无 key 回落**现有 HTML 引擎) | 单测:fake JSON 响应 → 结构化 `SearchResult`(含 score/排序);无 key → 走 `web_search` HTML 路径。**live 待用户提供搜索 key** | ⬜ |
-| **P1** | **网络探测更稳**:多探针并发取最快成功者 + 结果 TTL 缓存(而非永久缓存) | 单测:3 个 fake 探针(1 快 Ok / 2 慢或 Err)→ 判 International;同一 `NetProbe` 在 TTL 内不重探(计数验证) | ⬜ |
-| **P2** | `~/.ridge/config.toml`(provider/model/预算/**搜索与 LLM key**/多 `[[mcp]]`/skills;env 覆盖)+ 多 MCP 并接(现有 `StdioTransport`) | 单测:解析含 2 个 `[[mcp]]` + 搜索 key 的 config → 对应 spec/设置;起 2 假 server → `list_tools` 并集、命名空间不撞 | ⬜ |
-| **P2** | 搜索结果**去重 + 排序**(按引擎给的相关性;同 URL 物理合并) | 单测:含重复 URL 的结果集 → 去重后唯一、按 score 降序 | ⬜ |
+| **P0** | **`fetch_url(url)`**:抓网页 → 去脚本/样式/标签 → 返回正文纯文本(截断防爆),喂模型做 RAG。复用 `WebFetch` + `strip_tags` | fake html → 干净正文;**live** example.com 正文非空含关键词 | ✅ `0df7a09` |
+| ~~P1~~ | ~~**API key 搜索后端**(Brave/Tavily)~~ → **用户驳回付费 API**。改为**无 key 多引擎 fallback 链**:某引擎报错/空 → 自动落下一个(International=[duckduckgo, bing]、Restricted=[bing-cn]) | 单测:DDG 返回空 → 落到 Bing 拿到结果;GLM live DDG 正常 | ✅ `a7b632d` |
+| **P1** | **网络探测更稳**:多探针并发 | 单测:一探针 Err 另一 Ok → International(3s 超时上限) | ✅ `c91640b`(TTL 缓存 = YAGNI,会话级永久缓存够用) |
+| **P2** | `~/.ridge/config.toml`(provider/model/预算/多 `[[mcp]]`/skills;env 覆盖)+ 多 MCP 并接(现有 `StdioTransport`) | 单测:解析含 2 个 `[[mcp]]` 的 config → 对应 spec/设置;起 2 假 server → `list_tools` 并集、命名空间不撞 | ⬜ 下一步 |
+| **P2** | 搜索结果**去重**(同 URL 物理合并) | 单测:含重复 URL → 去重后唯一 | ✅ `ec41364` |
 
 ## 「工业级 web + 媲美 Claude Code」Definition of Done
 
 - [x] 联网搜索 + 网络环境感知 + 引擎切换 —— Iter09
-- [ ] **完整 Research 闭环**:`web_search` → `fetch_url`(正文)→ RAG 总结 → 写码;**信原文不信摘要**(本轮 P0)
-- [ ] **混合搜索**:环境感知 + API 后端优先 + 无 key 回落 HTML(本轮 P1)
-- [ ] **探测鲁棒**:多探针 + TTL,不因单探针误判失效(本轮 P1)
-- [ ] **生产级配置**:LLM/搜索 key 在 config.toml/env 统一管理(本轮 P2)
-- [ ] 插件式扩展:config 加 MCP 不改源码即见新工具(本轮 P2)
-- [ ] 引用编号(可选打磨,**非硬门槛** —— 引用正确性不可确定性机检)
+- [x] **完整 Research 闭环**:`web_search` → `fetch_url`(正文)→ 据原文作答 —— `0df7a09`
+- [x] **无 key 稳健搜索**:环境感知 + **多引擎 fallback**(不接付费 API)+ 去重 —— `a7b632d`/`ec41364`
+- [x] **探测鲁棒**:多探针并发(TTL = YAGNI) —— `c91640b`
+- [ ] **生产级配置**:LLM key/多 MCP 在 config.toml/env 统一管理(下一步 P2)
+- [ ] 插件式扩展:config 加 MCP 不改源码即见新工具(下一步 P2)
 - [ ] 批量工程:多文件 EditBuffer + 汇总 diff 一次确认(顺延自 CONTRACT-09,backlog)
 
 ## 已知限制(Beta 可先发,对抗评审后明确)
 
-- **搜索 API key 的 live 实测**:手上只有智谱 GLM 的 key,无 Brave/Serper/Tavily key → API 后端只能假抓取器单测,live 待用户提供。
+- **付费搜索 API(Brave/Tavily)**:用户明确不接。搜索靠**无 key 多引擎 fallback** 抗单点失效;若未来所有引擎同时改版,再往 `engines()` 加无 key 引擎(Mojeek/SearXNG),仍不接付费 API。
 - **重量级沙箱**(Docker/gVisor;WASM 不适合 shell)、**rmcp 替换自写 stdio**(自写已连真实 server,可选升级)、**自动化触发器**、kill-9 REPL 恢复、子任务并行 = backlog / 已知限制。
 
 ## 边界
