@@ -504,6 +504,9 @@ pub mod search {
         };
         let html = fetch.get_text(&url).await?;
         let mut results = parse(&html);
+        // 按 URL 去重(保序):同一结果被引擎重复列出时只留一条。
+        let mut seen = std::collections::HashSet::new();
+        results.retain(|r| seen.insert(r.url.clone()));
         results.truncate(8);
         Ok(results)
     }
@@ -816,6 +819,24 @@ pub mod search {
             );
             // 块级标签转了换行 → 段落分行,不会糊成一坨。
             assert!(text.lines().count() >= 3, "应按段分行: {text}");
+        }
+
+        #[tokio::test]
+        async fn web_search_dedupes_by_url() {
+            struct DupFetch;
+            #[async_trait::async_trait]
+            impl WebFetch for DupFetch {
+                async fn get_text(&self, _url: &str) -> Result<String, ProviderError> {
+                    // 同一 URL 出现两次的 DDG 结果。
+                    Ok(r#"<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fa.com%2F">A1</a>
+                        <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fa.com%2F">A2</a>"#.to_string())
+                }
+            }
+            let r = web_search(&DupFetch, "q", NetEnv::International)
+                .await
+                .unwrap();
+            assert_eq!(r.len(), 1, "重复 URL 应去重: {r:?}");
+            assert_eq!(r[0].url, "https://a.com/");
         }
 
         #[test]
