@@ -159,6 +159,45 @@ pub trait LlmProvider: Send + Sync {
     }
 }
 
+/// 运行时可**热切换**底层 provider 的包装:让 REPL 的 `/model <name>` 即时换模型,
+/// 而**不必重建 agent 图**。图只见到一个 `Arc<dyn LlmProvider>`,真正的实现藏在
+/// `Mutex<Arc<dyn LlmProvider>>` 后面;[`swap`](SwapProvider::swap) 换芯,下一次补全即生效。
+pub struct SwapProvider {
+    inner: std::sync::Mutex<std::sync::Arc<dyn LlmProvider>>,
+}
+
+impl SwapProvider {
+    pub fn new(initial: std::sync::Arc<dyn LlmProvider>) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(initial),
+        }
+    }
+
+    /// 换掉底层 provider(下一次 `complete` 起生效)。
+    pub fn swap(&self, next: std::sync::Arc<dyn LlmProvider>) {
+        *self.inner.lock().unwrap() = next;
+    }
+
+    /// 取当前底层的 clone —— **持锁只到 clone**,不跨 await 持锁(std Mutex 不可跨 await)。
+    fn current(&self) -> std::sync::Arc<dyn LlmProvider> {
+        self.inner.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for SwapProvider {
+    async fn complete(&self, req: &CompletionRequest) -> Result<Completion, ProviderError> {
+        self.current().complete(req).await
+    }
+    async fn complete_streaming(
+        &self,
+        req: &CompletionRequest,
+        on_token: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<Completion, ProviderError> {
+        self.current().complete_streaming(req, on_token).await
+    }
+}
+
 /// 离线脚本 provider:按顺序吐预设的 [`Completion`],零联网、确定性,用于 demo / 测试。
 pub struct ScriptedProvider {
     steps: std::sync::Mutex<std::collections::VecDeque<Completion>>,
@@ -1248,6 +1287,24 @@ mod tests {
         // 归一化到位:除了 id,两边的工具调用等价。
         assert_eq!(a.tool_calls[0].name, b.tool_calls[0].name);
         assert_eq!(a.tool_calls[0].arguments, b.tool_calls[0].arguments);
+    }
+
+    #[tokio::test]
+    async fn swap_provider_hot_switches_inner() {
+        use std::sync::Arc;
+        let comp = |t: &str| Completion {
+            text: t.into(),
+            ..Default::default()
+        };
+        let a: Arc<dyn LlmProvider> = Arc::new(ScriptedProvider::new(vec![comp("from-A")]));
+        let b: Arc<dyn LlmProvider> = Arc::new(ScriptedProvider::new(vec![comp("from-B")]));
+        let sw = SwapProvider::new(a);
+        let req = CompletionRequest::default();
+        // 起始走 A。
+        assert_eq!(sw.complete(&req).await.unwrap().text, "from-A");
+        // 热切换到 B → 下一次补全即走 B(图无需重建)。
+        sw.swap(b);
+        assert_eq!(sw.complete(&req).await.unwrap().text, "from-B");
     }
 
     #[test]

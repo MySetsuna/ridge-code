@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-07-15 · /model 热切换(像 Claude 的 /model,不重建图)
+
+- **REPL 内即时换模型**:`/model <name>` 当场切换本会话模型,**无需重启、不重建 agent 图**。做法:新增 `provider::SwapProvider` —— 一个把底层 `Arc<dyn LlmProvider>` 藏在 `Mutex` 后的装饰器,`complete`/`complete_streaming` 委托给当前底层,`swap()` 换芯。图只见到这一个 `Arc<dyn LlmProvider>`,所以换芯即换模型,`mcp`/`skills` 不必重建。
+- `/model`(无参)仍看当前 provider/model/base_url;`/model <name>` 只换 model(沿用当前 provider/base_url/key),**本会话生效、不落盘**(持久化仍走 `/config set model`)。抽 `make_provider` 给启动装配与热切换共用。
+- **护栏**:持锁只到 clone、不跨 await 持 std Mutex;密钥只从 `RIDGE_API_KEY` env 取、绝不打印。
+- **验收**:provider 单测 `swap_provider_hot_switches_inner`(两个 ScriptedProvider,swap 前后 complete 走不同底层);REPL 实测 `/model`→`/model glm-4.6`→`/model` 显示即时更新。`cargo test`=**83 全绿**,clippy/fmt 干净。
+
 ## 2026-07-15 · 配置改 JSON + 交互中 /config 持久化(用户要求)
 
 - **配置格式 TOML→JSON**:用户要求用 JSON 做配置文件。`Config::parse` 改 `serde_json`;路径 `~/.ridge/config.toml`→`config.json`(env `RIDGE_CONFIG` 仍覆盖)。删 `toml`/`toml_edit` 依赖(JSON 无注释、`serde_json` 已在,零新增依赖)。样例 `samples/config.toml`→`config.json`(注释挪进 samples/README 的键表)。

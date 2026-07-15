@@ -8,7 +8,7 @@ use agent::{
 };
 use langgraph::{CompiledGraph, RunConfig, StreamEvent};
 use mcp::{McpClient, StdioTransport};
-use provider::{AnthropicProvider, LlmProvider, Message, OpenAiProvider};
+use provider::{AnthropicProvider, LlmProvider, Message, OpenAiProvider, SwapProvider};
 
 /// REPL 展示用元信息(`/tools` `/model` 命令用)。
 struct ReplMeta {
@@ -46,7 +46,7 @@ fn handle_meta_flags() -> bool {
              --yolo/--skip-permissions      skip-danger:工具自动放行不问 [y/N](灾难命令仍拦)\n  \
              --resume/--continue            恢复上次 REPL 会话\n  \
              -h/--help、-V/--version        本帮助 / 版本\n\n\
-             REPL 内:@path 引用文件、Ctrl-C 中断任务;/help /reset /compact /config /exit\n\n\
+             REPL 内:@path 引用文件、Ctrl-C 中断任务;/help /reset /compact /model /config /exit\n\n\
              配置:~/.ridge/config.json(provider/model/预算/多 mcp/skills;env 覆盖);\
              REPL 内 /config set <key> <value> 可持久化。密钥只走 RIDGE_API_KEY env。\
              ~/.ridge/skills/*/SKILL.md 加领域技能不改源码。"
@@ -95,7 +95,9 @@ async fn main() -> anyhow::Result<()> {
                         model,
                         base_url,
                     };
-                    repl(p, mcp, skills, skip_danger, budget, initial, meta).await
+                    // 包一层 SwapProvider,让 REPL 的 /model 能热切换底层模型而不重建图。
+                    let swap = Arc::new(SwapProvider::new(p));
+                    repl(swap, mcp, skills, skip_danger, budget, initial, meta).await
                     // 交互式
                 }
             }
@@ -165,6 +167,30 @@ fn handle_config(input: &str, meta: &ReplMeta) {
         }
         Some(other) => println!("未知子命令 {other};用 /config 或 /config set <key> <value>"),
     }
+}
+
+/// REPL 里的 `/model`:无参→看当前;`/model <name>`→**热切换**本会话模型(不重建图,像 Claude 的 /model)。
+/// 只换 model(沿用当前 provider/base_url/key);**不落盘**(要持久化用 `/config set model`)。
+fn handle_model(input: &str, meta: &mut ReplMeta, swap: &Arc<SwapProvider>) {
+    let name = input.strip_prefix("/model").unwrap_or("").trim();
+    if name.is_empty() {
+        println!(
+            "provider={} · model={} · base_url={}",
+            meta.provider, meta.model, meta.base_url
+        );
+        println!("热切换:/model <name>(本会话即时生效)· 持久化:/config set model <name>");
+        return;
+    }
+    let Some(key) = std::env::var("RIDGE_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
+    else {
+        println!("未设 RIDGE_API_KEY,无法热切换模型");
+        return;
+    };
+    swap.swap(make_provider(&meta.provider, name, &meta.base_url, key));
+    meta.model = name.to_string();
+    println!("已切换 model={name}(本会话即时生效;/config set model {name} 可持久化)");
 }
 
 /// `~/.ridge` 目录(env 配置与 skills 的家)。
@@ -302,16 +328,29 @@ fn resolve_model_info(cfg: &Config) -> (String, String, String) {
     )
 }
 
+/// 从零件造一个真实 provider(供启动装配与 `/model` 热切换共用)。
+fn make_provider(kind: &str, model: &str, base_url: &str, key: String) -> Arc<dyn LlmProvider> {
+    match kind {
+        "anthropic" => Arc::new(AnthropicProvider::new(
+            base_url.to_string(),
+            model.to_string(),
+            key,
+        )),
+        _ => Arc::new(OpenAiProvider::new(
+            base_url.to_string(),
+            model.to_string(),
+            key,
+        )),
+    }
+}
+
 /// 装配真实 provider:没有 key(只从 env 读)就返回 None(走 demo)。密钥绝不打印。
 fn real_provider(cfg: &Config) -> Option<Arc<dyn LlmProvider>> {
     let key = std::env::var("RIDGE_API_KEY")
         .ok()
         .filter(|k| !k.is_empty())?;
     let (kind, model, base) = resolve_model_info(cfg);
-    match kind.as_str() {
-        "anthropic" => Some(Arc::new(AnthropicProvider::new(base, model, key))),
-        _ => Some(Arc::new(OpenAiProvider::new(base, model, key))),
-    }
+    Some(make_provider(&kind, &model, &base, key))
 }
 
 /// 一次性任务:一律放行,跑完写 trace.json + 打印结果。
@@ -335,13 +374,13 @@ async fn run_once(
 /// `skip_danger` = true 时用 [`AutoApprove`],工具自动放行、不再 [y/N](像 Claude 的 skip-permissions)。
 #[allow(clippy::too_many_arguments)]
 async fn repl(
-    provider: Arc<dyn LlmProvider>,
+    swap: Arc<SwapProvider>,
     mcp: McpTools,
     skills: Vec<Skill>,
     skip_danger: bool,
     budget: usize,
     mut history: Vec<Message>,
-    meta: ReplMeta,
+    mut meta: ReplMeta,
 ) -> anyhow::Result<()> {
     let title = RichOutput::new().with_color(Color::BrightCyan).bold();
     println!(
@@ -371,7 +410,8 @@ async fn repl(
     };
     println!();
     let bus = null_token_bus(); // 逐字流式总线:REPL 每回合注册 sender
-    let app = build_llm_agent_full(provider, mcp, approver, skills, bus.clone())?;
+                                // 图只见到 swap(一个 Arc<dyn LlmProvider>);/model 换 swap 的芯 → 无需重建图。
+    let app = build_llm_agent_full(swap.clone(), mcp, approver, skills, bus.clone())?;
 
     loop {
         print!("ridgecode> ");
@@ -385,18 +425,15 @@ async fn repl(
             "" => continue,
             "/exit" | "/quit" => break,
             "/help" => {
-                println!("命令:/exit 退出 · /reset 清空上下文 · /compact 压缩上下文 · /tools 列可用工具 · /model 看当前模型 · /config 看/改配置 · /help 本帮助\n输入 @path 引用文件;Ctrl-C 中断任务;直接输入自然语言即为任务。");
+                println!("命令:/exit 退出 · /reset 清空上下文 · /compact 压缩上下文 · /tools 列可用工具 · /model [name] 看/热切换模型 · /config 看/改配置 · /help 本帮助\n输入 @path 引用文件;Ctrl-C 中断任务;直接输入自然语言即为任务。");
                 continue;
             }
             "/tools" => {
                 println!("可用工具({}):{}", meta.tools.len(), meta.tools.join(", "));
                 continue;
             }
-            "/model" => {
-                println!(
-                    "provider={} · model={} · base_url={}",
-                    meta.provider, meta.model, meta.base_url
-                );
+            _ if input.starts_with("/model") => {
+                handle_model(input, &mut meta, &swap);
                 continue;
             }
             _ if input.starts_with("/config") => {
