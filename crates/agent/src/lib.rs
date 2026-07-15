@@ -1351,8 +1351,18 @@ mod tests {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../samples/skills");
         let skills = load_skills(dir);
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"researcher"), "样例 skill: {names:?}");
-        assert!(names.contains(&"rust-fixer"), "样例 skill: {names:?}");
+        for expected in [
+            "researcher",
+            "rust-fixer",
+            "summarize",
+            "translate",
+            "triage",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "缺样例 skill {expected}: {names:?}"
+            );
+        }
         for s in &skills {
             assert!(
                 !s.description.is_empty() && !s.body.is_empty(),
