@@ -1291,7 +1291,6 @@ mod tests {
 
     #[tokio::test]
     async fn swap_provider_hot_switches_inner() {
-        use std::sync::Arc;
         let comp = |t: &str| Completion {
             text: t.into(),
             ..Default::default()

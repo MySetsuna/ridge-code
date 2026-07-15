@@ -331,16 +331,8 @@ fn resolve_model_info(cfg: &Config) -> (String, String, String) {
 /// 从零件造一个真实 provider(供启动装配与 `/model` 热切换共用)。
 fn make_provider(kind: &str, model: &str, base_url: &str, key: String) -> Arc<dyn LlmProvider> {
     match kind {
-        "anthropic" => Arc::new(AnthropicProvider::new(
-            base_url.to_string(),
-            model.to_string(),
-            key,
-        )),
-        _ => Arc::new(OpenAiProvider::new(
-            base_url.to_string(),
-            model.to_string(),
-            key,
-        )),
+        "anthropic" => Arc::new(AnthropicProvider::new(base_url, model, key)),
+        _ => Arc::new(OpenAiProvider::new(base_url, model, key)),
     }
 }
 
