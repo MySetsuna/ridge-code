@@ -332,6 +332,8 @@ pub struct Config {
     pub skip_danger: Option<bool>,
     /// 要并接的多个 MCP(stdio)服务器。
     pub mcp: Vec<McpServerCfg>,
+    /// 命名的 provider 档案(多 provider)—— `/provider use <name>` 可热切换到其中之一。
+    pub providers: Vec<ProviderProfile>,
 }
 
 /// 一个要并接的 MCP 服务器(stdio):可执行文件 + 参数 + 命名空间名。
@@ -341,6 +343,24 @@ pub struct McpServerCfg {
     pub cmd: String,
     #[serde(default)]
     pub args: Vec<String>,
+}
+
+/// 一个命名的 provider 档案:厂商类型 + 模型 + 端点 + **读密钥的 env 变量名**。
+/// **密钥不进 config**(明文风险)—— 只存要读的 env 名(`key_env`),用时才从环境变量取。
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct ProviderProfile {
+    pub name: String,
+    /// `openai`(兼容端点)| `anthropic`。
+    pub kind: String,
+    pub model: String,
+    pub base_url: String,
+    /// 读该 provider 密钥的环境变量名,默认 `RIDGE_API_KEY`。
+    #[serde(default = "default_key_env")]
+    pub key_env: String,
+}
+
+fn default_key_env() -> String {
+    "RIDGE_API_KEY".to_string()
 }
 
 impl Config {
@@ -395,6 +415,31 @@ pub fn config_set(text: &str, key: &str, value: &str) -> Result<String, String> 
         _ => serde_json::Value::from(value),
     };
     root.insert(key.to_string(), v);
+    serde_json::to_string_pretty(&serde_json::Value::Object(root)).map_err(|e| e.to_string())
+}
+
+/// 往 JSON 配置文本的 `providers` 数组加/覆盖一个 provider 档案(按 `name` 去重),**保留其余键**。
+/// 文本空/坏 → 从空对象起。纯变换,可单测;写盘由调用方做。供 REPL 的 `/provider add` 用。
+pub fn config_add_provider(text: &str, profile: &ProviderProfile) -> Result<String, String> {
+    let mut root = match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(serde_json::Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    };
+    let entry = serde_json::to_value(profile).map_err(|e| e.to_string())?;
+    let arr = root
+        .entry("providers")
+        .or_insert_with(|| serde_json::Value::Array(vec![]));
+    let serde_json::Value::Array(list) = arr else {
+        return Err("config 里 providers 不是数组".into());
+    };
+    // 同名覆盖,否则追加。
+    match list
+        .iter_mut()
+        .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(profile.name.as_str()))
+    {
+        Some(slot) => *slot = entry,
+        None => list.push(entry),
+    }
     serde_json::to_string_pretty(&serde_json::Value::Object(root)).map_err(|e| e.to_string())
 }
 
@@ -1524,6 +1569,39 @@ mod tests {
         // 未知键 / 坏类型 → Err(不写坏文件)。
         assert!(config_set(start, "api_key", "sk-x").is_err());
         assert!(config_set(start, "budget_tokens", "abc").is_err());
+    }
+
+    /// `/provider add` 的纯文本变换:追加 provider 档案、同名覆盖、保留 `mcp`、密钥不落盘。
+    #[test]
+    fn config_add_provider_appends_and_upserts() {
+        let prof = |name: &str, model: &str| ProviderProfile {
+            name: name.into(),
+            kind: "openai".into(),
+            model: model.into(),
+            base_url: "https://x/v1".into(),
+            key_env: "ZHIPU_KEY".into(),
+        };
+        let start = r#"{ "model": "old", "mcp": [ { "name": "nlm", "cmd": "x.exe" } ] }"#;
+        // 追加第一个 → mcp 保留、providers 出现。
+        let s = config_add_provider(start, &prof("glm", "glm-4.6")).unwrap();
+        let cfg = Config::parse(&s);
+        assert_eq!(cfg.mcp.len(), 1);
+        assert_eq!(cfg.providers.len(), 1);
+        assert_eq!(cfg.providers[0].name, "glm");
+        assert_eq!(cfg.providers[0].key_env, "ZHIPU_KEY"); // 只存 env 名,不存密钥本身
+                                                           // 追加第二个不同名 → 2 个。
+        let s = config_add_provider(&s, &prof("kimi", "k2")).unwrap();
+        // 同名覆盖 glm 的 model → 仍 2 个,glm 更新。
+        let s = config_add_provider(&s, &prof("glm", "glm-4.7")).unwrap();
+        let cfg = Config::parse(&s);
+        assert_eq!(cfg.providers.len(), 2);
+        let glm = cfg.providers.iter().find(|p| p.name == "glm").unwrap();
+        assert_eq!(glm.model, "glm-4.7");
+        // 缺省 key_env 反序列化为 RIDGE_API_KEY。
+        let d = Config::parse(
+            r#"{ "providers": [ { "name": "a", "kind": "openai", "model": "m", "base_url": "u" } ] }"#,
+        );
+        assert_eq!(d.providers[0].key_env, "RIDGE_API_KEY");
     }
 
     /// fetch_url:抓网页 → 抽正文喂模型(RAG 的「读」),走假抓取器不联网。

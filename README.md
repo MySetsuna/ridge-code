@@ -6,7 +6,8 @@
 
 ## 能力(对标 Claude Code —— 核心用户体验已全套达成)
 
-- **交互式 REPL**:彩色实时输出 + 等待 spinner、答案 **token 逐字流式**(SSE)、`/help /reset /compact /tools /model /exit`。
+- **交互式 REPL**:彩色实时输出 + 等待 spinner、答案 **token 逐字流式**(SSE)、灰色**状态行**(provider·model · 会话 tokens · 目录)、`/help /cost /model /provider /config /reset /compact /tools /exit`。
+- **多 provider**:`/provider add|list|use` **交互式加/列/热切换** provider 档案;`/model <name>` 热切换模型(均不重建图);`/cost` 看会话累计 tokens。**密钥不落 config**,档案只存要读的 env 变量名。
 - **驾驭工程**:精准 `edit_file`(唯一匹配替换)、**多文件原子批量编辑** `apply_edits`(汇总一份 diff 一次确认)、可移植 `search`、分段 `read_file`。
 - **安全人机**:副作用工具**权限门 + `-/+` diff 预览**、危险命令硬拦截、`--yolo` **skip-danger** 模式。
 - **web 研究闭环**:`web_search`(**探测 GFW 自动换引擎**、无 key 多引擎 fallback)→ `fetch_url`(抓正文)→ 据原文作答。

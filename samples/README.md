@@ -34,6 +34,17 @@ RidgeCode 的核心承诺:**加能力 = 加一个 `SKILL.md` 或一段 MCP 配�
 
 启动后也能在 REPL 里 **`/config`** 看配置、**`/config set <key> <value>`** 持久化上表标量键(改完重启生效);两种方式并存,直接编辑文件同样有效。
 
+### 多 provider
+
+`providers` 数组存**命名的 provider 档案**(厂商 `kind`=openai/anthropic + `model` + `base_url` + `key_env`)。REPL 里:
+
+- `/provider list` —— 列所有档案(★=当前,⚠=其 `key_env` 未设);
+- `/provider add <name> <openai|anthropic> <model> <base_url> [KEY_ENV]` —— 交互式加一个并落盘;
+- `/provider use <name>` —— **热切换**到该档案(不重启、不重建图)。
+- `/model <name>` —— 只换模型(沿用当前 provider);`/cost` —— 看会话累计 tokens。
+
+**密钥永不进 config** —— 档案只存要读密钥的**环境变量名** `key_env`(默认 `RIDGE_API_KEY`)。切换前先 `export <KEY_ENV>=...`,否则 `/provider use` 会拒绝切换。
+
 ## MCP(接万物)
 
 在 `config.json` 的 `mcp` 数组里加一段即多一批工具(见样例里的 AnySearch 例子)。零改源码。

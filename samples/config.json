@@ -4,6 +4,22 @@
   "base_url": "https://open.bigmodel.cn/api/paas/v4",
   "budget_tokens": 200000,
   "skip_danger": false,
+  "providers": [
+    {
+      "name": "zhipu",
+      "kind": "openai",
+      "model": "glm-4.6",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "key_env": "RIDGE_API_KEY"
+    },
+    {
+      "name": "kimi",
+      "kind": "openai",
+      "model": "kimi-k2",
+      "base_url": "https://api.moonshot.cn/v1",
+      "key_env": "MOONSHOT_KEY"
+    }
+  ],
   "mcp": [
     {
       "name": "notebooklm",

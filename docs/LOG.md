@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-07-15 · 多 provider 交互式管理 + /cost + 状态行 + /models 误伤修复
+
+- **遗留修复**:REPL 斜杠命令用 `starts_with("/model")` 会把 `/models`(想列模型)误当「切到模型 s」。改成精确匹配或带空格参数(`input=="/model" || starts_with("/model ")`),`/config` 同修。
+- **多 provider(用户要求「支持多 provider 且可交互式添加」)**:config.json 新增 `providers` 数组(命名档案:`kind`+`model`+`base_url`+`key_env`)。REPL `/provider list|add|use`:list 列档案(★=当前,⚠=key_env 未设);add 交互式加并落盘(纯变换 `agent::config_add_provider` 同名 upsert、保留其余键,可单测);use **热切换**到档案(复用 SwapProvider,不重建图)。**密钥永不进 config** —— 档案只存 `key_env`(env 变量名,默认 RIDGE_API_KEY),`use` 前 env 未设则拒绝切换。
+- **`/cost`**:REPL 手动累计每轮 `out.total_tokens` → 展示会话累计 tokens + 轮数 + 单任务预算(单 AgentState 只记单任务,故跨轮手动累计)。
+- **状态行(回应「about statusline?」)**:每个提示符前打一行灰色 `provider·model · Nk tok · 目录名`,`is_terminal` 门控(管道/重定向不打)。为此给 `Color` 加 `BrightBlack`(ANSI 90)。
+- **验收**:单测 `config_add_provider_appends_and_upserts`;REPL 实测 add→list(★/⚠)→use(key 未设拒绝、已设切换)→/cost 全通过。`cargo test`=**84 全绿**,clippy/fmt 干净。README/samples 同步。
+
 ## 2026-07-15 · /model 热切换(像 Claude 的 /model,不重建图)
 
 - **REPL 内即时换模型**:`/model <name>` 当场切换本会话模型,**无需重启、不重建 agent 图**。做法:新增 `provider::SwapProvider` —— 一个把底层 `Arc<dyn LlmProvider>` 藏在 `Mutex` 后的装饰器,`complete`/`complete_streaming` 委托给当前底层,`swap()` 换芯。图只见到这一个 `Arc<dyn LlmProvider>`,所以换芯即换模型,`mcp`/`skills` 不必重建。

@@ -26,6 +26,8 @@ pub enum Color {
     BrightMagenta,
     BrightCyan,
     BrightWhite,
+    /// 灰(ANSI 90)—— 状态行等次要信息用,不抢眼。
+    BrightBlack,
 }
 
 impl Color {
@@ -47,6 +49,7 @@ impl Color {
             Color::BrightMagenta => "\x1b[35;1m",
             Color::BrightCyan => "\x1b[36;1m",
             Color::BrightWhite => "\x1b[37;1m",
+            Color::BrightBlack => "\x1b[90m",
         }
     }
 
