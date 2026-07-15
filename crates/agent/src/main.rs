@@ -243,20 +243,16 @@ fn handle_provider(input: &str, meta: &mut ReplMeta, swap: &Arc<SwapProvider>) {
             println!("切换:/provider use <name>(热切换,本会话生效)");
         }
         Some("add") => {
-            let (name, kind, model, base) = match (
-                args.get(2),
-                args.get(3),
-                args.get(4),
-                args.get(5),
-            ) {
-                (Some(n), Some(k), Some(m), Some(b)) => (*n, *k, *m, *b),
-                _ => {
-                    println!(
+            let (name, kind, model, base) =
+                match (args.get(2), args.get(3), args.get(4), args.get(5)) {
+                    (Some(n), Some(k), Some(m), Some(b)) => (*n, *k, *m, *b),
+                    _ => {
+                        println!(
                         "用法:/provider add <name> <openai|anthropic> <model> <base_url> [KEY_ENV]"
                     );
-                    return;
-                }
-            };
+                        return;
+                    }
+                };
             if kind != "openai" && kind != "anthropic" {
                 println!("kind 只能是 openai 或 anthropic,得到 {kind}");
                 return;
