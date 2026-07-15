@@ -11,7 +11,7 @@
 - **安全人机**:副作用工具**权限门 + `-/+` diff 预览**、危险命令硬拦截、`--yolo` **skip-danger** 模式。
 - **web 研究闭环**:`web_search`(**探测 GFW 自动换引擎**、无 key 多引擎 fallback)→ `fetch_url`(抓正文)→ 据原文作答。
 - **会话韧性**:`@file` 上下文引用、`--resume` **kill-9 崩溃恢复**、**Ctrl-C 中断**当前任务、`todo_write` **任务清单** `[x]/[~]/[ ]` 实时渲染。
-- **插件式扩展**:`~/.ridge/config.toml`(provider/model/预算/多 `[[mcp]]`/skills;env 覆盖;**密钥只走 env**)、多 MCP 并接(实测零改源码接入 [AnySearch](docs/web-search-and-anysearch.md))、`SKILL.md` 声明式技能。
+- **插件式扩展**:`~/.ridge/config.json`(provider/model/预算/多 `mcp`/skills;env 覆盖;**密钥只走 env**;REPL 内 `/config set` 可持久化)、多 MCP 并接(实测零改源码接入 [AnySearch](docs/web-search-and-anysearch.md))、`SKILL.md` 声明式技能。
 - **可信闭环**:`maker≠checker`(确定性验证 + 可选独立模型 reviewer)、多层停机护栏、`trace.json` 审计、`tracing` 全链路。
 
 `cargo test --workspace` = **81 全绿**,clippy `-D warnings` / fmt 干净。
@@ -32,13 +32,13 @@ cargo run -p agent --bin ridgecode -- --help   # 用法
 cargo test --workspace                          # 81 单测,全绿
 
 # 接真实 LLM(OpenAI 兼容端点示例;密钥只走 env):
-export RIDGE_API_KEY=sk-...        # 或用 ~/.ridge/config.toml(见 samples/config.toml)
+export RIDGE_API_KEY=sk-...        # 或用 ~/.ridge/config.json(见 samples/config.json)
 ridgecode                          # 交互式 REPL
 ridgecode "修复编译错误" --cwd /path/to/proj   # 一次性任务
 ridgecode --resume                 # 恢复上次会话(崩溃/关掉重开)
 ```
 
-**加能力不改源码**:把 [`samples/skills/`](samples/) 里的 `SKILL.md` 拷进 `~/.ridge/skills/`(含 researcher/rust-fixer/triage/summarize/translate),或在 `config.toml` 加 `[[mcp]]`。
+**加能力不改源码**:把 [`samples/skills/`](samples/) 里的 `SKILL.md` 拷进 `~/.ridge/skills/`(含 researcher/rust-fixer/triage/summarize/translate),或在 `config.json` 的 `mcp` 加一段。
 
 ## 引擎用法
 

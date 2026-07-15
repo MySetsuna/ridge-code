@@ -18,8 +18,22 @@ RidgeCode 的核心承诺:**加能力 = 加一个 `SKILL.md` 或一段 MCP 配�
 
 ## 配置
 
-`config.toml` —— 带注释的配置样例,拷到 `~/.ridge/config.toml`。provider/model/预算/多 `[[mcp]]`/skills 一处配;env 覆盖;**密钥只走 `RIDGE_API_KEY` 环境变量,不进 config**。
+`config.json` —— 配置样例,拷到 `~/.ridge/config.json`(或用 `RIDGE_CONFIG` 指定路径)。env 覆盖此处;**密钥只走 `RIDGE_API_KEY` 环境变量,不进 config**。
+
+键:
+
+| 键 | 说明 |
+|---|---|
+| `provider` | `openai`(兼容端点)/ `anthropic` |
+| `model` | 模型名 |
+| `base_url` | OpenAI 兼容端点;anthropic 走 `https://api.anthropic.com/v1` |
+| `budget_tokens` | 预算,`0` = 不限;超预算熔断停机 |
+| `skills_dir` | 技能目录,不填默认 `~/.ridge/skills` |
+| `skip_danger` | `true` = 工具自动放行不问 `[y/N]`(灾难命令仍拦) |
+| `mcp` | 要并接的 MCP server 数组(见下) |
+
+启动后也能在 REPL 里 **`/config`** 看配置、**`/config set <key> <value>`** 持久化上表标量键(改完重启生效);两种方式并存,直接编辑文件同样有效。
 
 ## MCP(接万物)
 
-在 `config.toml` 里加 `[[mcp]]` 段即多一批工具(见 `config.toml` 里的 AnySearch 例子)。零改源码。
+在 `config.json` 的 `mcp` 数组里加一段即多一批工具(见样例里的 AnySearch 例子)。零改源码。

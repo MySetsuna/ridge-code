@@ -319,7 +319,7 @@ fn parse_skill(text: &str) -> Option<Skill> {
     })
 }
 
-/// `~/.ridge/config.toml`:一处配 provider/model/预算/多 MCP/skills(env 仍可覆盖)。
+/// `~/.ridge/config.json`:一处配 provider/model/预算/多 MCP/skills(env 仍可覆盖)。
 /// **密钥不进 config**(明文风险)—— API key 只从 `RIDGE_API_KEY` env 读。
 #[derive(Debug, Default, Clone, serde::Deserialize)]
 #[serde(default)]
@@ -344,9 +344,9 @@ pub struct McpServerCfg {
 }
 
 impl Config {
-    /// 从 TOML 文本解析;**解析失败 → 默认空配置**(降级到 env,不崩)。
+    /// 从 JSON 文本解析;**解析失败 → 默认空配置**(降级到 env,不崩)。
     pub fn parse(text: &str) -> Self {
-        toml::from_str(text).unwrap_or_default()
+        serde_json::from_str(text).unwrap_or_default()
     }
 
     /// 从路径加载(读不到 → 默认空配置)。
@@ -355,6 +355,47 @@ impl Config {
             .map(|t| Self::parse(&t))
             .unwrap_or_default()
     }
+}
+
+/// 交互中可 `/config set` 持久化的标量键白名单。
+/// **不含** `mcp`(结构化,直接编辑文件)与任何密钥(密钥只走 `RIDGE_API_KEY` env)。
+pub const CONFIG_KEYS: &[&str] = &[
+    "provider",
+    "model",
+    "base_url",
+    "budget_tokens",
+    "skills_dir",
+    "skip_danger",
+];
+
+/// 把一个标量键写进 JSON 配置文本,**保留其余键**(如 `mcp`),返回美化后的新文本。
+/// 文本空/坏 → 从空对象起。类型按 key 归一:`budget_tokens`→number、`skip_danger`→bool、其余→string。
+/// 供 REPL 的 `/config set` 用 —— 写盘由调用方做,这里只做纯文本变换(可单测)。
+pub fn config_set(text: &str, key: &str, value: &str) -> Result<String, String> {
+    if !CONFIG_KEYS.contains(&key) {
+        return Err(format!("未知配置键 {key};可设:{}", CONFIG_KEYS.join(", ")));
+    }
+    let mut root = match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(serde_json::Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    };
+    let v = match key {
+        "budget_tokens" => {
+            let n: u64 = value
+                .parse()
+                .map_err(|_| format!("budget_tokens 需要非负整数,得到 {value}"))?;
+            serde_json::Value::from(n)
+        }
+        "skip_danger" => {
+            let b: bool = value
+                .parse()
+                .map_err(|_| format!("skip_danger 需要 true/false,得到 {value}"))?;
+            serde_json::Value::from(b)
+        }
+        _ => serde_json::Value::from(value),
+    };
+    root.insert(key.to_string(), v);
+    serde_json::to_string_pretty(&serde_json::Value::Object(root)).map_err(|e| e.to_string())
 }
 
 /// 通用 agent 的基础 system prompt(不再只面向编码)。
@@ -1426,24 +1467,21 @@ mod tests {
         assert!(needs_approval("run_shell"));
     }
 
-    /// config.toml:解析含 2 个 `[[mcp]]` 的配置 → 2 个 server + provider 设置(CONTRACT-10 P2 验收)。
+    /// config.json:解析含 2 个 `mcp` 的配置 → 2 个 server + provider 设置(CONTRACT-10 P2 验收)。
     #[test]
     fn config_parses_two_mcp_and_provider() {
         let cfg = Config::parse(
             r#"
-            provider = "openai"
-            model = "glm-4.5-air"
-            budget_tokens = 50000
-            skip_danger = true
-
-            [[mcp]]
-            name = "nlm"
-            cmd = "notebooklm-mcp.exe"
-
-            [[mcp]]
-            name = "fs"
-            cmd = "fs-server"
-            args = ["--root", "/tmp"]
+            {
+              "provider": "openai",
+              "model": "glm-4.5-air",
+              "budget_tokens": 50000,
+              "skip_danger": true,
+              "mcp": [
+                { "name": "nlm", "cmd": "notebooklm-mcp.exe" },
+                { "name": "fs", "cmd": "fs-server", "args": ["--root", "/tmp"] }
+              ]
+            }
         "#,
         );
         assert_eq!(cfg.provider.as_deref(), Some("openai"));
@@ -1456,13 +1494,36 @@ mod tests {
         assert_eq!(cfg.mcp[1].args, vec!["--root", "/tmp"]);
     }
 
-    /// 坏 TOML / 缺文件 → 降级到默认空配置(不崩,回落 env)。
+    /// 坏 JSON / 缺文件 → 降级到默认空配置(不崩,回落 env)。
     #[test]
-    fn config_bad_toml_degrades_to_default() {
-        let cfg = Config::parse("这不是合法 toml {{{");
+    fn config_bad_json_degrades_to_default() {
+        let cfg = Config::parse("这不是合法 json {{{");
         assert!(cfg.provider.is_none() && cfg.mcp.is_empty());
-        let missing = Config::load("C:/no/such/ridge-config-xyz.toml");
+        let missing = Config::load("C:/no/such/ridge-config-xyz.json");
         assert!(missing.mcp.is_empty());
+    }
+
+    /// `/config set` 的纯文本变换:改标量键、保留 `mcp`、类型归一、拒绝未知键 —— 且回写能被再解析。
+    #[test]
+    fn config_set_updates_scalar_keeps_mcp() {
+        let start = r#"{ "model": "old", "mcp": [ { "name": "nlm", "cmd": "x.exe" } ] }"#;
+        // 改 model → 保留 mcp。
+        let s = config_set(start, "model", "glm-4.6").unwrap();
+        let cfg = Config::parse(&s);
+        assert_eq!(cfg.model.as_deref(), Some("glm-4.6"));
+        assert_eq!(cfg.mcp.len(), 1);
+        // 类型归一:budget_tokens→数字、skip_danger→bool。
+        let s = config_set(&s, "budget_tokens", "80000").unwrap();
+        let s = config_set(&s, "skip_danger", "true").unwrap();
+        let cfg = Config::parse(&s);
+        assert_eq!(cfg.budget_tokens, Some(80000));
+        assert_eq!(cfg.skip_danger, Some(true));
+        assert_eq!(cfg.mcp.len(), 1); // 一路保留
+                                      // 空文本 → 从空对象起,仍写得进。
+        assert!(config_set("", "provider", "openai").is_ok());
+        // 未知键 / 坏类型 → Err(不写坏文件)。
+        assert!(config_set(start, "api_key", "sk-x").is_err());
+        assert!(config_set(start, "budget_tokens", "abc").is_err());
     }
 
     /// fetch_url:抓网页 → 抽正文喂模型(RAG 的「读」),走假抓取器不联网。

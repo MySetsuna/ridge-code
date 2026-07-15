@@ -46,9 +46,10 @@ fn handle_meta_flags() -> bool {
              --yolo/--skip-permissions      skip-danger:工具自动放行不问 [y/N](灾难命令仍拦)\n  \
              --resume/--continue            恢复上次 REPL 会话\n  \
              -h/--help、-V/--version        本帮助 / 版本\n\n\
-             REPL 内:@path 引用文件、Ctrl-C 中断任务;/help /reset /compact /exit\n\n\
-             配置:~/.ridge/config.toml(provider/model/预算/多 [[mcp]]/skills;env 覆盖);\
-             密钥只走 RIDGE_API_KEY env。~/.ridge/skills/*/SKILL.md 加领域技能不改源码。"
+             REPL 内:@path 引用文件、Ctrl-C 中断任务;/help /reset /compact /config /exit\n\n\
+             配置:~/.ridge/config.json(provider/model/预算/多 mcp/skills;env 覆盖);\
+             REPL 内 /config set <key> <value> 可持久化。密钥只走 RIDGE_API_KEY env。\
+             ~/.ridge/skills/*/SKILL.md 加领域技能不改源码。"
         );
         return true;
     }
@@ -65,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(dir) = &cwd {
         std::env::set_current_dir(dir)?;
     }
-    let cfg = load_config(); // ~/.ridge/config.toml(env 仍覆盖)
+    let cfg = load_config(); // ~/.ridge/config.json(env 仍覆盖)
 
     match real_provider(&cfg) {
         Some(p) => {
@@ -108,15 +109,62 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// 加载配置:`RIDGE_CONFIG` 指定路径,否则 `~/.ridge/config.toml`。读不到/坏 → 默认空配置(回落 env)。
+/// 配置文件路径:`RIDGE_CONFIG` env > `~/.ridge/config.json`。加载与 `/config` 回写共用。
+fn config_path() -> String {
+    std::env::var("RIDGE_CONFIG").unwrap_or_else(|_| format!("{}/config.json", ridge_home()))
+}
+
+/// 加载配置(JSON)。读不到/坏 → 默认空配置(回落 env)。
 fn load_config() -> Config {
-    let path =
-        std::env::var("RIDGE_CONFIG").unwrap_or_else(|_| format!("{}/config.toml", ridge_home()));
+    let path = config_path();
     let cfg = Config::load(&path);
     if cfg.provider.is_some() || !cfg.mcp.is_empty() {
         eprintln!("[ridgecode] 已加载 config {path}");
     }
     cfg
+}
+
+/// 把一个标量键持久化进 config.json(保留其余键;目录/文件不存在则新建)。
+fn persist_config(key: &str, value: &str) -> Result<String, String> {
+    let path = config_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let updated = agent::config_set(&text, key, value)?;
+    if let Some(dir) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, updated).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+/// REPL 里的 `/config`:无参→看路径+当前生效值+可设键;`set <key> <value>`→持久化(下次启动生效)。
+fn handle_config(input: &str, meta: &ReplMeta) {
+    let args: Vec<&str> = input.split_whitespace().collect();
+    match args.get(1).copied() {
+        None => {
+            println!("配置文件:{}(JSON,可直接编辑)", config_path());
+            println!(
+                "当前生效:provider={} · model={} · base_url={}",
+                meta.provider, meta.model, meta.base_url
+            );
+            println!("可设键:{}", agent::CONFIG_KEYS.join(", "));
+            println!(
+                "用法:/config set <key> <value>(改完重启 ridgecode 生效;密钥只走 RIDGE_API_KEY env,不写文件)"
+            );
+        }
+        Some("set") => {
+            let key = args.get(2).copied().unwrap_or("");
+            let value = args.get(3..).map(|v| v.join(" ")).unwrap_or_default();
+            if key.is_empty() || value.is_empty() {
+                println!("用法:/config set <key> <value>");
+                return;
+            }
+            match persist_config(key, &value) {
+                Ok(path) => println!("已写入 {path}:{key} = {value}(重启 ridgecode 生效)"),
+                Err(e) => println!("写入失败:{e}"),
+            }
+        }
+        Some(other) => println!("未知子命令 {other};用 /config 或 /config set <key> <value>"),
+    }
 }
 
 /// `~/.ridge` 目录(env 配置与 skills 的家)。
@@ -151,7 +199,7 @@ fn load_session(path: &str) -> Vec<Message> {
         .unwrap_or_default()
 }
 
-/// 接入 MCP 服务器:**config 里的多个 `[[mcp]]`** + 兼容旧的单个 env `RIDGE_MCP_CMD`。
+/// 接入 MCP 服务器:**config 里的多个 `mcp`** + 兼容旧的单个 env `RIDGE_MCP_CMD`。
 /// 降级不崩:单个起不来 → 跳过;都没有 → 空,agent 只用内置工具。
 async fn resolve_configured_mcp(cfg: &Config) -> McpTools {
     let mut clients = Vec::new();
@@ -337,7 +385,7 @@ async fn repl(
             "" => continue,
             "/exit" | "/quit" => break,
             "/help" => {
-                println!("命令:/exit 退出 · /reset 清空上下文 · /compact 压缩上下文 · /tools 列可用工具 · /model 看当前模型 · /help 本帮助\n输入 @path 引用文件;Ctrl-C 中断任务;直接输入自然语言即为任务。");
+                println!("命令:/exit 退出 · /reset 清空上下文 · /compact 压缩上下文 · /tools 列可用工具 · /model 看当前模型 · /config 看/改配置 · /help 本帮助\n输入 @path 引用文件;Ctrl-C 中断任务;直接输入自然语言即为任务。");
                 continue;
             }
             "/tools" => {
@@ -349,6 +397,10 @@ async fn repl(
                     "provider={} · model={} · base_url={}",
                     meta.provider, meta.model, meta.base_url
                 );
+                continue;
+            }
+            _ if input.starts_with("/config") => {
+                handle_config(input, &meta);
                 continue;
             }
             "/reset" => {

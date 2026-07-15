@@ -11,23 +11,28 @@
 | key | 不需要 | 匿名可用 / 可选免费 key(1000 次/天) |
 | 输出 | 抓 HTML 解析(脆,引擎改版/广告位会脏) | **结构化**(title/url/context + JSON) |
 | 能力 | search + fetch 正文 | search / **batch_search** / **extract** / **vertical 垂直域**(金融/学术/代码/法律/安全) |
-| 接入 RidgeCode | 已内置 | **加 4 行 config.toml,零改源码** |
+| 接入 RidgeCode | 已内置 | **config.json 加一段 mcp,零改源码** |
 
 **结论**:AnySearch 的**结构化输出确实更优**(内置抓 HTML 实测会混进 DuckDuckGo 广告位 `y.js` 脏链,已加过滤但结构化天生免疫),且有 batch/extract/垂直域等内置没有的能力。但它是**第三方服务 + 需 npx**;内置是**零依赖默认**。所以:**内置当默认(离线无 node 也能用)、AnySearch 当可选升级**,按 RidgeCode 的插件式扩展方式接入 —— **不写一行 Rust**。
 
-## 关键验证:AnySearch = 一个 MCP server,config.toml 即插即用(已实测)
+## 关键验证:AnySearch = 一个 MCP server,config.json 即插即用(已实测)
 
-AnySearch 提供官方 MCP server。RidgeCode 的 `~/.ridge/config.toml` 多 MCP 支持(Iteration 10 P2)直接吃它,**零改源码**就多出 4 个工具。**实测通过**:
+AnySearch 提供官方 MCP server。RidgeCode 的 `~/.ridge/config.json` 多 MCP 支持(Iteration 10 P2)直接吃它,**零改源码**就多出 4 个工具。**实测通过**:
 
-```toml
-# ~/.ridge/config.toml
-[[mcp]]
-name = "anysearch"
-# ⚠ Windows 必须用 cmd /c 包一层 —— Rust 的 Command 不解析 npx.cmd,直接写 "npx" 会 "program not found"
-cmd = "cmd"
-args = ["/c", "npx", "-y", "mcp-remote", "https://api.anysearch.com/mcp"]
-# 类 Unix 直接:cmd = "npx", args = ["-y", "mcp-remote", "https://api.anysearch.com/mcp"]
-# 要更高额度:再加 --header "Authorization: Bearer <ANYSEARCH_API_KEY>"
+```jsonc
+// ~/.ridge/config.json 的 mcp 数组里加一段:
+{
+  "mcp": [
+    {
+      "name": "anysearch",
+      // ⚠ Windows 必须用 cmd /c 包一层 —— Rust 的 Command 不解析 npx.cmd,直接写 "npx" 会 "program not found"
+      "cmd": "cmd",
+      "args": ["/c", "npx", "-y", "mcp-remote", "https://api.anysearch.com/mcp"]
+      // 类 Unix 直接:"cmd": "npx", "args": ["-y", "mcp-remote", "https://api.anysearch.com/mcp"]
+      // 要更高额度:再加 --header "Authorization: Bearer <ANYSEARCH_API_KEY>"
+    }
+  ]
+}
 ```
 
 跑 `ridgecode` 后 stderr 打印 `[ridgecode] 已接入 1 个 MCP server`,模型即可用:

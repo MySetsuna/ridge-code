@@ -4,6 +4,12 @@
 
 ---
 
+## 2026-07-15 · 配置改 JSON + 交互中 /config 持久化(用户要求)
+
+- **配置格式 TOML→JSON**:用户要求用 JSON 做配置文件。`Config::parse` 改 `serde_json`;路径 `~/.ridge/config.toml`→`config.json`(env `RIDGE_CONFIG` 仍覆盖)。删 `toml`/`toml_edit` 依赖(JSON 无注释、`serde_json` 已在,零新增依赖)。样例 `samples/config.toml`→`config.json`(注释挪进 samples/README 的键表)。
+- **REPL 内 `/config`**:无参→看文件路径+当前生效值+可设键;`/config set <key> <value>`→持久化标量键(白名单 provider/model/base_url/budget_tokens/skills_dir/skip_danger,类型归一)到 config.json,**保留其余键(如 mcp)**,改完**重启生效**。密钥仍拒写(只走 `RIDGE_API_KEY` env)。纯文本变换 `agent::config_set` 抽在 lib(可单测),写盘在 main。三种配置方式并存:REPL `/config set`、直接编辑文件、env 覆盖。
+- **实测**:`/config` 显示、`/config set model/budget_tokens` 写盘、未知键(api_key)被拒、mcp 数组一路保留、重启读回 —— 全通过。`cargo test`=**82 全绿**,clippy/fmt 干净。README/samples/anysearch 文档同步 JSON。
+
 ## 2026-07-15 · Iteration 12 续³:顶层 README 刷新(front door 反映完成态)
 
 - **README 重写**:旧版还叫 `langgraph-rs`/「编码 agent」/32 测试/里程碑停在 M5,严重滞后。新版:标题 **RidgeCode**、北极星(模块化跨领域框架、加 SKILL.md/MCP 不改源码)、**能力全表**(REPL 流式/spinner、批量编辑、权限门+diff+skip-danger、web 研究闭环、@file/--resume/Ctrl-C/todo_write、config.toml/多 MCP/Skills)、快速开始(REPL/一次性/--resume/加技能)、引擎用法、已知限制(沙箱/rmcp)。测试数 32→**81**。校验所有文档链接可达。
