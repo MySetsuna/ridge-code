@@ -1,37 +1,44 @@
-# langgraph-rs
+# RidgeCode
 
-手搓的 **Rust 版 LangGraph** 引擎,以及跑在它之上的**编码 agent**,目标是媲美 Claude Code。
-用 NotebookLM 驱动持续迭代(见 [`docs/WORKFLOW.md`](docs/WORKFLOW.md)),关键决策过对抗评审。
+**模块化、跨领域可扩展的通用 agent 框架**(单二进制 `ridgecode`)—— 既能像 Claude Code 写代码,也能做编程以外的事(调研 / 摘要 / 翻译 / 分诊 …)。核心赌注:**加新能力 = 加一个 `SKILL.md` 或一段 MCP 配置,而不是改 Rust 源码。**
 
-- **`crates/langgraph`** —— 强类型 `StateGraph` + Pregel 超步执行环(BSP)+ checkpoint(内存 + `FileCheckpointer` 落盘 + `resume` 耐用执行)+ streaming。纯图引擎,零 LLM 概念。
-- **`crates/provider`** —— `LlmProvider` trait + Anthropic/OpenAI 工具调用归一化 + 多轮请求构建 + token 用量 + 真实 HTTP 客户端(传输/归一化解耦)+ 离线 `ScriptedProvider`。
-- **`crates/tools`** —— 真实文件读写 + 跨平台 shell。
-- **`crates/mcp`** —— 最小 MCP 客户端(JSON-RPC:initialize/tools/list/tools/call + `server__tool` 命名空间)+ 可插拔传输。
-- **`crates/agent`** —— ReAct 循环(reason → act → verify),装配成 langgraph 图。二进制 `ridgecode`(产品名 RidgeCode)。
-  - 结构化 tool_call 驱动真实工具 + MCP 工具;**maker≠checker**(确定性闸 + 可选独立模型 reviewer 抓作弊);
-  - 多层停机:回合上限 / token 预算熔断 / 无进展检测;`plan()` 目标→子任务分解。
+底座是手搓的 **Rust 版 LangGraph** 引擎(有状态图状态机),agent 分层跑在其上。用 NotebookLM 驱动持续迭代(见 [`docs/WORKFLOW.md`](docs/WORKFLOW.md)),关键决策过对抗评审。方向见 [`docs/DIRECTION.md`](docs/DIRECTION.md)。
 
-设计的「为什么」与来源(NotebookLM「手搓agent」笔记本)见 **[`docs/REPORT-langgraph-rust.md`](docs/REPORT-langgraph-rust.md)**。
+## 能力(对标 Claude Code —— 核心用户体验已全套达成)
+
+- **交互式 REPL**:彩色实时输出 + 等待 spinner、答案 **token 逐字流式**(SSE)、`/help /reset /compact /tools /model /exit`。
+- **驾驭工程**:精准 `edit_file`(唯一匹配替换)、**多文件原子批量编辑** `apply_edits`(汇总一份 diff 一次确认)、可移植 `search`、分段 `read_file`。
+- **安全人机**:副作用工具**权限门 + `-/+` diff 预览**、危险命令硬拦截、`--yolo` **skip-danger** 模式。
+- **web 研究闭环**:`web_search`(**探测 GFW 自动换引擎**、无 key 多引擎 fallback)→ `fetch_url`(抓正文)→ 据原文作答。
+- **会话韧性**:`@file` 上下文引用、`--resume` **kill-9 崩溃恢复**、**Ctrl-C 中断**当前任务、`todo_write` **任务清单** `[x]/[~]/[ ]` 实时渲染。
+- **插件式扩展**:`~/.ridge/config.toml`(provider/model/预算/多 `[[mcp]]`/skills;env 覆盖;**密钥只走 env**)、多 MCP 并接(实测零改源码接入 [AnySearch](docs/web-search-and-anysearch.md))、`SKILL.md` 声明式技能。
+- **可信闭环**:`maker≠checker`(确定性验证 + 可选独立模型 reviewer)、多层停机护栏、`trace.json` 审计、`tracing` 全链路。
+
+`cargo test --workspace` = **81 全绿**,clippy `-D warnings` / fmt 干净。
+
+## 两层架构
+
+- **`crates/langgraph`** —— 纯图引擎(零 LLM):强类型 `StateGraph` + Pregel 超步(BSP)+ checkpoint(内存 / `FileCheckpointer` 落盘 / `resume`)+ `StreamEvent`。
+- **`crates/provider`** —— `LlmProvider`(Anthropic/OpenAI 归一化 + **流式 `complete_streaming` SSE**)+ `HttpClient` 传输接缝 + `web_search`/`fetch_url`(`WebFetch` 接缝,可离线测)。
+- **`crates/tools`** —— std-only 真实文件读写 / `edit_file` / `apply_edits` / `search` / 跨平台 shell / 危险命令拦截。
+- **`crates/mcp`** —— MCP 客户端(JSON-RPC:initialize/tools/list/tools/call + `server__tool` 命名空间)+ 可插拔传输。
+- **`crates/agent`** —— ReAct 图(reason → act → verify)+ 全部上面的装配;二进制 `ridgecode`。
 
 ## 快速开始
 
 ```bash
-cargo test --workspace          # 全部单测(32 项:引擎/provider/tools/mcp/agent + doctest)
-cargo run -p agent --bin ridgecode  # 跑通 agent 闭环,打印轨迹 + 每个超步的 checkpoint
+cargo build --workspace
+cargo run -p agent --bin ridgecode -- --help   # 用法
+cargo test --workspace                          # 81 单测,全绿
+
+# 接真实 LLM(OpenAI 兼容端点示例;密钥只走 env):
+export RIDGE_API_KEY=sk-...        # 或用 ~/.ridge/config.toml(见 samples/config.toml)
+ridgecode                          # 交互式 REPL
+ridgecode "修复编译错误" --cwd /path/to/proj   # 一次性任务
+ridgecode --resume                 # 恢复上次会话(崩溃/关掉重开)
 ```
 
-预期输出(节选):
-
-```
-== agent trace ==
-  reason#1: -> write_code
-  act: write_code -> tests: 1 failed
-  reason#2: -> fix
-  act: fix -> tests: passed
-  reason#3: -> finish
-  verify: PASS (deterministic gate)
-== result: approved=true steps=3 ==
-```
+**加能力不改源码**:把 [`samples/skills/`](samples/) 里的 `SKILL.md` 拷进 `~/.ridge/skills/`(含 researcher/rust-fixer/triage/summarize/translate),或在 `config.toml` 加 `[[mcp]]`。
 
 ## 引擎用法
 
@@ -52,25 +59,17 @@ g.add_edge("inc", END);
 let out = g.compile()?.invoke(S { n: 0 }).await?; // out.n == 1
 ```
 
-四个要素:**State**(`GraphState` + reducer)、**Node**(`add_node` 异步函数)、**Edge**(`add_edge` / `add_conditional_edge`)、**Runtime**(`invoke` / `invoke_with`,后者可挂 checkpointer 与 streaming)。
+四要素:**State**(`GraphState` + reducer)、**Node**(异步函数)、**Edge**(`add_edge` / `add_conditional_edge`)、**Runtime**(`invoke` / `invoke_with`,后者可挂 checkpointer 与 streaming)。
 
-## 里程碑现状
+## 已知限制(需环境/决策,标为后续)
 
-| 里程碑 | 状态 |
-|---|---|
-| M1 物理闭环(真实工具 + 真实 LLM 结构化 tool_call + HTTP 传输) | ✅ |
-| M2 MCP 协议(客户端 + agent 命名空间路由) | ✅ 核心 |
-| M3 耐用执行(checkpoint 落盘 + resume) | ✅ 起步(JSONL;bincode 待优化) |
-| M4 独立模型 checker(抓作弊) | ✅ |
-| M5 规划器 + 执行(`run_planned` orchestrator-workers) | ✅ |
-| 停机护栏(回合上限 / 预算 / 无进展) | ✅ |
-| 可运行 CLI(`ridgecode`,接真实 provider + `--cwd`) | ✅ |
-| Eval harness(`ridge-eval`,批量测成功率 + 成本) | ✅ |
-| 可观测(`tracing` 全链路,`RUST_LOG` 控制) | ✅ |
+- **重量级沙箱**(Docker/gVisor;gVisor 仅 Linux)—— 现靠危险命令拦截 + 权限门 + diff 确认;真 OS 隔离待技术选型。
+- **官方 `rmcp` 替换自写 stdio** —— 自写传输已连真实 server(notebooklm-mcp / AnySearch),rmcp 为可选鲁棒性升级。
+- 子智能体并行编排接进 REPL、`bincode` checkpoint。
 
-待做(生产硬化,均在既有接缝后):MCP 真实 stdio 换官方 `rmcp`、子任务 **并行** 编排(引擎 fan-out 已支持)、沙箱隔离(Docker/gVisor/WASM)、流式 TUI(引擎 `StreamEvent` 已就绪)、`bincode` checkpoint。详见 `docs/WORKFLOW.md` 与 `docs/iterations/`。
+来源与设计理由见 [`docs/REPORT-langgraph-rust.md`](docs/REPORT-langgraph-rust.md);迭代归档见 [`docs/iterations/`](docs/iterations/) 与 [`docs/LOG.md`](docs/LOG.md)。
 
 ```bash
-cargo run -p eval --bin ridgecode-eval       # 离线 eval demo:每 case PASS/FAIL + 总成功率
+cargo run -p eval --bin ridgecode-eval       # 离线 eval demo:每 case PASS/FAIL + 成功率
 RUST_LOG=langgraph=debug,agent=debug ridgecode …  # 全链路结构化日志
 ```

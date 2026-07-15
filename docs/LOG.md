@@ -4,6 +4,11 @@
 
 ---
 
+## 2026-07-15 · Iteration 12 续³:顶层 README 刷新(front door 反映完成态)
+
+- **README 重写**:旧版还叫 `langgraph-rs`/「编码 agent」/32 测试/里程碑停在 M5,严重滞后。新版:标题 **RidgeCode**、北极星(模块化跨领域框架、加 SKILL.md/MCP 不改源码)、**能力全表**(REPL 流式/spinner、批量编辑、权限门+diff+skip-danger、web 研究闭环、@file/--resume/Ctrl-C/todo_write、config.toml/多 MCP/Skills)、快速开始(REPL/一次性/--resume/加技能)、引擎用法、已知限制(沙箱/rmcp)。测试数 32→**81**。校验所有文档链接可达。
+- 纯 docs,无源码改动。
+
 ## 2026-07-15 · Iteration 12 续²:官方样例技能 +3(含非编程域)
 
 - **CONTRACT-12 P1 样例技能落地**:`samples/skills` 补 triage(分诊排优先级)、summarize(摘要保真去水)、translate(中英互译信达雅)。**summarize/translate 是非编程域** —— 实证「换 `SKILL.md` 就换领域,不改一行 Rust」的框架北极星。单测守住 5 个样例都能被 `load_skills` 解析。`cargo test`=**81 全绿**。提交 `58875e0`。
