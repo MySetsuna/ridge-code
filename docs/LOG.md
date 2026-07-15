@@ -4,6 +4,10 @@
 
 ---
 
+## 2026-07-15 · Iteration 12 续²:官方样例技能 +3(含非编程域)
+
+- **CONTRACT-12 P1 样例技能落地**:`samples/skills` 补 triage(分诊排优先级)、summarize(摘要保真去水)、translate(中英互译信达雅)。**summarize/translate 是非编程域** —— 实证「换 `SKILL.md` 就换领域,不改一行 Rust」的框架北极星。单测守住 5 个样例都能被 `load_skills` 解析。`cargo test`=**81 全绿**。提交 `58875e0`。
+
 ## 2026-07-15 · Iteration 12 续:斜杠命令 /tools /model
 
 - **CONTRACT-12 P2 斜杠命令落地**:`/tools` 列所有可用工具(内置 + MCP)、`/model` 显示当前 `provider/model/base_url`。抽 `resolve_model_info`(env>config>默认)给装配与 `/model` 共用 → 显示即真在用;`McpTools::tool_names()`;`/help` 补新命令 + 提示 `@path`/Ctrl-C。
