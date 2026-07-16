@@ -60,6 +60,7 @@ crates/agent      (装配 agent 图 + 二进制 ridge)
 - **双保险停机**:`MAX_STEPS` 硬上限 + `approved` 闸门。
 - **`Brain` trait** 是接真实 LLM provider 的接缝 —— 换实现,图不动。当前是离线 `ScriptedBrain`(零联网可测)。
 - **sub-agent(只读)**:agent 定义 = 带 frontmatter 的 `.md`(内置 fastcontext/explorer/reviewer 编进二进制 + 用户 `~/.ridge/agents/*.md`,同名覆盖内置)。主 agent 用 `dispatch_agent` 工具自动派 / `/agent` 手动派;子 agent 独立上下文、只回结论(省主上下文/token)、恒**只读**(仅 `read_file`/`search`,双重防御不下放写/shell)。`provider:` 字段引 `config.providers` 的廉价档 = **FastContext** 省钱。cwd 的 `CLAUDE.md`/`AGENTS.md` 经 `load_project_rules` 注入 system prompt。
+- **内核 token 节约(愿景已收束,2026-07-16)**:四层已落地,发 LLM 的上下文对**长任务**保持有界。改这块前先看 `docs/iterations/VISION-token-runtime-state-COMPLETE.md`。四判据:①**历史有界** —— `to_messages` 按加权字符估算(`est_tokens`,CJK≈1tok/字,不引 tiktoken)超阈值自动 `compact_history`(压缩窗口首端裁悬空 `role=tool` 防端点 400);②**静态底噪极小** —— 工具 `description` 精简(`tool_descriptions_stay_terse` 守 <120 字/工具);③**Lean 输出** —— `BASE_SYSTEM` 含简洁 + 最小 diff 约束;④**事实驱动** —— `AgentState.modified_files`(`BTreeSet` 有序稳态)/`last_error` 由 `durable_updates` 在 act 后确定性回填,`durable_state_block` 编成事实块注入 messages **末尾**(role=system;首部 system prompt 冻结利缓存),体量 O(去重文件数)不随步数膨胀。**内核精简铁律**:squeez/向量库(RAG)/AST 骨架(syn)/tiktoken 等**外置可装能力一律走 MCP/SKILL,不进 Rust 内核**;动态工具加载/模型路由附条件推迟(见 VISION 文档)。
 
 ## 工程约定
 
