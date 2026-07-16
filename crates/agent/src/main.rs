@@ -4,14 +4,15 @@ use std::sync::Arc;
 use agent::{
     build_agent, build_llm_agent_full, builtin_tool_specs, compact_history, default_tool,
     expand_mentions, load_skills, null_token_bus, render_todos, resolve_mcp, scripted, write_trace,
-    AgentState, Approver, AutoApprove, Color, Config, McpTools, ProviderProfile, RichOutput, Skill,
-    Todo, TokenBus,
+    AgentState, Approver, AutoApprove, Color, Config, McpTools, RichOutput, Skill, Todo, TokenBus,
 };
 use langgraph::{CompiledGraph, RunConfig, StreamEvent};
 use mcp::{McpClient, StdioTransport};
 use provider::{AnthropicProvider, LlmProvider, Message, OpenAiProvider, SwapProvider};
 
-/// REPL 展示用元信息(`/tools` `/model` 命令用)。
+mod tui;
+
+/// TUI 展示用元信息(`/tools` `/model` 命令用)。
 struct ReplMeta {
     tools: Vec<String>,
     provider: String,
@@ -22,7 +23,7 @@ struct ReplMeta {
 /// ridgecode —— 通用 agent CLI(产品名 RidgeCode)。
 ///
 /// 用法:
-///   ridgecode                                # 交互式 REPL(有 key);/exit /reset /help
+///   ridgecode                                # 交互式 TUI(有 key);管道/非 TTY 则 headless
 ///   ridgecode "修复编译错误"                  # 一次性任务
 ///   ridgecode --cwd /path/to/project "..."    # 在目标项目里跑
 ///   ridgecode --yolo "..."                    # skip-danger:工具自动放行不问 [y/N]
@@ -39,17 +40,18 @@ fn handle_meta_flags() -> bool {
         println!(
             "RidgeCode —— 模块化通用 agent CLI(二进制 ridgecode)\n\n\
              用法:\n  \
-             ridgecode                      交互式 REPL(需 RIDGE_API_KEY)\n  \
+             ridgecode                      交互式 TUI(需 RIDGE_API_KEY;非 TTY 则 headless 逐行任务)\n  \
              ridgecode \"任务\"               一次性任务\n  \
              ridgecode --resume             恢复上次会话(kill-9/关掉重开后续接)\n\n\
              选项:\n  \
              --cwd <dir>                    在目标项目目录里跑\n  \
              --yolo/--skip-permissions      skip-danger:工具自动放行不问 [y/N](灾难命令仍拦)\n  \
-             --resume/--continue            恢复上次 REPL 会话\n  \
+             --resume/--continue            恢复上次会话\n  \
              -h/--help、-V/--version        本帮助 / 版本\n\n\
-             REPL 内:@path 引用文件、Ctrl-C 中断任务;/help /cost /model /provider /config /reset /compact /exit\n\n\
+             TUI 内:斜杠命令 /model /provider /config /agent /compact 等;@path 引用文件、Ctrl-C 中断。\
+             管道/非 TTY:逐行 stdin 当任务(headless,无斜杠命令)。\n\n\
              配置:~/.ridge/config.json(provider/model/预算/多 mcp/skills;env 覆盖);\
-             REPL 内 /config set <key> <value> 可持久化。密钥只走 RIDGE_API_KEY env。\
+             TUI 内 /config set <key> <value> 可持久化。密钥只走 RIDGE_API_KEY env。\
              ~/.ridge/skills/*/SKILL.md 加领域技能不改源码。"
         );
         return true;
@@ -75,8 +77,9 @@ async fn main() -> anyhow::Result<()> {
             let skills = load_configured_skills(&cfg); // 声明式技能(领域知识)
             let budget = cfg.budget_tokens.unwrap_or(0); // 0 = 不限
             let skip_danger = cli_skip_danger || cfg.skip_danger.unwrap_or(false);
+            let agents = Arc::new(build_agents(&cfg)); // sub-agent 注册表(内置 + 用户 + 命名 provider)
             match task {
-                Some(t) => run_once(p, mcp, skills, &t, budget).await, // 一次性
+                Some(t) => run_once(p, mcp, skills, &t, budget, agents).await, // 一次性
                 None => {
                     // --resume:kill-9 / 关掉重开后恢复上一会话的多轮 history。
                     let initial = if resume {
@@ -89,23 +92,38 @@ async fn main() -> anyhow::Result<()> {
                         .iter()
                         .map(|s| s.name.clone())
                         .collect();
-                    tools.extend(mcp.tool_names()); // 读工具名(在 mcp 被移入 repl 前)
+                    tools.extend(mcp.tool_names()); // 读工具名(在 mcp 被移入交互循环前)
                     let meta = ReplMeta {
                         tools,
                         provider: provider_kind,
                         model,
                         base_url,
                     };
-                    // 包一层 SwapProvider,让 REPL 的 /model 能热切换底层模型而不重建图。
+                    // 包一层 SwapProvider,让 TUI 的 /model 能热切换底层模型而不重建图。
                     let swap = Arc::new(SwapProvider::new(p));
-                    repl(swap, mcp, skills, skip_danger, budget, initial, meta).await
-                    // 交互式
+                    // 终端采用 TUI；管道/非 TTY 退回 headless，避免破坏脚本/重定向调用。
+                    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                        tui::run(
+                            swap,
+                            mcp,
+                            skills,
+                            skip_danger,
+                            budget,
+                            initial,
+                            meta,
+                            agents,
+                        )
+                        .await
+                    } else {
+                        // 非 TTY(管道/CI/重定向):极简 headless,无 TUI、无斜杠命令。
+                        headless(swap, mcp, skills, budget, initial, agents).await
+                    }
                 }
             }
         }
         None => {
             eprintln!(
-                "[ridgecode] 未检测到 RIDGE_API_KEY,跑离线脚本 demo(设置密钥即用真实 LLM / REPL)。\n"
+                "[ridgecode] 未检测到 RIDGE_API_KEY,跑离线脚本 demo(设置密钥即用真实 LLM / TUI)。\n"
             );
             run_demo().await
         }
@@ -139,199 +157,6 @@ fn persist_config(key: &str, value: &str) -> Result<String, String> {
     Ok(path)
 }
 
-/// REPL 里的 `/config`:无参→看路径+当前生效值+可设键;`set <key> <value>`→持久化(下次启动生效)。
-fn handle_config(input: &str, meta: &ReplMeta) {
-    let args: Vec<&str> = input.split_whitespace().collect();
-    match args.get(1).copied() {
-        None => {
-            println!("配置文件:{}(JSON,可直接编辑)", config_path());
-            println!(
-                "当前生效:provider={} · model={} · base_url={}",
-                meta.provider, meta.model, meta.base_url
-            );
-            println!("可设键:{}", agent::CONFIG_KEYS.join(", "));
-            println!(
-                "用法:/config set <key> <value>(改完重启 ridgecode 生效;密钥只走 RIDGE_API_KEY env,不写文件)"
-            );
-        }
-        Some("set") => {
-            let key = args.get(2).copied().unwrap_or("");
-            let value = args.get(3..).map(|v| v.join(" ")).unwrap_or_default();
-            if key.is_empty() || value.is_empty() {
-                println!("用法:/config set <key> <value>");
-                return;
-            }
-            match persist_config(key, &value) {
-                Ok(path) => println!("已写入 {path}:{key} = {value}(重启 ridgecode 生效)"),
-                Err(e) => println!("写入失败:{e}"),
-            }
-        }
-        Some(other) => println!("未知子命令 {other};用 /config 或 /config set <key> <value>"),
-    }
-}
-
-/// REPL 里的 `/model`:无参→看当前;`/model <name>`→**热切换**本会话模型(不重建图,像 Claude 的 /model)。
-/// 只换 model(沿用当前 provider/base_url/key);**不落盘**(要持久化用 `/config set model`)。
-fn handle_model(input: &str, meta: &mut ReplMeta, swap: &Arc<SwapProvider>) {
-    let name = input.strip_prefix("/model").unwrap_or("").trim();
-    if name.is_empty() {
-        println!(
-            "provider={} · model={} · base_url={}",
-            meta.provider, meta.model, meta.base_url
-        );
-        println!("热切换:/model <name>(本会话即时生效)· 持久化:/config set model <name>");
-        return;
-    }
-    let Some(key) = std::env::var("RIDGE_API_KEY")
-        .ok()
-        .filter(|k| !k.is_empty())
-    else {
-        println!("未设 RIDGE_API_KEY,无法热切换模型");
-        return;
-    };
-    swap.swap(make_provider(&meta.provider, name, &meta.base_url, key));
-    meta.model = name.to_string();
-    println!("已切换 model={name}(本会话即时生效;/config set model {name} 可持久化)");
-}
-
-/// 把一个 provider 档案持久化进 config.json(同名覆盖;保留其余键)。
-fn persist_provider(profile: &ProviderProfile) -> Result<String, String> {
-    let path = config_path();
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let updated = agent::config_add_provider(&text, profile)?;
-    if let Some(dir) = std::path::Path::new(&path).parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(&path, updated).map_err(|e| e.to_string())?;
-    Ok(path)
-}
-
-/// env 变量是否已设为非空(供检查某 provider 的密钥来源)。
-fn env_set(name: &str) -> bool {
-    std::env::var(name).map(|v| !v.is_empty()).unwrap_or(false)
-}
-
-/// REPL 里的 `/provider`:多 provider 管理 + **交互式添加/热切换**。
-/// - `/provider`(或 `list`):列已配档案(★=当前生效,⚠=密钥 env 未设);
-/// - `/provider add <name> <openai|anthropic> <model> <base_url> [KEY_ENV]`:持久化一个档案(密钥不落盘,只存 env 名);
-/// - `/provider use <name>`:热切换到该档案(读其 KEY_ENV 取密钥,不重建图)。
-fn handle_provider(input: &str, meta: &mut ReplMeta, swap: &Arc<SwapProvider>) {
-    let args: Vec<&str> = input.split_whitespace().collect();
-    match args.get(1).copied() {
-        None | Some("list") => {
-            let cfg = Config::load(config_path());
-            if cfg.providers.is_empty() {
-                println!("未配置命名 provider。加一个:/provider add <name> <openai|anthropic> <model> <base_url> [KEY_ENV]");
-            } else {
-                println!("已配置 {} 个 provider(★=当前):", cfg.providers.len());
-                for p in &cfg.providers {
-                    let active = p.kind == meta.provider
-                        && p.model == meta.model
-                        && p.base_url == meta.base_url;
-                    let mark = if active { "★" } else { " " };
-                    let keywarn = if env_set(&p.key_env) {
-                        String::new()
-                    } else {
-                        format!("  ⚠ {} 未设", p.key_env)
-                    };
-                    println!(
-                        "{mark} {} · {}·{} · {}{}",
-                        p.name, p.kind, p.model, p.base_url, keywarn
-                    );
-                }
-            }
-            println!("切换:/provider use <name>(热切换,本会话生效)");
-        }
-        Some("add") => {
-            let (name, kind, model, base) =
-                match (args.get(2), args.get(3), args.get(4), args.get(5)) {
-                    (Some(n), Some(k), Some(m), Some(b)) => (*n, *k, *m, *b),
-                    _ => {
-                        println!(
-                        "用法:/provider add <name> <openai|anthropic> <model> <base_url> [KEY_ENV]"
-                    );
-                        return;
-                    }
-                };
-            if kind != "openai" && kind != "anthropic" {
-                println!("kind 只能是 openai 或 anthropic,得到 {kind}");
-                return;
-            }
-            let key_env = args.get(6).copied().unwrap_or("RIDGE_API_KEY");
-            let profile = ProviderProfile {
-                name: name.into(),
-                kind: kind.into(),
-                model: model.into(),
-                base_url: base.into(),
-                key_env: key_env.into(),
-            };
-            match persist_provider(&profile) {
-                Ok(path) => {
-                    println!("已写入 {path}:provider 档案 {name}({kind}·{model})");
-                    if !env_set(key_env) {
-                        println!("⚠ 密钥来自环境变量 {key_env},当前未设 —— 用前先 export {key_env}=...(密钥不写进 config)");
-                    }
-                    println!("切换到它:/provider use {name}");
-                }
-                Err(e) => println!("写入失败:{e}"),
-            }
-        }
-        Some("use") => {
-            let Some(name) = args.get(2).copied() else {
-                println!("用法:/provider use <name>");
-                return;
-            };
-            let Some(p) = Config::load(config_path())
-                .providers
-                .into_iter()
-                .find(|p| p.name == name)
-            else {
-                println!("没有名为 {name} 的 provider 档案(/provider list 看已有)");
-                return;
-            };
-            let Some(key) = std::env::var(&p.key_env).ok().filter(|k| !k.is_empty()) else {
-                println!(
-                    "provider {name} 的密钥来自 env {},当前未设 —— 先 export {}=...",
-                    p.key_env, p.key_env
-                );
-                return;
-            };
-            swap.swap(make_provider(&p.kind, &p.model, &p.base_url, key));
-            meta.provider = p.kind.clone();
-            meta.model = p.model.clone();
-            meta.base_url = p.base_url.clone();
-            println!(
-                "已切换到 provider {name}({}·{});本会话即时生效",
-                p.kind, p.model
-            );
-        }
-        Some(other) => println!("未知子命令 {other};用 /provider [list|add|use]"),
-    }
-}
-
-/// 状态行:灰色一行 `provider·model · Nk tok · 目录名`,仅 TTY 显示(管道/重定向不打,免刷屏)。
-fn print_statusline(meta: &ReplMeta, session_tokens: usize) {
-    if !std::io::stdout().is_terminal() {
-        return;
-    }
-    let cwd = std::env::current_dir()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .unwrap_or_default();
-    let tok = if session_tokens >= 1000 {
-        format!("{:.1}k", session_tokens as f64 / 1000.0)
-    } else {
-        session_tokens.to_string()
-    };
-    let line = format!("{}·{} · {tok} tok · {cwd}", meta.provider, meta.model);
-    println!(
-        "{}",
-        RichOutput::new()
-            .with_color(Color::BrightBlack)
-            .format(&line)
-    );
-}
-
 /// `~/.ridge` 目录(env 配置与 skills 的家)。
 fn ridge_home() -> String {
     let home = std::env::var("USERPROFILE")
@@ -340,7 +165,7 @@ fn ridge_home() -> String {
     format!("{home}/.ridge")
 }
 
-/// 会话持久化文件:`RIDGE_SESSION` 或 `~/.ridge/session.json`。存 REPL 的对话 history,
+/// 会话持久化文件:`RIDGE_SESSION` 或 `~/.ridge/session.json`。存 TUI/headless 会话的对话 history,
 /// 供 `--resume` 在 kill-9 / 关掉重开后**恢复多轮上下文**(像 Claude Code 的续接会话)。
 fn session_path() -> String {
     std::env::var("RIDGE_SESSION").unwrap_or_else(|_| format!("{}/session.json", ridge_home()))
@@ -400,7 +225,11 @@ fn load_configured_skills(cfg: &Config) -> Vec<Skill> {
         .ok()
         .or_else(|| cfg.skills_dir.clone())
         .unwrap_or_else(|| format!("{}/skills", ridge_home()));
-    let skills = load_skills(&dir);
+    let mut skills = load_skills(&dir);
+    skills.extend(agent::builtin_skills()); // 内置 skill:agent-creator / skill-creator
+    if let Some(rules) = agent::load_project_rules() {
+        skills.push(rules); // cwd 的 CLAUDE.md / AGENTS.md 作为项目规则注入
+    }
     if !skills.is_empty() {
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         eprintln!(
@@ -412,7 +241,7 @@ fn load_configured_skills(cfg: &Config) -> Vec<Skill> {
     skills
 }
 
-/// 解析参数:非 flag 拼成任务(无 → REPL);`--cwd <dir>` 切换工作目录;
+/// 解析参数:非 flag 拼成任务(无 → TUI/headless);`--cwd <dir>` 切换工作目录;
 /// `--yolo` / `--skip-permissions` / `--dangerously-skip-permissions` 或 env `RIDGE_SKIP_PERMISSIONS=1`
 /// 开 skip-danger 模式(工具自动放行,不再 [y/N])。
 fn parse_args() -> (Option<String>, Option<String>, bool, bool) {
@@ -475,6 +304,38 @@ fn make_provider(kind: &str, model: &str, base_url: &str, key: String) -> Arc<dy
     }
 }
 
+/// 组装 sub-agent 注册表:**内置 agent**(fastcontext/explorer/reviewer)+ 用户 `agents` 目录
+/// (同名覆盖内置)+ 命名 provider 档案(能从各自 KEY_ENV 取到密钥的那些,供 agent 的 `provider:` 引用)。
+fn build_agents(cfg: &Config) -> agent::Agents {
+    let dir =
+        std::env::var("RIDGE_AGENTS_DIR").unwrap_or_else(|_| format!("{}/agents", ridge_home()));
+    let mut defs = agent::builtin_agents();
+    for a in agent::load_agents(&dir) {
+        match defs.iter_mut().find(|d| d.name == a.name) {
+            Some(slot) => *slot = a, // 用户同名文件覆盖内置
+            None => defs.push(a),
+        }
+    }
+    let mut providers = std::collections::HashMap::new();
+    for p in &cfg.providers {
+        if let Some(key) = std::env::var(&p.key_env).ok().filter(|k| !k.is_empty()) {
+            providers.insert(
+                p.name.clone(),
+                make_provider(&p.kind, &p.model, &p.base_url, key),
+            );
+        }
+    }
+    if !defs.is_empty() {
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        eprintln!(
+            "[ridgecode] 已加载 {} 个 sub-agent:{}",
+            defs.len(),
+            names.join(", ")
+        );
+    }
+    agent::Agents { defs, providers }
+}
+
 /// 装配真实 provider:没有 key(只从 env 读)就返回 None(走 demo)。密钥绝不打印。
 fn real_provider(cfg: &Config) -> Option<Arc<dyn LlmProvider>> {
     let key = std::env::var("RIDGE_API_KEY")
@@ -491,9 +352,17 @@ async fn run_once(
     skills: Vec<Skill>,
     task: &str,
     budget: usize,
+    agents: Arc<agent::Agents>,
 ) -> anyhow::Result<()> {
     let bus = null_token_bus();
-    let app = build_llm_agent_full(provider, mcp, Arc::new(AutoApprove), skills, bus.clone())?;
+    let app = build_llm_agent_full(
+        provider,
+        mcp,
+        Arc::new(AutoApprove),
+        skills,
+        bus.clone(),
+        agents,
+    )?;
     // `@path` 引用 → 注入文件正文(一次性任务也支持)。
     let state = AgentState::new(expand_mentions(task)).with_budget(budget);
     let out = run_streamed(&app, state, &bus).await?;
@@ -501,139 +370,46 @@ async fn run_once(
     Ok(())
 }
 
-/// 交互式 REPL:跨轮携带 history,有副作用的工具执行前 stdin 确认。`/exit` `/reset` `/compact` `/help`。
-/// `skip_danger` = true 时用 [`AutoApprove`],工具自动放行、不再 [y/N](像 Claude 的 skip-permissions)。
-#[allow(clippy::too_many_arguments)]
-async fn repl(
-    swap: Arc<SwapProvider>,
+/// 非 TTY(管道/CI/重定向):无 TUI、无斜杠命令。逐行读 stdin,每行当一个任务串行跑,跨行携带 history。
+/// 非交互无法 [y/N] 确认,故一律 [`AutoApprove`](灾难命令仍被 `is_dangerous_command` 硬拦截)。
+/// ponytail: headless 恒自动放行;要严格权限门请用 TTY 交互(TUI)。
+async fn headless(
+    provider: Arc<dyn LlmProvider>,
     mcp: McpTools,
     skills: Vec<Skill>,
-    skip_danger: bool,
     budget: usize,
     mut history: Vec<Message>,
-    mut meta: ReplMeta,
+    agents: Arc<agent::Agents>,
 ) -> anyhow::Result<()> {
-    let title = RichOutput::new().with_color(Color::BrightCyan).bold();
-    println!(
-        "{}",
-        title.format("RidgeCode —— 输入任务开跑;/help 看命令,/exit 退出。")
-    );
-    if !history.is_empty() {
-        println!(
-            "{}",
-            RichOutput::new()
-                .with_color(Color::Green)
-                .format(&format!("(已恢复上次会话:{} 条消息)", history.len()))
-        );
-    }
-    let approver: Arc<dyn Approver> = if skip_danger {
-        println!(
-            "{}",
-            RichOutput::new()
-                .with_color(Color::BrightRed)
-                .bold()
-                .format("⚠ skip-danger 模式:工具自动执行,不再询问 [y/N](灾难命令仍被硬拦截)。")
-        );
-        Arc::new(AutoApprove)
-    } else {
-        println!("危险操作会先问你 [y/N]。");
-        Arc::new(StdinApprover)
-    };
-    println!();
-    let bus = null_token_bus(); // 逐字流式总线:REPL 每回合注册 sender
-                                // 图只见到 swap(一个 Arc<dyn LlmProvider>);/model 换 swap 的芯 → 无需重建图。
-    let app = build_llm_agent_full(swap.clone(), mcp, approver, skills, bus.clone())?;
-
-    // 本会话累计用量(每个 AgentState 是单任务的,跨轮不累加 → 这里手动累计,供 /cost 展示)。
-    let mut session_tokens = 0usize;
-    let mut session_turns = 0usize;
-
-    loop {
-        // 状态行(像 Claude Code):当前 provider·model · 会话累计 tokens · 工作目录名,灰色不抢眼。
-        print_statusline(&meta, session_tokens);
-        print!("ridgecode> ");
-        std::io::stdout().flush().ok();
-        let mut line = String::new();
-        if std::io::stdin().read_line(&mut line)? == 0 {
-            break; // EOF (Ctrl-D)
-        }
+    let bus = null_token_bus();
+    let app = build_llm_agent_full(
+        provider,
+        mcp,
+        Arc::new(AutoApprove),
+        skills,
+        bus.clone(),
+        agents,
+    )?;
+    for line in std::io::stdin().lines() {
+        let line = line?; // 读到 EOF 迭代自然结束;IO 错误照旧上抛
         let input = line.trim();
-        match input {
-            "" => continue,
-            "/exit" | "/quit" => break,
-            "/help" => {
-                println!("命令:/exit 退出 · /reset 清空 · /compact 压缩 · /cost 会话用量 · /tools 列工具 · /model [name] 看/换模型 · /provider [list|add|use] 多 provider · /config 看/改配置 · /help\n输入 @path 引用文件;Ctrl-C 中断任务;直接输入自然语言即为任务。");
-                continue;
-            }
-            "/tools" => {
-                println!("可用工具({}):{}", meta.tools.len(), meta.tools.join(", "));
-                continue;
-            }
-            // 精确匹配或带空格参数 —— 否则 `/models`(想列模型)会被当成「切到模型 s」的误伤。
-            _ if input == "/model" || input.starts_with("/model ") => {
-                handle_model(input, &mut meta, &swap);
-                continue;
-            }
-            _ if input == "/provider" || input.starts_with("/provider ") => {
-                handle_provider(input, &mut meta, &swap);
-                continue;
-            }
-            _ if input == "/config" || input.starts_with("/config ") => {
-                handle_config(input, &meta);
-                continue;
-            }
-            "/reset" => {
-                history.clear();
-                save_session(&session_path(), &history); // 清空也落盘,--resume 不再带回旧会话
-                println!("(上下文已清空)");
-                continue;
-            }
-            "/compact" => {
-                let before = history.len();
-                history = compact_history(history, 4);
-                println!("(上下文已压缩:{before} → {} 条)", history.len());
-                continue;
-            }
-            "/cost" => {
-                println!("本会话累计:{session_tokens} tokens · {session_turns} 轮任务");
-                if budget > 0 {
-                    println!("单任务预算:{budget} tokens(超则熔断;0=不限)");
-                }
-                continue;
-            }
-            _ => {}
+        if input.is_empty() {
+            continue;
         }
-
-        // 带上历史续跑;跑完把更新后的 history 存回,实现多轮。
-        // `@path` 引用 → 注入文件正文(像 Claude Code);任务字段仍留原文供显示。
+        // `@path` 引用 → 注入文件正文;跨行携带 history 实现多轮。
         history.push(Message::user(expand_mentions(input)));
         let state = AgentState::new(input)
             .with_history(history.clone())
             .with_budget(budget);
-        // Ctrl-C 中断:任务跑一半按 Ctrl-C → 取消当前任务、回提示符(不杀整个 REPL,像 Claude Code)。
-        tokio::select! {
-            r = run_streamed(&app, state, &bus) => match r {
-                Ok(out) => {
-                    history = out.history.clone();
-                    save_session(&session_path(), &history); // 每轮落盘 → kill-9 后 --resume 可恢复
-                    session_tokens += out.total_tokens; // 会话累计,供 /cost
-                    session_turns += 1;
-                    trace_and_report(&out);
-                }
-                Err(e) => eprintln!("[ridgecode] 出错:{e}"),
-            },
-            _ = tokio::signal::ctrl_c() => {
-                *bus.lock().unwrap() = None; // 清掉可能残留的 token sender
-                println!(
-                    "\n{}",
-                    RichOutput::new()
-                        .with_color(Color::Yellow)
-                        .format("(已中断当前任务,回到提示符。/exit 退出)")
-                );
+        match run_streamed(&app, state, &bus).await {
+            Ok(out) => {
+                history = out.history.clone();
+                save_session(&session_path(), &history); // 每轮落盘 → --resume 可恢复
+                trace_and_report(&out);
             }
+            Err(e) => eprintln!("[ridgecode] 出错:{e}"),
         }
     }
-    println!("bye.");
     Ok(())
 }
 
@@ -785,20 +561,6 @@ async fn run_demo() -> anyhow::Result<()> {
     }
     print_report(&out);
     Ok(())
-}
-
-/// stdin 权限门:有副作用的工具执行前问 [y/N]。
-struct StdinApprover;
-impl Approver for StdinApprover {
-    fn approve(&self, action: &str, detail: &str) -> bool {
-        eprint!("\n  ⚠ 允许 {action} {detail} ? [y/N] ");
-        std::io::stderr().flush().ok();
-        let mut line = String::new();
-        if std::io::stdin().read_line(&mut line).is_err() {
-            return false;
-        }
-        matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
-    }
 }
 
 fn print_report(out: &AgentState) {

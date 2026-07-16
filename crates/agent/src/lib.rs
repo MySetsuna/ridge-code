@@ -319,6 +319,245 @@ fn parse_skill(text: &str) -> Option<Skill> {
     })
 }
 
+/// 一个 sub-agent 定义(带 frontmatter 的 `.md`):独立上下文、**只读**、可指定便宜模型。
+/// 主 agent 通过 `dispatch_agent` 工具派活给它,或 REPL `/agent` 手动派;它只回精炼结论,省主上下文/token。
+#[derive(Clone, Debug)]
+pub struct Agent {
+    pub name: String,
+    pub description: String,
+    /// 引用 config.providers 里的档案名(如 `fast`);省略 → 用主 provider。
+    pub provider: Option<String>,
+    /// 只读工具白名单(`read_file` / `search`);省略 → 给全部只读工具。
+    pub tools: Option<Vec<String>>,
+    /// 正文 = 该 sub-agent 的 system prompt。
+    pub body: String,
+}
+
+/// 解析 agent 定义 `.md`:frontmatter(name/description/provider/tools)+ 正文。无 name → 无效。
+/// (刻意与 [`parse_skill`] 分开,不动那条已测路径;多解析 provider/tools 两字段。)
+fn parse_agent(text: &str) -> Option<Agent> {
+    let rest = text.strip_prefix("---")?;
+    let end = rest.find("\n---")?;
+    let front = &rest[..end];
+    let body = rest[end + 4..]
+        .trim_start_matches(['-', '\n'])
+        .trim()
+        .to_string();
+    let (mut name, mut description, mut provider, mut tools) =
+        (String::new(), String::new(), None, None);
+    for line in front.lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("name:") {
+            name = v.trim().to_string();
+        } else if let Some(v) = line.strip_prefix("description:") {
+            description = v.trim().to_string();
+        } else if let Some(v) = line.strip_prefix("provider:") {
+            let v = v.trim();
+            if !v.is_empty() {
+                provider = Some(v.to_string());
+            }
+        } else if let Some(v) = line.strip_prefix("tools:") {
+            let list: Vec<String> = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !list.is_empty() {
+                tools = Some(list);
+            }
+        }
+    }
+    (!name.is_empty()).then_some(Agent {
+        name,
+        description,
+        provider,
+        tools,
+        body,
+    })
+}
+
+/// 扫描扁平目录 `<dir>/*.md` 解析成 agent 定义列表。目录不存在 → 空。
+pub fn load_agents(dir: impl AsRef<std::path::Path>) -> Vec<Agent> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if let Some(a) = parse_agent(&text) {
+                    out.push(a);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 内置 agent / skill(编进二进制;用户放同名文件即可覆盖)。
+const BUILTIN_AGENTS: &[&str] = &[
+    include_str!("builtin/agents/fastcontext.md"),
+    include_str!("builtin/agents/explorer.md"),
+    include_str!("builtin/agents/reviewer.md"),
+];
+const BUILTIN_SKILLS: &[&str] = &[
+    include_str!("builtin/skills/agent-creator.md"),
+    include_str!("builtin/skills/skill-creator.md"),
+];
+
+/// 内置 agent 定义(fastcontext / explorer / reviewer)。
+pub fn builtin_agents() -> Vec<Agent> {
+    BUILTIN_AGENTS
+        .iter()
+        .filter_map(|t| parse_agent(t))
+        .collect()
+}
+
+/// 内置 skill(agent-creator / skill-creator:教主 agent 自建 agent/skill)。
+pub fn builtin_skills() -> Vec<Skill> {
+    BUILTIN_SKILLS
+        .iter()
+        .filter_map(|t| parse_skill(t))
+        .collect()
+}
+
+/// 读 cwd 的项目规则文件(CLAUDE.md / AGENTS.md),拼成一个"技能"注入 system prompt。都不存在 → None。
+/// 不向上递归(YAGNI):只看当前工作目录。
+pub fn load_project_rules() -> Option<Skill> {
+    let mut body = String::new();
+    for f in ["CLAUDE.md", "AGENTS.md"] {
+        if let Ok(t) = std::fs::read_to_string(f) {
+            if !t.trim().is_empty() {
+                body.push_str(&format!("\n<!-- {f} -->\n{}\n", t.trim()));
+            }
+        }
+    }
+    (!body.is_empty()).then(|| Skill {
+        name: "项目规则".to_string(),
+        description: "本仓库的 CLAUDE.md / AGENTS.md 约定,须遵守".to_string(),
+        body,
+    })
+}
+
+/// sub-agent 注册表:定义列表 + 命名 provider(name → 已建 provider)。
+#[derive(Default)]
+pub struct Agents {
+    pub defs: Vec<Agent>,
+    pub providers: HashMap<String, Arc<dyn LlmProvider>>,
+}
+
+/// sub-agent 允许的**只读**工具(不下放写/改/shell,免绕过主 agent 的权限门)。
+const READONLY_TOOLS: &[&str] = &["read_file", "search"];
+
+/// sub-agent 步数上限(只读检索,不需要很多轮)。
+const SUBAGENT_MAX_STEPS: usize = 8;
+
+/// 按白名单裁出 sub-agent 可用的只读工具 spec。`allow=None` → 全部只读工具。
+fn readonly_tool_specs(allow: &Option<Vec<String>>) -> Vec<ToolSpec> {
+    builtin_tool_specs()
+        .into_iter()
+        .filter(|s| READONLY_TOOLS.contains(&s.name.as_str()))
+        .filter(|s| {
+            allow
+                .as_ref()
+                .is_none_or(|a| a.iter().any(|t| t == &s.name))
+        })
+        .collect()
+}
+
+/// 跑一个**只读** sub-agent:独立 system(=定义正文)+ 只读工具,自成一轮 reason-act 循环,
+/// 返回它的最终结论文本(不回灌工具轨迹到主上下文 —— 这正是省 token 的关键)。
+/// ponytail: 只读(read_file/search),要写让主 agent 写;放开写权限需接权限门。
+pub async fn run_subagent(def: &Agent, provider: Arc<dyn LlmProvider>, task: &str) -> String {
+    let system = format!(
+        "你是 '{}' sub-agent。{}\n\n{}\n\n你是**只读**的:只能用 read_file / search 搜集信息,不能改文件或跑命令。查完后用纯文本回一个精炼结论。",
+        def.name, def.description, def.body
+    );
+    let tools = readonly_tool_specs(&def.tools);
+    let mut history: Vec<Message> = vec![Message::user(task.to_string())];
+    for _ in 0..SUBAGENT_MAX_STEPS {
+        let mut msgs = vec![Message::new(Role::System, system.clone())];
+        msgs.extend(history.iter().cloned());
+        let req = CompletionRequest {
+            messages: msgs,
+            tools: tools.clone(),
+        };
+        let completion = match provider.complete(&req).await {
+            Ok(c) => c,
+            Err(e) => return format!("[{} 出错: {e}]", def.name),
+        };
+        match completion.tool_calls.into_iter().next() {
+            Some(call) => {
+                // 深度防御:即便模型幻觉调了非只读工具,也挡下,绝不执行副作用工具。
+                let obs = if READONLY_TOOLS.contains(&call.name.as_str()) {
+                    execute_tool_call(&call)
+                } else {
+                    format!("sub-agent 无权调用 {}(只读)", call.name)
+                };
+                history
+                    .push(Message::assistant(completion.text).with_tool_calls(vec![call.clone()]));
+                history.push(Message::tool_result(call.id.clone(), obs));
+            }
+            None => return completion.text,
+        }
+    }
+    format!("[{} 达到步数上限,未收敛]", def.name)
+}
+
+/// `dispatch_agent` 工具 spec(仅在有 agent 定义时暴露)。让主 agent 自主把只读子任务派出去。
+fn dispatch_spec(agents: &Agents) -> Option<ToolSpec> {
+    if agents.defs.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = agents.defs.iter().map(|a| a.name.clone()).collect();
+    let list = agents
+        .defs
+        .iter()
+        .map(|a| format!("- {}: {}", a.name, a.description))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(ToolSpec {
+        name: "dispatch_agent".to_string(),
+        description: format!(
+            "把一个**只读**子任务(检索/探索/审查)派给专职 sub-agent:独立上下文,只回精炼结论,替你省上下文与 token。可用 agent:\n{list}"
+        ),
+        schema: serde_json::json!({
+            "type":"object",
+            "properties":{
+                "agent":{"type":"string","enum":names},
+                "task":{"type":"string","description":"交给该 sub-agent 的具体只读子任务"}
+            },
+            "required":["agent","task"]
+        }),
+    })
+}
+
+/// 执行 `dispatch_agent`:选 provider(定义指定的档案,缺则主 provider)→ 跑 sub-agent → 回结论。
+async fn dispatch_obs(agents: &Agents, main: &Arc<dyn LlmProvider>, call: &ToolCall) -> String {
+    let name = call
+        .arguments
+        .get("agent")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let task = call
+        .arguments
+        .get("task")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let Some(def) = agents.defs.iter().find(|a| a.name == name) else {
+        return format!("没有名为 {name} 的 sub-agent(dispatch_agent 的 enum 里选)");
+    };
+    let provider = def
+        .provider
+        .as_ref()
+        .and_then(|p| agents.providers.get(p))
+        .cloned()
+        .unwrap_or_else(|| main.clone());
+    let out = run_subagent(def, provider, task).await;
+    format!("[sub-agent {name} 的结论]\n{out}")
+}
+
 /// `~/.ridge/config.json`:一处配 provider/model/预算/多 MCP/skills(env 仍可覆盖)。
 /// **密钥不进 config**(明文风险)—— API key 只从 `RIDGE_API_KEY` env 读。
 #[derive(Debug, Default, Clone, serde::Deserialize)]
@@ -932,6 +1171,7 @@ pub fn build_llm_agent_with(
         Arc::new(AutoApprove),
         Vec::new(),
         null_token_bus(),
+        Arc::new(Agents::default()),
     )
 }
 
@@ -950,6 +1190,7 @@ pub fn build_llm_agent_reviewed(
         Arc::new(AutoApprove),
         Vec::new(),
         null_token_bus(),
+        Arc::new(Agents::default()),
     )
 }
 
@@ -959,19 +1200,29 @@ pub fn build_llm_agent_gated(
     mcp: McpTools,
     approver: Arc<dyn Approver>,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
-    build_core(provider, mcp, None, approver, Vec::new(), null_token_bus())
+    build_core(
+        provider,
+        mcp,
+        None,
+        approver,
+        Vec::new(),
+        null_token_bus(),
+        Arc::new(Agents::default()),
+    )
 }
 
 /// **全装配**(模块化框架):MCP 工具 + 权限门 + 声明式 Skills + 流式 token 总线。CLI 用它。
 /// `token_bus` 传 [`null_token_bus`] 即不流式;REPL 传真实总线以逐字显示。
+#[allow(clippy::too_many_arguments)]
 pub fn build_llm_agent_full(
     provider: Arc<dyn LlmProvider>,
     mcp: McpTools,
     approver: Arc<dyn Approver>,
     skills: Vec<Skill>,
     token_bus: TokenBus,
+    agents: Arc<Agents>,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
-    build_core(provider, mcp, None, approver, skills, token_bus)
+    build_core(provider, mcp, None, approver, skills, token_bus, agents)
 }
 
 /// reason 把 内置 + MCP 工具一起 offer 给 LLM,act 按 `<server>__<tool>` 命名空间路由到对应
@@ -984,9 +1235,13 @@ fn build_core(
     approver: Arc<dyn Approver>,
     skills: Vec<Skill>,
     token_bus: TokenBus,
+    agents: Arc<Agents>,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
     let mut g = StateGraph::<AgentState>::new();
     let mut specs = builtin_tool_specs();
+    if let Some(d) = dispatch_spec(&agents) {
+        specs.push(d); // 有 sub-agent 才把 dispatch_agent 摆上桌
+    }
     specs.extend(mcp.specs);
     let router = Arc::new(mcp.router);
     let system = Arc::new(build_system_prompt(&skills));
@@ -1053,11 +1308,15 @@ fn build_core(
     let approver_c = approver.clone();
     let fetch_c = fetch.clone();
     let net_c = net.clone();
+    let agents_c = agents.clone();
+    let provider_act = provider.clone(); // 主 provider:sub-agent 未指定档案时的回落
     g.add_node("act", move |s: AgentState| {
         let router = router_c.clone();
         let approver = approver_c.clone();
         let fetch = fetch_c.clone();
         let net = net_c.clone();
+        let agents = agents_c.clone();
+        let main_provider = provider_act.clone();
         async move {
             let patch = match &s.pending_call {
                 Some(call) => {
@@ -1066,6 +1325,8 @@ fn build_core(
                         && !approver.approve(&call.name, &preview_call(call))
                     {
                         format!("permission denied by user: {}", call.name)
+                    } else if call.name == "dispatch_agent" {
+                        dispatch_obs(&agents, &main_provider, call).await
                     } else if call.name == "web_search" {
                         web_search_obs(fetch.as_ref(), &net, call).await
                     } else if call.name == "fetch_url" {
@@ -1300,6 +1561,48 @@ pub async fn run_planned(
 mod tests {
     use super::*;
     use langgraph::RunConfig;
+
+    #[test]
+    fn parse_agent_reads_frontmatter_and_body() {
+        let md = "---\nname: fc\ndescription: 检索\nprovider: fast\ntools: read_file, search\n---\n正文指令";
+        let a = parse_agent(md).expect("应解析出 agent");
+        assert_eq!(a.name, "fc");
+        assert_eq!(a.provider.as_deref(), Some("fast"));
+        assert_eq!(
+            a.tools.as_deref(),
+            Some(&["read_file".to_string(), "search".to_string()][..])
+        );
+        assert_eq!(a.body, "正文指令");
+    }
+
+    #[test]
+    fn subagent_tools_are_readonly_never_side_effecting() {
+        // 安全:sub-agent 工具集绝不含写/改/删/shell(免绕过主 agent 权限门)。
+        let names: Vec<String> = readonly_tool_specs(&None)
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert!(names.iter().any(|n| n == "read_file") && names.iter().any(|n| n == "search"));
+        for forbidden in ["write_file", "edit_file", "apply_edits", "run_shell"] {
+            assert!(
+                !names.iter().any(|n| n == forbidden),
+                "{forbidden} 不该给 sub-agent"
+            );
+        }
+        // 白名单进一步收窄:只要 search。
+        let only = readonly_tool_specs(&Some(vec!["search".to_string()]));
+        assert_eq!(only.len(), 1);
+        assert_eq!(only[0].name, "search");
+    }
+
+    #[test]
+    fn builtin_agents_parse_with_fast_context() {
+        let a = builtin_agents();
+        assert!(a
+            .iter()
+            .any(|x| x.name == "fastcontext" && x.provider.as_deref() == Some("fast")));
+        assert!(a.iter().any(|x| x.name == "reviewer"));
+    }
 
     #[tokio::test]
     async fn happy_path_converges_and_gets_approved() {
