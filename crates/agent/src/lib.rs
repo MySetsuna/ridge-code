@@ -1016,6 +1016,15 @@ fn parse_todos(call: &ToolCall) -> Vec<Todo> {
         .collect()
 }
 
+/// 写操作沙箱守卫:路径须落在**进程 cwd 子树**内(`--cwd` 设的工作目录),越狱 → `Err(BLOCKED 串)`。
+/// 深度防御,与危险命令拦截同层:即使模型幻觉出绝对路径/`..` 逃逸,也硬拒,防写出工作目录祸害宿主。
+fn jail(path: &str) -> Result<(), String> {
+    let root = std::env::current_dir().map_err(|e| format!("BLOCKED (jail): 取 cwd 失败: {e}"))?;
+    tools::jail_path(&root, path)
+        .map(|_| ())
+        .map_err(|e| format!("BLOCKED (jail): {e}"))
+}
+
 /// 执行一个结构化工具调用,返回给模型看的观察结果(observation)。用真实的 `tools` crate 干活。
 pub fn execute_tool_call(call: &ToolCall) -> String {
     let arg = |k: &str| call.arguments.get(k).and_then(|v| v.as_str()).unwrap_or("");
@@ -1032,20 +1041,34 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
             }
         }
         "write_file" => {
+            if let Err(e) = jail(arg("path")) {
+                return e;
+            }
             let contents = arg("contents");
             match tools::write_file(arg("path"), contents) {
                 Ok(()) => format!("wrote {} bytes to {}", contents.len(), arg("path")),
                 Err(e) => format!("write error: {e}"),
             }
         }
-        "edit_file" => match tools::edit_file(arg("path"), arg("old_string"), arg("new_string")) {
-            Ok(()) => format!("edited {}", arg("path")),
-            Err(e) => format!("edit error: {e}"),
-        },
+        "edit_file" => {
+            if let Err(e) = jail(arg("path")) {
+                return e;
+            }
+            match tools::edit_file(arg("path"), arg("old_string"), arg("new_string")) {
+                Ok(()) => format!("edited {}", arg("path")),
+                Err(e) => format!("edit error: {e}"),
+            }
+        }
         "apply_edits" => {
             let edits = parse_edits(call);
             if edits.is_empty() {
                 return "apply_edits error: 缺少 edits".to_string();
+            }
+            // 沙箱:任一路径越狱 → 整批拒(与 apply_edits 的原子性一致,不留半成品)。
+            for e in &edits {
+                if let Err(msg) = jail(&e.path) {
+                    return msg;
+                }
             }
             match tools::apply_edits(&edits) {
                 Ok(n) => format!("applied {n} 个文件的批量编辑"),
@@ -1769,8 +1792,11 @@ mod tests {
     /// P1:结构化 tool_call → 真实文件写入(物理副作用可验证)。
     #[test]
     fn execute_tool_call_writes_real_file() {
-        let mut path = std::env::temp_dir();
-        path.push("ridge_llm_toolcall.txt");
+        // 沙箱后:写路径须在 cwd 子树内,故用 cwd 相对唯一名(非 temp_dir)。
+        let path = std::env::current_dir()
+            .unwrap()
+            .join("ridge_llm_toolcall.tmp");
+        let _ = std::fs::remove_file(&path);
         let call = ToolCall {
             id: "x".to_string(),
             name: "write_file".to_string(),
@@ -1785,8 +1811,7 @@ mod tests {
     /// 驾驭工程:结构化 edit_file tool_call → 精准替换真实文件(而非整文件覆写)。
     #[test]
     fn execute_tool_call_edits_real_file() {
-        let mut path = std::env::temp_dir();
-        path.push("ridge_llm_edit.txt");
+        let path = std::env::current_dir().unwrap().join("ridge_llm_edit.tmp");
         tools::write_file(&path, "let n = 1;\n").unwrap();
         let call = ToolCall {
             id: "e".to_string(),
@@ -1806,7 +1831,9 @@ mod tests {
     /// 多文件批量编辑:一个 apply_edits 调用改 2 个文件,原子生效;preview 是一份汇总 diff。
     #[test]
     fn apply_edits_batches_multiple_files() {
-        let dir = std::env::temp_dir().join("ridge_agent_batch");
+        let dir = std::env::current_dir()
+            .unwrap()
+            .join("ridge_agent_batch_tmp");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a.txt");
@@ -2539,6 +2566,21 @@ mod tests {
             .unwrap()
             .content
             .contains("durable_state"));
+    }
+
+    /// 沙箱深度防御:越出 cwd 的绝对路径写 → `execute_tool_call` 硬拒(BLOCKED)且不落盘。
+    #[test]
+    fn jail_blocks_write_outside_cwd() {
+        let outside = std::env::temp_dir().join("ridge_jail_evil_marker.txt");
+        let _ = std::fs::remove_file(&outside);
+        let call = ToolCall {
+            id: "j".into(),
+            name: "write_file".into(),
+            arguments: serde_json::json!({"path": outside.to_str().unwrap(), "contents":"x"}),
+        };
+        let obs = execute_tool_call(&call);
+        assert!(obs.starts_with("BLOCKED"), "越狱写应被拦: {obs}");
+        assert!(!outside.exists(), "拦截后绝不落盘");
     }
 
     /// 压缩窗口首端的悬空 role=tool(配对 assistant 已被压掉)必须裁掉,防 OpenAI 兼容端点 400。

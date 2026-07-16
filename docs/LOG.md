@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-07-16 · iter-5:轻量内核安全护栏(写操作 jail + denylist 补漏)
+
+- **方向**:用户择「轻量内核护栏」(非重量 Docker/gVisor —— gVisor 仅 Linux、用户在 Windows、需环境决策)。
+- **做了什么**:①**写操作路径 jail** `tools::jail_path(root,target)` —— 把 write_file/edit_file/apply_edits 的路径限在**进程 cwd 子树**,绝对路径/`..` 越界硬拒(纯词法规整、不碰 fs,因新建文件不存在不能 canonicalize);agent 侧 `jail()` 守卫接进 `execute_tool_call` 三写臂,越狱回 `BLOCKED (jail)`。②**denylist 补漏**:修 `dd of=/dev/` 漏 `dd if=/dev/zero of=/dev/sda`(改 `of=/dev/sd|nvme|hd|vd|mmcblk`,不误伤 `of=/dev/null`),加 wipefs/shred/`>/dev/sd`。
+- **验收**:`cargo test --workspace`=**全绿**(+2 测:jail 词法拒逃逸、越 cwd 写 BLOCKED 不落盘;denylist 补测)。3 个既有写测试改用 cwd 相对路径(temp_dir 在 cwd 外被 jail 正确拦)。clippy/fmt 净。
+- **残余**:符号链接逃逸词法层不解析(真 OS 隔离才根治);denylist 仍 best-effort 非边界(jail 才是写硬边界)。
+- **发布**:本会话已发 **v0.2.0** 全平台 Release(Linux x64/arm64、macOS Intel/ARM、Windows;reqwest 切 rustls-tls 去 openssl 依赖使跨编无忧)。
+- **下一步**:`docs/iterations/CONTRACT-iteration-06-readonly.md` —— `--read-only` 只读模式(iter-5 未做,穿线过图构建器方能测试安全地实现)。
+
 ## 2026-07-16 · token 节约之路 iter-4 + 愿景收束:状态快照编译器(Durable State)
 
 - **做了什么**:第一阶段 Runtime State **真正补全** —— `AgentState` 加 `modified_files: BTreeSet<String>`(有序稳态,利缓存)+ `last_error: Option<String>`;`durable_updates` 在 act 节点确定性回填(写类工具成功→记文件清错;工具错误→置 last_error);`durable_state_block` 编事实块注入 messages **末尾**(role=system,首部 system prompt 冻结利缓存),仅有事实时注入,体量 O(去重文件数),不随步数膨胀。

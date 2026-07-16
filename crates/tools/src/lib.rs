@@ -3,11 +3,12 @@
 //! 只用 std,跨平台。这是让 agent 从「真空运行」走向能触碰真实世界的第一块:
 //! 有了真实的文件读写与 shell 退出码,验证器(verifier)才有客观信号可判。
 //!
-//! ⚠ M1 阶段 **不做沙箱**:`run_shell` 直接在宿主机跑,只用于受控命令,别喂不可信输入。
-//! 沙箱(Docker/gVisor/WASM)留到 harness 阶段。
+//! ⚠ 轻量内核护栏(非 OS 隔离):写操作有 [`jail_path`] 限在 cwd 子树、`run_shell` 有
+//! [`is_dangerous_command`] 拦灾难命令 —— 但 `run_shell` 仍在宿主机直跑,别喂不可信输入。
+//! 真 OS 隔离(Docker/gVisor)是需用户环境/技术选型的重量级件,另议。
 
 use std::io;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 /// 读文件全文。
@@ -222,9 +223,17 @@ pub fn is_dangerous_command(cmd: &str) -> Option<&'static str> {
         ("rm -rf /*", "递归删除根目录"),
         ("rm -rf ~", "递归删除 home"),
         ("mkfs", "格式化文件系统"),
-        ("dd of=/dev/", "直写块设备"),
+        ("wipefs", "擦除文件系统签名"),
+        // dd/redirect 直写块设备(sd/nvme/hd/vd/mmcblk);不误伤 of=/dev/null、of=/dev/zero。
+        ("of=/dev/sd", "直写块设备"),
+        ("of=/dev/nvme", "直写块设备"),
+        ("of=/dev/hd", "直写块设备"),
+        ("of=/dev/vd", "直写块设备"),
+        ("of=/dev/mmcblk", "直写 SD/eMMC"),
+        ("shred /dev/", "粉碎块设备"),
         (":(){", "fork 炸弹"),
         ("> /dev/sd", "覆写块设备"),
+        (">/dev/sd", "覆写块设备"),
         ("chmod -r 777 /", "破坏系统权限"),
         ("format c:", "格式化 C 盘"),
         ("del /f /s /q c:", "删空 C 盘"),
@@ -232,6 +241,33 @@ pub fn is_dangerous_command(cmd: &str) -> Option<&'static str> {
     DENY.iter()
         .find(|(pat, _)| c.contains(pat))
         .map(|(_, why)| *why)
+}
+
+/// 写操作沙箱(信任边界):把 `target` 解析进 `root` 子树,越狱(绝对路径 / `..` 越界)→ `Err`。
+/// **纯词法规整,不碰文件系统** —— write_file 要新建的文件尚不存在,不能用 `canonicalize`。
+/// `root` 需是绝对路径(进程 cwd 即是)。这是防 agent 写出工作目录的硬门槛,须严格、不留绕过。
+pub fn jail_path(root: &Path, target: &str) -> Result<PathBuf, String> {
+    // target 绝对时 `join` 会直接替换成 target;`..` 用 pop 词法解析;之后 starts_with 统一裁决。
+    let mut normalized = PathBuf::new();
+    for comp in root.join(target).components() {
+        match comp {
+            Component::Prefix(p) => normalized.push(p.as_os_str()),
+            Component::RootDir => normalized.push(Component::RootDir.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(s) => normalized.push(s),
+        }
+    }
+    if normalized.starts_with(root) {
+        Ok(normalized)
+    } else {
+        Err(format!(
+            "路径越狱:`{target}` 解析后不在工作目录 `{}` 子树内",
+            root.display()
+        ))
+    }
 }
 
 /// 跨平台执行一条 shell 命令:Windows 走 `cmd /C`,其余走 `sh -c`。
@@ -404,5 +440,34 @@ mod tests {
         assert!(is_dangerous_command("cargo build").is_none());
         assert!(is_dangerous_command("rm -rf target/debug").is_none());
         assert!(is_dangerous_command("git status").is_none());
+        // 补漏:dd 直写块设备(此前 `dd of=/dev/` 漏了带 if= 的写法)。
+        assert!(is_dangerous_command("dd if=/dev/zero of=/dev/sda").is_some());
+        assert!(is_dangerous_command("dd if=/dev/zero of=/dev/nvme0n1").is_some());
+        assert!(is_dangerous_command("wipefs -a /dev/sda").is_some());
+        // 但 of=/dev/null 是日常,不误伤。
+        assert!(is_dangerous_command("dd if=x.img of=/dev/null").is_none());
+    }
+
+    #[test]
+    fn jail_path_confines_writes_to_root() {
+        let root = Path::new(if cfg!(windows) {
+            r"C:\work\proj"
+        } else {
+            "/work/proj"
+        });
+        // 子树内 → 放行。
+        assert!(jail_path(root, "src/main.rs").is_ok());
+        assert!(jail_path(root, "./a/b.txt").is_ok());
+        assert!(jail_path(root, "a/../b.txt").is_ok()); // 词法归一后仍在子树
+                                                        // 越狱 → 拒。
+        assert!(jail_path(root, "../secret").is_err()); // 上跳出根
+        assert!(jail_path(root, "../../etc/passwd").is_err());
+        assert!(jail_path(root, "a/../../../etc").is_err());
+        let abs = if cfg!(windows) {
+            r"C:\Windows\System32\x"
+        } else {
+            "/etc/passwd"
+        };
+        assert!(jail_path(root, abs).is_err()); // 绝对路径逃逸
     }
 }
