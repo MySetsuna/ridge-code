@@ -4,6 +4,12 @@
 
 ---
 
+## 2026-07-16 · iter-6:`--read-only` 只读模式(轻量护栏套件收束)
+
+- **做了什么**:`--read-only`(+ env `RIDGE_READ_ONLY`)—— **双保险**:①offering 过滤,`build_core` 加 `read_only` 参,只读时 `retain` 掉 mutating 工具 + 不 offer MCP(dispatch_agent 保留,子 agent 恒只读);②深度防御 `read_only_block`,act 节点首臂拦副作用工具回 `BLOCKED (read-only)`。穿线走构建参数(`build_llm_agent_full`→run_once/headless/tui::run;`parse_args` 改返 `ParsedArgs` 结构体),不引全局可变态、测试并发安全。
+- **验收**:`cargo test --workspace`=**全绿**(+2 测:只读 offering 排除 4 写工具、深度防御只拦副作用)。clippy/fmt 净。
+- **轻量沙箱套件收束**:iter-5(写 cwd jail + denylist)+ iter-6(只读模式)= 用户所择「轻量内核护栏」全落地。残余(symlink 逃逸、run_shell 真隔离)待真 OS 沙箱(Docker/gVisor,需用户环境决策)。
+
 ## 2026-07-16 · iter-5:轻量内核安全护栏(写操作 jail + denylist 补漏)
 
 - **方向**:用户择「轻量内核护栏」(非重量 Docker/gVisor —— gVisor 仅 Linux、用户在 Windows、需环境决策)。

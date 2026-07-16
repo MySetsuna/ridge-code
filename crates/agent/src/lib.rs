@@ -1025,6 +1025,21 @@ fn jail(path: &str) -> Result<(), String> {
         .map_err(|e| format!("BLOCKED (jail): {e}"))
 }
 
+/// 有副作用的内置工具(改文件 / 跑 shell)。只读模式过滤/拒绝它们;jail 只管其中的写文件路径。
+fn is_mutating_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "run_shell" | "write_file" | "edit_file" | "apply_edits"
+    )
+}
+
+/// 只读模式(`--read-only`)的深度防御:副作用工具即使被 offer/幻觉调到,也硬拒。
+/// `Some(观察串)` = 拒绝(与 offering 过滤形成双保险)。
+fn read_only_block(read_only: bool, name: &str) -> Option<String> {
+    (read_only && is_mutating_tool(name))
+        .then(|| format!("BLOCKED (read-only): 只读模式拒绝副作用工具 {name}"))
+}
+
 /// 执行一个结构化工具调用,返回给模型看的观察结果(observation)。用真实的 `tools` crate 干活。
 pub fn execute_tool_call(call: &ToolCall) -> String {
     let arg = |k: &str| call.arguments.get(k).and_then(|v| v.as_str()).unwrap_or("");
@@ -1302,6 +1317,7 @@ pub fn build_llm_agent_with(
         Vec::new(),
         null_token_bus(),
         Arc::new(Agents::default()),
+        false,
     )
 }
 
@@ -1321,6 +1337,7 @@ pub fn build_llm_agent_reviewed(
         Vec::new(),
         null_token_bus(),
         Arc::new(Agents::default()),
+        false,
     )
 }
 
@@ -1338,6 +1355,7 @@ pub fn build_llm_agent_gated(
         Vec::new(),
         null_token_bus(),
         Arc::new(Agents::default()),
+        false,
     )
 }
 
@@ -1351,13 +1369,17 @@ pub fn build_llm_agent_full(
     skills: Vec<Skill>,
     token_bus: TokenBus,
     agents: Arc<Agents>,
+    read_only: bool,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
-    build_core(provider, mcp, None, approver, skills, token_bus, agents)
+    build_core(
+        provider, mcp, None, approver, skills, token_bus, agents, read_only,
+    )
 }
 
 /// reason 把 内置 + MCP 工具一起 offer 给 LLM,act 按 `<server>__<tool>` 命名空间路由到对应
 /// MCP 客户端(否则走内置工具),执行前过权限门,verify 认确定性信号(可选再挂独立模型 reviewer);
 /// system prompt 注入 Skills(领域知识)。
+#[allow(clippy::too_many_arguments)]
 fn build_core(
     provider: Arc<dyn LlmProvider>,
     mcp: McpTools,
@@ -1366,13 +1388,20 @@ fn build_core(
     skills: Vec<Skill>,
     token_bus: TokenBus,
     agents: Arc<Agents>,
+    read_only: bool,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
     let mut g = StateGraph::<AgentState>::new();
+    // 只读模式:不 offer 副作用工具、也不 offer MCP(副作用未知)—— 从源头断写。
     let mut specs = builtin_tool_specs();
-    if let Some(d) = dispatch_spec(&agents) {
-        specs.push(d); // 有 sub-agent 才把 dispatch_agent 摆上桌
+    if read_only {
+        specs.retain(|s| !is_mutating_tool(&s.name));
     }
-    specs.extend(mcp.specs);
+    if let Some(d) = dispatch_spec(&agents) {
+        specs.push(d); // dispatch_agent 安全(子 agent 恒只读),只读模式也可派
+    }
+    if !read_only {
+        specs.extend(mcp.specs);
+    }
     let router = Arc::new(mcp.router);
     let system = Arc::new(build_system_prompt(&skills));
 
@@ -1450,8 +1479,10 @@ fn build_core(
         async move {
             let patch = match &s.pending_call {
                 Some(call) => {
-                    // 权限门:有副作用的工具执行前征询批准。
-                    let obs = if needs_approval(&call.name)
+                    // 只读模式深度防御:副作用工具即使被幻觉调到也硬拒(与 offering 过滤双保险)。
+                    let obs = if let Some(m) = read_only_block(read_only, &call.name) {
+                        m
+                    } else if needs_approval(&call.name)
                         && !approver.approve(&call.name, &preview_call(call))
                     {
                         format!("permission denied by user: {}", call.name)
@@ -2581,6 +2612,40 @@ mod tests {
         let obs = execute_tool_call(&call);
         assert!(obs.starts_with("BLOCKED"), "越狱写应被拦: {obs}");
         assert!(!outside.exists(), "拦截后绝不落盘");
+    }
+
+    /// 只读模式:装配时从 offering 里滤掉副作用工具,只留读/查/研究类。
+    #[test]
+    fn read_only_filters_out_mutating_tools() {
+        let ro: Vec<String> = builtin_tool_specs()
+            .into_iter()
+            .filter(|s| !is_mutating_tool(&s.name))
+            .map(|s| s.name)
+            .collect();
+        for m in ["run_shell", "write_file", "edit_file", "apply_edits"] {
+            assert!(!ro.contains(&m.to_string()), "只读不应 offer {m}");
+        }
+        for r in [
+            "read_file",
+            "search",
+            "web_search",
+            "fetch_url",
+            "todo_write",
+        ] {
+            assert!(ro.contains(&r.to_string()), "只读应保留 {r}");
+        }
+    }
+
+    /// 只读模式深度防御:只拦副作用工具,读类放行;非只读一律不拦。
+    #[test]
+    fn read_only_block_rejects_mutating_only() {
+        assert!(read_only_block(true, "write_file").is_some());
+        assert!(read_only_block(true, "run_shell").is_some());
+        assert!(read_only_block(true, "read_file").is_none());
+        assert!(read_only_block(false, "write_file").is_none());
+        assert!(read_only_block(true, "edit_file")
+            .unwrap()
+            .starts_with("BLOCKED (read-only)"));
     }
 
     /// 压缩窗口首端的悬空 role=tool(配对 assistant 已被压掉)必须裁掉,防 OpenAI 兼容端点 400。

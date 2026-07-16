@@ -113,6 +113,7 @@ pub(super) async fn run(
     mut history: Vec<Message>,
     mut meta: ReplMeta,
     agents: Arc<agent::Agents>,
+    read_only: bool,
 ) -> anyhow::Result<()> {
     let (approval_tx, approval_rx) = mpsc::channel();
     let approver: Arc<dyn Approver> = if skip_danger {
@@ -128,6 +129,7 @@ pub(super) async fn run(
         skills,
         bus.clone(),
         agents.clone(),
+        read_only,
     )?);
     let (event_tx, mut event_rx) =
         tokio::sync::mpsc::unbounded_channel::<StreamEvent<AgentState>>();

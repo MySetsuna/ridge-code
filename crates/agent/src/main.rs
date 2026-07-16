@@ -46,6 +46,7 @@ fn handle_meta_flags() -> bool {
              选项:\n  \
              --cwd <dir>                    在目标项目目录里跑\n  \
              --yolo/--skip-permissions      skip-danger:工具自动放行不问 [y/N](灾难命令仍拦)\n  \
+             --read-only                    只读模式:只 offer 读/查/研究工具,拒一切写/shell 副作用\n  \
              --resume/--continue            恢复上次会话\n  \
              -h/--help、-V/--version        本帮助 / 版本\n\n\
              TUI 内:斜杠命令 /model /provider /config /agent /compact 等;@path 引用文件、Ctrl-C 中断。\
@@ -65,7 +66,13 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     init_tracing();
-    let (task, cwd, cli_skip_danger, resume) = parse_args();
+    let ParsedArgs {
+        task,
+        cwd,
+        skip_danger: cli_skip_danger,
+        resume,
+        read_only,
+    } = parse_args();
     if let Some(dir) = &cwd {
         std::env::set_current_dir(dir)?;
     }
@@ -79,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
             let skip_danger = cli_skip_danger || cfg.skip_danger.unwrap_or(false);
             let agents = Arc::new(build_agents(&cfg)); // sub-agent 注册表(内置 + 用户 + 命名 provider)
             match task {
-                Some(t) => run_once(p, mcp, skills, &t, budget, agents).await, // 一次性
+                Some(t) => run_once(p, mcp, skills, &t, budget, agents, read_only).await, // 一次性
                 None => {
                     // --resume:kill-9 / 关掉重开后恢复上一会话的多轮 history。
                     let initial = if resume {
@@ -112,11 +119,12 @@ async fn main() -> anyhow::Result<()> {
                             initial,
                             meta,
                             agents,
+                            read_only,
                         )
                         .await
                     } else {
                         // 非 TTY(管道/CI/重定向):极简 headless,无 TUI、无斜杠命令。
-                        headless(swap, mcp, skills, budget, initial, agents).await
+                        headless(swap, mcp, skills, budget, initial, agents, read_only).await
                     }
                 }
             }
@@ -244,11 +252,14 @@ fn load_configured_skills(cfg: &Config) -> Vec<Skill> {
 /// 解析参数:非 flag 拼成任务(无 → TUI/headless);`--cwd <dir>` 切换工作目录;
 /// `--yolo` / `--skip-permissions` / `--dangerously-skip-permissions` 或 env `RIDGE_SKIP_PERMISSIONS=1`
 /// 开 skip-danger 模式(工具自动放行,不再 [y/N])。
-fn parse_args() -> (Option<String>, Option<String>, bool, bool) {
+fn parse_args() -> ParsedArgs {
     let mut task = String::new();
     let mut cwd = None;
     let mut resume = false;
     let mut skip_danger = std::env::var("RIDGE_SKIP_PERMISSIONS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let mut read_only = std::env::var("RIDGE_READ_ONLY")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     let mut args = std::env::args().skip(1);
@@ -258,6 +269,7 @@ fn parse_args() -> (Option<String>, Option<String>, bool, bool) {
             "--yolo" | "--skip-permissions" | "--dangerously-skip-permissions" => {
                 skip_danger = true
             }
+            "--read-only" | "--readonly" => read_only = true,
             "--resume" | "--continue" => resume = true,
             _ => {
                 if !task.is_empty() {
@@ -268,7 +280,22 @@ fn parse_args() -> (Option<String>, Option<String>, bool, bool) {
         }
     }
     let task = if task.is_empty() { None } else { Some(task) };
-    (task, cwd, skip_danger, resume)
+    ParsedArgs {
+        task,
+        cwd,
+        skip_danger,
+        resume,
+        read_only,
+    }
+}
+
+/// 命令行解析结果。
+struct ParsedArgs {
+    task: Option<String>,
+    cwd: Option<String>,
+    skip_danger: bool,
+    resume: bool,
+    read_only: bool,
 }
 
 /// 解析实际生效的 `(provider 类型, model, base_url)`:**env > config > 默认**。
@@ -353,6 +380,7 @@ async fn run_once(
     task: &str,
     budget: usize,
     agents: Arc<agent::Agents>,
+    read_only: bool,
 ) -> anyhow::Result<()> {
     let bus = null_token_bus();
     let app = build_llm_agent_full(
@@ -362,6 +390,7 @@ async fn run_once(
         skills,
         bus.clone(),
         agents,
+        read_only,
     )?;
     // `@path` 引用 → 注入文件正文(一次性任务也支持)。
     let state = AgentState::new(expand_mentions(task)).with_budget(budget);
@@ -380,6 +409,7 @@ async fn headless(
     budget: usize,
     mut history: Vec<Message>,
     agents: Arc<agent::Agents>,
+    read_only: bool,
 ) -> anyhow::Result<()> {
     let bus = null_token_bus();
     let app = build_llm_agent_full(
@@ -389,6 +419,7 @@ async fn headless(
         skills,
         bus.clone(),
         agents,
+        read_only,
     )?;
     for line in std::io::stdin().lines() {
         let line = line?; // 读到 EOF 迭代自然结束;IO 错误照旧上抛
