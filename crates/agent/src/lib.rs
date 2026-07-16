@@ -1038,9 +1038,22 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
 
 /// 把当前状态铺成给 provider 的消息序列:system(含注入的技能)+ **真实多轮 history**
 /// (user / assistant(带 tool_calls) / role=tool 结果),而非把轨迹当 assistant 文本糊上去。
+/// history 超过这么多条,发给 LLM 前**自动** compact —— 把 O(n) 全量历史收敛成有界快照
+/// (Runtime State:模型只需知「现在什么情况」,不需知全部「聊过什么」)。此前压缩仅 `/compact`
+/// 手动;长任务多轮下历史随步数线性膨胀、爆预算 + 击穿 prompt 缓存。ponytail: 按条数触发够用,
+/// 要按 token 精算再引 tiktoken(现避免外依赖);阈值/保留数是可调的校准旋钮。
+const AUTO_COMPACT_AT: usize = 24;
+/// 自动 compact 时保留的最近消息条数。
+const AUTO_COMPACT_KEEP: usize = 8;
+
 fn to_messages(system: &str, s: &AgentState) -> Vec<Message> {
+    let history = if s.history.len() > AUTO_COMPACT_AT {
+        compact_history(s.history.clone(), AUTO_COMPACT_KEEP)
+    } else {
+        s.history.clone()
+    };
     let mut msgs = vec![Message::new(Role::System, system)];
-    msgs.extend(s.history.iter().cloned());
+    msgs.extend(history);
     msgs
 }
 
@@ -1467,13 +1480,19 @@ pub fn compact_history(history: Vec<Message>, keep: usize) -> Vec<Message> {
     if history.len() <= keep + 1 {
         return history;
     }
-    let dropped = history.len() - keep - 1;
-    let mut out = Vec::with_capacity(keep + 2);
+    // 保留窗口 = 末 keep 条。若窗口首条是 role=tool(其配对的 assistant 已被压进摘要),
+    // 从前端裁掉这些悬空 tool 结果 —— 否则 OpenAI 兼容端点会因「tool 无前置 tool_calls」400。
+    let mut recent = &history[history.len() - keep..];
+    while recent.first().is_some_and(|m| m.role == Role::Tool) {
+        recent = &recent[1..];
+    }
+    let dropped = history.len() - 1 - recent.len();
+    let mut out = Vec::with_capacity(recent.len() + 2);
     out.push(history[0].clone()); // 原始任务
     out.push(Message::user(format!(
         "[上下文已压缩:省略 {dropped} 条早期消息]"
     )));
-    out.extend(history[history.len() - keep..].iter().cloned());
+    out.extend(recent.iter().cloned());
     out
 }
 
@@ -2277,6 +2296,56 @@ mod tests {
                                                              // 短历史不动。
         let short: Vec<Message> = (0..3).map(|i| Message::user(format!("s{i}"))).collect();
         assert_eq!(compact_history(short.clone(), 4).len(), short.len());
+    }
+
+    /// 自动压缩:history 超阈值时,`to_messages` 发给 LLM 的消息收敛为有界快照(O(n)→O(1))。
+    #[test]
+    fn to_messages_auto_compacts_long_history() {
+        let mut hist = vec![Message::user("原始任务")];
+        for i in 0..40 {
+            hist.push(Message::assistant(format!("step {i}")));
+        }
+        let s = AgentState::new("原始任务").with_history(hist);
+        let msgs = to_messages("SYS", &s);
+        assert!(
+            msgs.len() <= 1 + 2 + AUTO_COMPACT_KEEP,
+            "长历史应收敛为有界,实得 {}",
+            msgs.len()
+        );
+        assert_eq!(msgs[0].role, Role::System);
+        assert!(
+            msgs.iter().any(|m| m.content.contains("压缩")),
+            "应有压缩标记"
+        );
+        assert!(
+            msgs.iter().any(|m| m.content == "原始任务"),
+            "原始任务须保留"
+        );
+        // 短历史不压缩,全量带过(system + 2 条)。
+        let short =
+            AgentState::new("t").with_history(vec![Message::user("t"), Message::assistant("a")]);
+        assert_eq!(to_messages("SYS", &short).len(), 3);
+    }
+
+    /// 压缩窗口首端的悬空 role=tool(配对 assistant 已被压掉)必须裁掉,防 OpenAI 兼容端点 400。
+    #[test]
+    fn compact_history_drops_dangling_tool_result() {
+        let mut hist = vec![Message::user("task")];
+        for i in 0..8 {
+            hist.push(Message::assistant(format!("a{i}")));
+        }
+        hist.push(Message::tool_result("call1", "tool out A")); // keep=4 时会落在窗口首
+        hist.push(Message::assistant("a-final"));
+        hist.push(Message::tool_result("call2", "tool out B"));
+        hist.push(Message::assistant("a-last"));
+        let out = compact_history(hist, 4);
+        assert_eq!(out[0].content, "task"); // 原始任务保留
+        assert_ne!(
+            out[2].role,
+            Role::Tool,
+            "首条保留消息不应是悬空 tool: {:?}",
+            out[2]
+        );
     }
 
     /// M5:模型没给出可解析的数组 → 降级为单个子任务(绝不返回空)。

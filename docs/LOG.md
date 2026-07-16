@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-07-16 · token 节约之路 iter-1:Runtime State 首刀 —— 自动上下文压缩
+
+- **轨道**:新开「token 节约之路」,由 NotebookLM 笔记本「token节省之道」驱动;主源《rust agent开发下一步的token 节约之路》(为 langgraph-rust 量身,四阶段路线图,荐先做第一阶段 Runtime State)。
+- **做了什么**:`to_messages` 增**自动压缩** —— history 超阈值(24 条)发 LLM 前先 `compact_history` 成有界快照(原任务+摘要+近 8 条),把 O(n) 历史收敛为 O(1);此前压缩仅 `/compact` 手动。顺手给 `compact_history` 加 **API 正确性护栏**:裁窗口首端悬空 `role=tool`(防 OpenAI 端点 400),手动/自动两路皆受益。**复用既有 `compact_history`,零新依赖、未改图/reducer**。
+- **验收**:`cargo test --workspace`=**91 全绿**(+2 新测),clippy/fmt 干净。
+- **对抗评审(驳回 NotebookLM 部分建议)**:①驳回 `tiktoken-rs` 依赖(内核走 std/按量估算即可);②**回退**了初版「把 squeez 终端去噪重实现进内核」——squeez 是外置可装工具,应走 MCP/hook,不塞内核(用户明确约束:外置工具不进内核);③RAG 采纳「按需检索」思想但驳回「向量库编进内核」(Qdrant/LanceDB 走 MCP)。
+- **下一步**:见 `docs/iterations/CONTRACT-token-iter-2.md`。NotebookLM 荐 P0=压缩触发器改「加权字符数」(替代粗放的条数);P1 动态工具加载被本地评审**推迟**(现仅 ~9 工具,YAGNI);P2 状态快照编译器**推迟**(需先加 durable 字段,是独立大迭代)。
+- **报告/指导归档**:`docs/iterations/2026-07-16-iteration-token-runtime-state.md`(已上传笔记本);指导见 CONTRACT。
+- **熔断/驳回记录**:回退 squeez 内核集成 1 次(违「内核精简」);驳回 NotebookLM 建议 3 项(tiktoken 依赖、内核向量库、过早的动态工具加载)。
+
 ## 2026-07-15 · 多 provider 交互式管理 + /cost + 状态行 + /models 误伤修复
 
 - **遗留修复**:REPL 斜杠命令用 `starts_with("/model")` 会把 `/models`(想列模型)误当「切到模型 s」。改成精确匹配或带空格参数(`input=="/model" || starts_with("/model ")`),`/config` 同修。
