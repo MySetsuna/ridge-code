@@ -22,7 +22,7 @@
 //! - 图片/视频/文件路径的直接展示
 //! - 交互式输出增强
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -69,6 +69,12 @@ pub struct AgentState {
     pub history: Vec<Message>,
     /// 当前任务清单(模型经 `todo_write` 维护),REPL 渲染成 `[x]/[~]/[ ]` 给用户看进度。
     pub todos: Vec<Todo>,
+    /// **Durable State(持久化事实)**:本次任务已成功改动的文件路径。用 `BTreeSet` 保证**有序稳态**
+    /// —— 编进 prompt 事实块时字节稳定,不抖动、利 Claude 缓存。体量 O(去重文件数),不随步数膨胀。
+    pub modified_files: BTreeSet<String>,
+    /// **Durable State**:上一次工具调用的核心错误摘要(去噪后首行)。事实块据它「重锚定」模型注意力,
+    /// 免其在被压缩的模糊历史里遗忘卡在哪。成功时清空。
+    pub last_error: Option<String>,
 }
 
 impl AgentState {
@@ -107,6 +113,8 @@ pub enum Patch {
     SetStall(usize),
     PushHistory(Message),
     SetTodos(Vec<Todo>),
+    RecordModified(String),
+    SetLastError(Option<String>),
     BumpStep,
     Batch(Vec<Patch>),
 }
@@ -125,6 +133,10 @@ impl GraphState for AgentState {
             Patch::SetStall(n) => self.stall = n,
             Patch::PushHistory(m) => self.history.push(m),
             Patch::SetTodos(t) => self.todos = t,
+            Patch::RecordModified(p) => {
+                self.modified_files.insert(p);
+            }
+            Patch::SetLastError(e) => self.last_error = e,
             Patch::BumpStep => self.steps += 1,
             Patch::Batch(v) => v.into_iter().for_each(|p| self.apply(p)),
         }
@@ -688,7 +700,9 @@ const BASE_SYSTEM: &str = "You are a capable agent. Use the provided tools to ac
      rewriting the whole file with write_file; use search and ranged read_file to explore before \
      editing. For external/real-time info, web_search to find links then fetch_url to read the \
      actual page — trust the page text, not just the snippet. When there is an objective way to \
-     verify (compiler exit code, tests), rely on it and don't trust your own claim. When done, stop.";
+     verify (compiler exit code, tests), rely on it and don't trust your own claim. \
+     Reply concisely: no filler or restating the task; when changing code, emit only the minimal \
+     edit (unique-match replace / diff), not a full-file rewrite. When done, stop.";
 
 /// 把技能注入 system prompt(知识层 → 大脑偏好)。
 fn build_system_prompt(skills: &[Skill]) -> String {
@@ -896,7 +910,7 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "apply_edits".to_string(),
-            description: "**跨文件批量**精准编辑:一次给多处 {path, old_string, new_string},汇总成一份 diff 一次确认、**原子应用**(全成或全不改,不留半成品破坏编译)。重构/多文件改动用它,省得逐个 edit_file 反复确认".to_string(),
+            description: "**跨文件批量**精准编辑:多处 {path, old_string, new_string} 汇总一份 diff 一次确认、**原子应用**(全成或全不改)。重构/多文件改动用它".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"edits":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"]}}},"required":["edits"]}),
         },
         ToolSpec {
@@ -911,7 +925,7 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "web_search".to_string(),
-            description: "联网搜索:自动探测网络环境(能否直连国际网络/是否在 GFW 内)并据此选引擎(直连→DuckDuckGo,受限→Bing 中国版),返回标题/链接/摘要。查实时信息或外部资料用它。注意:query 会发给外部搜索引擎".to_string(),
+            description: "联网搜索,返回标题/链接/摘要(自动按网络环境选可用引擎)。查实时信息或外部资料用它;query 会发给外部搜索引擎".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
         },
         ToolSpec {
@@ -921,7 +935,7 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "todo_write".to_string(),
-            description: "维护任务清单(像 Claude Code 的 TodoWrite):把当前计划拆成若干条 {content, status},status ∈ pending|in_progress|completed。**多步/复杂任务**开始时列清单、每完成一步就更新对应项状态,让用户看到进度。简单单步任务不必用".to_string(),
+            description: "维护任务清单:把计划拆成若干 {content, status}。**多步/复杂任务**开始时列清单、每完成一步更新其状态给用户看进度;简单单步不必用".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"todos":{"type":"array","items":{"type":"object","properties":{"content":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]}},"required":["content","status"]}}},"required":["todos"]}),
         },
     ]
@@ -942,6 +956,46 @@ fn parse_edits(call: &ToolCall) -> Vec<tools::Edit> {
             ))
         })
         .collect()
+}
+
+/// 从一次工具调用 + 观察结果里,**确定性地**抽出 Durable State 更新(事实驱动回填):
+/// 观察到工具错误(前缀 ` error:` / `BLOCKED` / `permission denied`)→ 置 `last_error` 首行;
+/// 写类工具成功(write_file/edit_file/apply_edits)→ 记入 `modified_files` 并清 `last_error`;
+/// 其余工具不动 durable 状态。这样长任务只凭「当前事实」推理,不必靠全量历史。
+fn durable_updates(call: &ToolCall, observation: &str) -> Vec<Patch> {
+    let is_err = observation.contains(" error:")
+        || observation.starts_with("BLOCKED")
+        || observation.starts_with("permission denied");
+    if is_err {
+        let line = observation
+            .lines()
+            .next()
+            .unwrap_or(observation)
+            .to_string();
+        return vec![Patch::SetLastError(Some(line))];
+    }
+    let arg = |k: &str| call.arguments.get(k).and_then(|v| v.as_str());
+    match call.name.as_str() {
+        "write_file" | "edit_file" => arg("path")
+            .map(|p| {
+                vec![
+                    Patch::RecordModified(p.to_string()),
+                    Patch::SetLastError(None),
+                ]
+            })
+            .unwrap_or_default(),
+        "apply_edits" => {
+            let mut ps: Vec<Patch> = parse_edits(call)
+                .into_iter()
+                .map(|e| Patch::RecordModified(e.path))
+                .collect();
+            if !ps.is_empty() {
+                ps.push(Patch::SetLastError(None));
+            }
+            ps
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// 从 `todo_write` 的参数里抽出 `todos` 数组 → [`Todo`] 列表(status 缺省 `pending`)。
@@ -1071,7 +1125,30 @@ fn to_messages(system: &str, s: &AgentState) -> Vec<Message> {
     };
     let mut msgs = vec![Message::new(Role::System, system)];
     msgs.extend(history);
+    // Durable State 事实块放**末尾**(不进冻结的 system prompt):保首部前缀稳定利 Claude 缓存,
+    // 又把模型注意力「重锚定」到当前客观事实。仅在有事实时注入,免空噪。
+    if let Some(block) = durable_state_block(s) {
+        msgs.push(Message::new(Role::System, block));
+    }
     msgs
+}
+
+/// 把 Durable State 编译成一段紧凑事实块(已改文件 / 上次报错);无事实 → `None`(不注入)。
+/// 体量 O(去重文件数 + 一条报错),**不随步数膨胀** —— 这是「事实驱动而非消息驱动」的 O(1) 关键。
+fn durable_state_block(s: &AgentState) -> Option<String> {
+    if s.modified_files.is_empty() && s.last_error.is_none() {
+        return None;
+    }
+    let mut b = String::from("<durable_state>\n");
+    if !s.modified_files.is_empty() {
+        let files: Vec<&str> = s.modified_files.iter().map(String::as_str).collect();
+        b.push_str(&format!("已改文件: {}\n", files.join(", ")));
+    }
+    if let Some(e) = &s.last_error {
+        b.push_str(&format!("上次报错: {e}\n"));
+    }
+    b.push_str("</durable_state>");
+    Some(b)
 }
 
 /// 已连好的 MCP 工具:暴露给 LLM 的 [`ToolSpec`] + 「命名空间名 → (客户端, 原始工具名)」路由表。
@@ -1376,6 +1453,8 @@ fn build_core(
                     } else {
                         0
                     };
+                    // Durable State 回填(事实驱动):在 obs 被移动前算好。
+                    let durable = durable_updates(call, &obs);
                     let mut patches = vec![
                         Patch::Message(format!("act: {} -> {}", call.name, obs)),
                         // 工具结果按 role=tool 正确回灌(匹配 tool_call_id)。
@@ -1388,6 +1467,7 @@ fn build_core(
                     if call.name == "todo_write" {
                         patches.push(Patch::SetTodos(parse_todos(call)));
                     }
+                    patches.extend(durable); // 记已改文件 / 上次报错
                     Patch::Batch(patches)
                 }
                 None => Patch::Message("act: no pending tool_call".to_string()),
@@ -2351,6 +2431,114 @@ mod tests {
     fn est_tokens_weights_cjk_heavier_than_ascii() {
         assert_eq!(est_tokens(&"a".repeat(400)), 100);
         assert_eq!(est_tokens(&"中".repeat(400)), 400);
+    }
+
+    /// 静态底噪守护:工具 Schema 每轮都发,描述须精简且不回潮(去客套/内部机制/schema 重复)。
+    #[test]
+    fn tool_descriptions_stay_terse() {
+        // 每工具 description 字符上限 —— 描述只说「做什么 + 何时用」,不复述 schema、不讲内部机制。
+        const TOOL_DESC_MAX: usize = 120;
+        let specs = builtin_tool_specs();
+        assert!(!specs.is_empty());
+        for s in &specs {
+            let n = s.description.chars().count();
+            assert!(
+                n < TOOL_DESC_MAX,
+                "工具 {} 描述 {n} 字,超上限 {TOOL_DESC_MAX} —— 精简它",
+                s.name
+            );
+        }
+    }
+
+    /// 输出端省钱:BASE_SYSTEM 含 Lean-output 约束(简洁作答 + 只出最小编辑)。
+    #[test]
+    fn base_system_has_lean_output_directive() {
+        assert!(BASE_SYSTEM.contains("concisely"));
+        assert!(BASE_SYSTEM.contains("minimal edit"));
+        // 无技能时系统提示词仍等于 BASE_SYSTEM(不引入额外底噪)。
+        assert_eq!(build_system_prompt(&[]), BASE_SYSTEM);
+    }
+
+    /// Durable State 回填:写类工具成功 → 记 modified_files 清 last_error;工具错误 → 置 last_error。
+    #[test]
+    fn durable_state_backfill_from_tools() {
+        let mut st = AgentState::new("t");
+        let ok = ToolCall {
+            id: "1".into(),
+            name: "write_file".into(),
+            arguments: serde_json::json!({"path":"src/a.rs","contents":"x"}),
+        };
+        for p in durable_updates(&ok, "wrote 1 bytes to src/a.rs") {
+            st.apply(p);
+        }
+        assert!(st.modified_files.contains("src/a.rs"));
+        assert!(st.last_error.is_none());
+
+        let bad = ToolCall {
+            id: "2".into(),
+            name: "edit_file".into(),
+            arguments: serde_json::json!({"path":"src/b.rs","old_string":"x","new_string":"y"}),
+        };
+        for p in durable_updates(&bad, "edit error: old_string 未找到") {
+            st.apply(p);
+        }
+        assert_eq!(
+            st.last_error.as_deref(),
+            Some("edit error: old_string 未找到")
+        );
+        assert!(
+            !st.modified_files.contains("src/b.rs"),
+            "失败不记入已改文件"
+        );
+    }
+
+    /// 事实驱动 O(1):反复改同两文件 50 步,事实块字符数恒定(不随步数膨胀)。
+    #[test]
+    fn durable_state_block_stays_bounded_over_steps() {
+        let mut st = AgentState::new("t");
+        let block_len = |st: &AgentState| {
+            durable_state_block(st)
+                .map(|b| b.chars().count())
+                .unwrap_or(0)
+        };
+        let mut prev = 0;
+        for i in 0..50 {
+            let f = if i % 2 == 0 { "a.rs" } else { "b.rs" };
+            let call = ToolCall {
+                id: i.to_string(),
+                name: "write_file".into(),
+                arguments: serde_json::json!({"path": f, "contents":"x"}),
+            };
+            for p in durable_updates(&call, "wrote 1 bytes") {
+                st.apply(p);
+            }
+            let now = block_len(&st);
+            if i >= 2 {
+                assert_eq!(now, prev, "事实块应有界恒定,step {i} 却变了");
+            }
+            prev = now;
+        }
+        assert_eq!(st.modified_files.len(), 2, "去重后仅 2 个文件");
+    }
+
+    /// 事实块注入 messages **末尾**(role=system,冻结的首部 system prompt 不动);无事实则不加。
+    #[test]
+    fn to_messages_appends_durable_fact_block() {
+        let mut st = AgentState::new("原始任务").with_history(vec![Message::user("原始任务")]);
+        st.modified_files.insert("a.rs".into());
+        st.last_error = Some("boom".into());
+        let msgs = to_messages("SYS", &st);
+        assert_eq!(msgs[0].content, "SYS", "首部 system prompt 保持冻结");
+        let last = msgs.last().unwrap();
+        assert_eq!(last.role, Role::System);
+        assert!(last.content.contains("a.rs") && last.content.contains("boom"));
+        // 无 durable 状态 → 不加尾块。
+        let clean = AgentState::new("t").with_history(vec![Message::user("t")]);
+        assert!(!to_messages("SYS", &clean)
+            .last()
+            .unwrap()
+            .content
+            .contains("durable_state"));
     }
 
     /// 压缩窗口首端的悬空 role=tool(配对 assistant 已被压掉)必须裁掉,防 OpenAI 兼容端点 400。

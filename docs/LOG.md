@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-07-16 · token 节约之路 iter-4 + 愿景收束:状态快照编译器(Durable State)
+
+- **做了什么**:第一阶段 Runtime State **真正补全** —— `AgentState` 加 `modified_files: BTreeSet<String>`(有序稳态,利缓存)+ `last_error: Option<String>`;`durable_updates` 在 act 节点确定性回填(写类工具成功→记文件清错;工具错误→置 last_error);`durable_state_block` 编事实块注入 messages **末尾**(role=system,首部 system prompt 冻结利缓存),仅有事实时注入,体量 O(去重文件数),不随步数膨胀。
+- **对抗评审驳回**:①NotebookLM 荐 `HashSet` → 改 `BTreeSet`(缓存要确定性有序);②驳回 `environment_context`/`cd` 追踪(ridgecode 每次 `run_shell` 全新 `sh -c`,cd 不跨调用持久,追踪是错的)。
+- **验收**:`cargo test --workspace`=**全绿**(+3 测),clippy/fmt 干净。`durable_state_block_stays_bounded_over_steps`:改同两文件 50 步事实块字符恒定(O(1))。
+- **🎉 愿景收束**:NotebookLM 终审「**是**」—— 内核侧 token 节约愿景**已完成**。4 判据全绿:①历史有界(iter-1/2)②静态底噪极小(iter-3)③输出端 Lean(iter-3)④事实驱动(iter-4)。余项(RAG/squeez/AST(syn)/tiktoken)归**外置 MCP**,动态工具加载/模型路由**附条件推迟**。存证见 `docs/iterations/VISION-token-runtime-state-COMPLETE.md`。
+
+## 2026-07-16 · token 节约之路 iter-3:静态底噪清理(极简 Schema + Lean-output)
+
+- **做了什么**:转向「静态底噪」(工具 Schema + system prompt 每轮都发,是 token 起步价)。①审计 `builtin_tool_specs`,裁 `web_search`(去 GFW/选引擎机制)、`todo_write`(去「像 Claude Code」+ schema 重复的 status 枚举)、`apply_edits`(去尾冗)——只精简文案,不改 name/schema/语义;②`BASE_SYSTEM` 加 Lean-output 指令(简洁作答 + 只出最小 diff,不整文件重写)。
+- **验收**:`cargo test --workspace`=**全绿**(+2 测:`tool_descriptions_stay_terse` 每 desc <120 字守不回潮、`base_system_has_lean_output_directive`),clippy/fmt 干净。
+- **下一步**:iter-4(状态快照编译器)—— 本轮紧接完成,依据即 iter-3 报告的开放问题 + NotebookLM 指导,未单列 contract。
+
 ## 2026-07-16 · token 节约之路 iter-2:加权字符压缩触发器
 
 - **做了什么**:iter-1 的自动压缩触发判据由「history 条数(24)」改为「按内容体量的加权字符估算」——新增 `est_tokens`(CJK≈1 tok/字、ASCII≈1 tok/4 字符,口径同 `bin/token-count.mjs`,不引 tiktoken),`to_messages` 触发器改为 `history 各条 est_tokens 之和 > AUTO_COMPACT_TOKENS(6000)`。一条万字日志 ≫ 二十条短问答,条数触发会漏。
