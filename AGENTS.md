@@ -1,12 +1,12 @@
-# CLAUDE.md
+# AGENTS.md
 
-给 Claude Code 在本仓库干活的指引。与仓库既有文档一致,本文件用中文。
+给 Codex 在本仓库干活的指引。与仓库既有文档一致,本文件用中文。
 
 > 「为什么这么设计」与来源见 `docs/REPORT-langgraph-rust.md`;**方向/北极星见 `docs/DIRECTION.md`**;上手看 `README.md`。本文件只补「怎么干活」。
 
 ## 这是什么(北极星)
 
-RidgeCode 是一个**模块化、跨领域可扩展的通用 agent 框架**(单二进制 `ridgecode`),既能像 Claude Code 写代码,又能做**编程以外**的事。
+RidgeCode 是一个**模块化、跨领域可扩展的通用 agent 框架**(单二进制 `ridgecode`),既能像 Codex 写代码,又能做**编程以外**的事。
 **加新能力 = 加一个 MCP server 配置 或 一个 `SKILL.md`,而不是改 Rust 源码。** 四层解耦:
 内核(`langgraph-rs` 引擎)→ 协议(MCP 接万物)→ 知识(声明式 Skills)→ 协作(多智能体 maker-checker)+ 安全(权限门/危险命令拦截,沙箱待做)。详见 `docs/DIRECTION.md`。
 底层赌注不变:agent 的「大脑」是一台**有状态图状态机**,引擎(`langgraph`,不含 LLM)与 agent(`reason/act/verify`)分层。
@@ -23,12 +23,6 @@ cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings   # CI 
 ```
 
 ⚠️ 产品名 **RidgeCode**,二进制/命令是 **`ridgecode`**,但它住在 `crates/agent`(package 名 `agent`)。跑 demo 用 `-p agent --bin ridgecode`。环境变量前缀仍是 `RIDGE_*`(不改,避免破坏现有配置)。
-
-## 跑起来(交互)
-
-- `ridgecode`(TTY)→ **TUI**(ratatui:流式 + 状态行 + 权限弹窗);斜杠命令 `/model /provider /agent /config /compact /tools` 等**只在 TUI**。
-- 非 TTY(管道/CI/重定向)→ **headless**:逐行 stdin 当任务串行跑,无斜杠命令,恒 `AutoApprove`(危险命令仍硬拦截)。
-- **文本 REPL 已退役**:交互统一走 TUI,命令逻辑不再双份(见 `docs/` 决策记录)。改交互相关代码时,只有 `tui.rs`(TTY)与 `main.rs::headless`(非 TTY)两处,别再找 repl。
 
 ## 架构:两层
 
@@ -59,7 +53,6 @@ crates/agent      (装配 agent 图 + 二进制 ridge)
 - **maker ≠ checker**:`reason`/`act` 生成,`verify` **独立**判定且只认确定性信号(工具输出的 `tests: passed`),不信模型自述。
 - **双保险停机**:`MAX_STEPS` 硬上限 + `approved` 闸门。
 - **`Brain` trait** 是接真实 LLM provider 的接缝 —— 换实现,图不动。当前是离线 `ScriptedBrain`(零联网可测)。
-- **sub-agent(只读)**:agent 定义 = 带 frontmatter 的 `.md`(内置 fastcontext/explorer/reviewer 编进二进制 + 用户 `~/.ridge/agents/*.md`,同名覆盖内置)。主 agent 用 `dispatch_agent` 工具自动派 / `/agent` 手动派;子 agent 独立上下文、只回结论(省主上下文/token)、恒**只读**(仅 `read_file`/`search`,双重防御不下放写/shell)。`provider:` 字段引 `config.providers` 的廉价档 = **FastContext** 省钱。cwd 的 `CLAUDE.md`/`AGENTS.md` 经 `load_project_rules` 注入 system prompt。
 
 ## 工程约定
 

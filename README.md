@@ -6,13 +6,14 @@
 
 ## 能力(对标 Claude Code —— 核心用户体验已全套达成)
 
-- **交互式 REPL**:彩色实时输出 + 等待 spinner、答案 **token 逐字流式**(SSE)、灰色**状态行**(provider·model · 会话 tokens · 目录)、`/help /cost /model /provider /config /reset /compact /tools /exit`。
+- **交互式 TUI**(ratatui):彩色实时输出 + 等待 spinner、答案 **token 逐字流式**(SSE)、灰色**状态行**(provider·model · 会话 tokens · 目录)、斜杠命令 `/help /cost /model /provider /agent /config /reset /compact /tools /exit`;非 TTY(管道/CI/重定向)回落 **headless** —— 逐行 stdin 当任务串行跑,无斜杠命令。
 - **多 provider**:`/provider add|list|use` **交互式加/列/热切换** provider 档案;`/model <name>` 热切换模型(均不重建图);`/cost` 看会话累计 tokens。**密钥不落 config**,档案只存要读的 env 变量名。
 - **驾驭工程**:精准 `edit_file`(唯一匹配替换)、**多文件原子批量编辑** `apply_edits`(汇总一份 diff 一次确认)、可移植 `search`、分段 `read_file`。
 - **安全人机**:副作用工具**权限门 + `-/+` diff 预览**、危险命令硬拦截、`--yolo` **skip-danger** 模式。
 - **web 研究闭环**:`web_search`(**探测 GFW 自动换引擎**、无 key 多引擎 fallback)→ `fetch_url`(抓正文)→ 据原文作答。
 - **会话韧性**:`@file` 上下文引用、`--resume` **kill-9 崩溃恢复**、**Ctrl-C 中断**当前任务、`todo_write` **任务清单** `[x]/[~]/[ ]` 实时渲染。
-- **插件式扩展**:`~/.ridge/config.json`(provider/model/预算/多 `mcp`/skills;env 覆盖;**密钥只走 env**;REPL 内 `/config set` 可持久化)、多 MCP 并接(实测零改源码接入 [AnySearch](docs/web-search-and-anysearch.md))、`SKILL.md` 声明式技能。
+- **插件式扩展**:`~/.ridge/config.json`(provider/model/预算/多 `mcp`/skills;env 覆盖;**密钥只走 env**;TUI 内 `/config set` 可持久化)、多 MCP 并接(实测零改源码接入 [AnySearch](docs/web-search-and-anysearch.md))、`SKILL.md` 声明式技能。
+- **子智能体 & 自扩展**:内置只读 sub-agent(fastcontext/explorer/reviewer),`dispatch_agent` 主 agent **自动派** / `/agent` **手动派**(独立上下文、只回结论、省 token、恒**只读**);FastContext 走 config 的廉价档省钱;内置 `agent-creator`/`skill-creator` 教主 agent **自建 agent/skill**;cwd 的 `CLAUDE.md`/`AGENTS.md` 自动注入 system prompt。
 - **可信闭环**:`maker≠checker`(确定性验证 + 可选独立模型 reviewer)、多层停机护栏、`trace.json` 审计、`tracing` 全链路。
 
 `cargo test --workspace` = **81 全绿**,clippy `-D warnings` / fmt 干净。
@@ -34,7 +35,7 @@ cargo test --workspace                          # 81 单测,全绿
 
 # 接真实 LLM(OpenAI 兼容端点示例;密钥只走 env):
 export RIDGE_API_KEY=sk-...        # 或用 ~/.ridge/config.json(见 samples/config.json)
-ridgecode                          # 交互式 REPL
+ridgecode                          # 交互式 TUI(管道/非 TTY 则 headless 逐行任务)
 ridgecode "修复编译错误" --cwd /path/to/proj   # 一次性任务
 ridgecode --resume                 # 恢复上次会话(崩溃/关掉重开)
 ```
@@ -66,7 +67,7 @@ let out = g.compile()?.invoke(S { n: 0 }).await?; // out.n == 1
 
 - **重量级沙箱**(Docker/gVisor;gVisor 仅 Linux)—— 现靠危险命令拦截 + 权限门 + diff 确认;真 OS 隔离待技术选型。
 - **官方 `rmcp` 替换自写 stdio** —— 自写传输已连真实 server(notebooklm-mcp / AnySearch),rmcp 为可选鲁棒性升级。
-- 子智能体并行编排接进 REPL、`bincode` checkpoint。
+- 子智能体**并行**编排(现有 `dispatch_agent`/sub-agent 为**串行只读**)、`bincode` checkpoint。
 
 来源与设计理由见 [`docs/REPORT-langgraph-rust.md`](docs/REPORT-langgraph-rust.md);迭代归档见 [`docs/iterations/`](docs/iterations/) 与 [`docs/LOG.md`](docs/LOG.md)。
 
