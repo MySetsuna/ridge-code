@@ -1038,16 +1038,33 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
 
 /// 把当前状态铺成给 provider 的消息序列:system(含注入的技能)+ **真实多轮 history**
 /// (user / assistant(带 tool_calls) / role=tool 结果),而非把轨迹当 assistant 文本糊上去。
-/// history 超过这么多条,发给 LLM 前**自动** compact —— 把 O(n) 全量历史收敛成有界快照
-/// (Runtime State:模型只需知「现在什么情况」,不需知全部「聊过什么」)。此前压缩仅 `/compact`
-/// 手动;长任务多轮下历史随步数线性膨胀、爆预算 + 击穿 prompt 缓存。ponytail: 按条数触发够用,
-/// 要按 token 精算再引 tiktoken(现避免外依赖);阈值/保留数是可调的校准旋钮。
-const AUTO_COMPACT_AT: usize = 24;
+/// history 的**估算 token** 总量超过这么多,发给 LLM 前**自动** compact —— 把 O(n) 全量历史
+/// 收敛成有界快照(Runtime State:模型只需知「现在什么情况」,不需知全部「聊过什么」)。此前压缩仅
+/// `/compact` 手动;长任务多轮下历史随步数膨胀、爆预算 + 击穿 prompt 缓存。
+/// 按**内容体量**触发(而非条数):一条万字日志 ≫ 二十条短问答,条数触发会漏。
+/// ponytail: [`est_tokens`] 是本地启发式估算,真实计数(tiktoken)是外置能力不进内核;阈值是可调校准旋钮。
+/// 注意:加权触发改善「多条中等消息」的判准;「少数超大单条消息」仍需**单条内容截断**(属外置 squeez 域)。
+const AUTO_COMPACT_TOKENS: usize = 6000;
 /// 自动 compact 时保留的最近消息条数。
 const AUTO_COMPACT_KEEP: usize = 8;
 
+/// 本地 token 估算(不引 tiktoken):CJK 等非 ASCII 字 ≈ 1 token/字,ASCII ≈ 1 token/4 字符。
+/// 口径同仓内 `bin`/`token-count.mjs`。粗但零依赖、确定可测 —— 只用于「要不要压缩」的触发判断。
+fn est_tokens(text: &str) -> usize {
+    let (mut cjk, mut ascii) = (0usize, 0usize);
+    for c in text.chars() {
+        if c.is_ascii() {
+            ascii += 1;
+        } else {
+            cjk += 1;
+        }
+    }
+    cjk + ascii / 4
+}
+
 fn to_messages(system: &str, s: &AgentState) -> Vec<Message> {
-    let history = if s.history.len() > AUTO_COMPACT_AT {
+    let weight: usize = s.history.iter().map(|m| est_tokens(&m.content)).sum();
+    let history = if weight > AUTO_COMPACT_TOKENS {
         compact_history(s.history.clone(), AUTO_COMPACT_KEEP)
     } else {
         s.history.clone()
@@ -2298,18 +2315,20 @@ mod tests {
         assert_eq!(compact_history(short.clone(), 4).len(), short.len());
     }
 
-    /// 自动压缩:history 超阈值时,`to_messages` 发给 LLM 的消息收敛为有界快照(O(n)→O(1))。
+    /// 自动压缩:history 估算 token 超阈值(按**内容体量**而非条数)时,`to_messages` 发给 LLM
+    /// 的消息收敛为有界快照(O(n)→O(1))。
     #[test]
-    fn to_messages_auto_compacts_long_history() {
+    fn to_messages_auto_compacts_when_history_heavy() {
+        // 40 条较大消息 → 估算 token 总量超阈值 → 触发压缩。
         let mut hist = vec![Message::user("原始任务")];
         for i in 0..40 {
-            hist.push(Message::assistant(format!("step {i}")));
+            hist.push(Message::assistant(format!("step {i}: {}", "x".repeat(700))));
         }
         let s = AgentState::new("原始任务").with_history(hist);
         let msgs = to_messages("SYS", &s);
         assert!(
             msgs.len() <= 1 + 2 + AUTO_COMPACT_KEEP,
-            "长历史应收敛为有界,实得 {}",
+            "重历史应收敛为有界,实得 {}",
             msgs.len()
         );
         assert_eq!(msgs[0].role, Role::System);
@@ -2321,10 +2340,17 @@ mod tests {
             msgs.iter().any(|m| m.content == "原始任务"),
             "原始任务须保留"
         );
-        // 短历史不压缩,全量带过(system + 2 条)。
-        let short =
-            AgentState::new("t").with_history(vec![Message::user("t"), Message::assistant("a")]);
-        assert_eq!(to_messages("SYS", &short).len(), 3);
+        // 轻历史(总量未超阈值)不压缩,全量带过 —— 哪怕条数不少也不误伤。
+        let light = AgentState::new("t")
+            .with_history((0..20).map(|i| Message::user(format!("m{i}"))).collect());
+        assert_eq!(to_messages("SYS", &light).len(), 1 + 20);
+    }
+
+    /// 触发判据的本地估算:同字符数下 CJK ≈ ASCII 的 4 倍(CJK 1 tok/字,ASCII 1 tok/4 字符)。
+    #[test]
+    fn est_tokens_weights_cjk_heavier_than_ascii() {
+        assert_eq!(est_tokens(&"a".repeat(400)), 100);
+        assert_eq!(est_tokens(&"中".repeat(400)), 400);
     }
 
     /// 压缩窗口首端的悬空 role=tool(配对 assistant 已被压掉)必须裁掉,防 OpenAI 兼容端点 400。

@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-07-16 · token 节约之路 iter-2:加权字符压缩触发器
+
+- **做了什么**:iter-1 的自动压缩触发判据由「history 条数(24)」改为「按内容体量的加权字符估算」——新增 `est_tokens`(CJK≈1 tok/字、ASCII≈1 tok/4 字符,口径同 `bin/token-count.mjs`,不引 tiktoken),`to_messages` 触发器改为 `history 各条 est_tokens 之和 > AUTO_COMPACT_TOKENS(6000)`。一条万字日志 ≫ 二十条短问答,条数触发会漏。
+- **诚实边界**:加权触发改善「多条中等消息」判准;「少数超大单条消息」下 `compact_history` 按条数裁减不动,需单条内容截断(外置 squeez 域)。测试如实只验多条重消息触发。
+- **验收**:`cargo test --workspace`=**92 全绿**(+1 净),clippy/fmt 干净。新测:`est_tokens_weights_cjk_heavier_than_ascii`(4:1)、`to_messages_auto_compacts_when_history_heavy`(重触发/轻不误伤)。
+- **NotebookLM 予「剩余纯内核项」全表 + 愿景收敛**(经对抗评审):内核待办 ≈ iter-3(极简 Schema 审计 + Lean-output 指令)+ iter-4(状态快照编译器/Durable State);动态工具加载**推迟**(现仅 ~9 工具,YAGNI)、输出人格注入**判为已被 CLAUDE.md 注入覆盖**、置信度路由**推迟**(SwapProvider/FastContext 已具骨架);RAG/squeez/AST(syn)/tiktoken 归**外置走 MCP**。
+- **下一步**:`docs/iterations/CONTRACT-token-iter-3.md`。
+
 ## 2026-07-16 · token 节约之路 iter-1:Runtime State 首刀 —— 自动上下文压缩
 
 - **轨道**:新开「token 节约之路」,由 NotebookLM 笔记本「token节省之道」驱动;主源《rust agent开发下一步的token 节约之路》(为 langgraph-rust 量身,四阶段路线图,荐先做第一阶段 Runtime State)。
