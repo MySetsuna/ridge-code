@@ -62,7 +62,11 @@ crates/eval        离线评测 harness(ScriptedProvider 场景:pass/stuck 等)
 
 agent 定义 = frontmatter `.md`:内置 fastcontext/explorer/reviewer 编进二进制 + `~/.ridge/agents/*.md` 用户目录(同名覆盖)。`Agents{defs, providers}` 注册表;`provider:` 字段引 config 命名档(FastContext 走廉价模型省钱)。主 agent 经 `dispatch_agent` 自动派 / TUI `/agent` 手动派。**双重防御只读**:`READONLY_TOOLS = ["read_file", "search"]` 白名单裁剪(`readonly_tool_specs`),不下放写/shell;`SUBAGENT_MAX_STEPS = 15`。独立上下文、只回结论文本,不回灌工具轨迹 —— 省主上下文 token 的关键。
 
-### 2.7 Skills 与项目规则
+### 2.7 分支工作区隔离(`workspace.rs`,iter-25)
+
+BoN 真实接入的物理前提(引擎零感知):`Workspace`(GitWorktree / ShadowCopy)。`create_isolated` —— git 仓库先试 `git worktree add --detach`(best-effort),败/非 git 回落影子拷贝(跳过 `.git`/`target`/`.ridge`/`node_modules`);`merge_winner(main, branch, modified_files)` 胜者整文搬运合回(自动建嵌套目录,**全有或全无**回滚);`cleanup` best-effort 清分支。**未接 CLI**:分支 cwd 贯穿 `execute_tool_call` 的接线是下一刀(见 CONTRACT-iteration-25 边界)。
+
+### 2.8 Skills 与项目规则
 
 `SKILL.md` 声明式技能:`RIDGE_SKILLS_DIR` env > config `skills_dir` > `~/.ridge/skills`。cwd 的 `CLAUDE.md`/`AGENTS.md` 经 `load_project_rules` 注入 system prompt。`@file` 引用注入正文(MENTION_CAP=20000 截断)。
 

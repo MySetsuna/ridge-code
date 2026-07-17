@@ -32,6 +32,8 @@ use provider::{CompletionRequest, LlmProvider, Message, Role, ToolCall, ToolSpec
 
 /// 富文本输出层(彩色 / 表格 / 媒体展示)—— 见 [`rich_output`]。
 mod rich_output;
+/// 分支工作区隔离(iter-25):BoN 并发分支的物理互踩防护 + 胜者合回,见 [`workspace`]。
+pub mod workspace;
 pub use rich_output::{
     Color, Formatter, MediaDisplay, MediaInfo, MediaType, RichOutput, TableDisplay,
 };
