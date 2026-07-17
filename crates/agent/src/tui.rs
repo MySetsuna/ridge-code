@@ -45,6 +45,37 @@ struct ApprovalRequest {
     reply: mpsc::SyncSender<bool>,
 }
 
+/// 审批挂起时对一次按键的**纯决策**。修「滚动即拒绝」根因 —— 此前审批态下除 `y`/`Enter`
+/// 外一切键(含滚动键)都落 `_ => 拒绝`,用户想滚动看 diff 反而误拒。滚动/忽略**不消**审批请求。
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum ApprovalAction {
+    Approve,
+    Reject,
+    Scroll(i16),
+    Ignore,
+}
+
+fn approval_action(key: KeyCode) -> ApprovalAction {
+    match key {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => ApprovalAction::Approve,
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => ApprovalAction::Reject,
+        KeyCode::Up => ApprovalAction::Scroll(1),
+        KeyCode::Down => ApprovalAction::Scroll(-1),
+        KeyCode::PageUp => ApprovalAction::Scroll(8),
+        KeyCode::PageDown => ApprovalAction::Scroll(-8),
+        _ => ApprovalAction::Ignore,
+    }
+}
+
+/// 应用滚动增量到偏移(u16 饱和)。正=向历史回滚(同主输入区 `Up` 语义)。
+fn apply_scroll(scroll: u16, delta: i16) -> u16 {
+    if delta >= 0 {
+        scroll.saturating_add(delta as u16)
+    } else {
+        scroll.saturating_sub(delta.unsigned_abs())
+    }
+}
+
 struct TuiApprover {
     tx: mpsc::Sender<ApprovalRequest>,
 }
@@ -236,16 +267,23 @@ pub(super) async fn run(
         if key.kind != KeyEventKind::Press {
             continue;
         }
-        if let Some(request) = pending.take() {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => {
-                    let _ = request.reply.send(true);
+        if pending.is_some() {
+            // 模态状态机:审批态下滚动键**只滚不拒**(可先看 diff),仅 y/Enter 批准、n/Esc 拒绝,余键忽略。
+            match approval_action(key.code) {
+                ApprovalAction::Approve => {
+                    if let Some(r) = pending.take() {
+                        let _ = r.reply.send(true);
+                    }
                     ui.note("✓ 已批准", Color::Green);
                 }
-                _ => {
-                    let _ = request.reply.send(false);
+                ApprovalAction::Reject => {
+                    if let Some(r) = pending.take() {
+                        let _ = r.reply.send(false);
+                    }
                     ui.note("✗ 已拒绝", Color::Red);
                 }
+                ApprovalAction::Scroll(d) => ui.scroll = apply_scroll(ui.scroll, d),
+                ApprovalAction::Ignore => {}
             }
             continue;
         }
@@ -336,7 +374,7 @@ fn run_command(
 ) -> anyhow::Result<bool> {
     match input {
         "/exit" | "/quit" => return Ok(true),
-        "/help" => ui.note("/exit /reset /compact /cost /tools /model [name] /provider /agent /config [set key value]；@path 引用文件；Ctrl-C 中断；批准弹窗按 y/Enter 或任意键拒绝。", Color::Gray),
+        "/help" => ui.note("/exit /reset /compact /cost /tools /model [name] /provider /agent /config [set key value]；@path 引用文件；Ctrl-C 中断；批准弹窗:y/Enter 批准、n/Esc 拒绝、↑↓ 滚动看详情。", Color::Gray),
         "/tools" => ui.note(format!("可用工具({}): {}", meta.tools.len(), meta.tools.join(", ")), Color::Gray),
         "/reset" => { history.clear(); save_session(&session_path(), history); ui.note("上下文已清空", Color::Yellow); }
         "/compact" => { let n = history.len(); *history = compact_history(std::mem::take(history), 4); ui.note(format!("上下文已压缩: {n} → {} 条", history.len()), Color::Yellow); }
@@ -475,7 +513,7 @@ fn modal(frame: &mut ratatui::Frame, action: &str, detail: &str) {
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(format!(
-            "⚠ 允许执行 {action}？\n\n{detail}\n\ny / Enter: 批准    任意其他键: 拒绝"
+            "⚠ 允许执行 {action}？\n\n{detail}\n\ny/Enter: 批准    n/Esc: 拒绝    ↑↓/PgUp/PgDn: 滚动看详情"
         ))
         .style(Style::default().fg(Color::Yellow))
         .block(
@@ -536,5 +574,33 @@ mod tests {
     #[test]
     fn final_answer_gets_assistant_marker() {
         assert_eq!(format_event_plain("(final) hello"), "🤖 hello");
+    }
+
+    /// 根因回归:审批态下滚动键**不再误拒**,而是滚动;仅 y/Enter 批准、n/Esc 拒绝,余键忽略。
+    #[test]
+    fn approval_scroll_keys_do_not_reject() {
+        assert_eq!(approval_action(KeyCode::Up), ApprovalAction::Scroll(1));
+        assert_eq!(approval_action(KeyCode::Down), ApprovalAction::Scroll(-1));
+        assert_eq!(approval_action(KeyCode::PageUp), ApprovalAction::Scroll(8));
+        assert_eq!(
+            approval_action(KeyCode::PageDown),
+            ApprovalAction::Scroll(-8)
+        );
+        assert_eq!(approval_action(KeyCode::Char('y')), ApprovalAction::Approve);
+        assert_eq!(approval_action(KeyCode::Enter), ApprovalAction::Approve);
+        assert_eq!(approval_action(KeyCode::Char('n')), ApprovalAction::Reject);
+        assert_eq!(approval_action(KeyCode::Esc), ApprovalAction::Reject);
+        // 关键:随手一个字符键不再落「拒绝」,而是被忽略(等用户明确 y/n)。
+        assert_eq!(approval_action(KeyCode::Char('x')), ApprovalAction::Ignore);
+        assert_eq!(approval_action(KeyCode::Backspace), ApprovalAction::Ignore);
+    }
+
+    /// 滚动增量应用:上/下界饱和,不 panic。
+    #[test]
+    fn apply_scroll_saturates() {
+        assert_eq!(apply_scroll(5, 1), 6);
+        assert_eq!(apply_scroll(5, -1), 4);
+        assert_eq!(apply_scroll(0, -8), 0);
+        assert_eq!(apply_scroll(u16::MAX, 8), u16::MAX);
     }
 }

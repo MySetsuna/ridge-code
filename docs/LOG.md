@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-07-17 · iter-22:TUI 交互专轨(首刀:修「滚动即拒绝」根因)
+
+- **依据**:用户「启 TUI 交互专轨」。iter-21 押后的 TUI 重构开轨,先修唯一正确性 bug(非审美)。NLM notes 头号交互痛点。
+- **根因**:`tui.rs` 事件循环审批分支 `if let Some(req)=pending.take() { match key { y|Enter=>批准, _=>拒绝 } }` —— **任何键先 take 消费**,`↑↓/PgUp/PgDn` 落 `_ =>拒绝` = 用户滚动看 diff 反而误拒。
+- **做了什么**:①**模态决策纯函数** `approval_action(KeyCode)->ApprovalAction{Approve,Reject,Scroll(i16),Ignore}` + `apply_scroll(u16,i16)`(饱和);②事件循环审批分支重写:批准/拒绝才 `pending.take()` 消费回信,**滚动/忽略不消** pending(`SyncSender::send(&self)` 可 peek),滚动只动 `ui.scroll`;③modal 与 `/help` 文案由「任意其他键: 拒绝」→「y/Enter 批准 · n/Esc 拒绝 · ↑↓ 滚动看详情」(旧文案本在教用户踩 bug)。
+- **策略**:把可判定的**状态转移**从渲染里剥成纯函数测,避开 TUI 交互「难无抖测」老问题。不改安全语义(危险命令仍需显式 y)。
+- **验收**:`cargo test --workspace`=全绿(bin 6→**8**,+2:滚动键判 Scroll 非 Reject、饱和不 panic;lib 68 不变),clippy `-D warnings`、fmt 净。
+- **押后**(TUI 专轨后续切片):视口/滚动条/吸附底部(`ScrollState`)、分栏条件渲染/多行输入/`/`@ 补全菜单、启动 ASCII 动画+Loading tips。
+
 ## 2026-07-17 · iter-21:harness-aware 系统提示词硬化 + 工具调用鲁棒
 
 - **依据**:用户定「下轮重点:系统提示词/工具调用/交互」+「以后迭代记录不再上传 NLM 为来源,仅本地」。读 NLM notes(交互/驾驭工程系列)+ 对抗评审。
