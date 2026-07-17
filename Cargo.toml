@@ -21,3 +21,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ratatui = "0.29"
 crossterm = "0.28"
+
+# 发布档:面向「独立分发的单二进制」优化 —— 更小、更快、去符号。
+# 注意:**不设** panic = "abort" —— TUI 靠 `TerminalGuard` 的 Drop 在 panic 时恢复终端
+# (退出 raw mode / 关 BPM / Pop CSI u),abort 会跳过 Drop 令终端卡死,故保留 unwind。
+[profile.release]
+lto = true            # 跨 crate 链接期优化,去死码
+codegen-units = 1     # 单元编译,换更优代码(编译更慢,可接受)
+strip = true          # 去调试符号,二进制更小
+opt-level = 3         # 速度优先(TUI/网络场景不追极致体积)

@@ -47,8 +47,10 @@ jobs:
           archive: ridgecode-$target
           tar: unix
           zip: windows
-          # 一起打包进归档的附带文件(仓库暂无 LICENSE,加了再补进来)
-          include: README.md
+          # 每个归档附带 SHA256 校验和,便于校验下载完整性。
+          checksum: sha256
+          # 一起打包进归档的附带文件(README + 平台安装脚本;无 cargo 即可装到 PATH)
+          include: README.md,scripts/install.sh,scripts/install.ps1
           # Cargo.lock 已入库,锁定依赖版本保证可复现
           locked: true
           token: ${{ secrets.GITHUB_TOKEN }}

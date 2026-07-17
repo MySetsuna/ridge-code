@@ -26,6 +26,23 @@
 - **`crates/mcp`** —— MCP 客户端(JSON-RPC:initialize/tools/list/tools/call + `server__tool` 命名空间)+ 可插拔传输。
 - **`crates/agent`** —— ReAct 图(reason → act → verify)+ 全部上面的装配;二进制 `ridgecode`。
 
+## 安装(独立二进制,无需 cargo)
+
+`ridgecode` 是**单个静态二进制**(纯 Rust TLS,零系统依赖),下载即用。全平台一键装到 PATH:
+
+```bash
+# Linux / macOS —— 装最新 Release 到 ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.sh | sh
+```
+```powershell
+# Windows —— 装到 %LOCALAPPDATA%\Programs\ridgecode 并写入用户 PATH(新终端生效)
+irm https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.ps1 | iex
+```
+
+- 手动:去 [Releases](https://github.com/MySetsuna/ridge-code/releases) 下对应平台归档(`ridgecode-<target>.tar.gz`/`.zip`,附 `.sha256`),解压把 `ridgecode` 放进任一 PATH 目录即可。
+- 已在本机构建:`./scripts/install.sh --local target/release/ridgecode`(或 PS `install.ps1 -Local target\release\ridgecode.exe`)—— 不联网、不碰 cargo。
+- 自己出跨平台产物:打标签 `git tag v0.2.1 && git push origin v0.2.1` 触发 [`release.yml`](.github/workflows/release.yml),为 5 个目标(linux x86_64/aarch64、macOS x86_64/aarch64、windows x86_64)构建归档并传上 Release。本机单平台包:`scripts/dist.ps1` / `scripts/dist.sh` → `dist/`。
+
 ## 快速开始
 
 ```bash
