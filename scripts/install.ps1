@@ -59,6 +59,57 @@ if ($parts -notcontains $Dir) {
 } else {
   Write-Host "PATH 中已有 $Dir" -ForegroundColor DarkGray
 }
+# ---- 配置骨架:写 config.example.json 到安装目录 + 首次生成 ~/.ridge/config.json ----
+# 注意:配置文件写成 UTF-8 无 BOM(serde_json 不吞 BOM,带 BOM 会解析失败)。
+$noBom = New-Object System.Text.UTF8Encoding $false
+$exampleJson = @'
+{
+  "provider": "openai",
+  "model": "glm-4.6",
+  "base_url": "https://open.bigmodel.cn/api/paas/v4",
+  "api_key": "把你的 API Key 明文填这里即可直接启动;不想明文就删掉此行,改为设 RIDGE_API_KEY 环境变量",
+  "budget_tokens": 200000,
+  "skip_danger": false,
+  "providers": [
+    {
+      "name": "kimi",
+      "kind": "openai",
+      "model": "kimi-k2",
+      "base_url": "https://api.moonshot.cn/v1",
+      "key_env": "MOONSHOT_KEY"
+    }
+  ],
+  "mcp": [
+    { "name": "notebooklm", "cmd": "notebooklm-mcp" }
+  ]
+}
+'@
+$examplePath = Join-Path $Dir "config.example.json"
+[System.IO.File]::WriteAllText($examplePath, $exampleJson, $noBom)
+Write-Host "[OK] 示例配置: $examplePath" -ForegroundColor Green
+
+$cfgPath = if ($env:RIDGE_CONFIG) { $env:RIDGE_CONFIG } else { Join-Path $env:USERPROFILE ".ridge\config.json" }
+$cfgDir = Split-Path -Parent $cfgPath
+New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+if (-not (Test-Path $cfgPath)) {
+  $initJson = @'
+{
+  "provider": "openai",
+  "model": "glm-4.6",
+  "base_url": "https://open.bigmodel.cn/api/paas/v4",
+  "api_key": "",
+  "budget_tokens": 200000,
+  "skip_danger": false,
+  "providers": [],
+  "mcp": []
+}
+'@
+  [System.IO.File]::WriteAllText($cfgPath, $initJson, $noBom)
+  Write-Host "[OK] 已生成配置: $cfgPath  —— 填顶层 api_key（或设 RIDGE_API_KEY）即可启动真实 LLM" -ForegroundColor Green
+} else {
+  Write-Host "已有配置，未改动: $cfgPath（参照 $examplePath 补 api_key）" -ForegroundColor DarkGray
+}
+
 # 当前会话即时可用
 if (($env:Path -split ';') -notcontains $Dir) { $env:Path = "$env:Path;$Dir" }
 Write-Host "现在可运行: ridgecode" -ForegroundColor Cyan

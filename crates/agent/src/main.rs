@@ -42,7 +42,7 @@ fn handle_meta_flags() -> bool {
         println!(
             "RidgeCode —— 模块化通用 agent CLI(二进制 ridgecode)\n\n\
              用法:\n  \
-             ridgecode                      交互式 TUI(需 RIDGE_API_KEY;非 TTY 则 headless 逐行任务)\n  \
+             ridgecode                      交互式 TUI(需密钥:RIDGE_API_KEY 或 config 里 api_key/key_env;非 TTY 则 headless)\n  \
              ridgecode \"任务\"               一次性任务\n  \
              ridgecode --resume             恢复上次会话(kill-9/关掉重开后续接)\n\n\
              选项:\n  \
@@ -55,7 +55,7 @@ fn handle_meta_flags() -> bool {
              TUI 内:斜杠命令 /model /provider /config /agent /compact 等;@path 引用文件、Ctrl-C 中断。\
              管道/非 TTY:逐行 stdin 当任务(headless,无斜杠命令)。\n\n\
              配置:~/.ridge/config.json(provider/model/预算/多 mcp/skills;env 覆盖);\
-             TUI 内 /config set <key> <value> 可持久化。密钥只走 RIDGE_API_KEY env。\
+             TUI 内 /config set <key> <value> 可持久化。密钥:RIDGE_API_KEY env,或 config 档案的 api_key(明文)/key_env(环境变量名)。\
              ~/.ridge/skills/*/SKILL.md 加领域技能不改源码。\n  \
              RIDGE_EXTRACT_SIGNALS=1        opt-in:run 收尾用一次 LLM 把轨迹提炼成复利信号(默认关,省 token)。"
         );
@@ -136,7 +136,10 @@ async fn main() -> anyhow::Result<()> {
         }
         None => {
             eprintln!(
-                "[ridgecode] 未检测到 RIDGE_API_KEY,跑离线脚本 demo(设置密钥即用真实 LLM / TUI)。\n"
+                "[ridgecode] 未取到密钥,跑离线脚本 demo。给密钥即用真实 LLM / TUI,任选一:\n  \
+                 · 设 RIDGE_API_KEY 环境变量;或\n  \
+                 · 在 ~/.ridge/config.json 的某个 providers 档案里填 \"api_key\"(明文,自担风险),\n    \
+                 或把 \"key_env\" 指向一个已 export 的环境变量名。见同目录 config.example.json。\n"
             );
             run_demo().await
         }
@@ -371,7 +374,7 @@ fn build_agents(cfg: &Config) -> agent::Agents {
     }
     let mut providers = std::collections::HashMap::new();
     for p in &cfg.providers {
-        if let Some(key) = std::env::var(&p.key_env).ok().filter(|k| !k.is_empty()) {
+        if let Some(key) = p.resolve_key() {
             providers.insert(
                 p.name.clone(),
                 make_provider(&p.kind, &p.model, &p.base_url, key),
@@ -389,13 +392,38 @@ fn build_agents(cfg: &Config) -> agent::Agents {
     agent::Agents { defs, providers }
 }
 
-/// 装配真实 provider:没有 key(只从 env 读)就返回 None(走 demo)。密钥绝不打印。
+/// 装配真实 provider。密钥来源(任一命中即用,否则 None → demo)。密钥绝不打印:
+/// 1. **`RIDGE_API_KEY` env**(传统/最高优先)→ 配 env>config 解析出的 provider 身份;
+/// 2. **config `providers[]` 档案**:取第一个能解析出密钥的档案(内联 `api_key` 或 `key_env`→env),
+///    直接用它的 kind/model/base_url 启动 —— **config.json 即可跑,无需 `RIDGE_API_KEY`**。
 fn real_provider(cfg: &Config) -> Option<Arc<dyn LlmProvider>> {
-    let key = std::env::var("RIDGE_API_KEY")
+    if let Some(key) = std::env::var("RIDGE_API_KEY")
         .ok()
-        .filter(|k| !k.is_empty())?;
-    let (kind, model, base) = resolve_model_info(cfg);
-    Some(make_provider(&kind, &model, &base, key))
+        .filter(|k| !k.is_empty())
+    {
+        let (kind, model, base) = resolve_model_info(cfg);
+        return Some(make_provider(&kind, &model, &base, key));
+    }
+    // 顶层内联 api_key:用顶层 provider/model/base_url 身份启动(用户设的默认 model 生效)。
+    if let Some(key) = cfg
+        .api_key
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        let (kind, model, base) = resolve_model_info(cfg);
+        return Some(make_provider(&kind, &model, &base, key));
+    }
+    for p in &cfg.providers {
+        if let Some(key) = p.resolve_key() {
+            eprintln!(
+                "[ridgecode] 用 config provider 档案「{}」启动({} · {})",
+                p.name, p.kind, p.model
+            );
+            return Some(make_provider(&p.kind, &p.model, &p.base_url, key));
+        }
+    }
+    None
 }
 
 /// 一次性任务:一律放行,跑完写 run 留痕 + 打印结果。

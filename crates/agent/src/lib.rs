@@ -593,13 +593,17 @@ async fn dispatch_obs(agents: &Agents, main: &Arc<dyn LlmProvider>, call: &ToolC
 }
 
 /// `~/.ridge/config.json`:一处配 provider/model/预算/多 MCP/skills(env 仍可覆盖)。
-/// **密钥不进 config**(明文风险)—— API key 只从 `RIDGE_API_KEY` env 读。
+/// 密钥优先走 env(`RIDGE_API_KEY` 或档案 `key_env` 指名的变量);也可在档案里内联 `api_key`
+/// (明文存盘,自担风险)。启动取密钥顺序见 `main.rs::real_provider`。
 #[derive(Debug, Default, Clone, serde::Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub base_url: Option<String>,
+    /// 顶层「主 provider」的内联明文密钥(可选,自担明文存盘风险)。填了它,启动即用
+    /// 顶层 provider/model/base_url + 此 key,无需 `RIDGE_API_KEY`。留空则回落到 env 或 `providers[]` 档案。
+    pub api_key: Option<String>,
     pub budget_tokens: Option<usize>,
     pub skills_dir: Option<String>,
     pub skip_danger: Option<bool>,
@@ -618,8 +622,9 @@ pub struct McpServerCfg {
     pub args: Vec<String>,
 }
 
-/// 一个命名的 provider 档案:厂商类型 + 模型 + 端点 + **读密钥的 env 变量名**。
-/// **密钥不进 config**(明文风险)—— 只存要读的 env 名(`key_env`),用时才从环境变量取。
+/// 一个命名的 provider 档案:厂商类型 + 模型 + 端点 + 密钥来源。
+/// 密钥两种给法:①(**推荐**)`key_env` 指一个**环境变量名**,用时从环境读,不落盘;
+/// ②(便捷,自担风险)`api_key` 直接**内联明文**写在 config 里。二者皆有则 `api_key` 优先。
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ProviderProfile {
     pub name: String,
@@ -630,10 +635,26 @@ pub struct ProviderProfile {
     /// 读该 provider 密钥的环境变量名,默认 `RIDGE_API_KEY`。
     #[serde(default = "default_key_env")]
     pub key_env: String,
+    /// 内联明文密钥(可选)。**明文存盘,自担风险**;优先于 `key_env`。
+    /// `skip_serializing` —— 任何回写 config 的路径(如 `/provider add`)都**不会**把它写出去。
+    #[serde(default, skip_serializing)]
+    pub api_key: Option<String>,
 }
 
 fn default_key_env() -> String {
     "RIDGE_API_KEY".to_string()
+}
+
+impl ProviderProfile {
+    /// 解析本档案的密钥:内联 `api_key`(非空)优先,否则从 `key_env` 命名的环境变量读。
+    /// 都取不到 → `None`(该档案不可用于真实启动)。
+    pub fn resolve_key(&self) -> Option<String> {
+        self.api_key
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var(&self.key_env).ok().filter(|k| !k.is_empty()))
+    }
 }
 
 impl Config {
@@ -2618,6 +2639,7 @@ mod tests {
             model: model.into(),
             base_url: "https://x/v1".into(),
             key_env: "ZHIPU_KEY".into(),
+            api_key: None,
         };
         let start = r#"{ "model": "old", "mcp": [ { "name": "nlm", "cmd": "x.exe" } ] }"#;
         // 追加第一个 → mcp 保留、providers 出现。
@@ -2640,6 +2662,27 @@ mod tests {
             r#"{ "providers": [ { "name": "a", "kind": "openai", "model": "m", "base_url": "u" } ] }"#,
         );
         assert_eq!(d.providers[0].key_env, "RIDGE_API_KEY");
+    }
+
+    /// 密钥解析:内联 `api_key`(非空)优先于 `key_env`;`api_key` 不回写 config(skip_serializing)。
+    #[test]
+    fn provider_profile_resolve_key_precedence() {
+        // 内联 api_key 直接可用,无需任何环境变量。
+        let inline = Config::parse(
+            r#"{ "providers": [ { "name": "z", "kind": "openai", "model": "m", "base_url": "u", "key_env": "NOPE_UNSET_ENV", "api_key": "  sk-inline  " } ] }"#,
+        );
+        assert_eq!(
+            inline.providers[0].resolve_key().as_deref(),
+            Some("sk-inline")
+        ); // trim
+           // 序列化(如 /provider add 回写)绝不含 api_key。
+        let dumped = serde_json::to_string(&inline.providers[0]).unwrap();
+        assert!(!dumped.contains("sk-inline") && !dumped.contains("api_key"));
+        // 无 api_key 且 key_env 指向未设变量 → None。
+        let none = Config::parse(
+            r#"{ "providers": [ { "name": "z", "kind": "openai", "model": "m", "base_url": "u", "key_env": "DEFINITELY_UNSET_XYZ" } ] }"#,
+        );
+        assert_eq!(none.providers[0].resolve_key(), None);
     }
 
     /// fetch_url:抓网页 → 抽正文喂模型(RAG 的「读」),走假抓取器不联网。

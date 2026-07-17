@@ -61,6 +61,48 @@ else
   install_file "$(find "$tmp" -name "$BIN" -type f | head -1)"
 fi
 
+# ---- 配置骨架:写 config.example.json 到安装目录 + 首次生成 ~/.ridge/config.json ----
+EXAMPLE='{
+  "provider": "openai",
+  "model": "glm-4.6",
+  "base_url": "https://open.bigmodel.cn/api/paas/v4",
+  "api_key": "把你的 API Key 明文填这里即可直接启动;不想明文就删掉此行,改为设 RIDGE_API_KEY 环境变量",
+  "budget_tokens": 200000,
+  "skip_danger": false,
+  "providers": [
+    {
+      "name": "kimi",
+      "kind": "openai",
+      "model": "kimi-k2",
+      "base_url": "https://api.moonshot.cn/v1",
+      "key_env": "MOONSHOT_KEY"
+    }
+  ],
+  "mcp": [
+    { "name": "notebooklm", "cmd": "notebooklm-mcp" }
+  ]
+}'
+printf '%s\n' "$EXAMPLE" > "$BIN_DIR/config.example.json"
+echo "✓ 示例配置: $BIN_DIR/config.example.json"
+
+CFG="${RIDGE_CONFIG:-$HOME/.ridge/config.json}"
+mkdir -p "$(dirname "$CFG")"
+if [ ! -f "$CFG" ]; then
+  printf '%s\n' '{
+  "provider": "openai",
+  "model": "glm-4.6",
+  "base_url": "https://open.bigmodel.cn/api/paas/v4",
+  "api_key": "",
+  "budget_tokens": 200000,
+  "skip_danger": false,
+  "providers": [],
+  "mcp": []
+}' > "$CFG"
+  echo "✓ 已生成配置: $CFG  —— 填顶层 api_key(或设 RIDGE_API_KEY)即可启动真实 LLM"
+else
+  echo "已有配置,未改动: $CFG(参照 $BIN_DIR/config.example.json 补 api_key)"
+fi
+
 # PATH 提示
 case ":$PATH:" in
   *":$BIN_DIR:"*) echo "现在可直接运行: $BIN" ;;
