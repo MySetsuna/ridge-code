@@ -30,11 +30,14 @@ impl TerminalGuard {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen)?;
+        // BPM best-effort(iter-24):旧 Windows conhost 不支持则静默退化为逐字粘贴,绝不阻 TUI 启动。
+        let _ = execute!(stdout, event::EnableBracketedPaste);
         Ok((Self, Terminal::new(CrosstermBackend::new(stdout))?))
     }
 }
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        let _ = execute!(io::stdout(), event::DisableBracketedPaste);
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
     }
@@ -123,6 +126,28 @@ fn tail_window(len: usize, rows: usize, scroll: usize) -> std::ops::Range<usize>
     let end = len.saturating_sub(scroll).max(rows.min(len));
     let start = end.saturating_sub(rows);
     start..end
+}
+
+/// 粘贴净化(iter-24):CRLF/CR 归一 LF,滤除其余控制字符(留 \n \t),防转义序列注入输入框。
+fn sanitize_paste(s: &str) -> String {
+    s.replace("\r\n", "\n")
+        .chars()
+        .map(|c| if c == '\r' { '\n' } else { c })
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .collect()
+}
+
+/// 动态输入框高度(iter-24):按内容折行数伸缩,clamp 在 [min,max](计入上下边框 2 行)。
+/// 纯函数,免虚拟终端可测。ponytail: 字符数≈显示宽近似,CJK 宽字符按 1 格计,偏差可容。
+fn input_height(content: &str, width: u16, min: u16, max: u16) -> u16 {
+    let w = width.max(1) as usize;
+    let rows: usize = content
+        .split('\n')
+        .map(|l| l.chars().count().div_ceil(w).max(1))
+        .sum();
+    (rows.min(u16::MAX as usize) as u16)
+        .saturating_add(2)
+        .clamp(min, max)
 }
 
 struct TuiApprover {
@@ -277,7 +302,12 @@ pub(super) async fn run(
         tokio::select! {
             biased;
             Some(ev) = key_rx.recv() => {
-                dirty = true; // 键盘/resize 皆需重绘
+                dirty = true; // 键盘/粘贴/resize 皆需重绘
+                if let Event::Paste(s) = &ev {
+                    // BPM(iter-24):整块原子注入,绕过逐字解析,杜绝大段粘贴假死。
+                    ui.input.push_str(&sanitize_paste(s));
+                    continue;
+                }
                 let Event::Key(key) = ev else { continue };
                 if key.kind != KeyEventKind::Press {
                     continue;
@@ -487,12 +517,14 @@ fn draw(
     _turns: usize,
     approval: Option<&ApprovalRequest>,
 ) {
+    // 动态输入高度(iter-24):按内容折行伸缩,3..=8 行(含边框)。
+    let input_rows = input_height(&ui.input, frame.area().width.saturating_sub(2), 3, 8);
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(8),
-            Constraint::Length(3),
+            Constraint::Length(input_rows),
         ])
         .split(frame.area());
     let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][ui.frame % 10];
@@ -766,5 +798,25 @@ mod tests {
         assert_eq!(ui.log.len(), LOG_CAP);
         assert_eq!(ui.log.back().unwrap().0, format!("line {}", LOG_CAP + 4));
         assert_eq!(ui.log.front().unwrap().0, "line 5");
+    }
+
+    /// iter-24:粘贴净化 —— CRLF/CR 归一 LF,控制字符滤除,\t 保留。
+    #[test]
+    fn sanitize_paste_normalizes_and_strips() {
+        assert_eq!(sanitize_paste("a\r\nb"), "a\nb");
+        assert_eq!(sanitize_paste("a\rb"), "a\nb");
+        assert_eq!(sanitize_paste("a\x1b[31mb"), "a[31mb"); // ESC 滤除,可见字符保留
+        assert_eq!(sanitize_paste("a\tb\nc"), "a\tb\nc");
+    }
+
+    /// iter-24:动态输入高度 —— 空=min、折行、多行、封顶 max、width=0 不 panic。
+    #[test]
+    fn input_height_grows_and_clamps() {
+        assert_eq!(input_height("", 80, 3, 8), 3);
+        assert_eq!(input_height("hi", 80, 3, 8), 3);
+        assert_eq!(input_height(&"x".repeat(85), 80, 3, 8), 4); // 折成 2 行 + 边框
+        assert_eq!(input_height("a\nb\nc", 80, 3, 8), 5);
+        assert_eq!(input_height(&"a\n".repeat(30), 80, 3, 8), 8); // 封顶
+        assert_eq!(input_height("abc", 0, 3, 8), 5); // width=0 → 每字符一行,不 panic
     }
 }

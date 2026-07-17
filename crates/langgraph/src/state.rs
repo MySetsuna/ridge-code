@@ -24,6 +24,9 @@ pub enum GraphError {
 
     #[error("node task panicked or was cancelled: {0}")]
     Join(String),
+
+    #[error("best-of: no branch to select (empty input or all branches failed)")]
+    NoWinner,
 }
 
 /// 节点错误统一归一化成这个 boxed 类型(同 provider 边界原则:对上归一化)。

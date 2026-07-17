@@ -21,7 +21,8 @@ crates/eval        离线评测 harness(ScriptedProvider 场景:pass/stuck 等)
 
 - **`state.rs::GraphState`** trait:`type Update` + `fn apply(&mut self, Update)`。reducer **显式强制** —— 每种状态自己声明合并语义,防并发覆盖丢更新。
 - **`graph.rs::StateGraph`** 构建器:`add_node`(异步节点,收状态快照、返回 Update delta)、`add_edge`(静态边,重复 from = fan-out)、`set_entry`、`add_conditional_edge`(router 看**合并后**状态,优先于静态边)、`compile`(校验入口存在、静态边不悬空 → `CompiledGraph`)。节点无出边则隐式 END。
-- **`CompiledGraph::invoke_with(initial, RunConfig, Option<Checkpointer>, Option<StreamEvent 发送端>)`** → `run_loop`:**BSP 超步**执行环。每超步:state.clone 快照 → frontier 全节点吃同一快照、`tokio::spawn` 并发 → 同步点统一 `apply` → 据合并后状态路由。`RunConfig.max_supersteps` 防跑飞 → `GraphError::StepLimit`。另有 `resume`(从 checkpoint 续跑)。
+- **`CompiledGraph::invoke_with(initial, RunConfig, Option<Checkpointer>, Option<StreamEvent 发送端>)`** → `run_loop`:**BSP 超步**执行环。每超步:state.clone 快照 → frontier 全节点吃同一快照、`tokio::spawn` 并发 → 同步点统一 `apply` → 据合并后状态路由。`RunConfig`(Clone)`.max_supersteps` 防跑飞 → `GraphError::StepLimit`。另有 `resume`(从 checkpoint 续跑)。
+- **`invoke_best_of`**(iter-24,Best-of-N 投机分支):`Arc<Self>` + JoinSet 并发 N 份初始状态各跑一遍图;失败分支丢弃,调用方评分器 `Fn(&S)->i64` 择优、平分低索引确定性胜;空/全败 → `GraphError::NoWinner`。**边界**:分支间无副作用隔离(并发真实写会互踩),真实 agent 接入需先做每分支工作区隔离;agent 侧已备确定性评分器 `branch_score`(approved 压倒一切、同侪省 token 胜),未接 CLI 主流程。
 - **`checkpoint.rs`**:`Checkpoint{step, frontier, state}`;`Checkpointer` trait;`MemoryCheckpointer`(append-only,`history/get(step)/latest` 时间旅行)+ `FileCheckpointer`(落盘)。
 - **`StreamEvent`**:`NodeFinished` / `Superstep{state}`,供 TUI 实时渲染。
 - 错误:库层 `thiserror`(`GraphError`),节点错误归一化 `BoxError`;应用层 `anyhow`。
@@ -84,7 +85,7 @@ agent 侧 `resolve_mcp`:多 client 各自握手 + 列工具 → 归一化 `McpTo
 ## 6. 入口与交互(`main.rs` / `tui.rs`)
 
 - **`main`** 分流:有 `RIDGE_API_KEY`(或 config provider)→ 真实路径;无 → 离线脚本 demo。
-- **TUI**(TTY,ratatui):**事件驱动主环**(iter-23)—— 阻塞读线程转发键盘事件入 tokio mpsc,主环 `tokio::select!` 六路复用(键盘/token/StreamEvent/审批/完成/tick),**dirty 标记**仅状态变更或 busy 才重绘,空闲零轮询零重绘(无 `event::poll`);纯决策函数 `input_action`(键位路由,busy 时 Enter 不提交)/ `approval_action`(iter-22,审批态滚动不拒)/ `should_draw` / `tail_window`(视口尾窗)。日志 `VecDeque` + `LOG_CAP` 环形有界,`output_lines` 只构建窗口内行(O(rows)/帧)。`TuiApprover` 权限弹窗(请求走 tokio unbounded,应答 std sync_channel);斜杠命令 `/help /cost /model /provider /agent /config /reset /compact /tools /exit` **只在 TUI**;每轮 `save_session` 落盘。
+- **TUI**(TTY,ratatui):**事件驱动主环**(iter-23)—— 阻塞读线程转发键盘事件入 tokio mpsc,主环 `tokio::select!` 六路复用(键盘/token/StreamEvent/审批/完成/tick),**dirty 标记**仅状态变更或 busy 才重绘,空闲零轮询零重绘(无 `event::poll`);纯决策函数 `input_action`(键位路由,busy 时 Enter 不提交)/ `approval_action`(iter-22,审批态滚动不拒)/ `should_draw` / `tail_window`(视口尾窗)。日志 `VecDeque` + `LOG_CAP` 环形有界,`output_lines` 只构建窗口内行(O(rows)/帧)。`TuiApprover` 权限弹窗(请求走 tokio unbounded,应答 std sync_channel);**Bracketed Paste**(iter-24,best-effort 启用,`Event::Paste` 整块注入 + `sanitize_paste` 净化,防大段粘贴假死)与**动态输入高度**(`input_height` 纯函数,3..=8 行伸缩);斜杠命令 `/help /cost /model /provider /agent /config /reset /compact /tools /exit` **只在 TUI**;每轮 `save_session` 落盘。
 - **headless**(非 TTY:管道/CI/重定向):逐行 stdin 当任务串行跑,跨行携带 history,恒 `AutoApprove`(危险命令仍硬拦截)。
 - **`run_once`**(CLI 带任务):一次性;`--every <dur>` = 时间触发器(常驻,每轮重载信号、单轮出错不掀翻循环)。
 - CLI:`--cwd` / `--yolo`(skip_danger)/ `--resume`(kill-9 恢复会话)/ `--read-only` / `--every`。

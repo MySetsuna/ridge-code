@@ -213,3 +213,90 @@ async fn file_checkpointer_persists_and_resumes_across_processes() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+/// iter-24:Best-of-N 择优 —— 评分最高的分支终态胜出。
+#[tokio::test]
+async fn best_of_picks_highest_score() {
+    let mut g = StateGraph::<Counter>::new();
+    g.add_node("grow", |_s| async { Ok::<_, Infallible>(Up::Add(10)) });
+    g.set_entry("grow");
+    g.add_edge("grow", END);
+    let app = std::sync::Arc::new(g.compile().unwrap());
+
+    let initials = vec![
+        Counter {
+            n: 1,
+            trail: vec![],
+        },
+        Counter {
+            n: 5,
+            trail: vec![],
+        },
+        Counter {
+            n: 3,
+            trail: vec![],
+        },
+    ];
+    let best = app
+        .invoke_best_of(initials, &RunConfig::default(), |s| s.n)
+        .await
+        .unwrap();
+    assert_eq!(best.n, 15); // 5 + 10 胜出;败者状态被丢弃
+}
+
+/// iter-24:失败分支被弃(投机语义),不掀翻整体;全败/空输入 → NoWinner。
+#[tokio::test]
+async fn best_of_discards_failed_branches() {
+    let mut g = StateGraph::<Counter>::new();
+    g.add_node("risky", |s: Counter| async move {
+        if s.n == 0 {
+            Err("zero not allowed".to_string().into())
+        } else {
+            Ok::<Up, crate::state::BoxError>(Up::Add(10))
+        }
+    });
+    g.set_entry("risky");
+    g.add_edge("risky", END);
+    let app = std::sync::Arc::new(g.compile().unwrap());
+
+    // 分支 0 必败,分支 1 胜出。
+    let best = app
+        .invoke_best_of(
+            vec![
+                Counter {
+                    n: 0,
+                    trail: vec![],
+                },
+                Counter {
+                    n: 2,
+                    trail: vec![],
+                },
+            ],
+            &RunConfig::default(),
+            |s| s.n,
+        )
+        .await
+        .unwrap();
+    assert_eq!(best.n, 12);
+
+    // 空输入 → NoWinner。
+    let err = app
+        .invoke_best_of(vec![], &RunConfig::default(), |s: &Counter| s.n)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, GraphError::NoWinner));
+
+    // 全败 → NoWinner。
+    let err = app
+        .invoke_best_of(
+            vec![Counter {
+                n: 0,
+                trail: vec![],
+            }],
+            &RunConfig::default(),
+            |s: &Counter| s.n,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, GraphError::NoWinner));
+}

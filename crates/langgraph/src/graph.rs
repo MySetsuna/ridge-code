@@ -31,6 +31,7 @@ pub enum StreamEvent<S> {
 }
 
 /// 运行参数。
+#[derive(Clone)]
 pub struct RunConfig {
     /// 硬性超步上限 —— 防跑飞的护栏。超过即 [`GraphError::StepLimit`]。
     pub max_supersteps: usize,
@@ -184,6 +185,39 @@ impl<S: GraphState> CompiledGraph<S> {
         }
 
         self.run_loop(state, frontier, 0, cfg, cp, tx).await
+    }
+
+    /// Best-of-N 投机分支探索(iter-24):N 份初始状态并发各跑一遍图,失败分支**丢弃**,
+    /// 按 `score` 对成功终态择优;**平分低索引胜**(确定性稳态)。空输入或全败 → [`GraphError::NoWinner`]。
+    ///
+    /// 只是引擎通用原语 —— 分支间**无副作用隔离**(并发跑真实写文件/shell 会互踩),
+    /// 真实 agent 接入需先解决工作区隔离(每分支 worktree),见 docs/iterations/guidance-24。
+    pub async fn invoke_best_of(
+        self: &Arc<Self>,
+        initials: Vec<S>,
+        cfg: &RunConfig,
+        score: impl Fn(&S) -> i64,
+    ) -> Result<S, GraphError> {
+        let mut set = tokio::task::JoinSet::new();
+        for (i, s0) in initials.into_iter().enumerate() {
+            let g = Arc::clone(self);
+            let cfg = cfg.clone();
+            set.spawn(async move { (i, g.invoke_with(s0, &cfg, None, None).await) });
+        }
+        let mut best: Option<(i64, usize, S)> = None;
+        while let Some(joined) = set.join_next().await {
+            let (i, res) = joined.map_err(|e| GraphError::Join(e.to_string()))?;
+            let Ok(s) = res else { continue }; // 投机语义:单分支失败即弃,不掀翻整体
+            let sc = score(&s);
+            let better = match &best {
+                None => true,
+                Some((bs, bi, _)) => sc > *bs || (sc == *bs && i < *bi),
+            };
+            if better {
+                best = Some((sc, i, s));
+            }
+        }
+        best.map(|(_, _, s)| s).ok_or(GraphError::NoWinner)
     }
 
     /// 从某个 checkpoint 续跑(耐用执行 / M3):用快照的 state 与 frontier,从它那个超步继续。
