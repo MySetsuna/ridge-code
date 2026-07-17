@@ -1053,6 +1053,40 @@ fn is_mutating_tool(name: &str) -> bool {
     )
 }
 
+/// **受保护路径**(词法判定):路径任一组件为 `tests`(约定测试目录)或 `.git`。防**奖励黑客**
+/// —— 删/清空失败测试以伪造 CI 绿(loop engineering 头号失败模式)。用 `tests`(复数目录)而非 `test`
+/// 单词,免误伤 `cargo test`/`test_output.log` 等。
+fn is_protected_path(path: &str) -> bool {
+    path.replace('\\', "/")
+        .split('/')
+        .any(|c| matches!(c, "tests" | ".git"))
+}
+
+/// 约束守卫(写臂):往受保护路径写**空内容** = 清空测试 → 拒。正常带内容的编辑放行。
+fn constraint_guard_write(path: &str, contents: &str) -> Option<String> {
+    (is_protected_path(path) && contents.trim().is_empty())
+        .then(|| format!("BLOCKED (constraint): 拒绝清空受保护路径 {path}(防奖励黑客删/空测试)"))
+}
+
+/// 约束守卫(shell 臂):删除类命令(rm/rmdir/del/unlink/shred)或截断重定向(`>`)touch 受保护路径 → 拒。
+fn constraint_guard_shell(cmd: &str) -> Option<String> {
+    let lc = cmd.to_lowercase();
+    let has_delete = lc
+        .split(|c: char| c.is_whitespace())
+        .any(|t| matches!(t, "rm" | "rmdir" | "del" | "unlink" | "shred"));
+    let has_truncate = lc.contains('>');
+    if !(has_delete || has_truncate) {
+        return None;
+    }
+    // 按空白/引号切 token,看是否有 token 的路径组件命中受保护目录。
+    let touches_protected = lc
+        .split(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+        .any(is_protected_path);
+    touches_protected.then(|| {
+        format!("BLOCKED (constraint): 拒绝对受保护路径(测试)的删除/清空 `{cmd}`(防奖励黑客)")
+    })
+}
+
 /// 只读模式(`--read-only`)的深度防御:副作用工具即使被 offer/幻觉调到,也硬拒。
 /// `Some(观察串)` = 拒绝(与 offering 过滤形成双保险)。
 fn read_only_block(read_only: bool, name: &str) -> Option<String> {
@@ -1070,6 +1104,10 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
             if let Some(why) = tools::is_dangerous_command(cmd) {
                 return format!("BLOCKED (dangerous: {why}) —— 拒绝执行 `{cmd}`");
             }
+            // 约束守卫:删/清空受保护路径(测试)→ 拒(防奖励黑客)。
+            if let Some(m) = constraint_guard_shell(cmd) {
+                return m;
+            }
             match tools::run_shell(cmd) {
                 Ok(r) => format!("exit {}: {}{}", r.code, r.stdout.trim(), r.stderr.trim()),
                 Err(e) => format!("shell error: {e}"),
@@ -1080,6 +1118,10 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
                 return e;
             }
             let contents = arg("contents");
+            // 约束守卫:往受保护路径(测试)写空内容 = 清空测试 → 拒(防奖励黑客)。
+            if let Some(m) = constraint_guard_write(arg("path"), contents) {
+                return m;
+            }
             match tools::write_file(arg("path"), contents) {
                 Ok(()) => format!("wrote {} bytes to {}", contents.len(), arg("path")),
                 Err(e) => format!("write error: {e}"),
@@ -1242,7 +1284,7 @@ fn durable_state_block(s: &AgentState) -> Option<String> {
 // 从孤立脚本升为跨会话复利系统的心脏(证据研判 iter-15:单二进制单用户下证据最硬的差异化长板)。
 
 /// 信号复利:跨会话共享的知识层落盘目录(**项目级**,cwd 本地,像 `.ridge/runs`)。
-const SIGNALS_DIR: &str = ".ridge/signals";
+pub const SIGNALS_DIR: &str = ".ridge/signals";
 /// 注入上下文的信号块**硬字符上限** —— 有界,防复利知识膨胀反噬 token 节约成果。
 const SIGNALS_BLOCK_MAX: usize = 1200;
 
@@ -1406,6 +1448,27 @@ fn signals_block(sigs: &[Signal]) -> Option<String> {
 /// 供 CLI 在建 `AgentState` 前调用:读项目级 `.ridge/signals` 的 open 信号 → 有界注入块。
 pub fn load_signal_block() -> Option<String> {
     signals_block(&load_open_signals(SIGNALS_DIR))
+}
+
+/// **自动产者**:run 收尾时,失败(非成功停机 / 有报错)自动落一条 `failure` 信号 ——
+/// loop engineering「preserve mistakes so the loop can learn」:下个会话开局即继承「上次卡在哪」,
+/// 不重蹈覆辙。成功 run 不产噪。同内容幂等去重(反复失败于同处 → 不刷屏)。返回 signal id(无可记 → None)。
+pub fn auto_signal_from_run(
+    out: &AgentState,
+    dir: impl AsRef<std::path::Path>,
+    source: &str,
+) -> Option<String> {
+    let reason = halt_reason(out);
+    if reason.is_success() && out.last_error.is_none() {
+        return None;
+    }
+    let task: String = out.task.chars().take(80).collect();
+    let mut body = format!("任务未竟: {task} | 停机: {}", reason.as_str());
+    if let Some(e) = &out.last_error {
+        let e: String = e.chars().take(160).collect();
+        body.push_str(&format!(" | 末错: {e}"));
+    }
+    signal_create(dir, "failure", &body, source).ok()
 }
 
 /// 已连好的 MCP 工具:暴露给 LLM 的 [`ToolSpec`] + 「命名空间名 → (客户端, 原始工具名)」路由表。
@@ -1875,6 +1938,8 @@ pub enum HaltReason {
     Budget,
     Stall,
     StepCap,
+    /// **约束违反**(奖励黑客):试图删/清空受保护路径(测试)等 —— 被守卫硬拦。
+    ConstraintBreach,
     Unverified,
 }
 
@@ -1885,21 +1950,29 @@ impl HaltReason {
             HaltReason::Budget => "budget_exceeded",
             HaltReason::Stall => "no_progress",
             HaltReason::StepCap => "step_cap",
+            HaltReason::ConstraintBreach => "constraint_breach",
             HaltReason::Unverified => "unverified",
         }
     }
-    /// 成功(确定性验证通过)才 true;三种熔断与未验证都是失败,供调用方给非零退出码。
+    /// 成功(确定性验证通过)才 true;熔断/违约/未验证都是失败,供调用方给非零退出码。
     pub fn is_success(self) -> bool {
         matches!(self, HaltReason::Approved)
     }
 }
 
-/// 据终态判定停机原因。优先级:成功 > 超预算(经济护栏最该被看见)> 无进展 > 回合上限 > 未验证。
+/// 据终态判定停机原因。优先级:成功 > 超预算(经济护栏最该被看见)> **约束违反**(奖励黑客,安全须显)
+/// > 无进展 > 回合上限 > 未验证。
 pub fn halt_reason(s: &AgentState) -> HaltReason {
     if s.approved {
         HaltReason::Approved
     } else if over_budget(s) {
         HaltReason::Budget
+    } else if s
+        .last_error
+        .as_deref()
+        .is_some_and(|e| e.contains("constraint"))
+    {
+        HaltReason::ConstraintBreach
     } else if stalled(s) {
         HaltReason::Stall
     } else if s.steps >= MAX_STEPS {
@@ -2612,11 +2685,20 @@ mod tests {
         };
         assert_eq!(halt_reason(&cap), HaltReason::StepCap);
 
-        // 熔断都非成功 → 调用方据此给非零退出码。
+        // 约束违反(奖励黑客)由 last_error 分类,优先于回合上限。
+        let breach = AgentState {
+            steps: MAX_STEPS,
+            last_error: Some("BLOCKED (constraint): 拒绝清空受保护路径".into()),
+            ..Default::default()
+        };
+        assert_eq!(halt_reason(&breach), HaltReason::ConstraintBreach);
+
+        // 熔断/违约都非成功 → 调用方据此给非零退出码。
         for r in [
             HaltReason::Budget,
             HaltReason::Stall,
             HaltReason::StepCap,
+            HaltReason::ConstraintBreach,
             HaltReason::Unverified,
         ] {
             assert!(!r.is_success(), "{} 不应算成功", r.as_str());
@@ -2735,6 +2817,88 @@ mod tests {
                 .any(|m| m.role == Role::System && m.content.contains("inherited_signals")),
             "继承信号块应作为 system 消息注入"
         );
+    }
+
+    /// 约束守卫抗奖励黑客:删/清空受保护路径(测试)被拦;正常编辑与 `cargo test` 不误伤。
+    #[test]
+    fn constraint_guard_blocks_test_tampering() {
+        // 写臂:清空 tests/ 文件被拦;带内容写放行。
+        assert!(
+            constraint_guard_write("tests/foo.rs", "").is_some(),
+            "清空测试应拦"
+        );
+        assert!(
+            constraint_guard_write("tests/foo.rs", "   \n").is_some(),
+            "空白=清空,应拦"
+        );
+        assert!(
+            constraint_guard_write("tests/foo.rs", "fn t() {}").is_none(),
+            "带内容的正常编辑不该误伤"
+        );
+        assert!(
+            constraint_guard_write("src/lib.rs", "").is_none(),
+            "非保护路径不拦"
+        );
+
+        // shell 臂:删 tests/ 被拦;截断重定向进 tests/ 被拦;cargo test / 删源码不误伤。
+        assert!(
+            constraint_guard_shell("rm tests/foo_test.rs").is_some(),
+            "rm 测试应拦"
+        );
+        assert!(
+            constraint_guard_shell("rm -rf tests").is_some(),
+            "rm 测试目录应拦"
+        );
+        assert!(
+            constraint_guard_shell("echo '' > tests/foo.rs").is_some(),
+            "截断测试应拦"
+        );
+        assert!(
+            constraint_guard_shell("cargo test > out.log").is_none(),
+            "cargo test 不该被误伤(tests 复数目录才拦)"
+        );
+        assert!(
+            constraint_guard_shell("rm src/tmp.rs").is_none(),
+            "删源码非本守卫职责(jail 管边界)"
+        );
+    }
+
+    /// 自动产者:失败 run 落 failure 信号(preserve mistakes);成功 run 不产噪。
+    #[test]
+    fn auto_signal_records_failures_only() {
+        let dir = std::env::temp_dir().join("ridge_auto_signal_test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // 成功 run → 不产信号。
+        let ok = AgentState {
+            approved: true,
+            task: "任务甲".into(),
+            ..Default::default()
+        };
+        assert!(
+            auto_signal_from_run(&ok, &dir, "run-ok").is_none(),
+            "成功不该产噪"
+        );
+
+        // 失败 run(到回合上限未通过)→ 落一条 failure 信号,含任务与停机原因。
+        let bad = AgentState {
+            task: "任务乙".into(),
+            steps: MAX_STEPS,
+            last_error: Some("build error: E0433".into()),
+            ..Default::default()
+        };
+        let id = auto_signal_from_run(&bad, &dir, "run-bad").expect("失败应产信号");
+        let open = load_open_signals(&dir);
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id, id);
+        assert_eq!(open[0].kind, "failure");
+        assert!(
+            open[0].body.contains("任务乙") && open[0].body.contains("step_cap"),
+            "body 应含任务名 + 停机原因 step_cap:{}",
+            open[0].body
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// M2 端到端:LLM 发一个**命名空间**工具调用 → act 路由到 MCP 服务器 → verify 认其结果 → approved。

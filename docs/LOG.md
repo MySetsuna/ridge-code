@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-07-17 · iter-17:三者皆做(自动产者 + 时间触发器 + 约束守卫)
+
+- **触发**:用户「三者皆做」—— iter-16 收尾提的三个下一步一并落地。皆 Ponytail 最小实、离线可测。
+- **① 自动产者** `auto_signal_from_run`:run 收尾时,失败(非成功停机 / 有 `last_error`)**自动落一条 `failure` 信号**(loop engineering「preserve mistakes」),下个会话/下一轮开局即继承「上次卡在哪」。成功 run 不产噪;同内容幂等去重。接 `trace_and_report`,source=本 run id。
+- **② 时间触发器** `--every <30s|5m|1h>`:rung-3 延迟阶梯 —— `run_once` 重构为 app 只建一次、按间隔重跑同一任务的循环,**每轮重载 `.ridge/signals`(信号复利)** + 失败自动落信号,直到 Ctrl-C。「常驻助手」最小形态。`parse_duration` 解析 s/m/h。**webhook 诚实押后**(需引 HTTP server 依赖 = 决策项;OS cron/Task Scheduler 调 `ridgecode` 已覆盖定时;单二进制内 `--every` 足证 rung-3)。
+- **③ 约束守卫** `ConstraintBreach`(原 CONTRACT-14):防**奖励黑客**(删/清空失败测试伪造 CI 绿)。`is_protected_path`(组件 `tests`/`​.git`,用复数 `tests` 免误伤 `cargo test`)+ 写臂拦「清空受保护路径」+ shell 臂拦「rm/rmdir/del/unlink/shred/截断重定向 touch 受保护路径」;`HaltReason` 加 `ConstraintBreach`(据 `last_error` 含 "constraint" 分类,优先于 stall/step_cap)。与 jail/denylist/read-only 正交叠加。**诚实边界**:`edit_file`/`apply_edits` 清空未拦(需内容级判定,后续);词法守卫非真沙箱。
+- **验收**:`cargo test --workspace`=全绿(agent lib 58→**60** +2、bin +`parse_duration`),clippy `-D warnings`(`run_once` 8 参加 `#[allow(too_many_arguments)]`)、fmt 净。二进制 `--help` 实证含 `--every`。
+- **下一步**:signal 自动产者的**成功侧**(不止记失败,也可记「发现/待办」)、webhook 触发器(需依赖决策)、约束守卫深化(内容级清空检测 / 可配保护路径)。
+
 ## 2026-07-17 · iter-16:信号复利闭环(扬长优选 C 落地)
 
 - **依据**:iter-15 证据研判 —— C 多 loop 共享大脑(signals 复利)= 单二进制单用户下证据最硬的差异化长板。用户拍板「开工造 C」。

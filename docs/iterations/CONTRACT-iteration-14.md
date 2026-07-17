@@ -1,5 +1,7 @@
 # CONTRACT —— Iteration 14:约束守卫(防奖励黑客,补齐护栏套件)
 
+> ✅ **已交付(2026-07-17,iter-17 批次)**:`is_protected_path`+写臂/`shell` 臂约束守卫 + `HaltReason::ConstraintBreach`;`cargo test --workspace` 全绿。诚实边界:`edit_file`/`apply_edits` 清空未拦(需内容级判定)、词法守卫非真沙箱。详见 `docs/LOG.md` iter-17 条。
+
 - **开工时间戳**: 2026-07-17(待下轮执行)
 - **里程碑**: iter-13 落地标准存储库(`.ridge/runs/<id>/`)+ 显式停机原因(`HaltReason`);本轮补护栏套件缺的「防奖励黑客」一环
 - **依据**: `docs/iterations/2026-07-17-notebooklm-guidance-13.md`(NotebookLM + 对抗评审:**驳回**其「子agent并行」P0,升「约束守卫」为 P0)

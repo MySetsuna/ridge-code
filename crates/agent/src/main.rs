@@ -2,10 +2,10 @@ use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 
 use agent::{
-    build_agent, build_llm_agent_full, builtin_tool_specs, compact_history, default_tool,
-    expand_mentions, halt_reason, load_signal_block, load_skills, null_token_bus, render_todos,
-    resolve_mcp, scripted, write_run, AgentState, Approver, AutoApprove, Color, Config, McpTools,
-    RichOutput, Skill, Todo, TokenBus,
+    auto_signal_from_run, build_agent, build_llm_agent_full, builtin_tool_specs, compact_history,
+    default_tool, expand_mentions, halt_reason, load_signal_block, load_skills, null_token_bus,
+    render_todos, resolve_mcp, scripted, write_run, AgentState, Approver, AutoApprove, Color,
+    Config, McpTools, RichOutput, Skill, Todo, TokenBus,
 };
 use langgraph::{CompiledGraph, RunConfig, StreamEvent};
 use mcp::{McpClient, StdioTransport};
@@ -46,6 +46,7 @@ fn handle_meta_flags() -> bool {
              ridgecode --resume             恢复上次会话(kill-9/关掉重开后续接)\n\n\
              选项:\n  \
              --cwd <dir>                    在目标项目目录里跑\n  \
+             --every <30s|5m|1h>            时间触发器:按间隔重跑该任务(常驻;每轮重载信号复利,Ctrl-C 止)\n  \
              --yolo/--skip-permissions      skip-danger:工具自动放行不问 [y/N](灾难命令仍拦)\n  \
              --read-only                    只读模式:只 offer 读/查/研究工具,拒一切写/shell 副作用\n  \
              --resume/--continue            恢复上次会话\n  \
@@ -73,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
         skip_danger: cli_skip_danger,
         resume,
         read_only,
+        every,
     } = parse_args();
     if let Some(dir) = &cwd {
         std::env::set_current_dir(dir)?;
@@ -87,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
             let skip_danger = cli_skip_danger || cfg.skip_danger.unwrap_or(false);
             let agents = Arc::new(build_agents(&cfg)); // sub-agent 注册表(内置 + 用户 + 命名 provider)
             match task {
-                Some(t) => run_once(p, mcp, skills, &t, budget, agents, read_only).await, // 一次性
+                Some(t) => run_once(p, mcp, skills, &t, budget, agents, read_only, every).await, // 一次性 / --every 触发器
                 None => {
                     // --resume:kill-9 / 关掉重开后恢复上一会话的多轮 history。
                     let initial = if resume {
@@ -263,10 +265,12 @@ fn parse_args() -> ParsedArgs {
     let mut read_only = std::env::var("RIDGE_READ_ONLY")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+    let mut every = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--cwd" => cwd = args.next(),
+            "--every" => every = args.next().as_deref().and_then(parse_duration),
             "--yolo" | "--skip-permissions" | "--dangerously-skip-permissions" => {
                 skip_danger = true
             }
@@ -287,7 +291,24 @@ fn parse_args() -> ParsedArgs {
         skip_danger,
         resume,
         read_only,
+        every,
     }
+}
+
+/// 解析简单时长:`30s` / `5m` / `1h` / 裸数字当秒。坏/零 → `None`(用于 `--every` 时间触发器间隔)。
+fn parse_duration(s: &str) -> Option<std::time::Duration> {
+    let s = s.trim();
+    let (num, mult) = if let Some(n) = s.strip_suffix('s') {
+        (n, 1)
+    } else if let Some(n) = s.strip_suffix('m') {
+        (n, 60)
+    } else if let Some(n) = s.strip_suffix('h') {
+        (n, 3600)
+    } else {
+        (s, 1)
+    };
+    let n: u64 = num.trim().parse().ok()?;
+    (n > 0).then(|| std::time::Duration::from_secs(n * mult))
 }
 
 /// 命令行解析结果。
@@ -297,6 +318,8 @@ struct ParsedArgs {
     skip_danger: bool,
     resume: bool,
     read_only: bool,
+    /// `--every <dur>`:设了 → 时间触发器,按此间隔重跑任务(仅一次性任务模式)。
+    every: Option<std::time::Duration>,
 }
 
 /// 解析实际生效的 `(provider 类型, model, base_url)`:**env > config > 默认**。
@@ -373,7 +396,10 @@ fn real_provider(cfg: &Config) -> Option<Arc<dyn LlmProvider>> {
     Some(make_provider(&kind, &model, &base, key))
 }
 
-/// 一次性任务:一律放行,跑完写 trace.json + 打印结果。
+/// 一次性任务:一律放行,跑完写 run 留痕 + 打印结果。
+/// `every=Some(dur)`:**时间触发器**(rung-3 延迟阶梯)—— app 只建一次,按间隔重跑同一任务,
+/// 每轮重载 `.ridge/signals`(信号复利)、失败自动落信号,直到 Ctrl-C。是「常驻助手」的最小形态。
+#[allow(clippy::too_many_arguments)]
 async fn run_once(
     provider: Arc<dyn LlmProvider>,
     mcp: McpTools,
@@ -382,6 +408,7 @@ async fn run_once(
     budget: usize,
     agents: Arc<agent::Agents>,
     read_only: bool,
+    every: Option<std::time::Duration>,
 ) -> anyhow::Result<()> {
     let bus = null_token_bus();
     let app = build_llm_agent_full(
@@ -393,13 +420,28 @@ async fn run_once(
         agents,
         read_only,
     )?;
-    // `@path` 引用 → 注入文件正文(一次性任务也支持)。继承上个会话的未决信号(信号复利)。
-    let state = AgentState::new(expand_mentions(task))
-        .with_budget(budget)
-        .with_signals(load_signal_block());
-    let out = run_streamed(&app, state, &bus).await?;
-    trace_and_report(&out);
-    Ok(())
+    if let Some(dur) = every {
+        eprintln!(
+            "[ridgecode] 时间触发器:每 {}s 跑一次「{task}」(Ctrl-C 止;每轮重载信号复利)",
+            dur.as_secs()
+        );
+    }
+    loop {
+        // `@path` 引用 → 注入文件正文。继承上个会话的未决信号(信号复利);触发器模式每轮都重载。
+        let state = AgentState::new(expand_mentions(task))
+            .with_budget(budget)
+            .with_signals(load_signal_block());
+        match run_streamed(&app, state, &bus).await {
+            Ok(out) => trace_and_report(&out),
+            // 触发器(常驻)模式下单轮出错不该掀翻整个循环;一次性模式仍向上抛(非零退出)。
+            Err(e) if every.is_some() => eprintln!("[ridgecode] 本轮出错:{e}"),
+            Err(e) => return Err(e),
+        }
+        match every {
+            Some(dur) => tokio::time::sleep(dur).await,
+            None => return Ok(()),
+        }
+    }
 }
 
 /// 非 TTY(管道/CI/重定向):无 TUI、无斜杠命令。逐行读 stdin,每行当一个任务串行跑,跨行携带 history。
@@ -460,6 +502,14 @@ fn trace_and_report(out: &AgentState) {
     if !reason.is_success() {
         // 响亮失败:护栏熔断/未验证时明确播报,别让「悄悄停」被当成成功(loop engineering:fail loudly)。
         eprintln!("[ridgecode] 停机原因:{}(未通过确定性验证)", reason.as_str());
+        // 自动产者:失败落 failure 信号(preserve mistakes),下个会话/下一轮触发自动继承。source=本 run id。
+        let source = run_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("run");
+        if let Some(id) = auto_signal_from_run(out, agent::SIGNALS_DIR, source) {
+            eprintln!("[ridgecode] 已记失败信号 {id}(下个会话将继承)");
+        }
     }
     print_report(out);
 }
@@ -656,6 +706,19 @@ mod tests {
         assert!(format_event("act: web_search -> ok").contains("\x1b[33m")); // 黄
         assert!(format_event("verify: PASS (deterministic gate)").contains("\x1b[32m"));
         // 绿
+    }
+
+    /// 时间触发器间隔解析:s/m/h 后缀 + 裸数字当秒;坏/零 → None。
+    #[test]
+    fn parse_duration_units() {
+        use std::time::Duration;
+        assert_eq!(parse_duration("30s"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_duration("5m"), Some(Duration::from_secs(300)));
+        assert_eq!(parse_duration("1h"), Some(Duration::from_secs(3600)));
+        assert_eq!(parse_duration("90"), Some(Duration::from_secs(90)));
+        assert_eq!(parse_duration("0s"), None, "零间隔无意义");
+        assert_eq!(parse_duration("abc"), None);
+        assert_eq!(parse_duration(""), None);
     }
 
     #[test]
