@@ -1527,6 +1527,102 @@ pub fn auto_signal_from_run(
     signal_create(dir, "failure", &body, source).ok()
 }
 
+// ─────────── 自动 signal 抽取器(复利环产者的「发现/待办」侧)───────────
+// iter-17 的自动产者只记**失败**;本抽取器补另一半:run 收尾用 provider **一次性**把执行轨迹
+// 提炼成可跨会话复用的信号(发现/摩擦/待办),喂已建的产→消→解复利环。**opt-in**(env,默认关):
+// 尊重 token 北极星,不默认给每轮加一次 LLM 成本;`--every` 常驻用户可开启以求复利。
+// (对抗评审 iter-18:采纳「安全内核版」—— 喂已有 signals 环;**驳回**「自动改写 harness」,单用户样本不足、改写无 checker。)
+
+/// 一次抽取最多提炼多少条(宁缺毋滥 + 有界成本/防刷屏)。
+const MAX_EXTRACTED_SIGNALS: usize = 5;
+
+const SIGNAL_EXTRACT_SYSTEM: &str =
+    "你是复盘助手。从本次执行轨迹提炼**可跨会话复用**的信号,助下个会话免重新摸索。\
+只输出新增的、具体的、可复用条目;每行一条,格式严格 `kind: body`,kind ∈ {discovery, friction, todo}:\
+discovery=项目事实/结构发现;friction=踩的坑/易错处;todo=本次未竟、下次该做。\
+最多 5 条,宁缺毋滥;无可复用信号则只回 NONE。勿复述任务,勿客套。";
+
+/// run 是否有「值得抽取」的实质轨迹(动过工具或改过文件)。纯轻量运行不抽,省一次 LLM 调用。
+fn run_has_substance(out: &AgentState) -> bool {
+    !out.modified_files.is_empty() || out.messages.iter().any(|m| m.starts_with("act:"))
+}
+
+/// 构造抽取请求(有界轨迹 → 提炼复利信号)。无实质轨迹 → `None`(不抽)。
+fn signal_extract_request(out: &AgentState) -> Option<CompletionRequest> {
+    if !run_has_substance(out) {
+        return None;
+    }
+    let task: String = out.task.chars().take(200).collect();
+    // 轨迹有界:复用 bound_observation(head+tail 预览),免巨型轨迹撑爆这一次抽取调用。
+    let traj = bound_observation(out.messages.join("\n"));
+    Some(CompletionRequest {
+        messages: vec![
+            Message::new(Role::System, SIGNAL_EXTRACT_SYSTEM),
+            Message::new(Role::User, format!("任务:{task}\n\n执行轨迹:\n{traj}")),
+        ],
+        tools: vec![],
+    })
+}
+
+/// 解析抽取器输出为 `(kind, body)` 列表。**纯函数**:每行 `kind: body`(冒号中英皆可),
+/// kind 须在允许集内、body 非空;`NONE`/空行/不合规行/markdown 项目符号一律容错忽略;上限 [`MAX_EXTRACTED_SIGNALS`]。
+fn parse_extracted_signals(text: &str) -> Vec<(String, String)> {
+    const ALLOWED: [&str; 3] = ["discovery", "friction", "todo"];
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim().trim_start_matches(['-', '*', '•', ' ']).trim();
+        let Some((k, b)) = line.split_once([':', '：']) else {
+            continue;
+        };
+        let kind = k.trim().to_lowercase();
+        let body = b.trim();
+        if !ALLOWED.contains(&kind.as_str()) || body.is_empty() {
+            continue;
+        }
+        out.push((kind, body.to_string()));
+        if out.len() >= MAX_EXTRACTED_SIGNALS {
+            break;
+        }
+    }
+    out
+}
+
+/// 自动 signal 抽取是否启用(**opt-in**,env `RIDGE_EXTRACT_SIGNALS` = 1/true/on/yes)。
+/// 默认关 —— 尊重 token 北极星,不默认给每轮加一次 LLM 成本。
+pub fn signal_extract_enabled() -> bool {
+    std::env::var("RIDGE_EXTRACT_SIGNALS")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// **自动抽取器**:run 收尾用 provider 一次性把轨迹提炼成复利信号,落 `dir`(经 `signal_create` 内容哈希
+/// **幂等去重**,反复同一发现不刷屏)。返回落盘的 signal id 列表。抽取失败/无所得/无实质轨迹 → 空
+/// (best-effort,**绝不掀翻主流程**)。source = 本 run id(溯源回指 `.ridge/runs/<id>`)。
+pub async fn extract_signals_from_run(
+    provider: &dyn LlmProvider,
+    out: &AgentState,
+    dir: impl AsRef<std::path::Path>,
+    source: &str,
+) -> Vec<String> {
+    let Some(req) = signal_extract_request(out) else {
+        return Vec::new();
+    };
+    let text = match provider.complete(&req).await {
+        Ok(c) => c.text,
+        Err(_) => return Vec::new(),
+    };
+    let dir = dir.as_ref();
+    parse_extracted_signals(&text)
+        .into_iter()
+        .filter_map(|(kind, body)| signal_create(dir, &kind, &body, source).ok())
+        .collect()
+}
+
 /// 已连好的 MCP 工具:暴露给 LLM 的 [`ToolSpec`] + 「命名空间名 → (客户端, 原始工具名)」路由表。
 #[derive(Default)]
 pub struct McpTools {
@@ -3076,6 +3172,91 @@ mod tests {
             "body 应含任务名 + 停机原因 step_cap:{}",
             open[0].body
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 抽取器解析:合规 `kind: body` 收下,NONE/不合规 kind/空 body/项目符号一律容错,上限截断。
+    #[test]
+    fn parse_extracted_signals_filters_and_caps() {
+        let text = "NONE\n\
+            discovery: 构建脚本在 crates/tools\n\
+            - friction: MCP 路径需对服务器可见\n\
+            todo：中文冒号也认\n\
+            garbage: 不在允许集\n\
+            discovery:   \n\
+            随便一行没冒号\n\
+            todo: 甲\ndiscovery: 乙\nfriction: 丙\ntodo: 丁(第6条应被截断)";
+        let got = parse_extracted_signals(text);
+        // 允许集内 + body 非空的:discovery(构建)、friction(MCP)、todo(中文冒号)、todo(甲)、discovery(乙) = 上限 5 条。
+        assert_eq!(got.len(), MAX_EXTRACTED_SIGNALS);
+        assert_eq!(
+            got[0],
+            ("discovery".into(), "构建脚本在 crates/tools".into())
+        );
+        assert_eq!(got[1].0, "friction");
+        assert_eq!(got[2], ("todo".into(), "中文冒号也认".into()));
+        // garbage/空 body/无冒号行被过滤;第 6 条被截断。
+        assert!(got
+            .iter()
+            .all(|(k, _)| ["discovery", "friction", "todo"].contains(&k.as_str())));
+        assert!(parse_extracted_signals("NONE").is_empty());
+    }
+
+    /// 抽取门:无实质轨迹(未动工具/未改文件)→ 不抽(省 LLM 调用);有 act/改文件 → 构造请求。
+    #[test]
+    fn extract_request_gated_on_substance() {
+        let empty = AgentState {
+            task: "查天气".into(),
+            ..Default::default()
+        };
+        assert!(!run_has_substance(&empty));
+        assert!(signal_extract_request(&empty).is_none());
+
+        let worked = AgentState {
+            task: "改代码".into(),
+            messages: vec!["act: edit_file -> edited src/x.rs".into()],
+            ..Default::default()
+        };
+        assert!(run_has_substance(&worked));
+        assert!(signal_extract_request(&worked).is_some());
+    }
+
+    /// 抽取器端到端:假 provider 回 canned 轨迹提炼 → 解析 → 落盘为 open 信号(幂等去重)。
+    #[tokio::test]
+    async fn extract_signals_from_run_writes_parsed_signals() {
+        use provider::{Completion, ScriptedProvider};
+        let dir = std::env::temp_dir().join("ridge_extract_test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let out = AgentState {
+            task: "重构 tools".into(),
+            messages: vec!["act: edit_file -> edited crates/tools/src/lib.rs".into()],
+            ..Default::default()
+        };
+        let canned = "discovery: Edit 结构字段 path/old/new 皆 pub\nfriction: apply_edits 原子性,任一越狱整批拒\nNONE";
+        let provider = ScriptedProvider::new(vec![Completion {
+            text: canned.into(),
+            ..Default::default()
+        }]);
+
+        let ids = extract_signals_from_run(&provider, &out, &dir, "run-xyz").await;
+        assert_eq!(ids.len(), 2, "应落 2 条(discovery+friction)");
+        let open = load_open_signals(&dir);
+        assert_eq!(open.len(), 2);
+        assert!(open
+            .iter()
+            .any(|s| s.kind == "discovery" && s.source == "run-xyz"));
+        assert!(open.iter().any(|s| s.kind == "friction"));
+
+        // 幂等:同一 provider 输出再抽一次 → 内容哈希 id 相同,不新增文件。
+        let provider2 = ScriptedProvider::new(vec![Completion {
+            text: canned.into(),
+            ..Default::default()
+        }]);
+        let ids2 = extract_signals_from_run(&provider2, &out, &dir, "run-xyz").await;
+        assert_eq!(ids2, ids, "同内容幂等,id 一致");
+        assert_eq!(load_open_signals(&dir).len(), 2, "幂等不新增");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

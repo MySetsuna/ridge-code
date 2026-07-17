@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-07-17 · iter-20:自动 signal 抽取器(复利环产者的「发现/待办」侧)
+
+- **依据**:guidance-18 对抗评审采纳「自动 signal 抽取器」**安全内核版**(喂已建 signals 环);用户「开工」。兑现 iter-16/17 留的升级路径。
+- **做了什么**:iter-17 自动产者只记**失败**,本轮补另一半 —— run 收尾用 provider **一次性**把轨迹提炼成**发现/摩擦/待办**信号喂复利环。①`parse_extracted_signals` 纯函数(`kind: body` 中英冒号、kind∈{discovery,friction,todo}、NONE/越集/空/符号容错、上限 5);②抽取门 `run_has_substance`+`signal_extract_request`(无实质轨迹不抽,省调用;轨迹复用 `bound_observation` 有界);③`extract_signals_from_run` 端到端(调 provider→解析→`signal_create` 幂等去重,best-effort 失败静默);④`signal_extract_enabled` **opt-in** env `RIDGE_EXTRACT_SIGNALS`(默认关,尊 token 北极星);⑤`run_once`/`headless` 建 app 前留 provider,收尾 `maybe_extract_signals` 复用 run source id。
+- **验收**:`cargo test --workspace`=全绿(agent lib 63→**66**,+3:纯解析容错/上限、抽取门、端到端+幂等[`ScriptedProvider` 离线]),clippy `-D warnings`(修一处 `doc_lazy_continuation`:旧 doc 行 `+ ` 起被判列表)、fmt 净;`--help` 实证含 env。
+- **对抗评审 / 驳回**:**驳回** NotebookLM 暗含的「自动改写 harness config」(hill-climbing 改 prompt/grader)—— 维持 iter-15/18:单用户样本不足 + 改写无独立 checker。本轮**只做喂 signals** 的安全内核。
+- **成果**:复利环产者三侧齐(手动 `signal_write` + 失败自动 + 发现/待办自动)→ 消 → 解,「共享大脑」更实。
+- **下一步**(俟用户):抽取质量闸(独立 checker 过滤噪声?又一处 maker≠checker)、触发器编排多 loop(Webhook)、扬长 A —— 走 NLM 研判排序。
+
 ## 2026-07-17 · iter-19:巨型工具输出确定性截断(context_rot 根因修法)
 
 - **依据**:iter-18 报告上传 NotebookLM(52 源)取指导 + **对抗评审**。NLM 荐「截断代理」→ 采纳其**确定性内核版**为 P0(证据最硬:claw-tsaver 实测 11507→104 token 省 99.1%;context_rot 根因;契合 token 北极星)。

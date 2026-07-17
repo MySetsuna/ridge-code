@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use agent::{
     auto_signal_from_run, build_agent, build_llm_agent_full, builtin_tool_specs, compact_history,
-    default_tool, expand_mentions, halt_reason, load_signal_block, load_skills, null_token_bus,
-    render_todos, resolve_mcp, scripted, write_run, AgentState, Approver, AutoApprove, Color,
-    Config, McpTools, RichOutput, Skill, Todo, TokenBus,
+    default_tool, expand_mentions, extract_signals_from_run, halt_reason, load_signal_block,
+    load_skills, null_token_bus, render_todos, resolve_mcp, scripted, signal_extract_enabled,
+    write_run, AgentState, Approver, AutoApprove, Color, Config, McpTools, RichOutput, Skill, Todo,
+    TokenBus,
 };
 use langgraph::{CompiledGraph, RunConfig, StreamEvent};
 use mcp::{McpClient, StdioTransport};
@@ -55,7 +56,8 @@ fn handle_meta_flags() -> bool {
              管道/非 TTY:逐行 stdin 当任务(headless,无斜杠命令)。\n\n\
              配置:~/.ridge/config.json(provider/model/预算/多 mcp/skills;env 覆盖);\
              TUI 内 /config set <key> <value> 可持久化。密钥只走 RIDGE_API_KEY env。\
-             ~/.ridge/skills/*/SKILL.md 加领域技能不改源码。"
+             ~/.ridge/skills/*/SKILL.md 加领域技能不改源码。\n  \
+             RIDGE_EXTRACT_SIGNALS=1        opt-in:run 收尾用一次 LLM 把轨迹提炼成复利信号(默认关,省 token)。"
         );
         return true;
     }
@@ -411,6 +413,8 @@ async fn run_once(
     every: Option<std::time::Duration>,
 ) -> anyhow::Result<()> {
     let bus = null_token_bus();
+    // opt-in 自动 signal 抽取器:建 app 前留一把 provider(Arc 克隆廉价),供 run 收尾提炼复利信号。
+    let extractor = signal_extract_enabled().then(|| provider.clone());
     let app = build_llm_agent_full(
         provider,
         mcp,
@@ -432,7 +436,10 @@ async fn run_once(
             .with_budget(budget)
             .with_signals(load_signal_block());
         match run_streamed(&app, state, &bus).await {
-            Ok(out) => trace_and_report(&out),
+            Ok(out) => {
+                let source = trace_and_report(&out);
+                maybe_extract_signals(extractor.as_ref(), &out, &source).await;
+            }
             // 触发器(常驻)模式下单轮出错不该掀翻整个循环;一次性模式仍向上抛(非零退出)。
             Err(e) if every.is_some() => eprintln!("[ridgecode] 本轮出错:{e}"),
             Err(e) => return Err(e),
@@ -457,6 +464,7 @@ async fn headless(
     read_only: bool,
 ) -> anyhow::Result<()> {
     let bus = null_token_bus();
+    let extractor = signal_extract_enabled().then(|| provider.clone());
     let app = build_llm_agent_full(
         provider,
         mcp,
@@ -482,7 +490,8 @@ async fn headless(
             Ok(out) => {
                 history = out.history.clone();
                 save_session(&session_path(), &history); // 每轮落盘 → --resume 可恢复
-                trace_and_report(&out);
+                let source = trace_and_report(&out);
+                maybe_extract_signals(extractor.as_ref(), &out, &source).await;
             }
             Err(e) => eprintln!("[ridgecode] 出错:{e}"),
         }
@@ -490,28 +499,49 @@ async fn headless(
     Ok(())
 }
 
-/// 把一轮落成标准存储库的一条 run(`.ridge/runs/<id>/` 含 manifest.json + trace.json,best-effort)
-/// + 打印结果 + 播报停机原因。每 run 独立目录,审计历史不再互相覆盖。
-fn trace_and_report(out: &AgentState) {
+/// 把一轮落成标准存储库的一条 run(`.ridge/runs/<id>/` 含 manifest.json + trace.json,best-effort),
+/// 打印结果、播报停机原因。每 run 独立目录,审计历史不再互相覆盖。
+/// 返回本 run 的 source id(run 目录名),供自动 signal 抽取器复用同一溯源标签。
+fn trace_and_report(out: &AgentState) -> String {
     let run_dir = run_artifacts_dir();
     match write_run(out, &run_dir) {
         Ok(()) => eprintln!("[ridgecode] 运行留痕已写 {}", run_dir.display()),
         Err(e) => eprintln!("[ridgecode] 写运行留痕失败: {e}"),
     }
+    let source = run_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("run")
+        .to_string();
     let reason = halt_reason(out);
     if !reason.is_success() {
         // 响亮失败:护栏熔断/未验证时明确播报,别让「悄悄停」被当成成功(loop engineering:fail loudly)。
         eprintln!("[ridgecode] 停机原因:{}(未通过确定性验证)", reason.as_str());
         // 自动产者:失败落 failure 信号(preserve mistakes),下个会话/下一轮触发自动继承。source=本 run id。
-        let source = run_dir
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("run");
-        if let Some(id) = auto_signal_from_run(out, agent::SIGNALS_DIR, source) {
+        if let Some(id) = auto_signal_from_run(out, agent::SIGNALS_DIR, &source) {
             eprintln!("[ridgecode] 已记失败信号 {id}(下个会话将继承)");
         }
     }
     print_report(out);
+    source
+}
+
+/// 自动 signal 抽取器(opt-in,复利环产者的「发现/待办」侧):run 收尾用 provider 一次性把轨迹
+/// 提炼成可复用信号,喂 `.ridge/signals`。best-effort —— 失败/无所得静默,绝不掀翻主流程。
+async fn maybe_extract_signals(
+    extractor: Option<&Arc<dyn LlmProvider>>,
+    out: &AgentState,
+    source: &str,
+) {
+    let Some(p) = extractor else { return };
+    let ids = extract_signals_from_run(p.as_ref(), out, agent::SIGNALS_DIR, source).await;
+    if !ids.is_empty() {
+        eprintln!(
+            "[ridgecode] 抽取 {} 条复利信号(下个会话将继承):{}",
+            ids.len(),
+            ids.join(", ")
+        );
+    }
 }
 
 /// 本次 run 的留痕目录:`.ridge/runs/<纳秒时间戳>`(cwd 本地,像 `.git` 随项目走)。
