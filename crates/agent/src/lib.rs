@@ -721,6 +721,10 @@ const BASE_SYSTEM: &str = "You are a capable agent. Use the provided tools to ac
      editing. For external/real-time info, web_search to find links then fetch_url to read the \
      actual page — trust the page text, not just the snippet. When there is an objective way to \
      verify (compiler exit code, tests), rely on it and don't trust your own claim. \
+     Harness contract: large tool outputs are truncated to a head+tail preview — for detail from a \
+     big file use ranged read_file or search, never rely on one giant read. Never delete or empty \
+     tests to make a check pass: it is blocked and counts as failure. Record a reusable finding, \
+     pitfall or todo with signal_write so the next session inherits it. \
      Reply concisely: no filler or restating the task; when changing code, emit only the minimal \
      edit (unique-match replace / diff), not a full-file rewrite. When done, stop.";
 
@@ -1226,7 +1230,9 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
                 Err(e) => format!("signal error: {e}"),
             }
         }
-        other => format!("unknown tool `{other}`"),
+        // 未知/幻觉工具名:归一化为 **error**(含 " error:" → 喂失败信号 + 熔断计数),
+        // 并提示只调系统所列工具。此前回 "unknown tool" 不含判据词 → 幻觉工具静默空转不计错。
+        other => format!("tool error: 未知工具 `{other}`;请只调用系统所列工具"),
     }
 }
 
@@ -3492,6 +3498,33 @@ mod tests {
         assert!(BASE_SYSTEM.contains("minimal edit"));
         // 无技能时系统提示词仍等于 BASE_SYSTEM(不引入额外底噪)。
         assert_eq!(build_system_prompt(&[]), BASE_SYSTEM);
+    }
+
+    /// harness-aware 系统提示词:把 iter-17/19/20 后新成的**物理契约**讲给模型 ——
+    /// 输出截断(用 ranged read)、勿删测试(被拦=失败)、signal_write 沉淀复利。
+    #[test]
+    fn base_system_states_harness_contract() {
+        assert!(BASE_SYSTEM.contains("truncated"), "应告知输出被截断");
+        assert!(BASE_SYSTEM.contains("ranged read_file"), "应导向分段读");
+        assert!(BASE_SYSTEM.contains("delete or empty"), "应禁删/清空测试");
+        assert!(BASE_SYSTEM.contains("signal_write"), "应鼓励沉淀复利信号");
+    }
+
+    /// 工具调用鲁棒:未知/幻觉工具名归一化为 error(喂失败信号 + 熔断计数),不再静默空转。
+    #[test]
+    fn unknown_tool_is_error_classified() {
+        let call = ToolCall {
+            id: "x".into(),
+            name: "definitely_not_a_tool".into(),
+            arguments: serde_json::json!({}),
+        };
+        let obs = execute_tool_call(&call);
+        assert!(obs.contains("未知工具"), "应指出未知工具:{obs}");
+        assert!(
+            is_error_observation(&obs),
+            "未知工具应被判为 error(喂熔断/失败信号)"
+        );
+        assert!(tool_output_failed(&obs), "未知工具应算失败信号");
     }
 
     /// Durable State 回填:写类工具成功 → 记 modified_files 清 last_error;工具错误 → 置 last_error。
