@@ -1,7 +1,8 @@
-//! RidgeCode 的交互式终端界面。执行图跑在后台 Tokio task，绘制与键盘事件留在前台，
-//! 因而 token 流、工具事件和权限门都不会卡住界面。
+//! RidgeCode 的交互式终端界面 —— **主屏内联 REPL**(iter-26)。
+//! 不再霸占备用屏:历史内容经 `Terminal::insert_before` 静态提交进终端原生 scrollback
+//! (原生滚动/选取/搜索全保留),ratatui 只渲染底部一小块 Live 视口(状态行 + 流式尾巴 + 输入框)。
+//! 执行图跑在后台 Tokio task,token 流、工具事件和权限门都不会卡住界面(iter-23 事件驱动主环)。
 
-use std::collections::VecDeque;
 use std::io;
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
@@ -9,37 +10,46 @@ use std::time::Duration;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
-    Terminal,
+    widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap},
+    Terminal, TerminalOptions, Viewport,
 };
 
 use super::*;
 
 type Term = Terminal<CrosstermBackend<io::Stdout>>;
 
+/// Live 视口总高:状态行 1 + 流式尾巴 ≥5 + 输入框 3..=8。内联模式下 ratatui 只管这块,
+/// 高度恒小于终端 —— 从根上杜绝「动态高度超视口触发全屏清屏」的闪烁根因。
+const LIVE_HEIGHT: u16 = 14;
+
 struct TerminalGuard;
 impl TerminalGuard {
     fn enter() -> anyhow::Result<(Self, Term)> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
         // BPM best-effort(iter-24):旧 Windows conhost 不支持则静默退化为逐字粘贴,绝不阻 TUI 启动。
         let _ = execute!(stdout, event::EnableBracketedPaste);
-        Ok((Self, Terminal::new(CrosstermBackend::new(stdout))?))
+        // 主屏内联视口(iter-26):不进备用屏,终端原生历史/选取/搜索神圣不可侵犯。
+        let term = Terminal::with_options(
+            CrosstermBackend::new(stdout),
+            TerminalOptions {
+                viewport: Viewport::Inline(LIVE_HEIGHT),
+            },
+        )?;
+        Ok((Self, term))
     }
 }
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = execute!(io::stdout(), event::DisableBracketedPaste);
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
     }
 }
 
@@ -71,7 +81,7 @@ fn approval_action(key: KeyCode) -> ApprovalAction {
     }
 }
 
-/// 应用滚动增量到偏移(u16 饱和)。正=向历史回滚(同主输入区 `Up` 语义)。
+/// 应用滚动增量到偏移(u16 饱和)。审批模态看长 diff 用。
 fn apply_scroll(scroll: u16, delta: i16) -> u16 {
     if delta >= 0 {
         scroll.saturating_add(delta as u16)
@@ -80,13 +90,12 @@ fn apply_scroll(scroll: u16, delta: i16) -> u16 {
     }
 }
 
-/// 主输入态对一次按键的**纯决策**(续 iter-22 `approval_action` 模式,iter-23):
-/// 副作用(改 input/派任务/中断)由主环按返回值执行,函数本身零副作用、离线可测。
+/// 主输入态对一次按键的**纯决策**(续 iter-22 `approval_action` 模式):副作用由主环执行。
+/// iter-26:内联模式下历史滚动归还终端原生能力,Up/Down 空置(留 iter-27 做历史召回)。
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum InputAction {
     Insert(char),
     Backspace,
-    Scroll(i16),
     Submit,
     Interrupt,
     Ignore,
@@ -102,10 +111,6 @@ fn input_action(key: &KeyEvent, busy: bool) -> InputAction {
     match key.code {
         KeyCode::Char(c) => InputAction::Insert(c),
         KeyCode::Backspace => InputAction::Backspace,
-        KeyCode::Up => InputAction::Scroll(1),
-        KeyCode::Down => InputAction::Scroll(-1),
-        KeyCode::PageUp => InputAction::Scroll(8),
-        KeyCode::PageDown => InputAction::Scroll(-8),
         KeyCode::Enter if !busy => InputAction::Submit,
         _ => InputAction::Ignore,
     }
@@ -116,16 +121,19 @@ fn should_draw(dirty: bool, busy: bool) -> bool {
     dirty || busy
 }
 
-/// 日志环形缓冲上限:超出淘汰最旧行 —— 有界内存,长会话不膨胀(iter-23)。
-const LOG_CAP: usize = 2000;
+/// 折行行数(iter-26 抽取,`input_height`/`commit_height` 共用):按字符数近似显示宽。
+/// ponytail: CJK 宽字符按 1 格计,偏差可容;要精确再引 wcwidth 口径。
+fn wrapped_rows(content: &str, width: u16) -> usize {
+    let w = width.max(1) as usize;
+    content
+        .split('\n')
+        .map(|l| l.chars().count().div_ceil(w).max(1))
+        .sum()
+}
 
-/// 视口尾窗:从 `len` 条日志取「距尾 `scroll` 行处、往上最多 `rows` 行」区间。
-/// 越顶钳在顶端;len < rows 全量。纯函数 O(1) —— 每帧只构建窗口内行,替代全量重建。
-/// ponytail: 逻辑行≈视觉行(超长行折行会溢出截尾);需精确锚底再算折行高度。
-fn tail_window(len: usize, rows: usize, scroll: usize) -> std::ops::Range<usize> {
-    let end = len.saturating_sub(scroll).max(rows.min(len));
-    let start = end.saturating_sub(rows);
-    start..end
+/// 静态提交一段文本需占的终端行数(供 `insert_before`)。
+fn commit_height(text: &str, width: u16) -> u16 {
+    wrapped_rows(text, width).min(u16::MAX as usize).max(1) as u16
 }
 
 /// 粘贴净化(iter-24):CRLF/CR 归一 LF,滤除其余控制字符(留 \n \t),防转义序列注入输入框。
@@ -138,16 +146,42 @@ fn sanitize_paste(s: &str) -> String {
 }
 
 /// 动态输入框高度(iter-24):按内容折行数伸缩,clamp 在 [min,max](计入上下边框 2 行)。
-/// 纯函数,免虚拟终端可测。ponytail: 字符数≈显示宽近似,CJK 宽字符按 1 格计,偏差可容。
 fn input_height(content: &str, width: u16, min: u16, max: u16) -> u16 {
-    let w = width.max(1) as usize;
-    let rows: usize = content
-        .split('\n')
-        .map(|l| l.chars().count().div_ceil(w).max(1))
-        .sum();
-    (rows.min(u16::MAX as usize) as u16)
+    (wrapped_rows(content, width).min(u16::MAX as usize) as u16)
         .saturating_add(2)
         .clamp(min, max)
+}
+
+/// 流式尾巴:Live 视口只显示正在生成文本的最后 `k` 行(前面的行等 Superstep 后整段历史化)。
+fn stream_tail(stream: &str, k: usize) -> Vec<&str> {
+    let lines: Vec<&str> = stream.lines().collect();
+    let start = lines.len().saturating_sub(k);
+    lines[start..].to_vec()
+}
+
+/// TODO 进度 (done, total);空清单 → None(状态行不显)。
+fn todo_progress(todos: &[Todo]) -> Option<(usize, usize)> {
+    if todos.is_empty() {
+        return None;
+    }
+    let done = todos.iter().filter(|t| t.status == "completed").count();
+    Some((done, todos.len()))
+}
+
+/// TODO 清单渲染成静态提交块(变更时整段落进终端历史,取代旧侧边栏面板)。
+fn render_todo_block(todos: &[Todo]) -> String {
+    todos
+        .iter()
+        .map(|t| {
+            let mark = match t.status.as_str() {
+                "completed" => "✓",
+                "in_progress" => "~",
+                _ => " ",
+            };
+            format!("[{mark}] {}", t.content)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 struct TuiApprover {
@@ -170,10 +204,11 @@ impl Approver for TuiApprover {
 #[derive(Default)]
 struct Ui {
     input: String,
-    log: VecDeque<(String, Color)>,
+    /// 待静态提交队列(iter-26):`note` 只入队,主环 drain 经 `insert_before` 写进终端原生历史。
+    /// 队列是瞬态的(每圈清空),无需环形上限 —— 有界性由「提交即出队」保证。
+    commits: Vec<(String, Color)>,
     stream: String,
     todos: Vec<Todo>,
-    tool: String,
     scroll: u16,
     busy: bool,
     phase: String,
@@ -181,40 +216,33 @@ struct Ui {
 }
 impl Ui {
     fn note(&mut self, text: impl Into<String>, color: Color) {
-        self.log.push_back((text.into(), color));
-        if self.log.len() > LOG_CAP {
-            self.log.pop_front(); // 环形淘汰:有界内存
-        }
+        self.commits.push((text.into(), color));
     }
-    /// 只构建视口尾窗内的行(O(rows)/帧),滚动经 `tail_window` 而非 Paragraph 偏移。
-    fn output_lines(&self, rows: usize, scroll: usize) -> Vec<Line<'static>> {
-        let w = tail_window(self.log.len(), rows, scroll);
-        let mut lines: Vec<_> = self
-            .log
-            .iter()
-            .skip(w.start)
-            .take(w.len())
-            .flat_map(|(s, c)| {
-                s.lines().map(move |line| {
-                    Line::from(Span::styled(line.to_owned(), Style::default().fg(*c)))
-                })
-            })
-            .collect();
-        if !self.stream.is_empty() {
-            lines.extend(self.stream.lines().map(|s| {
-                Line::from(Span::styled(
-                    s.to_owned(),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ))
-            }));
-        }
-        lines
+    fn drain_commits(&mut self) -> Vec<(String, Color)> {
+        std::mem::take(&mut self.commits)
     }
 }
 
-/// TUI 是交互入口；只有非 TTY 的自动化管道才会回落到旧文本 REPL。
+/// 把积压的历史行静态提交进终端 scrollback(iter-26 核心):行一经 `insert_before`
+/// 即成原生历史,永不参与后续帧的差分重绘 —— Live 视口恒小,闪烁根因根除。
+fn flush_commits(terminal: &mut Term, ui: &mut Ui) -> io::Result<()> {
+    let width = terminal.size()?.width;
+    for (text, color) in ui.drain_commits() {
+        let h = commit_height(&text, width);
+        terminal.insert_before(h, |buf| {
+            let lines: Vec<Line> = text
+                .lines()
+                .map(|l| Line::from(Span::styled(l.to_owned(), Style::default().fg(color))))
+                .collect();
+            Paragraph::new(Text::from(lines))
+                .wrap(Wrap { trim: false })
+                .render(buf.area, buf);
+        })?;
+    }
+    Ok(())
+}
+
+/// TUI 是交互入口；只有非 TTY 的自动化管道才会回落到 headless。
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run(
     swap: Arc<SwapProvider>,
@@ -251,7 +279,7 @@ pub(super) async fn run(
     let (_guard, mut terminal) = TerminalGuard::enter()?;
     let mut ui = Ui::default();
     ui.note(
-        "RidgeCode  TUI  ·  Enter 发送 · Ctrl-C 中断 · /help 命令",
+        "RidgeCode  ·  内联模式:输出直接落进终端历史(原生滚动/选取)· Enter 发送 · Ctrl-C 中断 · /help",
         Color::Cyan,
     );
     if skip_danger {
@@ -284,21 +312,17 @@ pub(super) async fn run(
     let mut dirty = true;
 
     'main: loop {
+        // 静态提交先于绘制:历史行离开 Live 视口,进终端 scrollback。
+        if !ui.commits.is_empty() {
+            flush_commits(&mut terminal, &mut ui)?;
+            dirty = true;
+        }
         if should_draw(dirty, ui.busy) {
             ui.frame = ui.frame.wrapping_add(1);
-            terminal.draw(|frame| {
-                draw(
-                    frame,
-                    &ui,
-                    &meta,
-                    session_tokens,
-                    session_turns,
-                    pending.as_ref(),
-                )
-            })?;
+            terminal.draw(|frame| draw(frame, &ui, &meta, session_tokens, pending.as_ref()))?;
             dirty = false;
         }
-        // 事件驱动多路复用替代 50ms 固定轮询(iter-23):无事时阻塞挂起,不烧 CPU。
+        // 事件驱动多路复用替代固定轮询(iter-23):无事时阻塞挂起,不烧 CPU。
         tokio::select! {
             biased;
             Some(ev) = key_rx.recv() => {
@@ -346,7 +370,6 @@ pub(super) async fn run(
                     InputAction::Backspace => {
                         ui.input.pop();
                     }
-                    InputAction::Scroll(d) => ui.scroll = apply_scroll(ui.scroll, d),
                     InputAction::Submit => {
                         let input = std::mem::take(&mut ui.input);
                         let input = input.trim().to_owned();
@@ -416,7 +439,14 @@ pub(super) async fn run(
                             ui.note(format_event_plain(m), event_color(m));
                         }
                         printed = state.messages.len();
+                        // TODO 变更 → 清单快照静态提交进历史(取代旧侧边栏面板)。
+                        if render_todo_block(&state.todos) != render_todo_block(&ui.todos)
+                            && !state.todos.is_empty()
+                        {
+                            ui.note(render_todo_block(&state.todos), Color::Cyan);
+                        }
                         ui.todos = state.todos;
+                        // 流式已完段落随 Superstep 消息历史化,Live 只留尾巴。
                         ui.stream.clear();
                         ui.busy = false;
                     }
@@ -425,6 +455,7 @@ pub(super) async fn run(
             }
             Some(request) = approval_rx.recv() => {
                 pending = Some(request);
+                ui.scroll = 0; // 新审批从头看
                 ui.busy = false;
                 dirty = true;
             }
@@ -485,7 +516,7 @@ fn run_command(
 ) -> anyhow::Result<bool> {
     match input {
         "/exit" | "/quit" => return Ok(true),
-        "/help" => ui.note("/exit /reset /compact /cost /tools /model [name] /provider /agent /config [set key value]；@path 引用文件；Ctrl-C 中断；批准弹窗:y/Enter 批准、n/Esc 拒绝、↑↓ 滚动看详情。", Color::Gray),
+        "/help" => ui.note("/exit /reset /compact /cost /tools /model [name] /provider /agent /config [set key value]；@path 引用文件；Ctrl-C 中断；历史滚动/选取用终端原生能力；批准弹窗:y/Enter 批准、n/Esc 拒绝、↑↓ 滚动看详情。", Color::Gray),
         "/tools" => ui.note(format!("可用工具({}): {}", meta.tools.len(), meta.tools.join(", ")), Color::Gray),
         "/reset" => { history.clear(); save_session(&session_path(), history); ui.note("上下文已清空", Color::Yellow); }
         "/compact" => { let n = history.len(); *history = compact_history(std::mem::take(history), 4); ui.note(format!("上下文已压缩: {n} → {} 条", history.len()), Color::Yellow); }
@@ -509,30 +540,33 @@ fn run_command(
     Ok(false)
 }
 
+/// Live 视口绘制(iter-26):状态行 + 流式尾巴 + 输入框;审批模态覆整个视口。
 fn draw(
     frame: &mut ratatui::Frame,
     ui: &Ui,
     meta: &ReplMeta,
     tokens: usize,
-    _turns: usize,
     approval: Option<&ApprovalRequest>,
 ) {
-    // 动态输入高度(iter-24):按内容折行伸缩,3..=8 行(含边框)。
-    let input_rows = input_height(&ui.input, frame.area().width.saturating_sub(2), 3, 8);
+    let area = frame.area();
+    let input_rows = input_height(&ui.input, area.width.saturating_sub(2), 3, 8);
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Min(8),
+            Constraint::Min(1),
             Constraint::Length(input_rows),
         ])
-        .split(frame.area());
+        .split(area);
     let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][ui.frame % 10];
     let status = if ui.busy {
         format!(" {spinner} {}", ui.phase)
     } else {
         " ready".into()
     };
+    let todo = todo_progress(&ui.todos)
+        .map(|(d, n)| format!(" · todo {d}/{n}"))
+        .unwrap_or_default();
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -543,7 +577,7 @@ fn draw(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
-                " {} · {} · {} tokens · {}{}",
+                " {} · {} · {} tokens{todo} · {}{}",
                 meta.provider,
                 meta.model,
                 tokens,
@@ -557,56 +591,20 @@ fn draw(
         .style(Style::default().bg(Color::DarkGray)),
         outer[0],
     );
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-        .split(outer[1]);
-    // 视口虚拟化(iter-23):只构建尾窗内的行,滚动经 tail_window,不再用 Paragraph 偏移。
-    let rows = body[0].height.saturating_sub(2) as usize; // 减上下边框
-    frame.render_widget(
-        Paragraph::new(Text::from(ui.output_lines(rows, ui.scroll as usize)))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" 输出 / 执行流 "),
-            )
-            .wrap(Wrap { trim: false }),
-        body[0],
-    );
-    let side = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .split(body[1]);
-    let todos: Vec<ListItem> = ui
-        .todos
-        .iter()
-        .map(|t| {
-            let mark = match t.status.as_str() {
-                "completed" => "✓",
-                "in_progress" => "~",
-                _ => " ",
-            };
-            ListItem::new(format!("[{mark}] {}", t.content))
+    // 流式尾巴:只画最后 K 行(已完段落随 Superstep 静态提交进历史)。
+    let k = outer[1].height as usize;
+    let tail: Vec<Line> = stream_tail(&ui.stream, k)
+        .into_iter()
+        .map(|s| {
+            Line::from(Span::styled(
+                s.to_owned(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ))
         })
         .collect();
-    frame.render_widget(
-        List::new(todos).block(Block::default().borders(Borders::ALL).title(" TODO ")),
-        side[0],
-    );
-    frame.render_widget(
-        Paragraph::new(if ui.tool.is_empty() {
-            "工具调用与批准详情会显示在这里"
-        } else {
-            &ui.tool
-        })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" 工具 / Diff "),
-        )
-        .wrap(Wrap { trim: true }),
-        side[1],
-    );
+    frame.render_widget(Paragraph::new(Text::from(tail)), outer[1]);
     frame.render_widget(
         Paragraph::new(ui.input.as_str())
             .block(
@@ -618,46 +616,27 @@ fn draw(
         outer[2],
     );
     if let Some(req) = approval {
-        modal(frame, &req.action, &req.detail);
+        // 审批模态覆整个 Live 视口;↑↓ 滚动看长 diff(scroll 接到 Paragraph 偏移)。
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(format!(
+                "⚠ 允许执行 {}？\n\n{}\n\ny/Enter: 批准    n/Esc: 拒绝    ↑↓/PgUp/PgDn: 滚动看详情",
+                req.action, req.detail
+            ))
+            .style(Style::default().fg(Color::Yellow))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" 需要权限 ")
+                    .border_style(Style::default().fg(Color::Yellow)),
+            )
+            .wrap(Wrap { trim: false })
+            .scroll((ui.scroll, 0)),
+            area,
+        );
     }
 }
 
-fn modal(frame: &mut ratatui::Frame, action: &str, detail: &str) {
-    let area = centered_rect(70, 45, frame.area());
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(format!(
-            "⚠ 允许执行 {action}？\n\n{detail}\n\ny/Enter: 批准    n/Esc: 拒绝    ↑↓/PgUp/PgDn: 滚动看详情"
-        ))
-        .style(Style::default().fg(Color::Yellow))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" 需要权限 ")
-                .border_style(Style::default().fg(Color::Yellow)),
-        )
-        .wrap(Wrap { trim: false }),
-        area,
-    );
-}
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let v = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(v[1])[1]
-}
 fn format_event_plain(m: &str) -> String {
     m.strip_prefix("(final) ")
         .map(|x| format!("🤖 {x}"))
@@ -718,7 +697,8 @@ mod tests {
         assert_eq!(apply_scroll(u16::MAX, 8), u16::MAX);
     }
 
-    /// iter-23:主输入态键位路由纯函数 —— busy 时 Enter 不提交,Ctrl-C 恒中断,松键忽略。
+    /// iter-26:主输入键位表 —— 内联模式下 Up/Down/PageUp/PageDown 空置(历史滚动归终端原生;
+    /// 历史召回留 iter-27),busy 时 Enter 不提交,Ctrl-C 恒中断,松键忽略。
     #[test]
     fn input_action_routes_keys() {
         let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
@@ -732,17 +712,24 @@ mod tests {
         );
         assert_eq!(
             input_action(&press(KeyCode::Up), false),
-            InputAction::Scroll(1)
+            InputAction::Ignore
+        );
+        assert_eq!(
+            input_action(&press(KeyCode::Down), false),
+            InputAction::Ignore
+        );
+        assert_eq!(
+            input_action(&press(KeyCode::PageUp), false),
+            InputAction::Ignore
         );
         assert_eq!(
             input_action(&press(KeyCode::PageDown), false),
-            InputAction::Scroll(-8)
+            InputAction::Ignore
         );
         assert_eq!(
             input_action(&press(KeyCode::Enter), false),
             InputAction::Submit
         );
-        // busy 时 Enter 不提交(任务进行中);Ctrl-C 是中断。
         assert_eq!(
             input_action(&press(KeyCode::Enter), true),
             InputAction::Ignore
@@ -754,7 +741,6 @@ mod tests {
             ),
             InputAction::Interrupt
         );
-        // 松键(Release)不触发任何动作。
         assert_eq!(
             input_action(
                 &KeyEvent::new_with_kind(
@@ -776,28 +762,23 @@ mod tests {
         assert!(!should_draw(false, false));
     }
 
-    /// iter-23:视口尾窗 —— 尾部取窗、回滚平移、越顶钳住、不足一屏全量、极值饱和不 panic。
+    /// iter-26:折行行数(input_height/commit_height 共用)。
     #[test]
-    fn tail_window_clamps_and_saturates() {
-        assert_eq!(tail_window(100, 10, 0), 90..100);
-        assert_eq!(tail_window(100, 10, 5), 85..95);
-        assert_eq!(tail_window(100, 10, 95), 0..10);
-        assert_eq!(tail_window(100, 10, usize::MAX), 0..10);
-        assert_eq!(tail_window(5, 10, 0), 0..5);
-        assert_eq!(tail_window(5, 10, 3), 0..5);
-        assert_eq!(tail_window(0, 10, 0), 0..0);
+    fn wrapped_rows_counts_folding() {
+        assert_eq!(wrapped_rows("", 80), 1);
+        assert_eq!(wrapped_rows("hi", 80), 1);
+        assert_eq!(wrapped_rows(&"x".repeat(85), 80), 2);
+        assert_eq!(wrapped_rows("a\nb\nc", 80), 3);
+        assert_eq!(wrapped_rows("abc", 0), 3); // width=0 → 每字符一行,不 panic
     }
 
-    /// iter-23:日志环形缓冲有界,淘汰最旧、留存最新。
+    /// iter-26:静态提交高度 ≥1,折行入账。
     #[test]
-    fn log_ring_buffer_is_bounded_and_keeps_newest() {
-        let mut ui = Ui::default();
-        for i in 0..(LOG_CAP + 5) {
-            ui.note(format!("line {i}"), Color::White);
-        }
-        assert_eq!(ui.log.len(), LOG_CAP);
-        assert_eq!(ui.log.back().unwrap().0, format!("line {}", LOG_CAP + 4));
-        assert_eq!(ui.log.front().unwrap().0, "line 5");
+    fn commit_height_at_least_one_row() {
+        assert_eq!(commit_height("", 80), 1);
+        assert_eq!(commit_height("short", 80), 1);
+        assert_eq!(commit_height(&"x".repeat(85), 80), 2);
+        assert_eq!(commit_height("a\nb", 80), 2);
     }
 
     /// iter-24:粘贴净化 —— CRLF/CR 归一 LF,控制字符滤除,\t 保留。
@@ -814,9 +795,49 @@ mod tests {
     fn input_height_grows_and_clamps() {
         assert_eq!(input_height("", 80, 3, 8), 3);
         assert_eq!(input_height("hi", 80, 3, 8), 3);
-        assert_eq!(input_height(&"x".repeat(85), 80, 3, 8), 4); // 折成 2 行 + 边框
+        assert_eq!(input_height(&"x".repeat(85), 80, 3, 8), 4);
         assert_eq!(input_height("a\nb\nc", 80, 3, 8), 5);
-        assert_eq!(input_height(&"a\n".repeat(30), 80, 3, 8), 8); // 封顶
-        assert_eq!(input_height("abc", 0, 3, 8), 5); // width=0 → 每字符一行,不 panic
+        assert_eq!(input_height(&"a\n".repeat(30), 80, 3, 8), 8);
+        assert_eq!(input_height("abc", 0, 3, 8), 5);
+    }
+
+    /// iter-26:流式尾巴 —— 少于 K 全量,多于 K 取尾。
+    #[test]
+    fn stream_tail_takes_last_k_lines() {
+        assert_eq!(stream_tail("a\nb\nc", 5), vec!["a", "b", "c"]);
+        assert_eq!(stream_tail("a\nb\nc\nd\ne\nf", 3), vec!["d", "e", "f"]);
+        assert!(stream_tail("", 3).is_empty());
+    }
+
+    /// iter-26:静态提交队列 —— note 入队有序,drain 取尽且清空(有界性 = 提交即出队)。
+    #[test]
+    fn commit_queue_drains_in_order() {
+        let mut ui = Ui::default();
+        ui.note("one", Color::White);
+        ui.note("two", Color::Green);
+        let drained = ui.drain_commits();
+        assert_eq!(
+            drained.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(),
+            vec!["one", "two"]
+        );
+        assert!(ui.commits.is_empty());
+    }
+
+    /// iter-26:TODO 进度与清单渲染(状态行计数 + 变更快照历史化)。
+    #[test]
+    fn todo_progress_and_block_render() {
+        assert_eq!(todo_progress(&[]), None);
+        let todos = vec![
+            Todo {
+                content: "a".into(),
+                status: "completed".into(),
+            },
+            Todo {
+                content: "b".into(),
+                status: "in_progress".into(),
+            },
+        ];
+        assert_eq!(todo_progress(&todos), Some((1, 2)));
+        assert_eq!(render_todo_block(&todos), "[✓] a\n[~] b");
     }
 }
