@@ -1245,6 +1245,27 @@ const AUTO_COMPACT_KEEP: usize = 8;
 /// 继续只会烧预算/降智 → 停机(诊断标签,喂 signal 复利)。
 const CONTEXT_ROT_TOKENS: usize = 2 * AUTO_COMPACT_TOKENS;
 
+/// 单条工具观察的字符上限(超则截断)。取值宽,使**仅病态巨型**输出被截,常规输出零影响。
+/// head+tail 各半,合计即上限。
+const OBS_CHAR_CAP: usize = 8000;
+
+/// 上下文卫生(根因):巨型工具观察入 `history` 前**确定性截断**为 head+tail 预览 + 中缝标记 ——
+/// 补 `compact_history`(压多条旧消息)压不掉「单条近消息」的缺口。纯函数、**零丢数据**
+/// (磁盘文件不动,可 `read_file` 区间重取)。截断标记刻意避开 verify/durable 判据词
+/// (error/failed/exit/BLOCKED/permission),免污染成功/失败/错误信号。
+fn bound_observation(obs: String) -> String {
+    let total = obs.chars().count();
+    if total <= OBS_CHAR_CAP {
+        return obs;
+    }
+    const HEAD: usize = OBS_CHAR_CAP / 2;
+    const TAIL: usize = OBS_CHAR_CAP - HEAD;
+    let head: String = obs.chars().take(HEAD).collect();
+    let tail: String = obs.chars().skip(total - TAIL).collect();
+    let dropped = total - HEAD - TAIL;
+    format!("{head}\n\n…[截断 {dropped} 字符;完整内容已存盘,可 read_file 指定区间重取]…\n\n{tail}")
+}
+
 /// 本地 token 估算(不引 tiktoken):CJK 等非 ASCII 字 ≈ 1 token/字,ASCII ≈ 1 token/4 字符。
 /// 口径同仓内 `bin`/`token-count.mjs`。粗但零依赖、确定可测 —— 只用于「要不要压缩」的触发判断。
 fn est_tokens(text: &str) -> usize {
@@ -1818,6 +1839,9 @@ fn build_core(
                     } else {
                         execute_tool_call(call)
                     };
+                    // 上下文卫生(根因):巨型工具输出入 history 前确定性截断(head+tail 预览),
+                    // 止住单条巨输出撑爆上下文;零丢数据,文件可 read_file 区间重取。所有工具路径汇流此接缝。
+                    let obs = bound_observation(obs);
                     // 无进展检测:工具输出与上一轮相同则 stall+1,否则清零。
                     let stall = if s.tool_output.as_deref() == Some(obs.as_str()) {
                         s.stall + 1
@@ -2820,6 +2844,44 @@ mod tests {
             ..Default::default()
         };
         assert!(!must_stop(&ok), "未达连错阈值不应停机");
+    }
+
+    /// 巨型工具输出确定性截断:超上限 → head+tail 预览;不误伤常规输出;保 verify/durable 判据信号。
+    #[test]
+    fn bound_observation_truncates_giant_but_preserves_signals() {
+        // 未超上限 → 原样(逐字节相等)。
+        let small = "短小输出 exit 0: done".to_string();
+        assert_eq!(bound_observation(small.clone()), small);
+
+        // 超上限 → 截断:含 head 片段 + tail 片段 + 截断标记,总长有界。
+        let giant = format!("HEAD_MARK{}TAIL_MARK", "x".repeat(20000));
+        let bounded = bound_observation(giant);
+        let n = bounded.chars().count();
+        assert!(n <= OBS_CHAR_CAP + 60, "截断后应有界,实际 {n}");
+        assert!(bounded.starts_with("HEAD_MARK"), "应保留 head 片段");
+        assert!(bounded.ends_with("TAIL_MARK"), "应保留 tail 片段");
+        assert!(bounded.contains("截断"), "应含截断标记");
+
+        // 截断标记不含判据词 → 不污染 error/失败信号。
+        let plain = bound_observation("平安无事输出".repeat(3000));
+        assert!(
+            !is_error_observation(&plain),
+            "无错巨输出截断后不应被判为错误"
+        );
+        assert!(!tool_output_failed(&plain), "无错巨输出截断后不应判失败");
+
+        // head 保 `exit 0:` 前缀 → 成功信号存活。
+        let okout = bound_observation(format!("exit 0: {}", "y".repeat(20000)));
+        assert!(tool_output_ok(&okout), "截断后 exit 0 成功信号应存活");
+
+        // head 保 `exit 7:` → 失败信号存活。
+        let failout = bound_observation(format!("exit 7: {}", "z".repeat(20000)));
+        assert!(tool_output_failed(&failout), "截断后非零退出失败信号应存活");
+
+        // 相同巨输入 → 截断结果相同(stall 检测不被破坏)。
+        let a = bound_observation("同样的巨输出".repeat(3000));
+        let b = bound_observation("同样的巨输出".repeat(3000));
+        assert_eq!(a, b, "确定性:相同输入截断结果一致");
     }
 
     /// 标准存储库:一轮任务落成独立 run 目录,含 manifest.json(结构化结论)+ trace.json(完整轨迹)。

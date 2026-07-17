@@ -25,5 +25,10 @@ NotebookLM 驱动的迭代循环产出物都放这里。命名规范:
 | 11 | `CONTRACT-iteration-11.md`(6/6 全完成) | `2026-07-15-iteration-11.md`(Claude Code UX 全套达成) | `2026-07-15-notebooklm-guidance-11.md` |
 | 12 | `CONTRACT-iteration-12.md`(发布打磨) | (进行中:--help/--version+样例✅) | (含于 guidance-11) |
 | 13 | `CONTRACT-iteration-14.md`(下轮:约束守卫) | `2026-07-17-iteration-13.md`(标准存储库+停机原因) | `2026-07-17-notebooklm-guidance-13.md` |
+| 15 | `CONTRACT-iteration-16-signals.md`(下轮:signals) | `2026-07-17-iteration-15-hardening.md`(补硬伤+扬长研判) | (含于 iteration-15) |
+| 16 | `CONTRACT-iteration-16-signals.md`(✅已交付) | (信号复利闭环,见 LOG iter-16) | — |
+| 17 | — | (三者皆做,见 LOG iter-17) | — |
+| 18 | `CONTRACT-iteration-14.md`(✅全交付) | `2026-07-17-iteration-18.md`(护栏套件收尾) | `2026-07-17-notebooklm-guidance-18.md` |
+| 19 | `CONTRACT-iteration-19.md`(✅已交付) | (巨型输出截断,见 LOG iter-19) | (含于 guidance-18) |
 
 > 注:另有并行子轨「token 节约之路」(token-iter-1~4 + VISION-COMPLETE)与「轻量安全护栏」(iter-5 jail / iter-6 read-only),文件名带对应后缀,未并入上表主线编号。

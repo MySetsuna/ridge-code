@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-07-17 · iter-19:巨型工具输出确定性截断(context_rot 根因修法)
+
+- **依据**:iter-18 报告上传 NotebookLM(52 源)取指导 + **对抗评审**。NLM 荐「截断代理」→ 采纳其**确定性内核版**为 P0(证据最硬:claw-tsaver 实测 11507→104 token 省 99.1%;context_rot 根因;契合 token 北极星)。
+- **做了什么**:`bound_observation(obs)->String` 纯函数(`OBS_CHAR_CAP=8000`,head 4000+tail 4000+中缝截断标记),接进 act 循环 `obs` 定稿处(read_file/search/run_shell/MCP/web 所有工具路径**单一汇流接缝**)。巨型观察入 history 前即时截断,补 `compact_history`(压多条旧消息)压不掉「单条近消息」的缺口。**零丢数据**:磁盘文件不动,可 `read_file` 区间重取;截断标记用 CJK 措辞刻意避开 `error/failed/exit/BLOCKED/permission` 判据词,免污染 verify/durable 信号。
+- **验收**:`cargo test --workspace`=全绿(agent lib 62→**63**,+1:验有界/保 head-tail 片段/`exit 0` 成功与 `exit 7` 失败信号截断后存活/无错巨输出不误判/确定性一致),clippy `-D warnings`、fmt 净。
+- **对抗评审 / 驳回**:①**驳回** NLM 的 P0「Saga 自动回滚」—— 分布式多 agent 生产语境([来源 Databricks/MLflow])错套单用户本地 CLI;自动 `git checkout .` 毁用户未提交改动 + 失败现场(违 preserve-mistakes);重造 git;合理内核(记录改动文件)已由 durable state/manifest 实现。②**确认** NLM「内容级语义检测=过度设计」(独立佐证 iter-18 YAGNI:改断言属奖励黑客,应由独立 checker 跑真测拦)。③**推迟**自动 signal 抽取器(需 LLM 摘要 pass,内容难单测;「自动改写 harness」维持 iter-15 驳回)、WASM/真沙箱(重量级+违单二进制+WASM 跑不了原生 shell,归 MCP)、可配保护路径(小优化,除非顺带)。
+- **成果**:内核对上下文膨胀成**三层确定性防御**(即时截断→累积压缩→终态腐烂标签)。token 北极星在巨输出/长任务下更稳。
+- **下一步**(俟用户):自动 signal 抽取器(复利环产者的发现/待办侧,需 LLM pass);或据新证据再研判。
+
 ## 2026-07-17 · iter-18:护栏套件收尾(编辑臂守卫 + ContextRot + CircuitBroken)
 
 - **触发**:用户「继续做遗留工作」。清 CONTRACT-14 残留 P1 + 闭合 iter-17 诚实边界。
