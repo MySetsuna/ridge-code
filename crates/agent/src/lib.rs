@@ -36,8 +36,11 @@ pub use rich_output::{
     Color, Formatter, MediaDisplay, MediaInfo, MediaType, RichOutput, TableDisplay,
 };
 
-/// 到达此回合数强制收尾 —— 成本 / 防死循环护栏。
-pub const MAX_STEPS: usize = 8;
+/// 回合硬上限 —— **防跑飞的后备护栏**,非正常终止手段。真正的停机主力是:`approved`(目标达成)、
+/// 预算熔断(`budget_tokens`)、无进展检测(`stalled`)。旧值 8 过低,真实多文件任务动辄十数次工具调用即被腰斩;
+/// 提到 30(≈60 超步,稳在引擎默认 100 超步之下,无需动引擎/RunConfig)。要更长任务:设 `budget_tokens` 控成本、
+/// 或后续把本上限做成可配 + 按其派生引擎超步上限(见 CONTRACT-iteration-15)。
+pub const MAX_STEPS: usize = 30;
 
 /// 一条任务清单项(像 Claude Code 的 TodoWrite):`status` ∈ `pending` / `in_progress` / `completed`。
 #[derive(Clone, Debug, PartialEq)]
@@ -75,6 +78,9 @@ pub struct AgentState {
     /// **Durable State**:上一次工具调用的核心错误摘要(去噪后首行)。事实块据它「重锚定」模型注意力,
     /// 免其在被压缩的模糊历史里遗忘卡在哪。成功时清空。
     pub last_error: Option<String>,
+    /// **信号复利**:run 启动时从 `.ridge/signals` 载入的「继承信号」有界注入块(上个会话留下的未决发现/
+    /// 摩擦/待办)。run 中不变,由 CLI 在建 state 时经 [`load_signal_block`] 注入;无则 `None`。
+    pub signal_block: Option<String>,
 }
 
 impl AgentState {
@@ -96,6 +102,12 @@ impl AgentState {
     /// 用已有对话历史续跑(REPL 多轮携带上下文)。
     pub fn with_history(mut self, history: Vec<Message>) -> Self {
         self.history = history;
+        self
+    }
+
+    /// 注入继承信号块(信号复利:上个会话的未决发现)。CLI 建 state 时调 [`load_signal_block`] 取之。
+    pub fn with_signals(mut self, block: Option<String>) -> Self {
+        self.signal_block = block;
         self
     }
 }
@@ -173,7 +185,7 @@ impl Approver for AutoDeny {
 fn needs_approval(tool: &str) -> bool {
     !matches!(
         tool,
-        "read_file" | "search" | "web_search" | "fetch_url" | "todo_write"
+        "read_file" | "search" | "web_search" | "fetch_url" | "todo_write" | "signal_write"
     )
 }
 
@@ -462,8 +474,8 @@ pub struct Agents {
 /// sub-agent 允许的**只读**工具(不下放写/改/shell,免绕过主 agent 的权限门)。
 const READONLY_TOOLS: &[&str] = &["read_file", "search"];
 
-/// sub-agent 步数上限(只读检索,不需要很多轮)。
-const SUBAGENT_MAX_STEPS: usize = 8;
+/// sub-agent 步数上限(只读检索)。旧值 8 对真实仓库的多文件侦察偏紧;提到 15 仍有界、恒只读故低风险。
+const SUBAGENT_MAX_STEPS: usize = 15;
 
 /// 按白名单裁出 sub-agent 可用的只读工具 spec。`allow=None` → 全部只读工具。
 fn readonly_tool_specs(allow: &Option<Vec<String>>) -> Vec<ToolSpec> {
@@ -731,8 +743,11 @@ fn stalled(s: &AgentState) -> bool {
 }
 
 /// 确定性**成功**信号(编码任务:shell `exit 0` 或测试 `passed`)。
+/// shell 成功恒以 harness 产出的前缀 `"exit 0:"` 打头 —— 用 `starts_with` 而非 `contains`:
+/// ①修正确性 bug(失败命令 `exit 7: ...` 正文若含 "exit 0" 文本会被 `contains` 误判成功);
+/// ②堵奖励黑客(模型无法伪造位于**行首**的退出码前缀)。
 fn tool_output_ok(o: &str) -> bool {
-    o.contains("exit 0") || (o.contains("passed") && !o.contains("failed"))
+    o.starts_with("exit 0:") || (o.contains("passed") && !o.contains("failed"))
 }
 
 /// 确定性**失败**信号(编译/测试出错、非 0 退出、被拦截/拒绝)。
@@ -938,6 +953,11 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
             description: "维护任务清单:把计划拆成若干 {content, status}。**多步/复杂任务**开始时列清单、每完成一步更新其状态给用户看进度;简单单步不必用".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"todos":{"type":"array","items":{"type":"object","properties":{"content":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]}},"required":["content","status"]}}},"required":["todos"]}),
         },
+        ToolSpec {
+            name: "signal_write".to_string(),
+            description: "记录/消解**跨会话复用**的信号(发现/摩擦/待办)。记:给 type+body;消解已处理的:给 resolve=<id>。下个会话自动继承未决信号".to_string(),
+            schema: serde_json::json!({"type":"object","properties":{"type":{"type":"string"},"body":{"type":"string"},"resolve":{"type":"string"}}}),
+        },
     ]
 }
 
@@ -1124,6 +1144,29 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
         }
         // 状态更新在 act 节点(发 SetTodos patch);这里只回个观察摘要。
         "todo_write" => format!("已更新任务清单:{} 项", parse_todos(call).len()),
+        "signal_write" => {
+            let resolve = arg("resolve");
+            if !resolve.is_empty() {
+                return match signal_resolve(SIGNALS_DIR, resolve) {
+                    Ok(true) => format!("signal resolved: {resolve}"),
+                    Ok(false) => format!("signal 未找到: {resolve}"),
+                    Err(e) => format!("signal error: {e}"),
+                };
+            }
+            let body = arg("body");
+            if body.is_empty() {
+                return "signal error: 缺少 body".to_string();
+            }
+            let kind = if arg("type").is_empty() {
+                "note"
+            } else {
+                arg("type")
+            };
+            match signal_create(SIGNALS_DIR, kind, body, "manual") {
+                Ok(id) => format!("signal recorded: {id}"),
+                Err(e) => format!("signal error: {e}"),
+            }
+        }
         other => format!("unknown tool `{other}`"),
     }
 }
@@ -1163,6 +1206,10 @@ fn to_messages(system: &str, s: &AgentState) -> Vec<Message> {
     };
     let mut msgs = vec![Message::new(Role::System, system)];
     msgs.extend(history);
+    // 继承信号块(信号复利:上个会话的未决发现),放末尾同 Durable State,有界、仅在有信号时注入。
+    if let Some(block) = &s.signal_block {
+        msgs.push(Message::new(Role::System, block.clone()));
+    }
     // Durable State 事实块放**末尾**(不进冻结的 system prompt):保首部前缀稳定利 Claude 缓存,
     // 又把模型注意力「重锚定」到当前客观事实。仅在有事实时注入,免空噪。
     if let Some(block) = durable_state_block(s) {
@@ -1187,6 +1234,178 @@ fn durable_state_block(s: &AgentState) -> Option<String> {
     }
     b.push_str("</durable_state>");
     Some(b)
+}
+
+// ───────────────────────── 信号复利(多 loop 共享大脑)─────────────────────────
+// 「标准存储库」不止审计留痕:一个会话探测到的事实(发现/摩擦/待办)落成结构化 signal,
+// 下个会话**自动继承**之 —— 解 agent「每会话冷启动、重新学项目」的根本损耗。这是把 agent
+// 从孤立脚本升为跨会话复利系统的心脏(证据研判 iter-15:单二进制单用户下证据最硬的差异化长板)。
+
+/// 信号复利:跨会话共享的知识层落盘目录(**项目级**,cwd 本地,像 `.ridge/runs`)。
+const SIGNALS_DIR: &str = ".ridge/signals";
+/// 注入上下文的信号块**硬字符上限** —— 有界,防复利知识膨胀反噬 token 节约成果。
+const SIGNALS_BLOCK_MAX: usize = 1200;
+
+/// 一条可跨会话复用的**信号**(发现 / 摩擦点 / 待办)。落盘为带 frontmatter 的 markdown。
+#[derive(Clone, Debug, PartialEq)]
+pub struct Signal {
+    pub id: String,
+    pub kind: String,   // frontmatter 里的 `type`(避 Rust 关键字)
+    pub status: String, // open / resolved
+    pub source: String, // 产它的 run id 或 "manual"
+    pub body: String,
+}
+
+/// slug 化:留字母数字、小写、其余转 `-`,截 24 字 —— 拼进文件名/id,须文件系统安全。
+fn slugify(s: &str) -> String {
+    let out: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let t = out.trim_matches('-');
+    if t.is_empty() {
+        "signal".to_string()
+    } else {
+        t.chars().take(24).collect()
+    }
+}
+
+/// 信号 id = `<slug(kind)>-<内容哈希>`。用 `DefaultHasher`(固定 key、确定性、无时间戳):
+/// **同内容 → 同 id** → 天然幂等去重(重复记同一发现不产重复文件),且离线可测。
+fn signal_id(kind: &str, body: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    kind.hash(&mut h);
+    body.hash(&mut h);
+    format!("{}-{:08x}", slugify(kind), h.finish() as u32)
+}
+
+fn render_signal(sig: &Signal) -> String {
+    format!(
+        "---\nid: {}\ntype: {}\nstatus: {}\nsource: {}\n---\n{}\n",
+        sig.id,
+        sig.kind,
+        sig.status,
+        sig.source,
+        sig.body.trim()
+    )
+}
+
+/// 解析一份 signal markdown(frontmatter + 正文);缺 id / 格式坏 → `None`。
+fn parse_signal(text: &str) -> Option<Signal> {
+    let rest = text.strip_prefix("---\n")?;
+    let (front, body) = rest.split_once("\n---\n")?;
+    let (mut id, mut kind, mut status, mut source) =
+        (String::new(), String::new(), String::new(), String::new());
+    for line in front.lines() {
+        if let Some((k, v)) = line.split_once(':') {
+            let v = v.trim().to_string();
+            match k.trim() {
+                "id" => id = v,
+                "type" => kind = v,
+                "status" => status = v,
+                "source" => source = v,
+                _ => {}
+            }
+        }
+    }
+    if id.is_empty() {
+        return None;
+    }
+    if status.is_empty() {
+        status = "open".to_string();
+    }
+    Some(Signal {
+        id,
+        kind,
+        status,
+        source,
+        body: body.trim().to_string(),
+    })
+}
+
+/// **产者**:把一条 `open` 信号落盘 `dir/<id>.md`(同内容 id 相同 → 幂等去重)。返回 id。
+pub fn signal_create(
+    dir: impl AsRef<std::path::Path>,
+    kind: &str,
+    body: &str,
+    source: &str,
+) -> std::io::Result<String> {
+    let dir = dir.as_ref();
+    std::fs::create_dir_all(dir)?;
+    let id = signal_id(kind, body);
+    let sig = Signal {
+        id: id.clone(),
+        kind: kind.to_string(),
+        status: "open".to_string(),
+        source: source.to_string(),
+        body: body.to_string(),
+    };
+    std::fs::write(dir.join(format!("{id}.md")), render_signal(&sig))?;
+    Ok(id)
+}
+
+/// **消解**:把 `dir` 里 id 匹配的信号 status 改 `resolved`(闭环,免下轮重复消费)。找不到 → `Ok(false)`。
+pub fn signal_resolve(dir: impl AsRef<std::path::Path>, id: &str) -> std::io::Result<bool> {
+    let path = dir.as_ref().join(format!("{id}.md"));
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(false);
+    };
+    let Some(mut sig) = parse_signal(&text) else {
+        return Ok(false);
+    };
+    if sig.status != "resolved" {
+        sig.status = "resolved".to_string();
+        std::fs::write(&path, render_signal(&sig))?;
+    }
+    Ok(true)
+}
+
+/// **消费者**:读 `dir` 下全部 signal,取 `status=open`,按 id 排序(有序稳态、利缓存/确定性)。
+pub fn load_open_signals(dir: impl AsRef<std::path::Path>) -> Vec<Signal> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Signal> = rd
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .filter_map(|t| parse_signal(&t))
+        .filter(|s| s.status == "open")
+        .collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// 把 open 信号编成**有界**注入块(超 [`SIGNALS_BLOCK_MAX`] 截断,防复利知识膨胀)。无 → `None`。
+fn signals_block(sigs: &[Signal]) -> Option<String> {
+    if sigs.is_empty() {
+        return None;
+    }
+    let mut b = String::from(
+        "<inherited_signals>\n上个会话留下的未决信号;处理完请调 signal_write(resolve=<id>)消解:\n",
+    );
+    for s in sigs {
+        let line = format!("- [{}] ({}) {}\n", s.id, s.kind, s.body.replace('\n', " "));
+        if b.len() + line.len() > SIGNALS_BLOCK_MAX {
+            b.push_str("- …(更多信号已省略)\n");
+            break;
+        }
+        b.push_str(&line);
+    }
+    b.push_str("</inherited_signals>");
+    Some(b)
+}
+
+/// 供 CLI 在建 `AgentState` 前调用:读项目级 `.ridge/signals` 的 open 信号 → 有界注入块。
+pub fn load_signal_block() -> Option<String> {
+    signals_block(&load_open_signals(SIGNALS_DIR))
 }
 
 /// 已连好的 MCP 工具:暴露给 LLM 的 [`ToolSpec`] + 「命名空间名 → (客户端, 原始工具名)」路由表。
@@ -1647,6 +1866,70 @@ pub fn compact_history(history: Vec<Message>, keep: usize) -> Vec<Message> {
     out
 }
 
+/// 一轮任务的**停机原因**(loop engineering:让「为什么停」成为机器可判的确定性信号,
+/// 而非只知道停了)。`Approved`=确定性验证通过(成功);其余三种是护栏熔断(**响亮失败**):
+/// `Budget` 超 token 预算、`Stall` 连续无进展、`StepCap` 到硬回合上限;`Unverified`=模型收尾但未获通过。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HaltReason {
+    Approved,
+    Budget,
+    Stall,
+    StepCap,
+    Unverified,
+}
+
+impl HaltReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HaltReason::Approved => "approved",
+            HaltReason::Budget => "budget_exceeded",
+            HaltReason::Stall => "no_progress",
+            HaltReason::StepCap => "step_cap",
+            HaltReason::Unverified => "unverified",
+        }
+    }
+    /// 成功(确定性验证通过)才 true;三种熔断与未验证都是失败,供调用方给非零退出码。
+    pub fn is_success(self) -> bool {
+        matches!(self, HaltReason::Approved)
+    }
+}
+
+/// 据终态判定停机原因。优先级:成功 > 超预算(经济护栏最该被看见)> 无进展 > 回合上限 > 未验证。
+pub fn halt_reason(s: &AgentState) -> HaltReason {
+    if s.approved {
+        HaltReason::Approved
+    } else if over_budget(s) {
+        HaltReason::Budget
+    } else if stalled(s) {
+        HaltReason::Stall
+    } else if s.steps >= MAX_STEPS {
+        HaltReason::StepCap
+    } else {
+        HaltReason::Unverified
+    }
+}
+
+/// 把一轮任务落成**标准存储库**的一条 run:`<run_dir>/manifest.json`(结构化结论:任务/是否通过/
+/// 停机原因/步数/token)+ `trace.json`(完整审计轨迹)。相比旧的「cwd 平铺 trace.json 每轮覆盖」,
+/// 每 run 独立目录 → 审计历史不再互相冲掉,是 loop engineering 里跨 run 复利的物理底座。
+///
+/// ponytail: 只落 manifest+trace 这两样**真正被产出**的东西。跨 loop 复利单元 signal 已落地(iter-16),
+/// 但存**项目级** `.ridge/signals`(跨 run 共享 → 才复利),非 run 级子目录;溯源靠 signal 的 `source` 字段回指本 run。
+pub fn write_run(out: &AgentState, run_dir: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+    let dir = run_dir.as_ref();
+    std::fs::create_dir_all(dir)?;
+    let manifest = serde_json::json!({
+        "task": out.task,
+        "approved": out.approved,
+        "halt_reason": halt_reason(out).as_str(),
+        "steps": out.steps,
+        "tokens": out.total_tokens,
+    });
+    let json = serde_json::to_string_pretty(&manifest).map_err(std::io::Error::other)?;
+    std::fs::write(dir.join("manifest.json"), json)?;
+    write_trace(out, dir.join("trace.json"))
+}
+
 /// 写一轮的审计轨迹到 `trace.json`(DoD⑥:客观证据,含工具输出/退出码 + 多轮 history)。密钥不入 trace。
 pub fn write_trace(out: &AgentState, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
     let record = serde_json::json!({
@@ -1810,6 +2093,22 @@ mod tests {
 
         assert!(!out.approved, "must not fake success");
         assert_eq!(out.steps, MAX_STEPS, "hard cap stops the runaway loop");
+    }
+
+    /// 验证器抗奖励黑客:成功信号是**行首前缀** `exit 0:`,而非任意位置的 "exit 0" 子串。
+    /// 失败命令(`exit 7:`)正文即便含 "exit 0" 文本,也不得被判成功;真实 `exit 0:` 成功仍认。
+    #[test]
+    fn tool_output_ok_requires_exit0_prefix_not_substring() {
+        assert!(
+            tool_output_ok("exit 0: build ok"),
+            "真实 exit 0 前缀应算成功"
+        );
+        assert!(
+            !tool_output_ok("exit 7: build failed, expected exit 0 but got 7"),
+            "失败命令正文含 'exit 0' 文本不得被误判成功(堵奖励黑客/修正确性 bug)"
+        );
+        assert!(tool_output_ok("tests: passed"), "结构化 passed 标记仍认");
+        assert!(!tool_output_ok("tests: 1 failed"), "failed 不算成功");
     }
 
     /// P0 物理闭环:shell 工具把真实退出码带回来(0 vs 非 0),不再是脚本假信号。
@@ -2281,6 +2580,160 @@ mod tests {
             out.steps < MAX_STEPS,
             "no-progress熔断应早于回合上限: steps={}",
             out.steps
+        );
+    }
+
+    /// 停机原因分类:据终态确定性判定,优先级 成功 > 预算 > 无进展 > 回合上限 > 未验证。
+    #[test]
+    fn halt_reason_classifies_each_outcome() {
+        let approved = AgentState {
+            approved: true,
+            ..Default::default()
+        };
+        assert_eq!(halt_reason(&approved), HaltReason::Approved);
+        assert!(halt_reason(&approved).is_success());
+
+        let budget = AgentState {
+            budget_tokens: 100,
+            total_tokens: 100,
+            ..Default::default()
+        };
+        assert_eq!(halt_reason(&budget), HaltReason::Budget);
+
+        let stall = AgentState {
+            stall: MAX_STALL,
+            ..Default::default()
+        };
+        assert_eq!(halt_reason(&stall), HaltReason::Stall);
+
+        let cap = AgentState {
+            steps: MAX_STEPS,
+            ..Default::default()
+        };
+        assert_eq!(halt_reason(&cap), HaltReason::StepCap);
+
+        // 熔断都非成功 → 调用方据此给非零退出码。
+        for r in [
+            HaltReason::Budget,
+            HaltReason::Stall,
+            HaltReason::StepCap,
+            HaltReason::Unverified,
+        ] {
+            assert!(!r.is_success(), "{} 不应算成功", r.as_str());
+        }
+    }
+
+    /// 标准存储库:一轮任务落成独立 run 目录,含 manifest.json(结构化结论)+ trace.json(完整轨迹)。
+    #[test]
+    fn write_run_creates_per_run_dir_with_manifest_and_trace() {
+        let dir = std::env::temp_dir().join("ridge_write_run_test_1");
+        let _ = std::fs::remove_dir_all(&dir); // 清上一次残留,保证干净
+        let state = AgentState {
+            task: "查天气".into(),
+            steps: MAX_STEPS, // 未通过 + 到回合上限 → halt_reason=step_cap
+            total_tokens: 42,
+            ..Default::default()
+        };
+        write_run(&state, &dir).unwrap();
+
+        let manifest = dir.join("manifest.json");
+        let trace = dir.join("trace.json");
+        assert!(manifest.exists(), "manifest.json 应物理生成");
+        assert!(trace.exists(), "trace.json 应物理生成");
+
+        let m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+        assert_eq!(m["task"], "查天气");
+        assert_eq!(m["approved"], false);
+        assert_eq!(m["halt_reason"], "step_cap");
+        assert_eq!(m["steps"], MAX_STEPS);
+        assert_eq!(m["tokens"], 42);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 信号复利·产→消:产者落盘 open 信号,消费者读回;同内容 id 相同(幂等去重)。
+    #[test]
+    fn signal_create_then_load_open_roundtrips() {
+        let dir = std::env::temp_dir().join("ridge_signal_test_load");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let id = signal_create(&dir, "friction", "构建慢:cold build 90s", "run-1").unwrap();
+        // 幂等:同 type+body 再产一次 → 同 id、不产重复文件。
+        let id2 = signal_create(&dir, "friction", "构建慢:cold build 90s", "run-2").unwrap();
+        assert_eq!(id, id2, "同内容应得同 id(内容哈希幂等去重)");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "幂等:只该有一个文件"
+        );
+
+        let open = load_open_signals(&dir);
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id, id);
+        assert_eq!(open[0].kind, "friction");
+        assert_eq!(open[0].status, "open");
+        assert!(open[0].body.contains("cold build 90s"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 信号复利·消解闭环:resolve 翻 status → 不再被消费者扫入(免下轮重复消费)。
+    #[test]
+    fn signal_resolve_removes_from_open() {
+        let dir = std::env::temp_dir().join("ridge_signal_test_resolve");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let id = signal_create(&dir, "todo", "补 X 的单测", "run-1").unwrap();
+        assert_eq!(load_open_signals(&dir).len(), 1);
+
+        assert!(signal_resolve(&dir, &id).unwrap(), "应找到并消解");
+        assert!(load_open_signals(&dir).is_empty(), "resolved 不该再被消费");
+        assert!(
+            !signal_resolve(&dir, "nonexistent-00000000").unwrap(),
+            "不存在的 id → false"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 信号注入块**有界**:再多再长信号,块字符数不超硬上限;空信号 → None(不注入)。
+    #[test]
+    fn signals_block_is_bounded_and_none_when_empty() {
+        assert!(signals_block(&[]).is_none(), "无信号不注入");
+
+        let many: Vec<Signal> = (0..200)
+            .map(|i| Signal {
+                id: format!("sig-{i:08x}"),
+                kind: "note".to_string(),
+                status: "open".to_string(),
+                source: "run-x".to_string(),
+                body: format!("一条相当长的信号正文用于撑爆上限 {i} ").repeat(4),
+            })
+            .collect();
+        let block = signals_block(&many).unwrap();
+        assert!(
+            block.len() <= SIGNALS_BLOCK_MAX + 64,
+            "注入块须有界,得 {} 字节",
+            block.len()
+        );
+        assert!(block.contains("…(更多信号已省略)"), "超限应截断并标注");
+    }
+
+    /// 消费者接线:state 带 signal_block → to_messages 把它作为 system 消息注入(末尾)。
+    #[test]
+    fn to_messages_injects_inherited_signal_block() {
+        let state = AgentState {
+            signal_block: Some(
+                "<inherited_signals>\n- [x] (todo) 干这个\n</inherited_signals>".into(),
+            ),
+            ..Default::default()
+        };
+        let msgs = to_messages("base system", &state);
+        assert!(
+            msgs.iter()
+                .any(|m| m.role == Role::System && m.content.contains("inherited_signals")),
+            "继承信号块应作为 system 消息注入"
         );
     }
 

@@ -293,7 +293,8 @@ pub(super) async fn run(
                 history.push(Message::user(expand_mentions(&input)));
                 let state = AgentState::new(&input)
                     .with_history(history.clone())
-                    .with_budget(budget);
+                    .with_budget(budget)
+                    .with_signals(agent::load_signal_block());
                 let app = app.clone();
                 let bus = bus.clone();
                 let tx = event_tx.clone();

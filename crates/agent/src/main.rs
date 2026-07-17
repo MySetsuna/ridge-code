@@ -3,8 +3,9 @@ use std::sync::Arc;
 
 use agent::{
     build_agent, build_llm_agent_full, builtin_tool_specs, compact_history, default_tool,
-    expand_mentions, load_skills, null_token_bus, render_todos, resolve_mcp, scripted, write_trace,
-    AgentState, Approver, AutoApprove, Color, Config, McpTools, RichOutput, Skill, Todo, TokenBus,
+    expand_mentions, halt_reason, load_signal_block, load_skills, null_token_bus, render_todos,
+    resolve_mcp, scripted, write_run, AgentState, Approver, AutoApprove, Color, Config, McpTools,
+    RichOutput, Skill, Todo, TokenBus,
 };
 use langgraph::{CompiledGraph, RunConfig, StreamEvent};
 use mcp::{McpClient, StdioTransport};
@@ -392,8 +393,10 @@ async fn run_once(
         agents,
         read_only,
     )?;
-    // `@path` 引用 → 注入文件正文(一次性任务也支持)。
-    let state = AgentState::new(expand_mentions(task)).with_budget(budget);
+    // `@path` 引用 → 注入文件正文(一次性任务也支持)。继承上个会话的未决信号(信号复利)。
+    let state = AgentState::new(expand_mentions(task))
+        .with_budget(budget)
+        .with_signals(load_signal_block());
     let out = run_streamed(&app, state, &bus).await?;
     trace_and_report(&out);
     Ok(())
@@ -431,7 +434,8 @@ async fn headless(
         history.push(Message::user(expand_mentions(input)));
         let state = AgentState::new(input)
             .with_history(history.clone())
-            .with_budget(budget);
+            .with_budget(budget)
+            .with_signals(load_signal_block());
         match run_streamed(&app, state, &bus).await {
             Ok(out) => {
                 history = out.history.clone();
@@ -444,13 +448,32 @@ async fn headless(
     Ok(())
 }
 
-/// 写审计轨迹 trace.json(best-effort)+ 打印结果。
+/// 把一轮落成标准存储库的一条 run(`.ridge/runs/<id>/` 含 manifest.json + trace.json,best-effort)
+/// + 打印结果 + 播报停机原因。每 run 独立目录,审计历史不再互相覆盖。
 fn trace_and_report(out: &AgentState) {
-    match write_trace(out, "trace.json") {
-        Ok(()) => eprintln!("[ridgecode] 审计轨迹已写 trace.json"),
-        Err(e) => eprintln!("[ridgecode] 写 trace.json 失败: {e}"),
+    let run_dir = run_artifacts_dir();
+    match write_run(out, &run_dir) {
+        Ok(()) => eprintln!("[ridgecode] 运行留痕已写 {}", run_dir.display()),
+        Err(e) => eprintln!("[ridgecode] 写运行留痕失败: {e}"),
+    }
+    let reason = halt_reason(out);
+    if !reason.is_success() {
+        // 响亮失败:护栏熔断/未验证时明确播报,别让「悄悄停」被当成成功(loop engineering:fail loudly)。
+        eprintln!("[ridgecode] 停机原因:{}(未通过确定性验证)", reason.as_str());
     }
     print_report(out);
+}
+
+/// 本次 run 的留痕目录:`.ridge/runs/<纳秒时间戳>`(cwd 本地,像 `.git` 随项目走)。
+/// ponytail: 纳秒时间戳做 id,顺序 CLI 调用间实际不会撞;要严格唯一再引 uuid。
+fn run_artifacts_dir() -> std::path::PathBuf {
+    let id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    std::path::Path::new(".ridge")
+        .join("runs")
+        .join(id.to_string())
 }
 
 /// 跑 agent 并**实时把内容渲染到终端**:等待时转 spinner,每个超步一合并就把新产生的

@@ -4,6 +4,32 @@
 
 ---
 
+## 2026-07-17 · iter-16:信号复利闭环(扬长优选 C 落地)
+
+- **依据**:iter-15 证据研判 —— C 多 loop 共享大脑(signals 复利)= 单二进制单用户下证据最硬的差异化长板。用户拍板「开工造 C」。
+- **做了什么**(产→消→解全闭环,建于 iter-13 标准存储库之上):①**产者** 内置工具 `signal_write`(记 type+body / 消解 resolve=<id>)→ 落 `.ridge/signals/<id>.md`(frontmatter:id/type/status/source/body)。**id = slug(type)+内容哈希**(`DefaultHasher` 固定 key,同内容同 id → **幂等去重**、无时间戳利测)。②**消费者** `load_signal_block`:run 启动扫 `.ridge/signals` 取 `status=open`,编**有界**块(`SIGNALS_BLOCK_MAX=1200` 超则截断,防复利知识膨胀反噬 token 节约),经 `to_messages` 注入(比照 `durable_state_block` 接缝,末尾 role=system);CLI 三入口(run_once/headless/tui)建 state 时经 `with_signals` 注入。③**消解** `signal_resolve` 翻 status,免下轮重复消费。
+- **安全归属**:signal 属知识层 bookkeeping(如 `todo_write`)→ 免审批、**只读模式仍许**(triage 只读也要写发现,合 DIRECTION「从 Triage 开始」);写 `.ridge/` cwd 本地,合 jail 边界;密钥不入。
+- **验收**:`cargo test --workspace`=全绿(agent 54→**58**,+4:产消 roundtrip+幂等去重、消解闭环、注入块有界、to_messages 注入),clippy/fmt 净。`.gitignore` 加 `/.ridge/`(运行时产物不入库)。
+- **押后(证据)**:A 时间旅行/分支(token 税炫技,有余力再做)、B 自改进 harness(单用户样本不足=炒作)。run 级 `signals/` 子目录不建(项目级才复利,溯源靠 `source` 字段)。
+- **下一步**:signal 之**自动产者**(从 trace 用 LLM 提炼 signal,现为显式工具)、触发器(Cron/Webhook)驱动多 loop 自动轮转、约束守卫 `ConstraintBreach`(CONTRACT-14)择一,待研判。
+
+## 2026-07-17 · iter-15:补硬伤(硬限修正)+ 扬长方向研判
+
+- **触发**:用户质疑「程序未达顶尖、别再自夸、除追赶外有无突破/差异化方向」→ 定策「补硬伤(确定)+ 用 NotebookLM 深研研判扬长(A/C/D)真伪」。
+- **补硬伤(核心二进制,全绿)**:①`MAX_STEPS` 8→**30**(旧值腰斩真实任务;30≈60 超步稳在引擎默认 100 下,定位后备护栏,主力停机仍 approved/预算/无进展);②**验证器抗奖励黑客**:`tool_output_ok` 的 `contains("exit 0")`→`starts_with("exit 0:")`(失败命令正文含 "exit 0" 文本会被 contains 误判成功——既正确性 bug 又奖励黑客缺口;行首前缀 harness 产出、模型难伪造);③`SUBAGENT_MAX_STEPS` 8→**15**(只读侦察,低风险)。`cargo test --workspace`=全绿(agent 53→54,+1 测),clippy/fmt 净。
+- **诚实边界**:LSP/代码智能判为 **MCP 生态**(加能力=加 MCP)非核心硬伤;更深验证器硬化(按工具身份门控 / verify 独立跑测)属 feature 级,列后续。
+- **扬长研判(NotebookLM 深研 + 51 源,真价值 vs 炒作)**:**A 时间旅行/分支** = 证据中/适配中,单用户 CLI 多属「token 税翻倍炫技」,价值主在崩溃恢复(已实现)→**有余力再做**;**B 自改进 harness/hill-climbing** = 证据**弱/炒作**,单用户无足够轨迹样本→**押后**;**C 多 loop 共享大脑(signals 复利)** = 证据**强**/适配**高**,建于已完成的标准存储库之上、解 agent 冷启动→**唯一优选**。
+- **校正上轮**:iter-13「signals 无产者故 YAGNI」对空目录成立,但研判表明真价值在建全「产者→消费者」闭环。
+- **下一步**:`CONTRACT-iteration-16-signals.md`(扬长优选 C:signal 复利闭环)。深研 task `0fe83eda`(子 `b578cfd6`)后端偏慢、所得偏泛,未阻塞等待,俟成再并入源。
+
+## 2026-07-17 · iter-13:标准存储库(运行时 `.ridge/runs/<id>/`)+ 显式停机原因
+
+- **方向来源**:NotebookLM「手搓agent」查询排序 #1「标准存储库」(系统的心脏/持久化脊柱);用户指令「按笔记建议、做当前未实现的方向」。
+- **做了什么**:①`write_run(out, run_dir)`(lib.rs)—— 每运行落成独立目录 `.ridge/runs/<纳秒id>/manifest.json`(结构化结论:task/approved/halt_reason/steps/tokens)+ `trace.json`(复用既有 `write_trace`)。**取代旧的「cwd 平铺 trace.json 每轮覆盖」=丢历史**,是跨 run 复利的物理底座。②`HaltReason` 枚举 + `halt_reason(&AgentState)` —— 据终态确定性判「为什么停」(approved/budget_exceeded/no_progress/step_cap/unverified),补齐预算熔断唯一缺的**响亮失败信号**;`is_success()` 供给非零退出码。③main.rs `trace_and_report` 接线 + 非成功时 stderr 播报停机原因。
+- **验收**:`cargo test --workspace`=**全绿**(agent 51→53,+2:`halt_reason_classifies_each_outcome`、`write_run_creates_per_run_dir_with_manifest_and_trace` 真实文件系统验证)。clippy/fmt 净。
+- **对抗评审 / 驳回**:①驳回 NotebookLM 荐的独立「成本熔断 + `GraphError::BudgetExceeded`」—— `over_budget`+`must_stop` 早已硬熔断(有测),只缺响亮失败信号,故用更小的 `HaltReason` 补缺环,不为已实现之物过度设计;②不建空 `signals/` 目录(无产者=YAGNI,留升级注释);③run 目录放 cwd(项目本地,像 `.git`)非 `~/.ridge`。
+- **下一步**:`docs/iterations/CONTRACT-iteration-14.md` —— **P0 约束守卫 `ConstraintBreach`**(防奖励黑客:保护 `tests/` 等路径禁删/禁清空,现状 cwd 内删测试仍放行是伪造 CI 绿的经典缺口)。**押后**(经对抗评审):子智能体并行编排(NotebookLM 荐为 iter-14 P0,但被**驳回**——性能上限非刚需、引擎 BSP 已并发、来源自相矛盾为单线程编排背书、其 sleep 计时验收易抖)、signals/ 复利(无产者)。
+
 ## 2026-07-16 · iter-6:`--read-only` 只读模式(轻量护栏套件收束)
 
 - **做了什么**:`--read-only`(+ env `RIDGE_READ_ONLY`)—— **双保险**:①offering 过滤,`build_core` 加 `read_only` 参,只读时 `retain` 掉 mutating 工具 + 不 offer MCP(dispatch_agent 保留,子 agent 恒只读);②深度防御 `read_only_block`,act 节点首臂拦副作用工具回 `BLOCKED (read-only)`。穿线走构建参数(`build_llm_agent_full`→run_once/headless/tui::run;`parse_args` 改返 `ParsedArgs` 结构体),不引全局可变态、测试并发安全。
