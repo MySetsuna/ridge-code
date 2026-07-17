@@ -496,6 +496,173 @@ fn render_todo_block(todos: &[Todo]) -> String {
         .join("\n")
 }
 
+// ───────────────────────── 视觉与反馈(iter-28)─────────────────────────
+
+/// 语义化色角色(iter-28):界面色一律经角色取 **ANSI 16 具名色**,零 RGB 硬编码 ——
+/// 尊重用户终端主题(浅色/高对比/透明背景下不悲剧)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    /// 品牌/焦点:提示符、状态行徽标、浮窗高亮、流式游标。
+    Primary,
+    /// 用户命令回显(`›`)。
+    Command,
+    /// 系统信息、事件默认色。
+    Info,
+    Success,
+    Error,
+    Warn,
+    /// 面板/围栏边框。
+    Border,
+    /// 次要文本、代码块内文。
+    Muted,
+    DiffAdd,
+    DiffDel,
+}
+
+fn role_color(r: Role) -> Color {
+    match r {
+        Role::Primary => Color::Cyan,
+        Role::Command => Color::LightGreen,
+        Role::Info => Color::LightBlue,
+        Role::Success => Color::Green,
+        Role::Error => Color::Red,
+        Role::Warn => Color::Yellow,
+        Role::Border => Color::DarkGray,
+        Role::Muted => Color::Gray,
+        Role::DiffAdd => Color::Green,
+        Role::DiffDel => Color::Red,
+    }
+}
+
+/// 行内 md 扫描:`` `code` ``(Warn 色)与 `**bold**`(加粗);未闭合记号按字面。纯函数。
+fn inline_md_spans(text: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut rest = text;
+    loop {
+        let tick = rest.find('`');
+        let bold = rest.find("**");
+        let (pos, is_tick) = match (tick, bold) {
+            (None, None) => {
+                if !rest.is_empty() {
+                    spans.push(Span::raw(rest.to_owned()));
+                }
+                break;
+            }
+            (Some(t), Some(b)) if t <= b => (t, true),
+            (Some(t), None) => (t, true),
+            (_, Some(b)) => (b, false),
+        };
+        if pos > 0 {
+            spans.push(Span::raw(rest[..pos].to_owned()));
+        }
+        if is_tick {
+            match rest[pos + 1..].find('`') {
+                Some(end) => {
+                    let inner = &rest[pos + 1..pos + 1 + end];
+                    spans.push(Span::styled(
+                        inner.to_owned(),
+                        Style::default().fg(role_color(Role::Warn)),
+                    ));
+                    rest = &rest[pos + 1 + end + 1..];
+                }
+                None => {
+                    spans.push(Span::raw(rest[pos..].to_owned()));
+                    break;
+                }
+            }
+        } else {
+            match rest[pos + 2..].find("**") {
+                Some(end) => {
+                    let inner = &rest[pos + 2..pos + 2 + end];
+                    spans.push(Span::styled(
+                        inner.to_owned(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ));
+                    rest = &rest[pos + 2 + end + 2..];
+                }
+                None => {
+                    spans.push(Span::raw(rest[pos..].to_owned()));
+                    break;
+                }
+            }
+        }
+    }
+    spans
+}
+
+/// 行级 md 轻渲染(iter-28,**只在静态提交时染** —— 样式定型才历史化):
+/// ``` 围栏切态(围栏行 Border 色)、块内 Muted、`#` 标题加粗 Primary、余走行内扫描。
+fn md_line_spans(line: &str, in_code: bool) -> (Vec<Span<'static>>, bool) {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("```") {
+        return (
+            vec![Span::styled(
+                line.to_owned(),
+                Style::default().fg(role_color(Role::Border)),
+            )],
+            !in_code,
+        );
+    }
+    if in_code {
+        return (
+            vec![Span::styled(
+                line.to_owned(),
+                Style::default().fg(role_color(Role::Muted)),
+            )],
+            true,
+        );
+    }
+    if trimmed.starts_with('#') {
+        return (
+            vec![Span::styled(
+                line.to_owned(),
+                Style::default()
+                    .fg(role_color(Role::Primary))
+                    .add_modifier(Modifier::BOLD),
+            )],
+            false,
+        );
+    }
+    (inline_md_spans(line), false)
+}
+
+/// 呈现层折叠上限(iter-28):静态提交前超限留头 + 尾标,历史不刷屏。
+/// (内核 `bound_observation` 已在源头有界,此为第二道收敛。)
+const FOLD_MAX: usize = 20;
+
+fn fold_lines(text: &str, max: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= max {
+        return text.to_owned();
+    }
+    let hidden = lines.len() - max;
+    let mut out = lines[..max].join("\n");
+    out.push_str(&format!("\n… (+{hidden} 行已折叠)"));
+    out
+}
+
+/// 启动 banner(iter-28):ASCII 安全字符(单格宽),经 `splash_frame` 列渐显 ≈1s。
+const SPLASH: &[&str] = &[
+    r"  ____  _     _            ____          _      ",
+    r" |  _ \(_) __| | __ _  ___/ ___|___   __| | ___ ",
+    r" | |_) | |/ _` |/ _` |/ _ \ |   / _ \ / _` |/ _ \",
+    r" |  _ <| | (_| | (_| |  __/ |__| (_) | (_| |  __/",
+    r" |_| \_\_|\__,_|\__, |\___|\____\___/ \__,_|\___|",
+    r"                |___/                            ",
+];
+const SPLASH_TICKS: usize = 10;
+
+/// 帧序列纯函数:第 `tick`/`total` 帧显示前 (maxw·tick/total) 列。首帧零字形,末帧全幅,单调渐显。
+fn splash_frame(tick: usize, total: usize) -> String {
+    let maxw = SPLASH.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let cols = maxw * tick / total.max(1);
+    SPLASH
+        .iter()
+        .map(|l| l.chars().take(cols).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 struct TuiApprover {
     tx: tokio::sync::mpsc::UnboundedSender<ApprovalRequest>,
 }
@@ -527,6 +694,8 @@ struct Ui {
     busy: bool,
     phase: String,
     frame: usize,
+    /// 启动帧序列进度(iter-28):< SPLASH_TICKS 时 tick 驱动渐显,末帧 banner 入历史。
+    splash: usize,
 }
 impl Ui {
     fn note(&mut self, text: impl Into<String>, color: Color) {
@@ -542,12 +711,24 @@ impl Ui {
 fn flush_commits(terminal: &mut Term, ui: &mut Ui) -> io::Result<()> {
     let width = terminal.size()?.width;
     for (text, color) in ui.drain_commits() {
+        let text = fold_lines(&text, FOLD_MAX); // 呈现层折叠(iter-28):历史不刷屏
         let h = commit_height(&text, width);
         terminal.insert_before(h, |buf| {
-            let lines: Vec<Line> = text
-                .lines()
-                .map(|l| Line::from(Span::styled(l.to_owned(), Style::default().fg(color))))
-                .collect();
+            let lines: Vec<Line> = if text.starts_with("🤖") {
+                // 终答走 md 轻渲染(iter-28):样式已定型,提交时染。
+                let mut in_code = false;
+                text.lines()
+                    .map(|l| {
+                        let (spans, next) = md_line_spans(l, in_code);
+                        in_code = next;
+                        Line::from(spans)
+                    })
+                    .collect()
+            } else {
+                text.lines()
+                    .map(|l| Line::from(Span::styled(l.to_owned(), Style::default().fg(color))))
+                    .collect()
+            };
             Paragraph::new(Text::from(lines))
                 .wrap(Wrap { trim: false })
                 .render(buf.area, buf);
@@ -743,7 +924,7 @@ pub(super) async fn run(
                         if input.starts_with('/') {
                             continue;
                         }
-                        ui.note(format!("› {input}"), Color::Cyan);
+                        ui.note(format!("› {input}"), role_color(Role::Command));
                         history.push(Message::user(expand_mentions(&input)));
                         let state = AgentState::new(&input)
                             .with_history(history.clone())
@@ -845,7 +1026,19 @@ pub(super) async fn run(
                 }
                 dirty = true;
             }
-            _ = tick.tick() => {}
+            _ = tick.tick() => {
+                // 启动帧序列(iter-28):空闲时借 tick 渐显 banner(≈1s),末帧整幅入历史。
+                if ui.splash < SPLASH_TICKS && !ui.busy && pending.is_none() {
+                    ui.splash += 1;
+                    if ui.splash == SPLASH_TICKS {
+                        ui.note(SPLASH.join("\n"), role_color(Role::Primary));
+                        ui.stream.clear();
+                    } else {
+                        ui.stream = splash_frame(ui.splash, SPLASH_TICKS);
+                    }
+                    dirty = true;
+                }
+            }
             else => break 'main,
         }
     }
@@ -945,7 +1138,7 @@ fn draw(
     );
     // 流式尾巴:只画最后 K 行(已完段落随 Superstep 静态提交进历史)。
     let k = outer[1].height as usize;
-    let tail: Vec<Line> = stream_tail(&ui.stream, k)
+    let mut tail: Vec<Line> = stream_tail(&ui.stream, k)
         .into_iter()
         .map(|s| {
             Line::from(Span::styled(
@@ -956,12 +1149,30 @@ fn draw(
             ))
         })
         .collect();
+    // 流式呼吸游标(iter-28):busy 时尾缀青色 █,按帧奇偶 BOLD/DIM 交替。
+    if ui.busy {
+        let cursor = Span::styled(
+            "█",
+            Style::default().fg(role_color(Role::Primary)).add_modifier(
+                if ui.frame.is_multiple_of(2) {
+                    Modifier::BOLD
+                } else {
+                    Modifier::DIM
+                },
+            ),
+        );
+        match tail.last_mut() {
+            Some(last) => last.spans.push(cursor),
+            None => tail.push(Line::from(cursor)),
+        }
+    }
     frame.render_widget(Paragraph::new(Text::from(tail)), outer[1]);
     frame.render_widget(
         Paragraph::new(ui.input.buffer.as_str())
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(Style::default().fg(role_color(Role::Border)))
                     .title(" 输入（Enter 发送 · Shift/Alt+Enter 换行 · Tab 补全）"),
             )
             .wrap(Wrap { trim: false }),
@@ -1008,7 +1219,7 @@ fn draw(
                 .highlight_style(
                     Style::default()
                         .fg(Color::Black)
-                        .bg(Color::Cyan)
+                        .bg(role_color(Role::Primary))
                         .add_modifier(Modifier::BOLD),
                 ),
             rect,
@@ -1016,22 +1227,45 @@ fn draw(
         );
     }
     if let Some(req) = approval {
-        // 审批模态覆整个 Live 视口;↑↓ 滚动看长 diff(scroll 接到 Paragraph 偏移)。
+        // 审批模态覆整个 Live 视口;↑↓ 滚动看长 diff;diff 行按 +/- 语义着色(iter-28)。
         frame.render_widget(Clear, area);
+        let mut lines: Vec<Line> = vec![
+            Line::from(Span::styled(
+                format!("⚠ 允许执行 {}？", req.action),
+                Style::default()
+                    .fg(role_color(Role::Warn))
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::default(),
+        ];
+        for l in req.detail.lines() {
+            let role = if l.starts_with('+') {
+                Role::DiffAdd
+            } else if l.starts_with('-') {
+                Role::DiffDel
+            } else {
+                Role::Warn
+            };
+            lines.push(Line::from(Span::styled(
+                l.to_owned(),
+                Style::default().fg(role_color(role)),
+            )));
+        }
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            "y/Enter: 批准    n/Esc: 拒绝    ↑↓/PgUp/PgDn: 滚动看详情",
+            Style::default().fg(role_color(Role::Muted)),
+        )));
         frame.render_widget(
-            Paragraph::new(format!(
-                "⚠ 允许执行 {}？\n\n{}\n\ny/Enter: 批准    n/Esc: 拒绝    ↑↓/PgUp/PgDn: 滚动看详情",
-                req.action, req.detail
-            ))
-            .style(Style::default().fg(Color::Yellow))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" 需要权限 ")
-                    .border_style(Style::default().fg(Color::Yellow)),
-            )
-            .wrap(Wrap { trim: false })
-            .scroll((ui.scroll, 0)),
+            Paragraph::new(Text::from(lines))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" 需要权限 ")
+                        .border_style(Style::default().fg(role_color(Role::Warn))),
+                )
+                .wrap(Wrap { trim: false })
+                .scroll((ui.scroll, 0)),
             area,
         );
     }
@@ -1042,17 +1276,18 @@ fn format_event_plain(m: &str) -> String {
         .map(|x| format!("🤖 {x}"))
         .unwrap_or_else(|| m.to_owned())
 }
+/// 事件行配色:经语义角色取色(iter-28 收口);终答用 White(具名 ANSI,非角色)。
 fn event_color(m: &str) -> Color {
     if m.starts_with("verify: PASS") {
-        Color::Green
+        role_color(Role::Success)
     } else if m.starts_with("verify: FAIL") {
-        Color::Red
+        role_color(Role::Error)
     } else if m.starts_with("act:") {
-        Color::Yellow
+        role_color(Role::Warn)
     } else if m.contains("(final)") {
         Color::White
     } else {
-        Color::Cyan
+        role_color(Role::Info)
     }
 }
 
@@ -1378,6 +1613,76 @@ mod tests {
             vec!["one", "two"]
         );
         assert!(ui.commits.is_empty());
+    }
+
+    /// iter-28:色角色映射 —— ANSI 16 具名色,语义正确。
+    #[test]
+    fn role_colors_are_ansi16() {
+        assert_eq!(role_color(Role::Success), Color::Green);
+        assert_eq!(role_color(Role::Error), Color::Red);
+        assert_eq!(role_color(Role::DiffAdd), Color::Green);
+        assert_eq!(role_color(Role::DiffDel), Color::Red);
+        assert_eq!(role_color(Role::Primary), Color::Cyan);
+        assert_eq!(role_color(Role::Border), Color::DarkGray);
+        assert_eq!(role_color(Role::Command), Color::LightGreen);
+    }
+
+    /// iter-28:md 轻渲染 —— 围栏切态、块内 Muted、标题粗、行内 code、未闭合按字面。
+    #[test]
+    fn md_line_rendering() {
+        let (spans, state) = md_line_spans("```rust", false);
+        assert!(state);
+        assert_eq!(spans.len(), 1);
+        let (_, state2) = md_line_spans("```", true);
+        assert!(!state2);
+        let (s, st) = md_line_spans("let x = 1;", true);
+        assert!(st);
+        assert_eq!(s[0].style.fg, Some(role_color(Role::Muted)));
+        let (h, _) = md_line_spans("# Title", false);
+        assert!(h[0].style.add_modifier.contains(Modifier::BOLD));
+        let (i, _) = md_line_spans("use `foo` now", false);
+        assert_eq!(i[1].content.as_ref(), "foo");
+        assert_eq!(i[1].style.fg, Some(role_color(Role::Warn)));
+        let (b, _) = md_line_spans("a **big** b", false);
+        assert!(b.iter().any(
+            |sp| sp.content.as_ref() == "big" && sp.style.add_modifier.contains(Modifier::BOLD)
+        ));
+        // 未闭合记号按字面,内容零丢失
+        let (u, _) = md_line_spans("lone `tick", false);
+        assert_eq!(
+            u.iter().map(|sp| sp.content.as_ref()).collect::<String>(),
+            "lone `tick"
+        );
+    }
+
+    /// iter-28:呈现层折叠 —— 限内不动,超限留头 + `+N` 尾标。
+    #[test]
+    fn fold_lines_caps_output() {
+        assert_eq!(fold_lines("a\nb", 20), "a\nb");
+        let long: String = (0..30)
+            .map(|i| format!("l{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let folded = fold_lines(&long, 20);
+        assert!(folded.contains("l0") && folded.contains("l19"));
+        assert!(!folded.contains("l29"));
+        assert!(folded.contains("+10 行已折叠"));
+    }
+
+    /// iter-28:启动帧序列 —— 首帧零字形、末帧全幅、宽度单调不减。
+    #[test]
+    fn splash_reveals_monotonically() {
+        assert!(splash_frame(0, SPLASH_TICKS).chars().all(|c| c == '\n'));
+        assert_eq!(splash_frame(SPLASH_TICKS, SPLASH_TICKS), SPLASH.join("\n"));
+        let mut prev = 0;
+        for t in 0..=SPLASH_TICKS {
+            let glyphs = splash_frame(t, SPLASH_TICKS)
+                .chars()
+                .filter(|c| *c != '\n')
+                .count();
+            assert!(glyphs >= prev);
+            prev = glyphs;
+        }
     }
 
     /// iter-26:TODO 进度与清单渲染(状态行计数 + 变更快照历史化)。
