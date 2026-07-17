@@ -1,12 +1,13 @@
 //! RidgeCode 的交互式终端界面。执行图跑在后台 Tokio task，绘制与键盘事件留在前台，
 //! 因而 token 流、工具事件和权限门都不会卡住界面。
 
+use std::collections::VecDeque;
 use std::io;
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -76,8 +77,56 @@ fn apply_scroll(scroll: u16, delta: i16) -> u16 {
     }
 }
 
+/// 主输入态对一次按键的**纯决策**(续 iter-22 `approval_action` 模式,iter-23):
+/// 副作用(改 input/派任务/中断)由主环按返回值执行,函数本身零副作用、离线可测。
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum InputAction {
+    Insert(char),
+    Backspace,
+    Scroll(i16),
+    Submit,
+    Interrupt,
+    Ignore,
+}
+
+fn input_action(key: &KeyEvent, busy: bool) -> InputAction {
+    if key.kind != KeyEventKind::Press {
+        return InputAction::Ignore;
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        return InputAction::Interrupt;
+    }
+    match key.code {
+        KeyCode::Char(c) => InputAction::Insert(c),
+        KeyCode::Backspace => InputAction::Backspace,
+        KeyCode::Up => InputAction::Scroll(1),
+        KeyCode::Down => InputAction::Scroll(-1),
+        KeyCode::PageUp => InputAction::Scroll(8),
+        KeyCode::PageDown => InputAction::Scroll(-8),
+        KeyCode::Enter if !busy => InputAction::Submit,
+        _ => InputAction::Ignore,
+    }
+}
+
+/// 要不要画这一帧:有状态变更(dirty)或 busy(spinner 需动)才画;空闲零重绘(iter-23)。
+fn should_draw(dirty: bool, busy: bool) -> bool {
+    dirty || busy
+}
+
+/// 日志环形缓冲上限:超出淘汰最旧行 —— 有界内存,长会话不膨胀(iter-23)。
+const LOG_CAP: usize = 2000;
+
+/// 视口尾窗:从 `len` 条日志取「距尾 `scroll` 行处、往上最多 `rows` 行」区间。
+/// 越顶钳在顶端;len < rows 全量。纯函数 O(1) —— 每帧只构建窗口内行,替代全量重建。
+/// ponytail: 逻辑行≈视觉行(超长行折行会溢出截尾);需精确锚底再算折行高度。
+fn tail_window(len: usize, rows: usize, scroll: usize) -> std::ops::Range<usize> {
+    let end = len.saturating_sub(scroll).max(rows.min(len));
+    let start = end.saturating_sub(rows);
+    start..end
+}
+
 struct TuiApprover {
-    tx: mpsc::Sender<ApprovalRequest>,
+    tx: tokio::sync::mpsc::UnboundedSender<ApprovalRequest>,
 }
 impl Approver for TuiApprover {
     fn approve(&self, action: &str, detail: &str) -> bool {
@@ -96,7 +145,7 @@ impl Approver for TuiApprover {
 #[derive(Default)]
 struct Ui {
     input: String,
-    log: Vec<(String, Color)>,
+    log: VecDeque<(String, Color)>,
     stream: String,
     todos: Vec<Todo>,
     tool: String,
@@ -107,12 +156,19 @@ struct Ui {
 }
 impl Ui {
     fn note(&mut self, text: impl Into<String>, color: Color) {
-        self.log.push((text.into(), color));
+        self.log.push_back((text.into(), color));
+        if self.log.len() > LOG_CAP {
+            self.log.pop_front(); // 环形淘汰:有界内存
+        }
     }
-    fn output_lines(&self) -> Vec<Line<'static>> {
+    /// 只构建视口尾窗内的行(O(rows)/帧),滚动经 `tail_window` 而非 Paragraph 偏移。
+    fn output_lines(&self, rows: usize, scroll: usize) -> Vec<Line<'static>> {
+        let w = tail_window(self.log.len(), rows, scroll);
         let mut lines: Vec<_> = self
             .log
             .iter()
+            .skip(w.start)
+            .take(w.len())
             .flat_map(|(s, c)| {
                 s.lines().map(move |line| {
                     Line::from(Span::styled(line.to_owned(), Style::default().fg(*c)))
@@ -146,7 +202,7 @@ pub(super) async fn run(
     agents: Arc<agent::Agents>,
     read_only: bool,
 ) -> anyhow::Result<()> {
-    let (approval_tx, approval_rx) = mpsc::channel();
+    let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
     let approver: Arc<dyn Approver> = if skip_danger {
         Arc::new(AutoApprove)
     } else {
@@ -188,171 +244,196 @@ pub(super) async fn run(
     let mut session_turns = 0usize;
     let mut printed = 0usize;
 
-    loop {
-        while let Ok(token) = token_rx.try_recv() {
-            ui.busy = true;
-            ui.stream.push_str(&token);
-        }
-        while let Ok(event) = event_rx.try_recv() {
-            match event {
-                StreamEvent::NodeFinished { node, .. } => {
-                    ui.phase = node_label(&node);
-                    ui.busy = true;
-                }
-                StreamEvent::Superstep { state, .. } => {
-                    for m in state.messages.iter().skip(printed) {
-                        ui.note(format_event_plain(m), event_color(m));
-                    }
-                    printed = state.messages.len();
-                    ui.todos = state.todos;
-                    ui.stream.clear();
-                    ui.busy = false;
-                }
+    // 阻塞读线程(iter-23):不开 crossterm `event-stream` feature(免引 futures 依赖),
+    // std 线程 `event::read()` 转发进 tokio 通道;主环退出后线程仍阻塞在 read 上,随进程结束回收。
+    let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+    std::thread::spawn(move || {
+        while let Ok(ev) = event::read() {
+            if key_tx.send(ev).is_err() {
+                break;
             }
         }
-        while let Ok(request) = approval_rx.try_recv() {
-            pending = Some(request);
-            ui.busy = false;
-        }
-        while let Ok(result) = done_rx.try_recv() {
-            task = None;
-            ui.busy = false;
-            ui.stream.clear();
-            printed = 0;
-            match result {
-                Ok(out) => {
-                    history = out.history.clone();
-                    save_session(&session_path(), &history);
-                    session_tokens += out.total_tokens;
-                    session_turns += 1;
-                    ui.todos = out.todos.clone();
-                    ui.note(
-                        format!(
-                            "{} · steps={} · tokens={}",
-                            if out.approved {
-                                "✓ approved"
-                            } else {
-                                "✗ not approved"
-                            },
-                            out.steps,
-                            out.total_tokens
-                        ),
-                        if out.approved {
-                            Color::Green
-                        } else {
-                            Color::Red
-                        },
-                    );
-                }
-                Err(e) => ui.note(format!("错误: {e}"), Color::Red),
-            }
-        }
-        ui.frame = ui.frame.wrapping_add(1);
-        terminal.draw(|frame| {
-            draw(
-                frame,
-                &ui,
-                &meta,
-                session_tokens,
-                session_turns,
-                pending.as_ref(),
-            )
-        })?;
-        if !event::poll(Duration::from_millis(50))? {
-            continue;
-        }
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        if pending.is_some() {
-            // 模态状态机:审批态下滚动键**只滚不拒**(可先看 diff),仅 y/Enter 批准、n/Esc 拒绝,余键忽略。
-            match approval_action(key.code) {
-                ApprovalAction::Approve => {
-                    if let Some(r) = pending.take() {
-                        let _ = r.reply.send(true);
-                    }
-                    ui.note("✓ 已批准", Color::Green);
-                }
-                ApprovalAction::Reject => {
-                    if let Some(r) = pending.take() {
-                        let _ = r.reply.send(false);
-                    }
-                    ui.note("✗ 已拒绝", Color::Red);
-                }
-                ApprovalAction::Scroll(d) => ui.scroll = apply_scroll(ui.scroll, d),
-                ApprovalAction::Ignore => {}
-            }
-            continue;
-        }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            if let Some(handle) = task.take() {
-                handle.abort();
-                *bus.lock().unwrap() = None;
-                ui.busy = false;
-                ui.stream.clear();
-                ui.note("已中断当前任务", Color::Yellow);
-            }
-            continue;
-        }
-        match key.code {
-            KeyCode::Char(c) => ui.input.push(c),
-            KeyCode::Backspace => {
-                ui.input.pop();
-            }
-            KeyCode::Up => ui.scroll = ui.scroll.saturating_add(1),
-            KeyCode::Down => ui.scroll = ui.scroll.saturating_sub(1),
-            KeyCode::PageUp => ui.scroll = ui.scroll.saturating_add(8),
-            KeyCode::PageDown => ui.scroll = ui.scroll.saturating_sub(8),
-            KeyCode::Enter if !ui.busy => {
-                let input = std::mem::take(&mut ui.input);
-                let input = input.trim().to_owned();
-                if input.is_empty() {
-                    continue;
-                }
-                if run_command(
-                    &input,
-                    &mut ui,
-                    &mut history,
-                    &mut meta,
-                    &swap,
-                    &agents,
+    });
+    // tick 只为 busy 时的 spinner 重绘;空闲时 should_draw=false,tick 醒来即再入睡,零重绘。
+    let mut tick = tokio::time::interval(Duration::from_millis(100));
+    let mut dirty = true;
+
+    'main: loop {
+        if should_draw(dirty, ui.busy) {
+            ui.frame = ui.frame.wrapping_add(1);
+            terminal.draw(|frame| {
+                draw(
+                    frame,
+                    &ui,
+                    &meta,
                     session_tokens,
                     session_turns,
-                )? {
-                    break;
-                }
-                if input.starts_with('/') {
+                    pending.as_ref(),
+                )
+            })?;
+            dirty = false;
+        }
+        // 事件驱动多路复用替代 50ms 固定轮询(iter-23):无事时阻塞挂起,不烧 CPU。
+        tokio::select! {
+            biased;
+            Some(ev) = key_rx.recv() => {
+                dirty = true; // 键盘/resize 皆需重绘
+                let Event::Key(key) = ev else { continue };
+                if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                ui.note(format!("› {input}"), Color::Cyan);
-                history.push(Message::user(expand_mentions(&input)));
-                let state = AgentState::new(&input)
-                    .with_history(history.clone())
-                    .with_budget(budget)
-                    .with_signals(agent::load_signal_block());
-                let app = app.clone();
-                let bus = bus.clone();
-                let tx = event_tx.clone();
-                let done = done_tx.clone();
-                let tokens = token_tx.clone();
+                if pending.is_some() {
+                    // 模态状态机:审批态下滚动键**只滚不拒**(可先看 diff),仅 y/Enter 批准、n/Esc 拒绝,余键忽略。
+                    match approval_action(key.code) {
+                        ApprovalAction::Approve => {
+                            if let Some(r) = pending.take() {
+                                let _ = r.reply.send(true);
+                            }
+                            ui.note("✓ 已批准", Color::Green);
+                        }
+                        ApprovalAction::Reject => {
+                            if let Some(r) = pending.take() {
+                                let _ = r.reply.send(false);
+                            }
+                            ui.note("✗ 已拒绝", Color::Red);
+                        }
+                        ApprovalAction::Scroll(d) => ui.scroll = apply_scroll(ui.scroll, d),
+                        ApprovalAction::Ignore => {}
+                    }
+                    continue;
+                }
+                match input_action(&key, ui.busy) {
+                    InputAction::Interrupt => {
+                        if let Some(handle) = task.take() {
+                            handle.abort();
+                            *bus.lock().unwrap() = None;
+                            ui.busy = false;
+                            ui.stream.clear();
+                            ui.note("已中断当前任务", Color::Yellow);
+                        }
+                    }
+                    InputAction::Insert(c) => ui.input.push(c),
+                    InputAction::Backspace => {
+                        ui.input.pop();
+                    }
+                    InputAction::Scroll(d) => ui.scroll = apply_scroll(ui.scroll, d),
+                    InputAction::Submit => {
+                        let input = std::mem::take(&mut ui.input);
+                        let input = input.trim().to_owned();
+                        if input.is_empty() {
+                            continue;
+                        }
+                        if run_command(
+                            &input,
+                            &mut ui,
+                            &mut history,
+                            &mut meta,
+                            &swap,
+                            &agents,
+                            session_tokens,
+                            session_turns,
+                        )? {
+                            break 'main;
+                        }
+                        if input.starts_with('/') {
+                            continue;
+                        }
+                        ui.note(format!("› {input}"), Color::Cyan);
+                        history.push(Message::user(expand_mentions(&input)));
+                        let state = AgentState::new(&input)
+                            .with_history(history.clone())
+                            .with_budget(budget)
+                            .with_signals(agent::load_signal_block());
+                        let app = app.clone();
+                        let bus = bus.clone();
+                        let tx = event_tx.clone();
+                        let done = done_tx.clone();
+                        let tokens = token_tx.clone();
+                        ui.busy = true;
+                        ui.phase = "推理中".into();
+                        ui.stream.clear();
+                        printed = 0;
+                        task = Some(tokio::spawn(async move {
+                            *bus.lock().unwrap() = Some(tokens);
+                            let result = app
+                                .invoke_with(state, &RunConfig::default(), None, Some(&tx))
+                                .await
+                                .map_err(|e| e.to_string());
+                            *bus.lock().unwrap() = None;
+                            let _ = done.send(result);
+                        }));
+                    }
+                    InputAction::Ignore => {}
+                }
+            }
+            Some(token) = token_rx.recv() => {
                 ui.busy = true;
-                ui.phase = "推理中".into();
+                ui.stream.push_str(&token);
+                // 批量排空积压 token,免逐 token 一帧。
+                while let Ok(t) = token_rx.try_recv() {
+                    ui.stream.push_str(&t);
+                }
+                dirty = true;
+            }
+            Some(event) = event_rx.recv() => {
+                match event {
+                    StreamEvent::NodeFinished { node, .. } => {
+                        ui.phase = node_label(&node);
+                        ui.busy = true;
+                    }
+                    StreamEvent::Superstep { state, .. } => {
+                        for m in state.messages.iter().skip(printed) {
+                            ui.note(format_event_plain(m), event_color(m));
+                        }
+                        printed = state.messages.len();
+                        ui.todos = state.todos;
+                        ui.stream.clear();
+                        ui.busy = false;
+                    }
+                }
+                dirty = true;
+            }
+            Some(request) = approval_rx.recv() => {
+                pending = Some(request);
+                ui.busy = false;
+                dirty = true;
+            }
+            Some(result) = done_rx.recv() => {
+                task = None;
+                ui.busy = false;
                 ui.stream.clear();
                 printed = 0;
-                task = Some(tokio::spawn(async move {
-                    *bus.lock().unwrap() = Some(tokens);
-                    let result = app
-                        .invoke_with(state, &RunConfig::default(), None, Some(&tx))
-                        .await
-                        .map_err(|e| e.to_string());
-                    *bus.lock().unwrap() = None;
-                    let _ = done.send(result);
-                }));
+                match result {
+                    Ok(out) => {
+                        history = out.history.clone();
+                        save_session(&session_path(), &history);
+                        session_tokens += out.total_tokens;
+                        session_turns += 1;
+                        ui.todos = out.todos.clone();
+                        ui.note(
+                            format!(
+                                "{} · steps={} · tokens={}",
+                                if out.approved {
+                                    "✓ approved"
+                                } else {
+                                    "✗ not approved"
+                                },
+                                out.steps,
+                                out.total_tokens
+                            ),
+                            if out.approved {
+                                Color::Green
+                            } else {
+                                Color::Red
+                            },
+                        );
+                    }
+                    Err(e) => ui.note(format!("错误: {e}"), Color::Red),
+                }
+                dirty = true;
             }
-            _ => {}
+            _ = tick.tick() => {}
+            else => break 'main,
         }
     }
     if let Some(handle) = task {
@@ -448,15 +529,16 @@ fn draw(
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(outer[1]);
+    // 视口虚拟化(iter-23):只构建尾窗内的行,滚动经 tail_window,不再用 Paragraph 偏移。
+    let rows = body[0].height.saturating_sub(2) as usize; // 减上下边框
     frame.render_widget(
-        Paragraph::new(Text::from(ui.output_lines()))
+        Paragraph::new(Text::from(ui.output_lines(rows, ui.scroll as usize)))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title(" 输出 / 执行流 "),
             )
-            .wrap(Wrap { trim: false })
-            .scroll((ui.scroll, 0)),
+            .wrap(Wrap { trim: false }),
         body[0],
     );
     let side = Layout::default()
@@ -602,5 +684,87 @@ mod tests {
         assert_eq!(apply_scroll(5, -1), 4);
         assert_eq!(apply_scroll(0, -8), 0);
         assert_eq!(apply_scroll(u16::MAX, 8), u16::MAX);
+    }
+
+    /// iter-23:主输入态键位路由纯函数 —— busy 时 Enter 不提交,Ctrl-C 恒中断,松键忽略。
+    #[test]
+    fn input_action_routes_keys() {
+        let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        assert_eq!(
+            input_action(&press(KeyCode::Char('a')), false),
+            InputAction::Insert('a')
+        );
+        assert_eq!(
+            input_action(&press(KeyCode::Backspace), false),
+            InputAction::Backspace
+        );
+        assert_eq!(
+            input_action(&press(KeyCode::Up), false),
+            InputAction::Scroll(1)
+        );
+        assert_eq!(
+            input_action(&press(KeyCode::PageDown), false),
+            InputAction::Scroll(-8)
+        );
+        assert_eq!(
+            input_action(&press(KeyCode::Enter), false),
+            InputAction::Submit
+        );
+        // busy 时 Enter 不提交(任务进行中);Ctrl-C 是中断。
+        assert_eq!(
+            input_action(&press(KeyCode::Enter), true),
+            InputAction::Ignore
+        );
+        assert_eq!(
+            input_action(
+                &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                true
+            ),
+            InputAction::Interrupt
+        );
+        // 松键(Release)不触发任何动作。
+        assert_eq!(
+            input_action(
+                &KeyEvent::new_with_kind(
+                    KeyCode::Char('a'),
+                    KeyModifiers::NONE,
+                    KeyEventKind::Release
+                ),
+                false
+            ),
+            InputAction::Ignore
+        );
+    }
+
+    /// iter-23:重绘判定 —— 脏或 busy(spinner)才画,空闲零重绘。
+    #[test]
+    fn draw_only_when_dirty_or_busy() {
+        assert!(should_draw(true, false));
+        assert!(should_draw(false, true));
+        assert!(!should_draw(false, false));
+    }
+
+    /// iter-23:视口尾窗 —— 尾部取窗、回滚平移、越顶钳住、不足一屏全量、极值饱和不 panic。
+    #[test]
+    fn tail_window_clamps_and_saturates() {
+        assert_eq!(tail_window(100, 10, 0), 90..100);
+        assert_eq!(tail_window(100, 10, 5), 85..95);
+        assert_eq!(tail_window(100, 10, 95), 0..10);
+        assert_eq!(tail_window(100, 10, usize::MAX), 0..10);
+        assert_eq!(tail_window(5, 10, 0), 0..5);
+        assert_eq!(tail_window(5, 10, 3), 0..5);
+        assert_eq!(tail_window(0, 10, 0), 0..0);
+    }
+
+    /// iter-23:日志环形缓冲有界,淘汰最旧、留存最新。
+    #[test]
+    fn log_ring_buffer_is_bounded_and_keeps_newest() {
+        let mut ui = Ui::default();
+        for i in 0..(LOG_CAP + 5) {
+            ui.note(format!("line {i}"), Color::White);
+        }
+        assert_eq!(ui.log.len(), LOG_CAP);
+        assert_eq!(ui.log.back().unwrap().0, format!("line {}", LOG_CAP + 4));
+        assert_eq!(ui.log.front().unwrap().0, "line 5");
     }
 }
