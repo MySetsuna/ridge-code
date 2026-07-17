@@ -1,6 +1,6 @@
 # CONTRACT —— Iteration 14:约束守卫(防奖励黑客,补齐护栏套件)
 
-> ✅ **已交付(2026-07-17,iter-17 批次)**:`is_protected_path`+写臂/`shell` 臂约束守卫 + `HaltReason::ConstraintBreach`;`cargo test --workspace` 全绿。诚实边界:`edit_file`/`apply_edits` 清空未拦(需内容级判定)、词法守卫非真沙箱。详见 `docs/LOG.md` iter-17 条。
+> ✅ **全部已交付**:P0 约束守卫(iter-17,`is_protected_path`+写/shell 臂 + `HaltReason::ConstraintBreach`);**iter-18 补齐**:①`edit_file`/`apply_edits` 臂约束守卫(`constraint_guard_edit`:受保护路径「非空替换为空」= 删测试代码 → 拦,闭合 iter-17 诚实边界的编辑清空缺口);②P1 `ContextRot`(压缩后仍超 2× 阈值 = 单条巨消息压不掉 → 诊断标签);③P1 `CircuitBroken`(连错达 `MAX_ERR_STREAK=5` 熔断,`must_stop` 早停,兜「错误每轮不同 stall 不触发」)。`cargo test --workspace` 全绿(agent lib 60→**62**)。**残留诚实边界**:词法/路径级守卫非真沙箱;改断言等**内容级语义**篡改仍未判(YAGNI:属深度问题);保护路径尚不可 config 配(默认 `tests`/`.git`)。详见 `docs/LOG.md` iter-18 条。
 
 - **开工时间戳**: 2026-07-17(待下轮执行)
 - **里程碑**: iter-13 落地标准存储库(`.ridge/runs/<id>/`)+ 显式停机原因(`HaltReason`);本轮补护栏套件缺的「防奖励黑客」一环

@@ -67,6 +67,9 @@ pub struct AgentState {
     pub budget_tokens: usize,
     /// 连续「无进展」轮数(工具输出与上一轮相同)。到 [`MAX_STALL`] 就熔断。
     pub stall: usize,
+    /// 连续**工具/provider 报错**轮数(与 `stall` 正交:stall 认「输出相同」,本字段认「输出为错误」,
+    /// 故报错内容**每轮不同**时 stall 不触发、由本字段兜底)。到 [`MAX_ERR_STREAK`] 熔断,防无人值守烧预算。
+    pub err_streak: usize,
     /// **模型面向**的多轮对话历史(system 之外的部分):user / assistant(可带 tool_calls)/ tool 结果。
     /// 这是发给 provider 的真身;REPL 跨轮携带它实现多轮上下文。
     pub history: Vec<Message>,
@@ -123,6 +126,7 @@ pub enum Patch {
     PendingCall(Option<ToolCall>),
     AddTokens(usize),
     SetStall(usize),
+    SetErrStreak(usize),
     PushHistory(Message),
     SetTodos(Vec<Todo>),
     RecordModified(String),
@@ -143,6 +147,7 @@ impl GraphState for AgentState {
             Patch::PendingCall(c) => self.pending_call = c,
             Patch::AddTokens(n) => self.total_tokens += n,
             Patch::SetStall(n) => self.stall = n,
+            Patch::SetErrStreak(n) => self.err_streak = n,
             Patch::PushHistory(m) => self.history.push(m),
             Patch::SetTodos(t) => self.todos = t,
             Patch::RecordModified(p) => {
@@ -157,6 +162,9 @@ impl GraphState for AgentState {
 
 /// 连续无进展多少轮就熔断(no-progress detection)。
 pub const MAX_STALL: usize = 3;
+
+/// 连续工具/provider 报错多少轮就熔断(circuit breaker,防无人值守 `--every` 循环持续失败烧预算)。
+pub const MAX_ERR_STREAK: usize = 5;
 
 /// 权限门:执行**有副作用的**工具(shell / 写文件 / MCP)前征询批准(human-in-the-loop)。
 /// REPL 用 stdin y/n;测试用 [`AutoApprove`] / [`AutoDeny`]。`read_file` 等只读工具不走它。
@@ -742,6 +750,11 @@ fn stalled(s: &AgentState) -> bool {
     s.stall >= MAX_STALL
 }
 
+/// 熔断?(连续 MAX_ERR_STREAK 轮工具/provider 报错 —— 即便报错内容每轮不同 stall 不触发)
+fn circuit_broken(s: &AgentState) -> bool {
+    s.err_streak >= MAX_ERR_STREAK
+}
+
 /// 确定性**成功**信号(编码任务:shell `exit 0` 或测试 `passed`)。
 /// shell 成功恒以 harness 产出的前缀 `"exit 0:"` 打头 —— 用 `starts_with` 而非 `contains`:
 /// ①修正确性 bug(失败命令 `exit 7: ...` 正文若含 "exit 0" 文本会被 `contains` 误判成功);
@@ -770,9 +783,10 @@ fn verify_ok(s: &AgentState) -> bool {
         || (s.last_action.as_deref() == Some("finish") && !out.is_some_and(tool_output_failed))
 }
 
-/// 多层独立退出:到回合上限 / 超预算 / 无进展任一命中,循环都该停(loop engineering:停机是设计的一半)。
+/// 多层独立退出:到回合上限 / 超预算 / 无进展 / 熔断任一命中,循环都该停(loop engineering:停机是设计的一半)。
+/// 全是 O(1) 字段判定;上下文腐烂(需算压缩)不进此热路径,只在终态 [`halt_reason`] 里作诊断重标签。
 fn must_stop(s: &AgentState) -> bool {
-    s.steps >= MAX_STEPS || over_budget(s) || stalled(s)
+    s.steps >= MAX_STEPS || over_budget(s) || stalled(s) || circuit_broken(s)
 }
 
 /// reason 之后的路由(scripted / llm 两条路径共用):finish 或需停机 → verify,否则 → act。
@@ -982,11 +996,14 @@ fn parse_edits(call: &ToolCall) -> Vec<tools::Edit> {
 /// 观察到工具错误(前缀 ` error:` / `BLOCKED` / `permission denied`)→ 置 `last_error` 首行;
 /// 写类工具成功(write_file/edit_file/apply_edits)→ 记入 `modified_files` 并清 `last_error`;
 /// 其余工具不动 durable 状态。这样长任务只凭「当前事实」推理,不必靠全量历史。
+/// 工具观察是否为**错误**(错误前缀 / BLOCKED / permission denied)。单一真相:
+/// Durable State 回填与熔断计数(`err_streak`)共用,免两处判据漂移。
+fn is_error_observation(obs: &str) -> bool {
+    obs.contains(" error:") || obs.starts_with("BLOCKED") || obs.starts_with("permission denied")
+}
+
 fn durable_updates(call: &ToolCall, observation: &str) -> Vec<Patch> {
-    let is_err = observation.contains(" error:")
-        || observation.starts_with("BLOCKED")
-        || observation.starts_with("permission denied");
-    if is_err {
+    if is_error_observation(observation) {
         let line = observation
             .lines()
             .next()
@@ -1224,6 +1241,9 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
 const AUTO_COMPACT_TOKENS: usize = 6000;
 /// 自动 compact 时保留的最近消息条数。
 const AUTO_COMPACT_KEEP: usize = 8;
+/// **上下文腐烂**硬上限:压缩后估算 token 仍超此值(2× 压缩阈值)= 单条巨消息压不掉,
+/// 继续只会烧预算/降智 → 停机(诊断标签,喂 signal 复利)。
+const CONTEXT_ROT_TOKENS: usize = 2 * AUTO_COMPACT_TOKENS;
 
 /// 本地 token 估算(不引 tiktoken):CJK 等非 ASCII 字 ≈ 1 token/字,ASCII ≈ 1 token/4 字符。
 /// 口径同仓内 `bin`/`token-count.mjs`。粗但零依赖、确定可测 —— 只用于「要不要压缩」的触发判断。
@@ -1258,6 +1278,21 @@ fn to_messages(system: &str, s: &AgentState) -> Vec<Message> {
         msgs.push(Message::new(Role::System, block));
     }
     msgs
+}
+
+/// 上下文是否**腐烂**:按 `to_messages` 同口径做压缩后,历史估算 token 仍超 [`CONTEXT_ROT_TOKENS`]
+/// —— 即单条超大消息压不掉(如塞进一个巨型工具输出)。纯函数、离线可测,只在终态分类时算一次。
+fn context_rotted(s: &AgentState) -> bool {
+    let raw: usize = s.history.iter().map(|m| est_tokens(&m.content)).sum();
+    if raw <= AUTO_COMPACT_TOKENS {
+        return false; // 未触发压缩,必然 ≤ 压缩阈值 < 硬上限
+    }
+    let compacted = compact_history(s.history.clone(), AUTO_COMPACT_KEEP);
+    compacted
+        .iter()
+        .map(|m| est_tokens(&m.content))
+        .sum::<usize>()
+        > CONTEXT_ROT_TOKENS
 }
 
 /// 把 Durable State 编译成一段紧凑事实块(已改文件 / 上次报错);无事实 → `None`(不注入)。
@@ -1789,6 +1824,12 @@ fn build_core(
                     } else {
                         0
                     };
+                    // 熔断计数:本轮观察为错误则 err_streak+1,成功则清零(与 stall 正交,兜「错误每轮不同」)。
+                    let err_streak = if is_error_observation(&obs) {
+                        s.err_streak + 1
+                    } else {
+                        0
+                    };
                     // Durable State 回填(事实驱动):在 obs 被移动前算好。
                     let durable = durable_updates(call, &obs);
                     let mut patches = vec![
@@ -1796,6 +1837,7 @@ fn build_core(
                         // 工具结果按 role=tool 正确回灌(匹配 tool_call_id)。
                         Patch::PushHistory(Message::tool_result(call.id.clone(), obs.clone())),
                         Patch::SetStall(stall),
+                        Patch::SetErrStreak(err_streak),
                         Patch::ToolOutput(Some(obs)),
                         Patch::PendingCall(None),
                     ];
@@ -1940,6 +1982,10 @@ pub enum HaltReason {
     StepCap,
     /// **约束违反**(奖励黑客):试图删/清空受保护路径(测试)等 —— 被守卫硬拦。
     ConstraintBreach,
+    /// **上下文腐烂**:压缩后上下文仍超硬上限(单条巨消息压不掉),继续只烧预算/降智。
+    ContextRot,
+    /// **熔断**:连续工具/provider 报错达 [`MAX_ERR_STREAK`],无人值守下提前停机防烧预算。
+    CircuitBroken,
     Unverified,
 }
 
@@ -1951,6 +1997,8 @@ impl HaltReason {
             HaltReason::Stall => "no_progress",
             HaltReason::StepCap => "step_cap",
             HaltReason::ConstraintBreach => "constraint_breach",
+            HaltReason::ContextRot => "context_rot",
+            HaltReason::CircuitBroken => "circuit_broken",
             HaltReason::Unverified => "unverified",
         }
     }
@@ -1960,8 +2008,9 @@ impl HaltReason {
     }
 }
 
-/// 据终态判定停机原因。优先级:成功 > 超预算(经济护栏最该被看见)> **约束违反**(奖励黑客,安全须显)
-/// > 无进展 > 回合上限 > 未验证。
+/// 据终态判定停机原因。优先级(高→低):成功、超预算(经济护栏最该被看见)、**约束违反**(奖励黑客,
+/// 安全须显)、**上下文腐烂**(结构性根因)、**熔断**(连错症状)、无进展(输出停滞)、回合上限(通用耗尽)、未验证。
+/// 「更根因/更具体者优先」:同为失败终态时,给最有诊断价值的标签(喂 signal 复利)。
 pub fn halt_reason(s: &AgentState) -> HaltReason {
     if s.approved {
         HaltReason::Approved
@@ -1973,6 +2022,10 @@ pub fn halt_reason(s: &AgentState) -> HaltReason {
         .is_some_and(|e| e.contains("constraint"))
     {
         HaltReason::ConstraintBreach
+    } else if context_rotted(s) {
+        HaltReason::ContextRot
+    } else if circuit_broken(s) {
+        HaltReason::CircuitBroken
     } else if stalled(s) {
         HaltReason::Stall
     } else if s.steps >= MAX_STEPS {
@@ -2693,16 +2746,80 @@ mod tests {
         };
         assert_eq!(halt_reason(&breach), HaltReason::ConstraintBreach);
 
+        // 熔断:连错达阈值 → circuit_broken,优先于回合上限(错误内容每轮不同、stall 不触发时兜底)。
+        let circuit = AgentState {
+            steps: MAX_STEPS,
+            err_streak: MAX_ERR_STREAK,
+            ..Default::default()
+        };
+        assert_eq!(halt_reason(&circuit), HaltReason::CircuitBroken);
+
+        // 上下文腐烂:压缩后单条巨消息仍超硬上限 → context_rot,优先于熔断(结构性根因)。
+        let big = "字".repeat(CONTEXT_ROT_TOKENS + 1); // 每 CJK 字≈1tok,单条即超硬上限,压不掉
+        let rot = AgentState {
+            steps: MAX_STEPS,
+            err_streak: MAX_ERR_STREAK,
+            history: vec![Message::user(big)],
+            ..Default::default()
+        };
+        assert_eq!(halt_reason(&rot), HaltReason::ContextRot);
+
         // 熔断/违约都非成功 → 调用方据此给非零退出码。
         for r in [
             HaltReason::Budget,
             HaltReason::Stall,
             HaltReason::StepCap,
             HaltReason::ConstraintBreach,
+            HaltReason::ContextRot,
+            HaltReason::CircuitBroken,
             HaltReason::Unverified,
         ] {
             assert!(!r.is_success(), "{} 不应算成功", r.as_str());
         }
+    }
+
+    /// 上下文腐烂判定:小历史不腐烂;单条超硬上限的巨消息(压不掉)→ 腐烂。
+    #[test]
+    fn context_rotted_detects_unshrinkable_giant_message() {
+        let small = AgentState {
+            history: vec![Message::user("短消息")],
+            ..Default::default()
+        };
+        assert!(!context_rotted(&small), "小历史不应判腐烂");
+
+        // 多条普通消息**真的超**压缩阈值(1200×6≈7200tok>6000),但压缩保留尾部 8 条 → 收敛到硬上限内 → 不腐烂。
+        let many: Vec<Message> = (0..1200).map(|_| Message::user("噪音消息一段")).collect();
+        let compactable = AgentState {
+            history: many,
+            ..Default::default()
+        };
+        assert!(!context_rotted(&compactable), "可压缩历史不应判腐烂");
+
+        // 单条巨消息压不掉 → 腐烂。
+        let rot = AgentState {
+            history: vec![Message::user("字".repeat(CONTEXT_ROT_TOKENS + 1))],
+            ..Default::default()
+        };
+        assert!(context_rotted(&rot), "单条超硬上限的巨消息应判腐烂");
+    }
+
+    /// 熔断早停:连续报错累计到 MAX_ERR_STREAK 即命中 must_stop(早于回合上限)。
+    #[test]
+    fn circuit_breaks_before_step_cap() {
+        let broken = AgentState {
+            err_streak: MAX_ERR_STREAK,
+            steps: 1, // 远未到回合上限
+            ..Default::default()
+        };
+        assert!(circuit_broken(&broken));
+        assert!(must_stop(&broken), "连错达阈值应触发停机,不必跑到回合上限");
+
+        let ok = AgentState {
+            err_streak: MAX_ERR_STREAK - 1,
+            steps: 1,
+            ..Default::default()
+        };
+        assert!(!must_stop(&ok), "未达连错阈值不应停机");
     }
 
     /// 标准存储库:一轮任务落成独立 run 目录,含 manifest.json(结构化结论)+ trace.json(完整轨迹)。

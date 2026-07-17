@@ -4,6 +4,17 @@
 
 ---
 
+## 2026-07-17 · iter-18:护栏套件收尾(编辑臂守卫 + ContextRot + CircuitBroken)
+
+- **触发**:用户「继续做遗留工作」。清 CONTRACT-14 残留 P1 + 闭合 iter-17 诚实边界。
+- **① 编辑臂约束守卫**:`constraint_guard_edit`(受保护路径「非空替换为空」= 删测试代码 → 拦)接进 `edit_file`/`apply_edits` 两臂 —— 堵 iter-17 遗留缺口(此前可借 `edit_file(tests/x, old=测试, new="")` 绕守卫伪造 CI 绿)。词法纯函数;**内容级语义篡改(改断言)仍不判**(YAGNI,诚实标)。
+- **② `HaltReason::ContextRot`**(P1):压缩后估算 token 仍 > `CONTEXT_ROT_TOKENS`(2× 压缩阈值=12000)= 单条巨消息压不掉 → 诊断标签。`context_rotted` 复用 `compact_history`,**只在终态 `halt_reason` 算一次**(不进 `must_stop` 热路径,守 O(1))。
+- **③ `HaltReason::CircuitBroken`**(P1):连错达 `MAX_ERR_STREAK=5` 熔断,接 `must_stop` **早停**。与 `stall` 正交 —— stall 认「输出相同」,报错内容每轮不同时归零永不触发;`err_streak`(新字段 + `SetErrStreak` reducer,act 循环回填)认「输出为错误」兜底。抽 `is_error_observation` 纯函数为单一真相(`durable_updates` 与熔断共用)。
+- **停机优先级**:approved > budget > constraint_breach > context_rot(根因)> circuit_broken(症状)> stall > step_cap > unverified。更根因/具体者优先,喂 signal 复利。
+- **验收**:`cargo test --workspace`=全绿(agent lib 60→**62**,+2:context_rotted 判定、circuit 早停;分类测/守卫测原地扩测),clippy `-D warnings`、fmt 净。
+- **成果**:无人值守自主循环的四类经典失败(无进展/超预算/上下文腐烂/奖励黑客)+ 熔断皆有确定性停机信号,护栏套件成体系。**残留**:非真沙箱、内容级篡改未判、保护路径不可配。
+- **下一步**:走 NLM 迭代工作流研判 —— 护栏是否已「足够」;下一杠杆(自动 signal 抽取 / 触发器编排 / 扬长 A)据证据排序;是否有被忽视硬伤。
+
 ## 2026-07-17 · iter-17:三者皆做(自动产者 + 时间触发器 + 约束守卫)
 
 - **触发**:用户「三者皆做」—— iter-16 收尾提的三个下一步一并落地。皆 Ponytail 最小实、离线可测。
