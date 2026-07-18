@@ -93,6 +93,8 @@ async fn main() -> anyhow::Result<()> {
             let skills = load_configured_skills(&cfg); // 声明式技能(领域知识)
             let budget = cfg.budget_tokens.unwrap_or(0); // 0 = 不限
             let skip_danger = cli_skip_danger || cfg.skip_danger.unwrap_or(false);
+            // 地址越狱(iter-34):启动从 config 置进程级开关,默认关(TUI 可 /jailbreak 实时切)。
+            agent::set_allow_jailbreak(cfg.allow_jailbreak.unwrap_or(false));
             let agents = Arc::new(build_agents(&cfg)); // sub-agent 注册表(内置 + 用户 + 命名 provider)
             match task {
                 Some(t) => run_once(p, mcp, skills, &t, budget, agents, read_only, every).await, // 一次性 / --every 触发器

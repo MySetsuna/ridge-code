@@ -610,6 +610,9 @@ pub struct Config {
     /// 输入框下方自定义状态条模板(可选)。占位:`{provider}{model}{ctx}{tokens}{cwd}`。
     /// 留空则用内置默认模板(见 `tui::DEFAULT_STATUS_BAR`)。
     pub status_bar: Option<String>,
+    /// 地址越狱(iter-34):true 则放行 cwd 子树外的写。默认 false;开启 TUI 状态栏标红。
+    /// **只放宽 cwd 子树** —— 危险命令拦截/受保护路径/只读不受影响。
+    pub allow_jailbreak: Option<bool>,
     /// 要并接的多个 MCP(stdio)服务器。
     pub mcp: Vec<McpServerCfg>,
     /// 命名的 provider 档案(多 provider)—— `/provider use <name>` 可热切换到其中之一。
@@ -684,6 +687,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "skills_dir",
     "skip_danger",
     "status_bar",
+    "allow_jailbreak",
 ];
 
 /// 把一个标量键写进 JSON 配置文本,**保留其余键**(如 `mcp`),返回美化后的新文本。
@@ -704,10 +708,10 @@ pub fn config_set(text: &str, key: &str, value: &str) -> Result<String, String> 
                 .map_err(|_| format!("budget_tokens 需要非负整数,得到 {value}"))?;
             serde_json::Value::from(n)
         }
-        "skip_danger" => {
+        "skip_danger" | "allow_jailbreak" => {
             let b: bool = value
                 .parse()
-                .map_err(|_| format!("skip_danger 需要 true/false,得到 {value}"))?;
+                .map_err(|_| format!("{key} 需要 true/false,得到 {value}"))?;
             serde_json::Value::from(b)
         }
         _ => serde_json::Value::from(value),
@@ -1121,9 +1125,31 @@ fn parse_todos(call: &ToolCall) -> Vec<Todo> {
         .collect()
 }
 
+/// 地址越狱开关(iter-34):进程级,默认 **关**。开则 `jail` 放行 cwd 子树外的写。
+/// **只放宽 cwd 子树这一条** —— 危险命令硬拦截、受保护路径(tests/.git)守卫、只读模式全不受影响。
+/// 与 `jail` 已读的进程级 cwd 同层(进程内 TUI 与后台任务共享),不逐调用穿参。
+static ALLOW_JAILBREAK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 置地址越狱开关(启动读 config、TUI `/jailbreak` 实时切)。安全放宽,开启时 TUI 须显红标。
+pub fn set_allow_jailbreak(on: bool) {
+    ALLOW_JAILBREAK.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+/// 读地址越狱开关(`jail` 与状态栏红标用)。
+pub fn allow_jailbreak() -> bool {
+    ALLOW_JAILBREAK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// 写操作沙箱守卫:路径须落在**进程 cwd 子树**内(`--cwd` 设的工作目录),越狱 → `Err(BLOCKED 串)`。
 /// 深度防御,与危险命令拦截同层:即使模型幻觉出绝对路径/`..` 逃逸,也硬拒,防写出工作目录祸害宿主。
 fn jail(path: &str) -> Result<(), String> {
+    jail_guard(allow_jailbreak(), path)
+}
+
+/// jail 决策纯函数(iter-34):`allow` 为开关快照。`allow==true` → 放行;否则钳在 cwd 子树。
+/// 抽纯函数是为可测且**不在测试里翻全局**(AtomicBool 全局若被某测试改会污染并行的 `jail_blocks_write_outside_cwd`)。
+fn jail_guard(allow: bool, path: &str) -> Result<(), String> {
+    if allow {
+        return Ok(());
+    }
     let root = std::env::current_dir().map_err(|e| format!("BLOCKED (jail): 取 cwd 失败: {e}"))?;
     tools::jail_path(&root, path)
         .map(|_| ())
@@ -3732,6 +3758,30 @@ mod tests {
         let obs = execute_tool_call(&call);
         assert!(obs.starts_with("BLOCKED"), "越狱写应被拦: {obs}");
         assert!(!outside.exists(), "拦截后绝不落盘");
+    }
+
+    /// iter-34:地址越狱决策纯函数 —— 开则放行 cwd 外,关则拦。测显式 bool,**不翻全局**(免污染并行的 jail_blocks 测试)。
+    #[test]
+    fn jail_guard_allows_when_on_blocks_when_off() {
+        let outside = std::env::temp_dir().join("ridge_jailbreak_probe.txt");
+        let p = outside.to_str().unwrap();
+        assert!(jail_guard(true, p).is_ok(), "越狱开:放行 cwd 外写");
+        let blocked = jail_guard(false, p);
+        assert!(
+            blocked.is_err() && blocked.unwrap_err().contains("BLOCKED"),
+            "越狱关:cwd 外写仍拦"
+        );
+    }
+
+    /// iter-34:`allow_jailbreak` 是可持久化 bool 配置键。
+    #[test]
+    fn config_set_accepts_allow_jailbreak_bool() {
+        let out = config_set("{}", "allow_jailbreak", "true").unwrap();
+        assert!(out.contains("\"allow_jailbreak\": true"), "得到: {out}");
+        assert!(
+            config_set("{}", "allow_jailbreak", "yes").is_err(),
+            "非 bool 应报错"
+        );
     }
 
     /// 只读模式:装配时从 offering 里滤掉副作用工具,只留读/查/研究类。

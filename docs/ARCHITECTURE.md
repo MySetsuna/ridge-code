@@ -81,6 +81,7 @@ BoN 真实接入的物理前提(引擎零感知):`Workspace`(GitWorktree / Shado
 ## 4. tools:std-only 真实工具
 
 `read_file` / `read_file_range`(区间读)/ `edit_file`(唯一匹配替换,0 处或多处即报错引导)/ `apply_edits`(多文件原子批量:全体校验唯一匹配 → 落盘,单写失败回滚已写)/ `write_file` / `search`(递归 + glob,SEARCH_CAP 截断提示)/ 跨平台 shell / `is_dangerous_command` 灾难命令硬拦截(任何模式下不可绕过)。
+**写沙箱 jail**(`execute_tool_call` 里 write/edit/apply_edits 路径守卫):`jail = jail_guard(allow_jailbreak(), path)`,`jail_guard` 纯函数 —— 关(默认)时钳在**进程 cwd 子树**,越狱 → `BLOCKED`。**地址越狱开关**(iter-34)= 进程级 `AtomicBool`(`set_allow_jailbreak`/`allow_jailbreak`,启动读 `config.allow_jailbreak`、TUI `/jailbreak [on|off]` 实时切):开则 `jail_guard` 放行 cwd 外写,**但只放宽这一条** —— 危险命令拦截、受保护路径(tests/.git)守卫、只读模式不受影响;开启时 TUI 顶栏红底 `⚠越狱` 徽标警示。默认关,持久化经 `/config set allow_jailbreak true`。
 
 ## 5. mcp:客户端协议层
 

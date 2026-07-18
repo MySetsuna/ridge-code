@@ -351,6 +351,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/cost",
     "/exit",
     "/help",
+    "/jailbreak",
     "/model",
     "/models",
     "/provider",
@@ -1340,7 +1341,7 @@ async fn run_command(
 ) -> anyhow::Result<bool> {
     match input {
         "/exit" | "/quit" => return Ok(true),
-        "/help" => ui.note("/exit /reset /compact /cost /tools /model [name|pick] /models /provider [list|use <name>|add <name> <kind> <model> <base_url> [key_env]] /agent /config [set key value]；@path 引用文件；Ctrl-C 中断；历史滚动/选取用终端原生能力；批准弹窗:y/Enter 批准、n/Esc 拒绝、↑↓ 滚动看详情。", Color::Gray),
+        "/help" => ui.note("/exit /reset /compact /cost /tools /model [name|pick] /models /provider [list|use <name>|add <name> <kind> <model> <base_url> [key_env]] /agent /config [set key value] /jailbreak [on|off]；@path 引用文件；Ctrl-C 中断；历史滚动/选取用终端原生能力；批准弹窗:y/Enter 批准、n/Esc 拒绝、↑↓ 滚动看详情。", Color::Gray),
         "/tools" => ui.note(format!("可用工具({}): {}", meta.tools.len(), meta.tools.join(", ")), Color::Gray),
         "/reset" => { history.clear(); save_session(&session_path(), history); ui.note("上下文已清空", Color::Yellow); }
         "/compact" => { let n = history.len(); *history = compact_history(std::mem::take(history), 4); ui.note(format!("上下文已压缩: {n} → {} 条", history.len()), Color::Yellow); }
@@ -1393,6 +1394,12 @@ async fn run_command(
             }
         }
         _ if input.starts_with("/model ") => swap_model(swap, meta, input[7..].trim(), ui),
+        _ if input == "/jailbreak" => {
+            let on = agent::allow_jailbreak();
+            ui.note(if on { "地址越狱: 开 ⚠（可写 cwd 子树外;危险命令/受保护路径/只读仍拦）。关闭: /jailbreak off" } else { "地址越狱: 关（写限 cwd 子树）。开启: /jailbreak on —— 放宽后顶状态栏标红" }, if on { Color::Red } else { Color::Gray });
+        }
+        _ if input == "/jailbreak on" => { agent::set_allow_jailbreak(true); ui.note("⚠ 地址越狱已开:可写 cwd 子树外（危险命令/受保护路径/只读仍硬拦）。本会话生效;持久化: /config set allow_jailbreak true", Color::Red); }
+        _ if input == "/jailbreak off" => { agent::set_allow_jailbreak(false); ui.note("地址越狱已关:写路径限回 cwd 子树", Color::Green); }
         _ if input == "/config" => ui.note(format!("配置文件: {}（JSON，可直接编辑）\n当前: {} · {}\n持久化: /config set <key> <value>", config_path(), meta.provider, meta.model), Color::Gray),
         _ if input.starts_with("/config set ") => { let parts: Vec<_> = input.splitn(4, ' ').collect(); if parts.len() == 4 { match persist_config(parts[2], parts[3]) { Ok(path) => ui.note(format!("已写入 {path}；下次启动生效"), Color::Green), Err(e) => ui.note(format!("写入失败: {e}"), Color::Red) } } else { ui.note("用法: /config set <key> <value>", Color::Yellow); } }
         _ if input == "/provider" || input == "/provider list" => { let cfg = Config::load(config_path()); let list = cfg.providers.iter().map(|p| format!("{} · {} · {}", p.name, p.kind, p.model)).collect::<Vec<_>>().join("\n"); let hint = "\n切换: /provider use <name>；新增: /provider add <name> <kind> <model> <base_url> [key_env]"; ui.note(if list.is_empty() { format!("没有 provider 档案。{hint}") } else { format!("{list}{hint}") }, Color::Gray); }
@@ -1458,25 +1465,33 @@ fn draw(
     let ctx = ctx_percent(vitals.ctx_used, meta.ctx_window as usize);
     // 顶状态行更显眼(iter-31 需求 3):busy 时徽标转暖色示运行、加 ctx% 段。
     let badge_bg = if ui.busy { Color::Yellow } else { Color::Cyan };
+    let mut top: Vec<Span> = vec![Span::styled(
+        " RidgeCode ",
+        Style::default()
+            .fg(Color::Black)
+            .bg(badge_bg)
+            .add_modifier(Modifier::BOLD),
+    )];
+    // 地址越狱红标(iter-34):放宽 cwd 沙箱时红底黑字警示,一眼可见。
+    if agent::allow_jailbreak() {
+        top.push(Span::styled(
+            " ⚠越狱 ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(role_color(Role::Error))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    top.push(Span::raw(format!(
+        " {} · {} · ctx {ctx}% · {} tokens{todo} · {}{}",
+        meta.provider,
+        meta.model,
+        tokens,
+        cwd_name(),
+        status
+    )));
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                " RidgeCode ",
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(badge_bg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(format!(
-                " {} · {} · ctx {ctx}% · {} tokens{todo} · {}{}",
-                meta.provider,
-                meta.model,
-                tokens,
-                cwd_name(),
-                status
-            )),
-        ]))
-        .style(Style::default().bg(Color::DarkGray)),
+        Paragraph::new(Line::from(top)).style(Style::default().bg(Color::DarkGray)),
         outer[0],
     );
     // 流式尾巴:只画最后 K 行(已完段落随 Superstep 静态提交进历史)。
