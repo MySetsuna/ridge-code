@@ -78,9 +78,7 @@ EXAMPLE='{
       "key_env": "MOONSHOT_KEY"
     }
   ],
-  "mcp": [
-    { "name": "notebooklm", "cmd": "notebooklm-mcp" }
-  ]
+  "mcp": []
 }'
 printf '%s\n' "$EXAMPLE" > "$BIN_DIR/config.example.json"
 echo "✓ 示例配置: $BIN_DIR/config.example.json"

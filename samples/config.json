@@ -23,10 +23,6 @@
   ],
   "mcp": [
     {
-      "name": "notebooklm",
-      "cmd": "notebooklm-mcp"
-    },
-    {
       "name": "anysearch",
       "cmd": "cmd",
       "args": ["/c", "npx", "-y", "mcp-remote", "https://api.anysearch.com/mcp"]
