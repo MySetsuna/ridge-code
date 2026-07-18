@@ -346,6 +346,7 @@ impl InputState {
 /// 斜杠命令静态表(补全数据源,与 `run_command` 分支对齐;有序稳态)。
 const SLASH_COMMANDS: &[&str] = &[
     "/agent",
+    "/commands",
     "/compact",
     "/config",
     "/cost",
@@ -359,6 +360,16 @@ const SLASH_COMMANDS: &[&str] = &[
     "/reset",
     "/tools",
 ];
+
+/// 动态斜杠命令名(iter-39,含前导 `/`):启动从命令表填一次,供补全浮窗与静态表并列。
+/// 进程全局 set-once(与 jailbreak AtomicBool 先例一致);未设(如单测)→ 空,补全只用静态表。
+static DYNAMIC_COMMANDS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+fn set_dynamic_commands(cmds: &[agent::SlashCommand]) {
+    let _ = DYNAMIC_COMMANDS.set(cmds.iter().map(|c| format!("/{}", c.name)).collect());
+}
+fn dynamic_commands() -> &'static [String] {
+    DYNAMIC_COMMANDS.get().map(|v| v.as_slice()).unwrap_or(&[])
+}
 
 struct Popup {
     items: Vec<String>,
@@ -419,7 +430,13 @@ fn path_candidates(part: &str) -> Vec<String> {
 fn build_popup(input: &InputState) -> Option<Popup> {
     let (anchor, word) = current_word(&input.buffer, input.cursor);
     if word.starts_with('/') && anchor == 0 {
-        let items = filter_prefix(SLASH_COMMANDS.iter().copied(), &word);
+        let items = filter_prefix(
+            SLASH_COMMANDS
+                .iter()
+                .copied()
+                .chain(dynamic_commands().iter().map(String::as_str)),
+            &word,
+        );
         return (!items.is_empty()).then_some(Popup {
             items,
             selected: 0,
@@ -1011,6 +1028,8 @@ struct Ui {
     queued: VecDeque<String>,
     /// 交互页(iter-35):Some = 模态页开(键位模态优先级:审批 > Panel > 浮窗 > 输入)。
     panel: Option<Panel>,
+    /// 自定义/skill 命令请求「以任务身份跑」(iter-39):`run_command` 展开 body 置此,主环取走起任务。
+    run_task: Option<String>,
 }
 impl Ui {
     fn note(&mut self, text: impl Into<String>, color: Color) {
@@ -1066,7 +1085,9 @@ pub(super) async fn run(
     mut meta: ReplMeta,
     agents: Arc<agent::Agents>,
     read_only: bool,
+    commands: Vec<agent::SlashCommand>,
 ) -> anyhow::Result<()> {
+    set_dynamic_commands(&commands); // 自定义/skill 命令名进补全源(iter-39)
     let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
     let approver: Arc<dyn Approver> = if skip_danger {
         Arc::new(AutoApprove)
@@ -1142,6 +1163,7 @@ pub(super) async fn run(
                     &mut meta,
                     &swap,
                     &agents,
+                    &commands,
                     session_tokens,
                     session_turns,
                 )
@@ -1149,10 +1171,16 @@ pub(super) async fn run(
                 {
                     break 'main;
                 }
-                if !input.starts_with('/') {
+                // 普通输入直接是任务;斜杠命令若为自定义/skill 命令,run_command 已把展开的 prompt 置 ui.run_task。
+                let task_input = if input.starts_with('/') {
+                    ui.run_task.take()
+                } else {
+                    Some(input.clone())
+                };
+                if let Some(ti) = task_input {
                     ui.note(format!("› {input}"), role_color(Role::Command));
-                    history.push(Message::user(expand_mentions(&input)));
-                    let state = AgentState::new(&input)
+                    history.push(Message::user(expand_mentions(&ti)));
+                    let state = AgentState::new(&ti)
                         .with_history(history.clone())
                         .with_budget(budget)
                         .with_signals(agent::load_signal_block());
@@ -1831,12 +1859,13 @@ async fn run_command(
     meta: &mut ReplMeta,
     swap: &Arc<SwapProvider>,
     agents: &agent::Agents,
+    commands: &[agent::SlashCommand],
     tokens: usize,
     turns: usize,
 ) -> anyhow::Result<bool> {
     match input {
         "/exit" | "/quit" => return Ok(true),
-        "/help" => ui.note("/exit /reset /compact /cost /tools /login [list|<id> <key>] /model [<name>] (no arg = live model picker) /provider [list|use <name>|add <name> <kind> <model> <base_url> [key_env]] /agent /config [set key value] /jailbreak [on|off]; @path to reference a file; Ctrl-C to interrupt; scroll/select history with the terminal's native keys; approval prompt: y/Enter approve, n/Esc reject, ↑↓ scroll details.", Color::Gray),
+        "/help" => ui.note("/exit /reset /compact /cost /tools /login [list|<id> <key>] /model [<name>] (no arg = live model picker) /provider [list|use <name>|add ...] /agent /commands (custom /name from ~/.ridge/commands/*.md + skills; $ARGS) /config [set key value] /jailbreak [on|off]; @path to reference a file; Ctrl-C to interrupt; scroll/select history with the terminal's native keys; approval prompt: y/Enter approve, n/Esc reject, ↑↓ scroll details.", Color::Gray),
         "/tools" => ui.panel = Some(tools_panel(&meta.tools)),
         "/reset" => { history.clear(); save_session(&session_path(), history); ui.note("context cleared", Color::Yellow); }
         "/compact" => { let n = history.len(); *history = compact_history(std::mem::take(history), 4); ui.note(format!("context compacted: {n} → {} messages", history.len()), Color::Yellow); }
@@ -1915,7 +1944,22 @@ async fn run_command(
             if agents.defs.is_empty() { ui.note("no sub-agents available", Color::Gray); }
             else { ui.panel = Some(agent_panel(&agents.defs)); }
         }
-        _ if input.starts_with('/') => ui.note(format!("unknown command: {input} (/help)"), Color::Yellow),
+        _ if input == "/commands" => {
+            if commands.is_empty() { ui.note("no custom commands. Add ~/.ridge/commands/<name>.md (body = prompt, $ARGS = args); skills also appear here.", Color::Gray); }
+            else {
+                let lines: Vec<String> = commands.iter().map(|c| if c.description.is_empty() { format!("/{}", c.name) } else { format!("/{}  —— {}", c.name, c.description) }).collect();
+                ui.note(format!("commands ({}):\n{}", commands.len(), lines.join("\n")), Color::Gray);
+            }
+        }
+        // 自定义 / skill 命令(iter-39):/name [args] → 展开 body(替 $ARGS)为任务(置 run_task,主环起任务)。
+        _ if input.starts_with('/') => {
+            let rest = &input[1..];
+            let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            match agent::resolve_command(name, commands) {
+                Some(cmd) => ui.run_task = Some(agent::expand_command(&cmd.body, args.trim())),
+                None => ui.note(format!("unknown command: {input} (/help · /commands)"), Color::Yellow),
+            }
+        }
         _ => return Ok(false),
     }
     Ok(false)
@@ -2722,6 +2766,7 @@ mod tests {
         assert_eq!(
             filter_prefix(SLASH_COMMANDS.iter().copied(), "/co"),
             vec![
+                "/commands".to_string(),
                 "/compact".to_string(),
                 "/config".to_string(),
                 "/cost".to_string()

@@ -4,10 +4,10 @@ use std::sync::Arc;
 use agent::{
     apply_login, auth_parse, auth_upsert, auto_signal_from_run, build_agent, build_llm_agent_full,
     builtin_tool_specs, compact_history, default_tool, est_tokens, expand_mentions,
-    extract_signals_from_run, halt_reason, load_signal_block, load_skills, null_token_bus,
-    preset_by_id, render_todos, resolve_key_env, resolve_mcp, scripted, signal_extract_enabled,
-    write_run, AgentState, Approver, AutoApprove, Color, Config, McpTools, RichOutput, Skill, Todo,
-    TokenBus, PROVIDER_PRESETS,
+    extract_signals_from_run, halt_reason, load_commands, load_signal_block, load_skills,
+    null_token_bus, preset_by_id, render_todos, resolve_key_env, resolve_mcp, scripted,
+    signal_extract_enabled, write_run, AgentState, Approver, AutoApprove, Color, Config, McpTools,
+    RichOutput, Skill, SlashCommand, Todo, TokenBus, PROVIDER_PRESETS,
 };
 use langgraph::{CompiledGraph, RunConfig, StreamEvent};
 use mcp::{McpClient, StdioTransport};
@@ -134,6 +134,8 @@ async fn main() -> anyhow::Result<()> {
                     let swap = Arc::new(SwapProvider::new(p));
                     // 终端采用 TUI；管道/非 TTY 退回 headless，避免破坏脚本/重定向调用。
                     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                        // 自定义斜杠命令(iter-39):从同一 skills 派生(含 skill-as-命令),再移交 skills 给图。
+                        let commands = load_configured_commands(&cfg, &skills);
                         tui::run(
                             swap,
                             mcp,
@@ -144,6 +146,7 @@ async fn main() -> anyhow::Result<()> {
                             meta,
                             agents,
                             read_only,
+                            commands,
                         )
                         .await
                     } else {
@@ -442,6 +445,25 @@ fn load_configured_skills(cfg: &Config) -> Vec<Skill> {
         );
     }
     skills
+}
+
+/// 加载自定义斜杠命令(iter-39):`RIDGE_COMMANDS_DIR` env > config `commands_dir` > `~/.ridge/commands`;
+/// 目录里 `*.md` 各成 `/名字` + 每个 skill 也暴露为同名命令。供 TUI 斜杠命令扩展。
+fn load_configured_commands(cfg: &Config, skills: &[Skill]) -> Vec<SlashCommand> {
+    let dir = std::env::var("RIDGE_COMMANDS_DIR")
+        .ok()
+        .or_else(|| cfg.commands_dir.clone())
+        .unwrap_or_else(|| format!("{}/commands", ridge_home()));
+    let cmds = load_commands(&dir, skills);
+    if !cmds.is_empty() {
+        let names: Vec<String> = cmds.iter().map(|c| format!("/{}", c.name)).collect();
+        eprintln!(
+            "[ridgecode] loaded {} command(s): {}",
+            cmds.len(),
+            names.join(" ")
+        );
+    }
+    cmds
 }
 
 /// 解析参数:非 flag 拼成任务(无 → TUI/headless);`--cwd <dir>` 切换工作目录;

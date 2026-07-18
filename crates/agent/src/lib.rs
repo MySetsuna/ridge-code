@@ -353,6 +353,96 @@ fn parse_skill(text: &str) -> Option<Skill> {
     })
 }
 
+// ───────────────────────── 斜杠命令:Prompt 模板 + Skills-as-命令(iter-39)─────────────────────────
+
+/// 一个斜杠命令:**Prompt 模板** —— `/name [args]` 调用即把 `body`(其中 `$ARGS` 替换为 args)
+/// 注入为一条任务喂给 agent。来源:`~/.ridge/commands/*.md`(用户自定义)或一个 [`Skill`](name→/name)。
+#[derive(Clone, Debug, PartialEq)]
+pub struct SlashCommand {
+    /// 不含前导 `/`。
+    pub name: String,
+    pub description: String,
+    pub body: String,
+}
+
+/// 解析命令 `.md`:可选 frontmatter(`description:`/`desc:`)+ 正文;**name 由文件名给**(非 frontmatter)。
+/// 无 frontmatter → 全文即 body。纯函数,可单测。
+pub fn parse_command_md(text: &str, name: &str) -> SlashCommand {
+    let parsed = text.strip_prefix("---").and_then(|rest| {
+        rest.find("\n---").map(|end| {
+            let front = &rest[..end];
+            let body = rest[end + 4..]
+                .trim_start_matches(['-', '\n'])
+                .trim()
+                .to_string();
+            let mut desc = String::new();
+            for line in front.lines() {
+                let line = line.trim();
+                if let Some(v) = line
+                    .strip_prefix("description:")
+                    .or_else(|| line.strip_prefix("desc:"))
+                {
+                    desc = v.trim().to_string();
+                }
+            }
+            (desc, body)
+        })
+    });
+    let (description, body) = parsed.unwrap_or_else(|| (String::new(), text.trim().to_string()));
+    SlashCommand {
+        name: name.to_string(),
+        description,
+        body,
+    }
+}
+
+/// 展开命令 body:`$ARGS` 全部替换为 `args`;body 无 `$ARGS` 且 args 非空 → args 追加末尾。纯函数。
+pub fn expand_command(body: &str, args: &str) -> String {
+    if body.contains("$ARGS") {
+        body.replace("$ARGS", args)
+    } else if args.trim().is_empty() {
+        body.to_string()
+    } else {
+        format!("{body}\n\n{args}")
+    }
+}
+
+/// 扫描 `<dir>/*.md` 为命令 + 把每个 skill 暴露为同名命令(**文件命令优先,同名 skill 跳过**)。
+/// 目录不存在 → 只有 skill 命令。供 TUI 斜杠命令扩展(name→/name)。
+pub fn load_commands(dir: impl AsRef<std::path::Path>, skills: &[Skill]) -> Vec<SlashCommand> {
+    let mut out: Vec<SlashCommand> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.extension().and_then(|x| x.to_str()) == Some("md") {
+                if let (Some(stem), Ok(text)) = (
+                    path.file_stem().and_then(|s| s.to_str()),
+                    std::fs::read_to_string(&path),
+                ) {
+                    if !stem.is_empty() {
+                        out.push(parse_command_md(&text, stem));
+                    }
+                }
+            }
+        }
+    }
+    for s in skills {
+        if !out.iter().any(|c| c.name == s.name) {
+            out.push(SlashCommand {
+                name: s.name.clone(),
+                description: s.description.clone(),
+                body: s.body.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// 按 name 查命令(name 不含前导 `/`)。纯函数。
+pub fn resolve_command<'a>(name: &str, commands: &'a [SlashCommand]) -> Option<&'a SlashCommand> {
+    commands.iter().find(|c| c.name == name)
+}
+
 /// 一个 sub-agent 定义(带 frontmatter 的 `.md`):独立上下文、**只读**、可指定便宜模型。
 /// 主 agent 通过 `dispatch_agent` 工具派活给它,或 REPL `/agent` 手动派;它只回精炼结论,省主上下文/token。
 #[derive(Clone, Debug)]
@@ -609,6 +699,8 @@ pub struct Config {
     pub key_env: Option<String>,
     pub budget_tokens: Option<usize>,
     pub skills_dir: Option<String>,
+    /// 自定义斜杠命令目录(iter-39):`<dir>/*.md` 各成 `/名字`;缺 → env 或 `~/.ridge/commands`。
+    pub commands_dir: Option<String>,
     pub skip_danger: Option<bool>,
     /// 输入框下方自定义状态条模板(可选)。占位:`{provider}{model}{ctx}{tokens}{cwd}`。
     /// 留空则用内置默认模板(见 `tui::DEFAULT_STATUS_BAR`)。
@@ -3941,6 +4033,65 @@ mod tests {
 
         // 空目录 → 无技能,用基础 prompt。
         assert_eq!(build_system_prompt(&[]), BASE_SYSTEM);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// iter-39:命令 md 解析 + `$ARGS` 展开。
+    #[test]
+    fn command_parse_and_expand() {
+        let c = parse_command_md(
+            "---\ndescription: review code\n---\nReview $ARGS for bugs.",
+            "review",
+        );
+        assert_eq!(c.name, "review");
+        assert_eq!(c.description, "review code");
+        assert_eq!(c.body, "Review $ARGS for bugs.");
+        assert_eq!(
+            expand_command(&c.body, "src/x.rs"),
+            "Review src/x.rs for bugs."
+        );
+        // 无 frontmatter → 全文 body、空描述;`desc:` 简写亦可。
+        let c2 = parse_command_md("just do it", "go");
+        assert_eq!(c2.description, "");
+        assert_eq!(c2.body, "just do it");
+        assert_eq!(
+            parse_command_md("---\ndesc: x\n---\nB", "n").description,
+            "x"
+        );
+        // 无 $ARGS:有 args → 追加,无 args → 原样。
+        assert_eq!(expand_command("do the thing", "now"), "do the thing\n\nnow");
+        assert_eq!(expand_command("do the thing", "  "), "do the thing");
+    }
+
+    /// iter-39:命令目录扫描 + skill 合并(文件命令优先于同名 skill)+ 查找。
+    #[test]
+    fn load_commands_merges_files_and_skills() {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("ridge_cmds_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("deploy.md"),
+            "---\ndesc: ship it\n---\nDeploy $ARGS",
+        )
+        .unwrap();
+        let skills = vec![
+            Skill {
+                name: "cooking".into(),
+                description: "pasta".into(),
+                body: "boil".into(),
+            },
+            Skill {
+                name: "deploy".into(),
+                description: "SKILL dup".into(),
+                body: "shadowed".into(),
+            },
+        ];
+        let cmds = load_commands(&dir, &skills);
+        let deploy = resolve_command("deploy", &cmds).expect("deploy");
+        assert_eq!(deploy.description, "ship it"); // 文件优先,非 skill
+        assert_eq!(deploy.body, "Deploy $ARGS");
+        assert!(resolve_command("cooking", &cmds).is_some()); // skill 命令
+        assert!(resolve_command("nope", &cmds).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
