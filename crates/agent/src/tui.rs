@@ -1151,6 +1151,32 @@ pub(super) async fn run(
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     let mut dirty = true;
 
+    // 失败自动重试(用户需求:给 10 次机会)—— 端点抖动/超时等瞬时失败自动重跑,不打断用户;
+    // 成功/中断/新任务清零。`start_task` 据任务串 + 当前 history 装配 state 并 spawn(初次与重试共用)。
+    const MAX_RETRIES: usize = 10;
+    let mut retry_count = 0usize;
+    let mut last_task: Option<String> = None;
+    let start_task = |ti: &str, hist: &[Message]| -> tokio::task::JoinHandle<()> {
+        let state = AgentState::new(ti)
+            .with_history(hist.to_vec())
+            .with_budget(budget)
+            .with_signals(agent::load_signal_block());
+        let app = app.clone();
+        let bus = bus.clone();
+        let tx = event_tx.clone();
+        let done = done_tx.clone();
+        let tokens = token_tx.clone();
+        tokio::spawn(async move {
+            *bus.lock().unwrap() = Some(tokens);
+            let result = app
+                .invoke_with(state, &RunConfig::default(), None, Some(&tx))
+                .await
+                .map_err(|e| e.to_string());
+            *bus.lock().unwrap() = None;
+            let _ = done.send(result);
+        })
+    };
+
     'main: loop {
         // 统一提交点(iter-33):非 busy 时消费 pending_submit —— 键入的新提交,或上一任务毕后接跑的队首。
         // 起任务/跑命令的逻辑**只此一处**(键 Submit 臂与 done 队列接跑共用),消除重复。
@@ -1180,30 +1206,15 @@ pub(super) async fn run(
                 if let Some(ti) = task_input {
                     ui.note(format!("› {input}"), role_color(Role::Command));
                     history.push(Message::user(expand_mentions(&ti)));
-                    let state = AgentState::new(&ti)
-                        .with_history(history.clone())
-                        .with_budget(budget)
-                        .with_signals(agent::load_signal_block());
-                    let app = app.clone();
-                    let bus = bus.clone();
-                    let tx = event_tx.clone();
-                    let done = done_tx.clone();
-                    let tokens = token_tx.clone();
+                    last_task = Some(ti.clone());
+                    retry_count = 0; // 新任务:重试计数清零
                     ui.busy = true;
                     ui.phase = "reasoning".into();
                     ui.stream.clear();
                     ui.stream_tokens = 0;
                     task_started = Some(Instant::now());
                     printed = 0;
-                    task = Some(tokio::spawn(async move {
-                        *bus.lock().unwrap() = Some(tokens);
-                        let result = app
-                            .invoke_with(state, &RunConfig::default(), None, Some(&tx))
-                            .await
-                            .map_err(|e| e.to_string());
-                        *bus.lock().unwrap() = None;
-                        let _ = done.send(result);
-                    }));
+                    task = Some(start_task(&ti, &history));
                 }
                 dirty = true;
             }
@@ -1346,6 +1357,7 @@ pub(super) async fn run(
                             ui.busy = false;
                             ui.stream.clear();
                             task_started = None;
+                            retry_count = 0; // 中断即取消重试链
                             // 中止即取消全部待跑(iter-33):不让排队项在中断后意外接跑。
                             let dropped = ui.queued.len();
                             ui.queued.clear();
@@ -1471,6 +1483,7 @@ pub(super) async fn run(
                 printed = 0;
                 match result {
                     Ok(out) => {
+                        retry_count = 0; // 成功:重试计数清零
                         history = out.history.clone();
                         save_session(&session_path(), &history);
                         session_tokens += out.total_tokens;
@@ -1500,8 +1513,30 @@ pub(super) async fn run(
                         );
                     }
                     Err(e) => {
-                        ui.note(format!("error: {e}"), Color::Red);
-                        agent::fire_session_hooks("stop", "error");
+                        // 失败自动重试(给 10 次):瞬时失败(端点抖动/超时)自动重跑同一任务,不打断用户。
+                        match last_task.clone() {
+                            Some(ti) if retry_count < MAX_RETRIES => {
+                                retry_count += 1;
+                                ui.note(
+                                    format!("↻ 失败,自动重试 {retry_count}/{MAX_RETRIES}(上次: {e})"),
+                                    Color::Yellow,
+                                );
+                                ui.busy = true;
+                                ui.phase = "reasoning".into();
+                                task_started = Some(Instant::now());
+                                task = Some(start_task(&ti, &history));
+                            }
+                            _ => {
+                                let tail = if retry_count >= MAX_RETRIES {
+                                    format!("error(已重试 {MAX_RETRIES} 次仍失败): {e}")
+                                } else {
+                                    format!("error: {e}")
+                                };
+                                ui.note(tail, Color::Red);
+                                agent::fire_session_hooks("stop", "error");
+                                retry_count = 0;
+                            }
+                        }
                     }
                 }
                 // 排队接跑(iter-33):任务毕,取队首交主环顶统一提交点起下一任务。
