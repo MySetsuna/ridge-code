@@ -1,0 +1,183 @@
+use langgraph::GraphState;
+use provider::{Message, ToolCall};
+use std::collections::BTreeSet;
+
+/// 回合硬上限 —— **防跑飞的后备护栏**,非正常终止手段。真正的停机主力是:`approved`(目标达成)、
+/// 预算熔断(`budget_tokens`)、无进展检测(`stalled`)。旧值 8 过低,真实多文件任务动辄十数次工具调用即被腰斩;
+/// 提到 30(≈60 超步,稳在引擎默认 100 超步之下,无需动引擎/RunConfig)。要更长任务:设 `budget_tokens` 控成本、
+/// 或后续把本上限做成可配 + 按其派生引擎超步上限(见 CONTRACT-iteration-15)。
+pub const MAX_STEPS: usize = 30;
+
+/// 一条任务清单项(像 Claude Code 的 TodoWrite):`status` ∈ `pending` / `in_progress` / `completed`。
+#[derive(Clone, Debug, PartialEq)]
+pub struct Todo {
+    pub content: String,
+    pub status: String,
+}
+
+/// agent 的共享状态。`messages` 是事件轨迹(reducer 追加),其余字段覆盖。
+#[derive(Clone, Debug, Default)]
+pub struct AgentState {
+    pub task: String,
+    pub messages: Vec<String>,
+    pub last_action: Option<String>,
+    pub tool_output: Option<String>,
+    pub approved: bool,
+    pub steps: usize,
+    pub issues: Vec<String>,
+    /// 由 reason 节点(真实 LLM 路径)产出、待 act 节点执行的结构化工具调用。
+    pub pending_call: Option<ToolCall>,
+    /// 累计消耗的 token(成本记账)。
+    pub total_tokens: usize,
+    /// token 预算(0 = 不限)。超了就熔断停机。
+    pub budget_tokens: usize,
+    /// 连续「无进展」轮数(工具输出与上一轮相同)。到 [`MAX_STALL`] 就熔断。
+    pub stall: usize,
+    /// 连续**工具/provider 报错**轮数(与 `stall` 正交:stall 认「输出相同」,本字段认「输出为错误」,
+    /// 故报错内容**每轮不同**时 stall 不触发、由本字段兜底)。到 [`MAX_ERR_STREAK`] 熔断,防无人值守烧预算。
+    pub err_streak: usize,
+    /// **模型面向**的多轮对话历史(system 之外的部分):user / assistant(可带 tool_calls)/ tool 结果。
+    /// 这是发给 provider 的真身;REPL 跨轮携带它实现多轮上下文。
+    pub history: Vec<Message>,
+    /// 当前任务清单(模型经 `todo_write` 维护),REPL 渲染成 `[x]/[~]/[ ]` 给用户看进度。
+    pub todos: Vec<Todo>,
+    /// **Durable State(持久化事实)**:本次任务已成功改动的文件路径。用 `BTreeSet` 保证**有序稳态**
+    /// —— 编进 prompt 事实块时字节稳定,不抖动、利 Claude 缓存。体量 O(去重文件数),不随步数膨胀。
+    pub modified_files: BTreeSet<String>,
+    /// **Durable State**:上一次工具调用的核心错误摘要(去噪后首行)。事实块据它「重锚定」模型注意力,
+    /// 免其在被压缩的模糊历史里遗忘卡在哪。成功时清空。
+    pub last_error: Option<String>,
+    /// **信号复利**:run 启动时从 `.ridge/signals` 载入的「继承信号」有界注入块(上个会话留下的未决发现/
+    /// 摩擦/待办)。run 中不变,由 CLI 在建 state 时经 [`load_signal_block`] 注入;无则 `None`。
+    pub signal_block: Option<String>,
+}
+
+impl AgentState {
+    pub fn new(task: impl Into<String>) -> Self {
+        let task = task.into();
+        Self {
+            history: vec![Message::user(task.clone())],
+            task,
+            ..Default::default()
+        }
+    }
+
+    /// 设 token 预算(loop engineering 的经济护栏之一)。
+    pub fn with_budget(mut self, tokens: usize) -> Self {
+        self.budget_tokens = tokens;
+        self
+    }
+
+    /// 用已有对话历史续跑(REPL 多轮携带上下文)。
+    pub fn with_history(mut self, history: Vec<Message>) -> Self {
+        self.history = history;
+        self
+    }
+
+    /// 注入继承信号块(信号复利:上个会话的未决发现)。CLI 建 state 时调 [`load_signal_block`] 取之。
+    pub fn with_signals(mut self, block: Option<String>) -> Self {
+        self.signal_block = block;
+        self
+    }
+}
+
+/// 节点产出的增量更新(delta)。`Batch` 让一个节点一次改多个字段。
+#[derive(Debug)]
+pub enum Patch {
+    Message(String),
+    Action(Option<String>),
+    ToolOutput(Option<String>),
+    Approved(bool),
+    Issues(Vec<String>),
+    PendingCall(Option<ToolCall>),
+    AddTokens(usize),
+    SetStall(usize),
+    SetErrStreak(usize),
+    PushHistory(Message),
+    SetTodos(Vec<Todo>),
+    RecordModified(String),
+    SetLastError(Option<String>),
+    BumpStep,
+    Batch(Vec<Patch>),
+}
+
+impl GraphState for AgentState {
+    type Update = Patch;
+    fn apply(&mut self, u: Patch) {
+        match u {
+            Patch::Message(m) => self.messages.push(m), // append reducer
+            Patch::Action(a) => self.last_action = a,
+            Patch::ToolOutput(o) => self.tool_output = o,
+            Patch::Approved(b) => self.approved = b,
+            Patch::Issues(v) => self.issues = v,
+            Patch::PendingCall(c) => self.pending_call = c,
+            Patch::AddTokens(n) => self.total_tokens += n,
+            Patch::SetStall(n) => self.stall = n,
+            Patch::SetErrStreak(n) => self.err_streak = n,
+            Patch::PushHistory(m) => self.history.push(m),
+            Patch::SetTodos(t) => self.todos = t,
+            Patch::RecordModified(p) => {
+                self.modified_files.insert(p);
+            }
+            Patch::SetLastError(e) => self.last_error = e,
+            Patch::BumpStep => self.steps += 1,
+            Patch::Batch(v) => v.into_iter().for_each(|p| self.apply(p)),
+        }
+    }
+}
+
+/// 连续无进展多少轮就熔断(no-progress detection)。
+pub const MAX_STALL: usize = 3;
+
+/// 连续工具/provider 报错多少轮就熔断(circuit breaker,防无人值守 `--every` 循环持续失败烧预算)。
+pub const MAX_ERR_STREAK: usize = 5;
+
+/// 权限门:执行**有副作用的**工具(shell / 写文件 / MCP)前征询批准(human-in-the-loop)。
+/// REPL 用 stdin y/n;测试用 [`AutoApprove`] / [`AutoDeny`]。`read_file` 等只读工具不走它。
+pub trait Approver: Send + Sync {
+    fn approve(&self, action: &str, detail: &str) -> bool;
+}
+
+/// 一律放行(默认;非交互 / 一次性任务用)。
+pub struct AutoApprove;
+impl Approver for AutoApprove {
+    fn approve(&self, _action: &str, _detail: &str) -> bool {
+        true
+    }
+}
+
+/// 一律拒绝(测试用)。
+pub struct AutoDeny;
+impl Approver for AutoDeny {
+    fn approve(&self, _action: &str, _detail: &str) -> bool {
+        false
+    }
+}
+
+/// 只读工具不需要批准(read_file / search 只读本地;web_search / fetch_url 只读公共网页;
+/// todo_write 只更新内部清单,无外部副作用)。
+pub(crate) fn needs_approval(tool: &str) -> bool {
+    !matches!(
+        tool,
+        "read_file" | "search" | "web_search" | "fetch_url" | "todo_write" | "signal_write"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[allow(unused_imports)]
+    use crate::*;
+
+    /// 只读工具(read_file / search / web_search / fetch_url)不走权限门;有副作用的走。
+    #[test]
+    fn readonly_tools_skip_approval() {
+        assert!(!needs_approval("read_file"));
+        assert!(!needs_approval("search"));
+        assert!(!needs_approval("web_search"));
+        assert!(!needs_approval("fetch_url"));
+        assert!(needs_approval("edit_file"));
+        assert!(needs_approval("write_file"));
+        assert!(needs_approval("run_shell"));
+    }
+}
