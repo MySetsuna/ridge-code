@@ -683,6 +683,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "budget_tokens",
     "skills_dir",
     "skip_danger",
+    "status_bar",
 ];
 
 /// 把一个标量键写进 JSON 配置文本,**保留其余键**(如 `mcp`),返回美化后的新文本。

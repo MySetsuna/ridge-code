@@ -3,6 +3,7 @@
 //! (原生滚动/选取/搜索全保留),ratatui 只渲染底部一小块 Live 视口(状态行 + 流式尾巴 + 输入框)。
 //! 执行图跑在后台 Tokio task,token 流、工具事件和权限门都不会卡住界面(iter-23 事件驱动主环)。
 
+use std::collections::VecDeque;
 use std::io;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
@@ -115,6 +116,8 @@ enum InputAction {
     End,
     NewLine,
     Submit,
+    /// busy 时提交 → 入队(iter-33),当前任务毕自动接跑。
+    Queue,
     Interrupt,
     CursorUpOrHistory,
     CursorDownOrHistory,
@@ -152,7 +155,9 @@ fn input_action(key: &KeyEvent, busy: bool, popup_open: bool) -> InputAction {
             InputAction::NewLine
         }
         KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => InputAction::NewLine,
-        KeyCode::Enter if !busy => InputAction::Submit,
+        // busy 时 Enter → 入队(iter-33),空闲 → 立即提交。
+        KeyCode::Enter if busy => InputAction::Queue,
+        KeyCode::Enter => InputAction::Submit,
         KeyCode::Tab => InputAction::PopupOpen,
         KeyCode::Char(c) => InputAction::Insert(c),
         KeyCode::Backspace => InputAction::Backspace,
@@ -775,6 +780,8 @@ struct Ui {
     splash: usize,
     /// 本任务流式 token 估算累计(iter-31):token_rx 每块 `est_tokens` 累加,Submit 清零、done 保留展示。
     stream_tokens: usize,
+    /// 排队待跑的提交(iter-33):busy 时 Enter 入队,任务 done 后自动取队首接跑;中断清空。
+    queued: VecDeque<String>,
 }
 impl Ui {
     fn note(&mut self, text: impl Into<String>, color: Color) {
@@ -874,6 +881,8 @@ pub(super) async fn run(
     let mut printed = 0usize;
     // 忙碌粘条计时(iter-31):任务起点,Submit 置、done/中断清;读秒/速率据此算(app 运行时用 Instant,非脚本)。
     let mut task_started: Option<Instant> = None;
+    // 统一提交点(iter-33):键入的新提交 or 队首,非 busy 时于主环顶消费(起任务/跑命令),消除重复。
+    let mut pending_submit: Option<String> = None;
 
     // 阻塞读线程(iter-23):不开 crossterm `event-stream` feature(免引 futures 依赖),
     // std 线程 `event::read()` 转发进 tokio 通道;主环退出后线程仍阻塞在 read 上,随进程结束回收。
@@ -890,6 +899,55 @@ pub(super) async fn run(
     let mut dirty = true;
 
     'main: loop {
+        // 统一提交点(iter-33):非 busy 时消费 pending_submit —— 键入的新提交,或上一任务毕后接跑的队首。
+        // 起任务/跑命令的逻辑**只此一处**(键 Submit 臂与 done 队列接跑共用),消除重复。
+        if !ui.busy {
+            if let Some(input) = pending_submit.take() {
+                if run_command(
+                    &input,
+                    &mut ui,
+                    &mut history,
+                    &mut meta,
+                    &swap,
+                    &agents,
+                    session_tokens,
+                    session_turns,
+                )
+                .await?
+                {
+                    break 'main;
+                }
+                if !input.starts_with('/') {
+                    ui.note(format!("› {input}"), role_color(Role::Command));
+                    history.push(Message::user(expand_mentions(&input)));
+                    let state = AgentState::new(&input)
+                        .with_history(history.clone())
+                        .with_budget(budget)
+                        .with_signals(agent::load_signal_block());
+                    let app = app.clone();
+                    let bus = bus.clone();
+                    let tx = event_tx.clone();
+                    let done = done_tx.clone();
+                    let tokens = token_tx.clone();
+                    ui.busy = true;
+                    ui.phase = "推理中".into();
+                    ui.stream.clear();
+                    ui.stream_tokens = 0;
+                    task_started = Some(Instant::now());
+                    printed = 0;
+                    task = Some(tokio::spawn(async move {
+                        *bus.lock().unwrap() = Some(tokens);
+                        let result = app
+                            .invoke_with(state, &RunConfig::default(), None, Some(&tx))
+                            .await
+                            .map_err(|e| e.to_string());
+                        *bus.lock().unwrap() = None;
+                        let _ = done.send(result);
+                    }));
+                }
+                dirty = true;
+            }
+        }
         // 静态提交先于绘制:历史行离开 Live 视口,进终端 scrollback。
         if !ui.commits.is_empty() {
             flush_commits(&mut terminal, &mut ui)?;
@@ -907,6 +965,7 @@ pub(super) async fn run(
                 task_tokens: ui.stream_tokens,
                 rate: token_rate(ui.stream_tokens, elapsed_ms),
                 ctx_used,
+                queued: ui.queued.len(),
             };
             terminal
                 .draw(|frame| draw(frame, &ui, &meta, session_tokens, &vitals, pending.as_ref()))?;
@@ -955,7 +1014,16 @@ pub(super) async fn run(
                             ui.busy = false;
                             ui.stream.clear();
                             task_started = None;
-                            ui.note("已中断当前任务", Color::Yellow);
+                            // 中止即取消全部待跑(iter-33):不让排队项在中断后意外接跑。
+                            let dropped = ui.queued.len();
+                            ui.queued.clear();
+                            pending_submit = None;
+                            let tail = if dropped > 0 {
+                                format!("已中断当前任务（并清空 {dropped} 条排队）")
+                            } else {
+                                "已中断当前任务".into()
+                            };
+                            ui.note(tail, Color::Yellow);
                         }
                     }
                     InputAction::Insert(c) => {
@@ -1011,54 +1079,22 @@ pub(super) async fn run(
                     }
                     InputAction::PopupClose => ui.popup = None,
                     InputAction::Submit => {
-                        let input = ui.input.take();
-                        let input = input.trim().to_owned();
-                        if input.is_empty() {
-                            continue;
+                        // 空闲提交:交主环顶统一提交点起任务/跑命令(iter-33)。
+                        let input = ui.input.take().trim().to_owned();
+                        if !input.is_empty() {
+                            pending_submit = Some(input);
                         }
-                        if run_command(
-                            &input,
-                            &mut ui,
-                            &mut history,
-                            &mut meta,
-                            &swap,
-                            &agents,
-                            session_tokens,
-                            session_turns,
-                        )
-                        .await?
-                        {
-                            break 'main;
+                    }
+                    InputAction::Queue => {
+                        // busy 提交:入队,当前任务毕自动接跑(iter-33)。
+                        let input = ui.input.take().trim().to_owned();
+                        if !input.is_empty() {
+                            ui.queued.push_back(input.clone());
+                            ui.note(
+                                format!("⏳ 已排队（{} 条待跑）: {input}", ui.queued.len()),
+                                role_color(Role::Muted),
+                            );
                         }
-                        if input.starts_with('/') {
-                            continue;
-                        }
-                        ui.note(format!("› {input}"), role_color(Role::Command));
-                        history.push(Message::user(expand_mentions(&input)));
-                        let state = AgentState::new(&input)
-                            .with_history(history.clone())
-                            .with_budget(budget)
-                            .with_signals(agent::load_signal_block());
-                        let app = app.clone();
-                        let bus = bus.clone();
-                        let tx = event_tx.clone();
-                        let done = done_tx.clone();
-                        let tokens = token_tx.clone();
-                        ui.busy = true;
-                        ui.phase = "推理中".into();
-                        ui.stream.clear();
-                        ui.stream_tokens = 0;
-                        task_started = Some(Instant::now());
-                        printed = 0;
-                        task = Some(tokio::spawn(async move {
-                            *bus.lock().unwrap() = Some(tokens);
-                            let result = app
-                                .invoke_with(state, &RunConfig::default(), None, Some(&tx))
-                                .await
-                                .map_err(|e| e.to_string());
-                            *bus.lock().unwrap() = None;
-                            let _ = done.send(result);
-                        }));
                     }
                     InputAction::Ignore => {}
                 }
@@ -1137,6 +1173,10 @@ pub(super) async fn run(
                         );
                     }
                     Err(e) => ui.note(format!("错误: {e}"), Color::Red),
+                }
+                // 排队接跑(iter-33):任务毕,取队首交主环顶统一提交点起下一任务。
+                if pending_submit.is_none() {
+                    pending_submit = ui.queued.pop_front();
                 }
                 dirty = true;
             }
@@ -1228,12 +1268,22 @@ fn ctx_percent(used: usize, window: usize) -> u16 {
     }
 }
 
-/// 忙碌粘条文案(需求 6,纯函数):运行态 · 读秒 · token 消耗 · 速率 · 任务进度。
-/// todo 空则省略进度段。计时/计量全由入参给定 —— 零 wall-clock,可纯测。
-fn fmt_busy_bar(phase: &str, todos: &[Todo], elapsed_s: u64, tokens: usize, rate: u64) -> String {
+/// 忙碌粘条文案(需求 6,纯函数):运行态 · 读秒 · token 消耗 · 速率 · 任务进度 · 待跑队列。
+/// todo 空则省略进度段;`queued>0` 追加 ` · ⏳N`(iter-33)。计时/计量全由入参给定 —— 零 wall-clock,可纯测。
+fn fmt_busy_bar(
+    phase: &str,
+    todos: &[Todo],
+    elapsed_s: u64,
+    tokens: usize,
+    rate: u64,
+    queued: usize,
+) -> String {
     let mut s = format!("⚡ {phase} · ⏱ {elapsed_s}s · {tokens} tok · {rate} tok/s");
     if let Some((d, n)) = todo_progress(todos) {
         s.push_str(&format!(" · todo {d}/{n}"));
+    }
+    if queued > 0 {
+        s.push_str(&format!(" · ⏳{queued}"));
     }
     s
 }
@@ -1273,6 +1323,8 @@ struct Vitals {
     rate: u64,
     /// 当前 history 估算 token(ctx% 分子)。
     ctx_used: usize,
+    /// 待跑排队条数(iter-33),忙碌粘条显 ⏳N。
+    queued: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1468,6 +1520,7 @@ fn draw(
                     vitals.elapsed_s,
                     vitals.task_tokens,
                     vitals.rate,
+                    vitals.queued,
                 ),
                 Style::default()
                     .fg(Color::Black)
@@ -1658,7 +1711,7 @@ mod tests {
 
     #[test]
     fn busy_bar_omits_todo_when_empty_and_shows_when_present() {
-        let none = fmt_busy_bar("推理中", &[], 12, 340, 28);
+        let none = fmt_busy_bar("推理中", &[], 12, 340, 28, 0);
         assert_eq!(none, "⚡ 推理中 · ⏱ 12s · 340 tok · 28 tok/s");
         let todos = vec![
             Todo {
@@ -1670,8 +1723,21 @@ mod tests {
                 status: "in_progress".into(),
             },
         ];
-        let with = fmt_busy_bar("执行中", &todos, 3, 10, 3);
+        let with = fmt_busy_bar("执行中", &todos, 3, 10, 3, 0);
         assert_eq!(with, "⚡ 执行中 · ⏱ 3s · 10 tok · 3 tok/s · todo 1/2");
+    }
+
+    /// iter-33:忙碌粘条显待跑队列深度(纯函数)。
+    #[test]
+    fn busy_bar_shows_queue_depth() {
+        assert_eq!(
+            fmt_busy_bar("推理中", &[], 5, 100, 20, 0),
+            "⚡ 推理中 · ⏱ 5s · 100 tok · 20 tok/s"
+        );
+        assert_eq!(
+            fmt_busy_bar("推理中", &[], 5, 100, 20, 2),
+            "⚡ 推理中 · ⏱ 5s · 100 tok · 20 tok/s · ⏳2"
+        );
     }
 
     #[test]
@@ -1819,9 +1885,10 @@ mod tests {
             input_action(&press(KeyCode::Enter), false, false),
             InputAction::Submit
         );
+        // busy 时 Enter 不再忽略 → 入队(iter-33)
         assert_eq!(
             input_action(&press(KeyCode::Enter), true, false),
-            InputAction::Ignore
+            InputAction::Queue
         );
         // 光标/历史枢纽 + 浮窗触发
         assert_eq!(
