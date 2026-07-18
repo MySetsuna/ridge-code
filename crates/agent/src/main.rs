@@ -77,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
     // `login` 子命令:内置供应商一键接入(在解析任务前拦下,免被当成任务串)。
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.first().map(|s| s.as_str()) == Some("login") {
-        return run_login(&raw[1..]);
+        return run_login(&raw[1..]).await;
     }
     init_tracing();
     let ParsedArgs {
@@ -221,6 +221,34 @@ fn secure_file(path: &str) {
     let _ = path;
 }
 
+/// 校验核:经 `fetch_models` 打 `{base_url}/models` 鉴权 GET → Ok(模型数) / Err(原因)。
+/// 走注入的 HttpClient(接缝),测试可零网络。`get_json` 非 2xx 返 Err → 错 key/坏端点如实失败。
+async fn verify_key_via(
+    http: &dyn provider::http::HttpClient,
+    kind: &str,
+    base_url: &str,
+    key: &str,
+) -> Result<usize, String> {
+    match provider::models::fetch_models(http, kind, base_url, key).await {
+        Ok(list) => Ok(list.len()),
+        Err(e) => Err(format!("{e}")),
+    }
+}
+
+/// 校验一把 key 对某 provider 是否真连通(真 `ReqwestClient` + 15s 超时)。供 CLI/TUI 登录共用。
+async fn verify_provider_key(kind: &str, base_url: &str, key: &str) -> Result<usize, String> {
+    let http = provider::http::ReqwestClient::new();
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        verify_key_via(&http, kind, base_url, key),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => Err("timed out (15s)".into()),
+    }
+}
+
 /// 打印内置供应商 preset 表(`login` 无参 / `--list`)。
 fn print_presets() {
     println!("Built-in providers (ridgecode login <id> [KEY]):\n");
@@ -231,9 +259,11 @@ fn print_presets() {
         );
     }
     println!(
-        "\nExample:  ridgecode login deepseek sk-...            (registers + sets as default)\n\
+        "\nExample:  ridgecode login deepseek sk-...            (verifies connection, registers + sets as default)\n\
          \x20         ridgecode login kimi --no-default          (add as a switchable profile)\n\
-         Key goes to ~/.ridge/auth.json (never into config.json). Omit KEY to be prompted on stdin."
+         \x20         ridgecode login openai sk-... --no-verify  (skip the connection check)\n\
+         Login verifies the key against the endpoint before saving. Key goes to ~/.ridge/auth.json\n\
+         (never into config.json). Omit KEY to be prompted on stdin."
     );
 }
 
@@ -241,18 +271,20 @@ fn print_presets() {
 ///   ridgecode login | login --list                     列出内置供应商
 ///   ridgecode login <id> [KEY] [--model M] [--name N] [--no-default]
 /// 缺 KEY 则从 stdin 读一行(避免落进 shell 历史 / 进程参数)。默认设为启动默认档;`--no-default` 只登记。
-fn run_login(args: &[String]) -> anyhow::Result<()> {
+async fn run_login(args: &[String]) -> anyhow::Result<()> {
     let mut positional: Vec<&str> = Vec::new();
     let mut model: Option<String> = None;
     let mut name: Option<String> = None;
     let mut make_default = true;
     let mut list = false;
+    let mut no_verify = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--list" | "-l" => list = true,
             "--no-default" => make_default = false,
             "--default" => make_default = true,
+            "--no-verify" => no_verify = true,
             "--model" => model = it.next().cloned(),
             "--name" => name = it.next().cloned(),
             _ => positional.push(a),
@@ -279,6 +311,18 @@ fn run_login(args: &[String]) -> anyhow::Result<()> {
     };
     if key.is_empty() {
         anyhow::bail!("no API key provided; aborted (nothing written).");
+    }
+    // 0) 连接校验(默认;--no-verify 跳过):打端点验 key 真连通,失败则不落盘。
+    if !no_verify {
+        eprint!("verifying {} …", preset.id);
+        std::io::stderr().flush().ok();
+        match verify_provider_key(preset.kind, preset.base_url, &key).await {
+            Ok(n) => eprintln!(" ✓ connected ({n} models)"),
+            Err(e) => {
+                eprintln!(" ✗");
+                anyhow::bail!("could not connect to {} ({e}); nothing written. Retry, or `--no-verify` to skip the check.", preset.label);
+            }
+        }
     }
     // 1) key → auth.json(独立密钥库,收紧权限)。
     let auth_file = {
@@ -922,6 +966,39 @@ mod tests {
         assert!(format_event("act: web_search -> ok").contains("\x1b[33m")); // 黄
         assert!(format_event("verify: PASS (deterministic gate)").contains("\x1b[32m"));
         // 绿
+    }
+
+    /// 连接校验核(iter-38):stub HttpClient 零网络 —— 模型 JSON → Ok(数);get 失败 → Err。
+    #[tokio::test]
+    async fn verify_key_via_maps_result() {
+        struct StubHttp(Result<serde_json::Value, String>);
+        #[async_trait::async_trait]
+        impl provider::http::HttpClient for StubHttp {
+            async fn post_json(
+                &self,
+                _u: &str,
+                _h: &[(String, String)],
+                _b: &serde_json::Value,
+            ) -> Result<serde_json::Value, provider::ProviderError> {
+                Err("GET only".into())
+            }
+            async fn get_json(
+                &self,
+                _u: &str,
+                _h: &[(String, String)],
+            ) -> Result<serde_json::Value, provider::ProviderError> {
+                match &self.0 {
+                    Ok(v) => Ok(v.clone()),
+                    Err(e) => Err(e.as_str().into()),
+                }
+            }
+        }
+        let ok = StubHttp(Ok(serde_json::json!({"data":[{"id":"m1"},{"id":"m2"}]})));
+        assert_eq!(verify_key_via(&ok, "openai", "https://x", "k").await, Ok(2));
+        let bad = StubHttp(Err("http 401: unauthorized".into()));
+        assert!(verify_key_via(&bad, "openai", "https://x", "k")
+            .await
+            .is_err());
     }
 
     /// 时间触发器间隔解析:s/m/h 后缀 + 裸数字当秒;坏/零 → None。

@@ -464,6 +464,8 @@ enum PanelKind {
     Models,
     /// Sub-agent 页:只读浏览 + 搜索。
     Agent,
+    /// 登录页(iter-38):↑↓ 选内置供应商 → Enter 就地输入 key(掩码)→ Enter 校验并接入。
+    Login,
 }
 
 /// 一行:动作键(config 键 / provider 名 / 模型 id / 工具名 / agent 名)+ 右列值 + (模型)上下文窗口。
@@ -642,6 +644,23 @@ fn agent_panel(defs: &[agent::Agent]) -> Panel {
     Panel::new(
         PanelKind::Agent,
         "Sub-agents (read-only) · type to filter · Esc close".into(),
+        rows,
+    )
+}
+
+/// 登录页(iter-38):列 14 家内置供应商 preset(id · label · model),Enter 选中后就地输入 key。
+fn login_panel() -> Panel {
+    let rows = PROVIDER_PRESETS
+        .iter()
+        .map(|p| PanelRow {
+            key: p.id.to_string(),
+            value: format!("{} · {}", p.label, p.default_model),
+            ctx: None,
+        })
+        .collect();
+    Panel::new(
+        PanelKind::Login,
+        "Login · ↑↓ pick provider · Enter enter key · type to filter · Esc close".into(),
         rows,
     )
 }
@@ -1264,7 +1283,29 @@ pub(super) async fn run(
                                 }
                             }
                         }
-                        PanelAction::Enter => panel_enter(&mut ui, &mut meta, &swap),
+                        PanelAction::Enter => {
+                            // 登录页 key 输入态提交 → 异步校验 + 接入(唯一异步 Enter 分支);余走同步 panel_enter。
+                            let login_submit = matches!(ui.panel.as_ref(), Some(p) if p.kind == PanelKind::Login && p.editing.is_some());
+                            if login_submit {
+                                let (id, key) = {
+                                    let p = ui.panel.as_ref().unwrap();
+                                    (
+                                        p.selected().map(|r| r.key.clone()),
+                                        p.editing.clone().unwrap_or_default(),
+                                    )
+                                };
+                                match id.as_deref().and_then(preset_by_id) {
+                                    Some(preset) if !key.trim().is_empty() => {
+                                        ui.note(format!("verifying {}…", preset.id), Color::Gray);
+                                        login_apply_verified(preset, key.trim(), &mut meta, &swap, &mut ui).await;
+                                    }
+                                    Some(_) => ui.note("enter a non-empty API key", Color::Yellow),
+                                    None => ui.note("no provider selected", Color::Red),
+                                }
+                            } else {
+                                panel_enter(&mut ui, &mut meta, &swap);
+                            }
+                        }
                         PanelAction::Ignore => {}
                     }
                     continue;
@@ -1497,6 +1538,46 @@ fn tui_login(preset: &agent::ProviderPreset, key: &str) -> Result<(), String> {
     std::fs::write(&cpath, out).map_err(|e| e.to_string())
 }
 
+/// TUI 登录落地(iter-38):**先校验连通** → 成功则写 auth+config(`tui_login`)+ 热切 + note ✓ + 关页;
+/// 失败 note ✗ 不落盘。共用于 `/login <id> <key>` 快捷路径与登录页提交。校验期短暂阻塞在 await
+/// (有效 key 通常 <2s,15s 仅超时上限)。ponytail: 需非阻塞再引入后台校验任务通道。
+async fn login_apply_verified(
+    preset: &agent::ProviderPreset,
+    key: &str,
+    meta: &mut ReplMeta,
+    swap: &Arc<SwapProvider>,
+    ui: &mut Ui,
+) {
+    match verify_provider_key(preset.kind, preset.base_url, key).await {
+        Ok(n) => match tui_login(preset, key) {
+            Ok(()) => {
+                swap.swap(make_provider(
+                    preset.kind,
+                    preset.default_model,
+                    preset.base_url,
+                    key.to_string(),
+                ));
+                meta.provider = preset.kind.to_string();
+                meta.model = preset.default_model.to_string();
+                meta.base_url = preset.base_url.to_string();
+                ui.panel = None;
+                ui.note(
+                    format!(
+                        "✓ connected to {} ({n} models) · now active (model {})",
+                        preset.label, preset.default_model
+                    ),
+                    Color::Green,
+                );
+            }
+            Err(e) => ui.note(format!("verified but write failed: {e}"), Color::Red),
+        },
+        Err(e) => ui.note(
+            format!("✗ could not connect to {}: {e}", preset.label),
+            Color::Red,
+        ),
+    }
+}
+
 /// 热切换模型(iter-32 共用路径):密钥经 `current_api_key`(env 优先,回落 config 内联)——
 /// `/model <name>` 文本命令与模型选择器浮窗同走此路,顺带修「内联 key 无法切模型」根因。
 fn swap_model(swap: &Arc<SwapProvider>, meta: &mut ReplMeta, model: &str, ui: &mut Ui) {
@@ -1632,6 +1713,16 @@ fn panel_enter(ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvider>) {
                 ui.panel = None;
             }
         }
+        // 登录页:Enter 选中 preset → 起 key 输入态(标题提示选了哪家)。Some 分支(提交 key)由主环
+        // 异步处理(校验联网),不达此。
+        (PanelKind::Login, None) => {
+            if let (Some(p), Some(id)) = (ui.panel.as_mut(), sel_key) {
+                p.editing = Some(String::new());
+                p.title =
+                    format!("Login · enter API key for {id} · Enter verify & connect · Esc cancel");
+            }
+        }
+        (PanelKind::Login, Some(_)) => {}
         // 只读页:Enter 关页。
         (PanelKind::Tools, _) | (PanelKind::Agent, _) => ui.panel = None,
     }
@@ -1804,28 +1895,20 @@ async fn run_command(
             }
         }
         _ if input.starts_with("/provider use ") => switch_provider(input[14..].trim(), meta, swap, ui),
-        _ if input == "/login" || input == "/login list" => {
+        _ if input == "/login" => ui.panel = Some(login_panel()),
+        _ if input == "/login list" => {
             let ids: Vec<&str> = PROVIDER_PRESETS.iter().map(|p| p.id).collect();
-            ui.note(format!("built-in providers: {}\nconnect: /login <id> <API_KEY>  —— key → ~/.ridge/auth.json (not config), becomes active now", ids.join(", ")), Color::Gray);
+            ui.note(format!("built-in providers: {}\ninteractive: /login  ·  quick: /login <id> <API_KEY> (verified; key → ~/.ridge/auth.json, not config)", ids.join(", ")), Color::Gray);
         }
         _ if input.starts_with("/login ") => {
             let rest = input["/login ".len()..].trim();
             let mut it = rest.split_whitespace();
             match (it.next(), it.next()) {
                 (Some(id), Some(key)) => match preset_by_id(id) {
-                    Some(preset) => match tui_login(preset, key) {
-                        Ok(()) => {
-                            swap.swap(make_provider(preset.kind, preset.default_model, preset.base_url, key.to_string()));
-                            meta.provider = preset.kind.to_string();
-                            meta.model = preset.default_model.to_string();
-                            meta.base_url = preset.base_url.to_string();
-                            ui.note(format!("logged in to {} · now active (model {})", preset.label, preset.default_model), Color::Green);
-                        }
-                        Err(e) => ui.note(format!("login failed: {e}"), Color::Red),
-                    },
+                    Some(preset) => login_apply_verified(preset, key, meta, swap, ui).await,
                     None => ui.note(format!("unknown provider \"{id}\"; see /login list"), Color::Yellow),
                 },
-                _ => ui.note("usage: /login <id> <API_KEY>  (see /login list)", Color::Yellow),
+                _ => ui.note("usage: /login <id> <API_KEY>, or just /login to pick interactively", Color::Yellow),
             }
         }
         _ if input == "/agent" => {
@@ -1865,8 +1948,12 @@ fn draw_panel(frame: &mut ratatui::Frame, area: Rect, panel: &Panel) {
             Constraint::Length(1), // 提示
         ])
         .split(inner);
-    // 搜索行(编辑态显编辑缓冲)。
+    // 搜索行(编辑态显编辑缓冲;登录页的 key 输入掩码,防肩窥)。
     let (head, head_color) = match &panel.editing {
+        Some(buf) if panel.kind == PanelKind::Login => (
+            format!("✎ API key: {}", "•".repeat(buf.chars().count())),
+            role_color(Role::Warn),
+        ),
         Some(buf) => (format!("✎ new value: {buf}"), role_color(Role::Warn)),
         None => (format!("🔍 {}", panel.query), role_color(Role::Muted)),
     };
@@ -1904,13 +1991,18 @@ fn draw_panel(frame: &mut ratatui::Frame, area: Rect, panel: &Panel) {
         &mut state,
     );
     let hint = if panel.editing.is_some() {
-        "Enter save · Esc cancel"
+        if panel.kind == PanelKind::Login {
+            "Enter verify & connect · Esc cancel"
+        } else {
+            "Enter save · Esc cancel"
+        }
     } else {
         match panel.kind {
             PanelKind::Config => "↑↓ select · Enter edit · type to filter · Esc close",
             PanelKind::Models | PanelKind::Provider => {
                 "↑↓ select · Enter switch · type to filter · Esc close"
             }
+            PanelKind::Login => "↑↓ pick provider · Enter enter key · type to filter · Esc close",
             PanelKind::Tools | PanelKind::Agent => "↑↓ scroll · type to filter · Esc close",
         }
     };
@@ -2332,6 +2424,21 @@ mod tests {
             assert!(keys.contains(k), "配置页缺键 {k}");
         }
         assert_eq!(p.rows.len(), agent::CONFIG_KEYS.len());
+    }
+
+    /// 登录页(iter-38):列全部内置 preset,每行 key 是合法 preset id,kind 为 Login。
+    #[test]
+    fn login_panel_lists_all_presets() {
+        let p = login_panel();
+        assert_eq!(p.kind, PanelKind::Login);
+        assert_eq!(p.rows.len(), PROVIDER_PRESETS.len());
+        for r in &p.rows {
+            assert!(
+                preset_by_id(&r.key).is_some(),
+                "登录页行 key 非 preset id: {}",
+                r.key
+            );
+        }
     }
 
     #[test]
