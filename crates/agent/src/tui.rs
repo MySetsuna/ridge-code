@@ -365,24 +365,6 @@ struct Popup {
     selected: usize,
     /// 被补全词的起始**字符**偏移(应用时替换 [anchor, cursor))。
     anchor: usize,
-    /// 浮窗性质(iter-32):文本补全 vs 选中即执行动作(模型选择器)。
-    kind: PopupKind,
-    /// 仅 `ModelPick` 填,与 `items` 平行:选中项的模型 id + 上下文窗口。
-    picks: Vec<ModelPick>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PopupKind {
-    /// `/`、`@` 文本补全:Enter 把选中项写回输入缓冲。
-    Complete,
-    /// 模型选择器(iter-32):Enter 热切换模型,不碰输入缓冲。
-    ModelPick,
-}
-
-/// 模型选择器一项(iter-32):切换目标 id + 其真实上下文窗口(选中即缓存为 ctx% 分母)。
-struct ModelPick {
-    id: String,
-    ctx: Option<u64>,
 }
 
 /// 光标前当前词(空白定界):(起始字符偏移, 词)。
@@ -442,8 +424,6 @@ fn build_popup(input: &InputState) -> Option<Popup> {
             items,
             selected: 0,
             anchor,
-            kind: PopupKind::Complete,
-            picks: Vec::new(),
         });
     }
     if let Some(at) = word.rfind('@') {
@@ -455,41 +435,9 @@ fn build_popup(input: &InputState) -> Option<Popup> {
             items,
             selected: 0,
             anchor,
-            kind: PopupKind::Complete,
-            picks: Vec::new(),
         });
     }
     None
-}
-
-/// 模型选择器浮窗(iter-32,纯函数):实时模型列表 → 选中即切换的浮窗。
-/// items 显示 `id · ctx X`;`picks` 平行携 id+ctx;`selected` 落在当前模型(无匹配则 0)。
-/// 空列表 → None(无可选)。
-fn build_model_popup(models: &[provider::models::ModelInfo], current: &str) -> Option<Popup> {
-    if models.is_empty() {
-        return None;
-    }
-    let mut items = Vec::with_capacity(models.len());
-    let mut picks = Vec::with_capacity(models.len());
-    let mut selected = 0;
-    for (i, m) in models.iter().enumerate() {
-        let ctx = m.context.map(fmt_ctx).unwrap_or_else(|| "?".into());
-        items.push(format!("{}  ·  ctx {ctx}", m.id));
-        picks.push(ModelPick {
-            id: m.id.clone(),
-            ctx: m.context,
-        });
-        if m.id == current {
-            selected = i;
-        }
-    }
-    Some(Popup {
-        items,
-        selected,
-        anchor: 0,
-        kind: PopupKind::ModelPick,
-        picks,
-    })
 }
 
 /// 应用选中项:替换 [anchor, cursor) 区间的词,光标落在补全末尾。
@@ -499,6 +447,230 @@ fn apply_completion(input: &mut InputState, popup: &Popup) {
     let end_b = input.byte_at(input.cursor);
     input.buffer.replace_range(start_b..end_b, &sel);
     input.cursor = popup.anchor + sel.chars().count();
+}
+
+// ───────────────────────── 交互页 Panel(iter-35)─────────────────────────
+
+/// 交互页类别:决定 Enter 动作与提示文案。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelKind {
+    /// 配置页:Enter 就地编辑选中键的值。
+    Config,
+    /// Provider 页:Enter 热切换到选中档。
+    Provider,
+    /// 工具页:只读浏览 + 搜索。
+    Tools,
+    /// 模型页:Enter 热切换到选中模型 + 缓存 ctx_window。
+    Models,
+    /// Sub-agent 页:只读浏览 + 搜索。
+    Agent,
+}
+
+/// 一行:动作键(config 键 / provider 名 / 模型 id / 工具名 / agent 名)+ 右列值 + (模型)上下文窗口。
+struct PanelRow {
+    key: String,
+    value: String,
+    ctx: Option<u64>,
+}
+
+/// 模态交互页(iter-35):标题 + 搜索框(随打随滤)+ 过滤列表(选中高亮)+ 选中动作。
+/// `view` 是 `rows` 的过滤下标,`sel` 是 `view` 内位次;`editing=Some` = 配置页正编辑选中键值。
+struct Panel {
+    kind: PanelKind,
+    title: String,
+    query: String,
+    rows: Vec<PanelRow>,
+    view: Vec<usize>,
+    sel: usize,
+    editing: Option<String>,
+}
+
+/// 过滤:key/value 不分大小写子串命中;空 query = 全含。有序稳态(保 rows 原序)。纯函数。
+fn panel_filter(rows: &[PanelRow], query: &str) -> Vec<usize> {
+    let q = query.to_lowercase();
+    rows.iter()
+        .enumerate()
+        .filter(|(_, r)| {
+            q.is_empty() || r.key.to_lowercase().contains(&q) || r.value.to_lowercase().contains(&q)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+impl Panel {
+    fn new(kind: PanelKind, title: String, rows: Vec<PanelRow>) -> Self {
+        let view = panel_filter(&rows, "");
+        Panel {
+            kind,
+            title,
+            query: String::new(),
+            rows,
+            view,
+            sel: 0,
+            editing: None,
+        }
+    }
+    /// query 变更后重算 view 并把 sel 钳回范围内。
+    fn retype(&mut self) {
+        self.view = panel_filter(&self.rows, &self.query);
+        if self.sel >= self.view.len() {
+            self.sel = self.view.len().saturating_sub(1);
+        }
+    }
+    fn move_up(&mut self) {
+        self.sel = self.sel.saturating_sub(1);
+    }
+    fn move_down(&mut self) {
+        if self.sel + 1 < self.view.len() {
+            self.sel += 1;
+        }
+    }
+    fn selected(&self) -> Option<&PanelRow> {
+        self.view.get(self.sel).map(|&i| &self.rows[i])
+    }
+}
+
+/// 当前 config 某标量键的显示值(空 → 空串,由调用方替 `(未设)`)。
+fn config_value(cfg: &Config, key: &str) -> String {
+    match key {
+        "provider" => cfg.provider.clone().unwrap_or_default(),
+        "model" => cfg.model.clone().unwrap_or_default(),
+        "base_url" => cfg.base_url.clone().unwrap_or_default(),
+        "budget_tokens" => cfg.budget_tokens.map(|n| n.to_string()).unwrap_or_default(),
+        "skills_dir" => cfg.skills_dir.clone().unwrap_or_default(),
+        "skip_danger" => cfg.skip_danger.map(|b| b.to_string()).unwrap_or_default(),
+        "status_bar" => cfg.status_bar.clone().unwrap_or_default(),
+        "allow_jailbreak" => cfg
+            .allow_jailbreak
+            .map(|b| b.to_string())
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// 配置页:行取自 `CONFIG_KEYS`,值现读现显(缺 → `(未设)`)。
+fn config_panel() -> Panel {
+    let cfg = Config::load(config_path());
+    let rows = agent::CONFIG_KEYS
+        .iter()
+        .map(|k| {
+            let v = config_value(&cfg, k);
+            PanelRow {
+                key: (*k).to_string(),
+                value: if v.is_empty() { "(未设)".into() } else { v },
+                ctx: None,
+            }
+        })
+        .collect();
+    Panel::new(
+        PanelKind::Config,
+        "配置 · ↑↓ 选 · Enter 改 · 输入过滤 · Esc 关".into(),
+        rows,
+    )
+}
+
+/// Provider 页:列命名档(名 · kind · model)。
+fn provider_panel() -> Panel {
+    let cfg = Config::load(config_path());
+    let rows = cfg
+        .providers
+        .iter()
+        .map(|p| PanelRow {
+            key: p.name.clone(),
+            value: format!("{} · {}", p.kind, p.model),
+            ctx: None,
+        })
+        .collect();
+    Panel::new(
+        PanelKind::Provider,
+        "Provider · ↑↓ 选 · Enter 切换 · Esc 关".into(),
+        rows,
+    )
+}
+
+/// 工具页(只读):列工具名。
+fn tools_panel(tools: &[String]) -> Panel {
+    let rows = tools
+        .iter()
+        .map(|t| PanelRow {
+            key: t.clone(),
+            value: String::new(),
+            ctx: None,
+        })
+        .collect();
+    Panel::new(
+        PanelKind::Tools,
+        "工具（只读）· 输入过滤 · Esc 关".into(),
+        rows,
+    )
+}
+
+/// 模型页:列实时模型(id · ctx),`sel` 落当前模型;`ctx` 携真实窗口供选中缓存。
+fn models_panel(list: &[provider::models::ModelInfo], current: &str) -> Panel {
+    let rows = list
+        .iter()
+        .map(|m| PanelRow {
+            key: m.id.clone(),
+            value: format!(
+                "ctx {}",
+                m.context.map(fmt_ctx).unwrap_or_else(|| "?".into())
+            ),
+            ctx: m.context,
+        })
+        .collect();
+    let mut p = Panel::new(
+        PanelKind::Models,
+        "模型 · ↑↓ 选 · Enter 切换 · 输入过滤 · Esc 关".into(),
+        rows,
+    );
+    if let Some(pos) = p.view.iter().position(|&i| p.rows[i].key == current) {
+        p.sel = pos;
+    }
+    p
+}
+
+/// Sub-agent 页(只读):列 agent 名 + 描述。
+fn agent_panel(defs: &[agent::Agent]) -> Panel {
+    let rows = defs
+        .iter()
+        .map(|a| PanelRow {
+            key: a.name.clone(),
+            value: a.description.clone(),
+            ctx: None,
+        })
+        .collect();
+    Panel::new(
+        PanelKind::Agent,
+        "Sub-agent（只读）· 输入过滤 · Esc 关".into(),
+        rows,
+    )
+}
+
+/// 交互页键路由(iter-35,纯函数):模态优先级 审批 > Panel > 浮窗 > 输入。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelAction {
+    Up,
+    Down,
+    Enter,
+    Esc,
+    Char(char),
+    Backspace,
+    Ignore,
+}
+
+fn panel_action(key: &KeyEvent) -> PanelAction {
+    if key.kind != KeyEventKind::Press {
+        return PanelAction::Ignore;
+    }
+    match key.code {
+        KeyCode::Up => PanelAction::Up,
+        KeyCode::Down => PanelAction::Down,
+        KeyCode::Enter => PanelAction::Enter,
+        KeyCode::Esc => PanelAction::Esc,
+        KeyCode::Backspace => PanelAction::Backspace,
+        KeyCode::Char(c) => PanelAction::Char(c),
+        _ => PanelAction::Ignore,
+    }
 }
 
 /// 要不要画这一帧:有状态变更(dirty)或 busy(spinner 需动)才画;空闲零重绘(iter-23)。
@@ -783,6 +955,8 @@ struct Ui {
     stream_tokens: usize,
     /// 排队待跑的提交(iter-33):busy 时 Enter 入队,任务 done 后自动取队首接跑;中断清空。
     queued: VecDeque<String>,
+    /// 交互页(iter-35):Some = 模态页开(键位模态优先级:审批 > Panel > 浮窗 > 输入)。
+    panel: Option<Panel>,
 }
 impl Ui {
     fn note(&mut self, text: impl Into<String>, color: Color) {
@@ -1007,6 +1181,56 @@ pub(super) async fn run(
                     }
                     continue;
                 }
+                // 交互页模态(iter-35):优先级 审批 > Panel > 浮窗 > 输入。编辑态字符入编辑缓冲,浏览态入 query。
+                if ui.panel.is_some() {
+                    match panel_action(&key) {
+                        PanelAction::Esc => {
+                            let p = ui.panel.as_mut().unwrap();
+                            if p.editing.is_some() {
+                                p.editing = None; // 取消编辑
+                            } else {
+                                ui.panel = None; // 关页
+                            }
+                        }
+                        PanelAction::Up => {
+                            let p = ui.panel.as_mut().unwrap();
+                            if p.editing.is_none() {
+                                p.move_up();
+                            }
+                        }
+                        PanelAction::Down => {
+                            let p = ui.panel.as_mut().unwrap();
+                            if p.editing.is_none() {
+                                p.move_down();
+                            }
+                        }
+                        PanelAction::Backspace => {
+                            let p = ui.panel.as_mut().unwrap();
+                            match &mut p.editing {
+                                Some(buf) => {
+                                    buf.pop();
+                                }
+                                None => {
+                                    p.query.pop();
+                                    p.retype();
+                                }
+                            }
+                        }
+                        PanelAction::Char(c) => {
+                            let p = ui.panel.as_mut().unwrap();
+                            match &mut p.editing {
+                                Some(buf) => buf.push(c),
+                                None => {
+                                    p.query.push(c);
+                                    p.retype();
+                                }
+                            }
+                        }
+                        PanelAction::Enter => panel_enter(&mut ui, &mut meta, &swap),
+                        PanelAction::Ignore => {}
+                    }
+                    continue;
+                }
                 match input_action(&key, ui.busy, ui.popup.is_some()) {
                     InputAction::Interrupt => {
                         if let Some(handle) = task.take() {
@@ -1028,12 +1252,13 @@ pub(super) async fn run(
                         }
                     }
                     InputAction::Insert(c) => {
-                        ui.popup = None; // 字符穿透:关浮窗继续编辑
+                        // 随打随滤(iter-35):打 `/`/`@` 即弹补全并实时过滤,余字符自然关窗(build_popup→None)。
                         ui.input.insert(c);
+                        ui.popup = build_popup(&ui.input);
                     }
                     InputAction::Backspace => {
-                        ui.popup = None;
                         ui.input.backspace();
+                        ui.popup = build_popup(&ui.input);
                     }
                     InputAction::Left => ui.input.left(),
                     InputAction::Right => ui.input.right(),
@@ -1064,18 +1289,7 @@ pub(super) async fn run(
                     }
                     InputAction::PopupApply => {
                         if let Some(p) = ui.popup.take() {
-                            match p.kind {
-                                PopupKind::Complete => apply_completion(&mut ui.input, &p),
-                                PopupKind::ModelPick => {
-                                    // 选中即热切换 + 缓存该模型真实上下文窗口(ctx% 分母转真值,iter-32)。
-                                    if let Some(pick) = p.picks.get(p.selected) {
-                                        if let Some(w) = pick.ctx {
-                                            meta.ctx_window = w;
-                                        }
-                                        swap_model(&swap, &mut meta, &pick.id, &mut ui);
-                                    }
-                                }
-                            }
+                            apply_completion(&mut ui.input, &p);
                         }
                     }
                     InputAction::PopupClose => ui.popup = None,
@@ -1233,6 +1447,124 @@ fn swap_model(swap: &Arc<SwapProvider>, meta: &mut ReplMeta, model: &str, ui: &m
     }
 }
 
+/// 热切换到命名 provider 档(iter-35 抽取):`/provider use` 与 Provider 页共用。
+/// 密钥走档案 `key_env`(env);缺则红字提示,不切。
+fn switch_provider(name: &str, meta: &mut ReplMeta, swap: &Arc<SwapProvider>, ui: &mut Ui) {
+    match Config::load(config_path())
+        .providers
+        .into_iter()
+        .find(|p| p.name == name)
+    {
+        Some(p) => match std::env::var(&p.key_env).ok().filter(|v| !v.is_empty()) {
+            Some(key) => {
+                swap.swap(make_provider(&p.kind, &p.model, &p.base_url, key));
+                meta.provider = p.kind;
+                meta.model = p.model;
+                meta.base_url = p.base_url;
+                ui.note(format!("已切换 provider {name}"), Color::Green);
+            }
+            None => ui.note(format!("{} 未设", p.key_env), Color::Red),
+        },
+        None => ui.note(format!("没有 provider: {name}"), Color::Red),
+    }
+}
+
+/// 配置页就地编辑后 live 应用(iter-35):可即时生效的键立即作用于运行态,余键仅持久化(下次启动生效)。
+fn apply_config_live(
+    key: &str,
+    val: &str,
+    meta: &mut ReplMeta,
+    swap: &Arc<SwapProvider>,
+    ui: &mut Ui,
+) {
+    match key {
+        "allow_jailbreak" => agent::set_allow_jailbreak(val == "true"),
+        "model" => swap_model(swap, meta, val, ui),
+        "provider" | "base_url" => {
+            if key == "provider" {
+                meta.provider = val.to_string();
+            } else {
+                meta.base_url = val.to_string();
+            }
+            if let Some(k) = current_api_key() {
+                swap.swap(make_provider(
+                    &meta.provider,
+                    &meta.model,
+                    &meta.base_url,
+                    k,
+                ));
+            }
+        }
+        "status_bar" => {
+            meta.status_bar = if val.trim().is_empty() {
+                DEFAULT_STATUS_BAR.to_string()
+            } else {
+                val.to_string()
+            }
+        }
+        _ => {} // budget_tokens/skills_dir/skip_danger:仅持久化,下次启动生效。
+    }
+}
+
+/// 交互页 Enter 动作分派(iter-35):先把选中项数据 clone 出(释放对 `ui.panel` 的不可变借用),
+/// 再按 kind/编辑态改 `ui`/`meta`/热切换。Config=进/提交编辑;Models=切模型;Provider=切档;Tools/Agent=只读关页。
+fn panel_enter(ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvider>) {
+    let Some(panel) = ui.panel.as_ref() else {
+        return;
+    };
+    let kind = panel.kind;
+    let editing = panel.editing.clone();
+    let sel_key = panel.selected().map(|r| r.key.clone());
+    let sel_val = panel.selected().map(|r| r.value.clone());
+    let sel_ctx = panel.selected().and_then(|r| r.ctx);
+    match (kind, editing) {
+        // 配置页:提交编辑 → 持久化 + live 应用 + 刷新页(退编辑态)。
+        (PanelKind::Config, Some(newval)) => {
+            let Some(key) = sel_key else { return };
+            let val = newval.trim().to_string();
+            match persist_config(&key, &val) {
+                Ok(_) => {
+                    apply_config_live(&key, &val, meta, swap, ui);
+                    ui.note(format!("已保存 {key}={val}"), Color::Green);
+                    ui.panel = Some(config_panel());
+                }
+                Err(e) => {
+                    ui.note(format!("写入失败: {e}"), Color::Red);
+                    if let Some(p) = ui.panel.as_mut() {
+                        p.editing = None;
+                    }
+                }
+            }
+        }
+        // 配置页:进入编辑 → 预填当前值(「(未设)」视为空)。
+        (PanelKind::Config, None) => {
+            let cur = sel_val.map(|v| if v == "(未设)" { String::new() } else { v });
+            if let (Some(p), Some(cur)) = (ui.panel.as_mut(), cur) {
+                p.editing = Some(cur);
+            }
+        }
+        // 模型页:切到选中模型 + 缓存其真实上下文窗口。
+        (PanelKind::Models, _) => {
+            if let Some(id) = sel_key {
+                if let Some(w) = sel_ctx {
+                    meta.ctx_window = w;
+                }
+                swap_model(swap, meta, &id, ui);
+                ui.panel = None;
+            }
+        }
+        // Provider 页:切到选中档。
+        (PanelKind::Provider, _) => {
+            if let Some(name) = sel_key {
+                switch_provider(&name, meta, swap, ui);
+                ui.panel = None;
+            }
+        }
+        // 只读页:Enter 关页。
+        (PanelKind::Tools, _) | (PanelKind::Agent, _) => ui.panel = None,
+    }
+}
+
 /// 上下文窗口人读化:200000 → "200K",1048576 → "1.0M"(纯函数)。
 fn fmt_ctx(n: u64) -> String {
     if n >= 1_000_000 {
@@ -1342,48 +1674,24 @@ async fn run_command(
     match input {
         "/exit" | "/quit" => return Ok(true),
         "/help" => ui.note("/exit /reset /compact /cost /tools /model [name|pick] /models /provider [list|use <name>|add <name> <kind> <model> <base_url> [key_env]] /agent /config [set key value] /jailbreak [on|off]；@path 引用文件；Ctrl-C 中断；历史滚动/选取用终端原生能力；批准弹窗:y/Enter 批准、n/Esc 拒绝、↑↓ 滚动看详情。", Color::Gray),
-        "/tools" => ui.note(format!("可用工具({}): {}", meta.tools.len(), meta.tools.join(", ")), Color::Gray),
+        "/tools" => ui.panel = Some(tools_panel(&meta.tools)),
         "/reset" => { history.clear(); save_session(&session_path(), history); ui.note("上下文已清空", Color::Yellow); }
         "/compact" => { let n = history.len(); *history = compact_history(std::mem::take(history), 4); ui.note(format!("上下文已压缩: {n} → {} 条", history.len()), Color::Yellow); }
         "/cost" => ui.note(format!("本会话累计: {tokens} tokens · {turns} 轮任务"), Color::Gray),
         _ if input == "/model" => ui.note(format!("provider={} · model={} · base_url={}\n热切换: /model <name>；程序内选择器(↑↓ 选、Enter 切): /model pick；实时列表(含上下文大小): /models", meta.provider, meta.model, meta.base_url), Color::Gray),
-        _ if input == "/model pick" => {
+        // /models 与 /model pick 都开模型页(iter-35 起交互页统一;实时抓取 + 选中即切)。
+        _ if input == "/models" || input == "/model pick" => {
             match current_api_key() {
                 Some(key) => {
                     let http = provider::http::ReqwestClient::new();
                     let fut = provider::models::fetch_models(&http, &meta.provider, &meta.base_url, &key);
                     match tokio::time::timeout(Duration::from_secs(15), fut).await {
                         Ok(Ok(list)) if !list.is_empty() => {
-                            ui.popup = build_model_popup(&list, &meta.model);
-                            ui.note(format!("模型选择器（{} 个）：↑↓ 选 · Enter 切 · Esc 关", list.len()), Color::Gray);
-                        }
-                        Ok(Ok(_)) => ui.note("端点返回空模型列表", Color::Yellow),
-                        Ok(Err(e)) => ui.note(format!("抓取模型失败: {e}"), Color::Red),
-                        Err(_) => ui.note("抓取模型超时（15s）", Color::Red),
-                    }
-                }
-                None => ui.note("未解析到 API key（设 RIDGE_API_KEY 或 config.json 顶层 api_key）", Color::Red),
-            }
-        }
-        _ if input == "/models" => {
-            match current_api_key() {
-                Some(key) => {
-                    let http = provider::http::ReqwestClient::new();
-                    let fut = provider::models::fetch_models(&http, &meta.provider, &meta.base_url, &key);
-                    match tokio::time::timeout(Duration::from_secs(15), fut).await {
-                        Ok(Ok(list)) if !list.is_empty() => {
-                            // 命中当前模型即缓存其真实上下文窗口 → 底栏/顶栏 ctx% 分母转真值(iter-31)。
+                            // 命中当前模型即缓存其真实上下文窗口 → 顶/底栏 ctx% 分母转真值(iter-31)。
                             if let Some(n) = list.iter().find(|m| m.id == meta.model).and_then(|m| m.context) {
                                 meta.ctx_window = n;
                             }
-                            let body = list.iter().map(|m| {
-                                let mark = if m.id == meta.model { "→ " } else { "  " };
-                                match m.context {
-                                    Some(n) => format!("{mark}{}  (ctx {})", m.id, fmt_ctx(n)),
-                                    None => format!("{mark}{}  (ctx ?)", m.id),
-                                }
-                            }).collect::<Vec<_>>().join("\n");
-                            ui.note(format!("{} · {} 个模型（→ 当前 {}）:\n{}", meta.provider, list.len(), meta.model, body), Color::Gray);
+                            ui.panel = Some(models_panel(&list, &meta.model));
                         }
                         Ok(Ok(_)) => ui.note("端点返回空模型列表", Color::Yellow),
                         Ok(Err(e)) => ui.note(format!("抓取模型失败: {e}"), Color::Red),
@@ -1400,9 +1708,13 @@ async fn run_command(
         }
         _ if input == "/jailbreak on" => { agent::set_allow_jailbreak(true); ui.note("⚠ 地址越狱已开:可写 cwd 子树外（危险命令/受保护路径/只读仍硬拦）。本会话生效;持久化: /config set allow_jailbreak true", Color::Red); }
         _ if input == "/jailbreak off" => { agent::set_allow_jailbreak(false); ui.note("地址越狱已关:写路径限回 cwd 子树", Color::Green); }
-        _ if input == "/config" => ui.note(format!("配置文件: {}（JSON，可直接编辑）\n当前: {} · {}\n持久化: /config set <key> <value>", config_path(), meta.provider, meta.model), Color::Gray),
+        _ if input == "/config" => ui.panel = Some(config_panel()),
         _ if input.starts_with("/config set ") => { let parts: Vec<_> = input.splitn(4, ' ').collect(); if parts.len() == 4 { match persist_config(parts[2], parts[3]) { Ok(path) => ui.note(format!("已写入 {path}；下次启动生效"), Color::Green), Err(e) => ui.note(format!("写入失败: {e}"), Color::Red) } } else { ui.note("用法: /config set <key> <value>", Color::Yellow); } }
-        _ if input == "/provider" || input == "/provider list" => { let cfg = Config::load(config_path()); let list = cfg.providers.iter().map(|p| format!("{} · {} · {}", p.name, p.kind, p.model)).collect::<Vec<_>>().join("\n"); let hint = "\n切换: /provider use <name>；新增: /provider add <name> <kind> <model> <base_url> [key_env]"; ui.note(if list.is_empty() { format!("没有 provider 档案。{hint}") } else { format!("{list}{hint}") }, Color::Gray); }
+        _ if input == "/provider" || input == "/provider list" => {
+            let cfg = Config::load(config_path());
+            if cfg.providers.is_empty() { ui.note("没有 provider 档案。新增: /provider add <name> <kind> <model> <base_url> [key_env]", Color::Gray); }
+            else { ui.panel = Some(provider_panel()); }
+        }
         _ if input.starts_with("/provider add ") => {
             match agent::parse_provider_add(input["/provider add ".len()..].trim()) {
                 Ok(profile) => {
@@ -1419,15 +1731,98 @@ async fn run_command(
                 Err(e) => ui.note(e, Color::Yellow),
             }
         }
-        _ if input.starts_with("/provider use ") => { let name = input[14..].trim(); if let Some(p) = Config::load(config_path()).providers.into_iter().find(|p| p.name == name) { match std::env::var(&p.key_env).ok().filter(|v| !v.is_empty()) { Some(key) => { swap.swap(make_provider(&p.kind, &p.model, &p.base_url, key)); meta.provider=p.kind; meta.model=p.model; meta.base_url=p.base_url; ui.note(format!("已切换 provider {name}"), Color::Green); }, None => ui.note(format!("{} 未设", p.key_env), Color::Red) } } else { ui.note(format!("没有 provider: {name}"), Color::Red); } }
+        _ if input.starts_with("/provider use ") => switch_provider(input[14..].trim(), meta, swap, ui),
         _ if input == "/agent" => {
             if agents.defs.is_empty() { ui.note("无可用 sub-agent", Color::Gray); }
-            else { let list = agents.defs.iter().map(|d| format!("{} —— {}", d.name, d.description)).collect::<Vec<_>>().join("\n"); ui.note(format!("可用 sub-agent（主 agent 会自动 dispatch；文本 REPL 里可 /agent <name> <task> 手动派）：\n{list}"), Color::Gray); }
+            else { ui.panel = Some(agent_panel(&agents.defs)); }
         }
         _ if input.starts_with('/') => ui.note(format!("未知命令: {input}（/help）"), Color::Yellow),
         _ => return Ok(false),
     }
     Ok(false)
+}
+
+/// 交互页模态绘制(iter-35):居中框(≤80 宽)= 搜索/编辑行 + 过滤列表(选中高亮)+ 提示行。
+fn draw_panel(frame: &mut ratatui::Frame, area: Rect, panel: &Panel) {
+    let w = area.width.saturating_sub(4).clamp(20, 80);
+    let h = area.height.saturating_sub(2).max(6);
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", panel.title))
+        .border_style(Style::default().fg(role_color(Role::Primary)));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // 搜索/编辑行
+            Constraint::Min(1),    // 列表
+            Constraint::Length(1), // 提示
+        ])
+        .split(inner);
+    // 搜索行(编辑态显编辑缓冲)。
+    let (head, head_color) = match &panel.editing {
+        Some(buf) => (format!("✎ 新值: {buf}"), role_color(Role::Warn)),
+        None => (format!("🔍 {}", panel.query), role_color(Role::Muted)),
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            head,
+            Style::default().fg(head_color),
+        ))),
+        rows[0],
+    );
+    // 过滤列表:key 左对齐 + 右列值。
+    let items: Vec<ListItem> = panel
+        .view
+        .iter()
+        .map(|&i| {
+            let r = &panel.rows[i];
+            let line = if r.value.is_empty() {
+                r.key.clone()
+            } else {
+                format!("{:<18} {}", r.key, r.value)
+            };
+            ListItem::new(line)
+        })
+        .collect();
+    let mut state = ListState::default();
+    state.select((!panel.view.is_empty()).then_some(panel.sel));
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(role_color(Role::Primary))
+                .add_modifier(Modifier::BOLD),
+        ),
+        rows[1],
+        &mut state,
+    );
+    let hint = if panel.editing.is_some() {
+        "Enter 保存 · Esc 取消"
+    } else {
+        match panel.kind {
+            PanelKind::Config => "↑↓ 选 · Enter 改 · 输入过滤 · Esc 关",
+            PanelKind::Models | PanelKind::Provider => "↑↓ 选 · Enter 切换 · 输入过滤 · Esc 关",
+            PanelKind::Tools | PanelKind::Agent => "↑↓ 滚 · 输入过滤 · Esc 关",
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            hint,
+            Style::default().fg(role_color(Role::Muted)),
+        ))),
+        rows[2],
+    );
 }
 
 /// Live 视口绘制(iter-26;iter-31 双状态栏):顶状态行 + 输出尾 + [忙碌粘条] + 输入框 + 自定义底栏;
@@ -1574,7 +1969,8 @@ fn draw(
         outer[4],
     );
     // 真光标(iter-27;iter-30 改按显示单元格列):CJK/emoji 宽字符落点精确,不再偏左。
-    if approval.is_none() {
+    // 审批 / 交互页模态开时不落输入光标(iter-35)。
+    if approval.is_none() && ui.panel.is_none() {
         let (row, col) = ui.input.cursor_display_col();
         let inner = outer[3];
         let x = (inner.x + 1 + col as u16).min(inner.right().saturating_sub(2));
@@ -1620,6 +2016,10 @@ fn draw(
             rect,
             &mut state,
         );
+    }
+    // 交互页模态(iter-35):居中覆视口,搜索框 + 过滤列表 + 提示。审批优先级更高,故在其前画。
+    if let Some(panel) = &ui.panel {
+        draw_panel(frame, area, panel);
     }
     if let Some(req) = approval {
         // 审批模态覆整个 Live 视口;↑↓ 滚动看长 diff;diff 行按 +/- 语义着色(iter-28)。
@@ -1783,41 +2183,101 @@ mod tests {
         assert!(est_tokens("你好abcd") >= 1);
     }
 
-    /// iter-32:模型选择器浮窗构造(纯函数)。
+    /// iter-35:交互 Panel 纯函数。
     fn mi(id: &str, ctx: Option<u64>) -> provider::models::ModelInfo {
         provider::models::ModelInfo {
             id: id.into(),
             context: ctx,
         }
     }
+    fn prow(key: &str, value: &str) -> PanelRow {
+        PanelRow {
+            key: key.into(),
+            value: value.into(),
+            ctx: None,
+        }
+    }
 
     #[test]
-    fn build_model_popup_selects_current_and_formats() {
+    fn panel_filter_substring_case_insensitive() {
+        let rows = vec![
+            prow("model", "opus"),
+            prow("provider", "anthropic"),
+            prow("base_url", "x"),
+        ];
+        assert_eq!(panel_filter(&rows, "").len(), 3); // 空 query 全含
+        assert_eq!(panel_filter(&rows, "MOD"), vec![0]); // 命中 key,大小写无关
+        assert_eq!(panel_filter(&rows, "anthropic"), vec![1]); // 命中 value
+        assert!(panel_filter(&rows, "zzz").is_empty()); // 无命中
+    }
+
+    #[test]
+    fn panel_nav_and_retype_clamp() {
+        let rows = vec![prow("a", ""), prow("ab", ""), prow("abc", "")];
+        let mut p = Panel::new(PanelKind::Tools, "t".into(), rows);
+        p.sel = 2;
+        p.move_down(); // 已在末,不越界
+        assert_eq!(p.sel, 2);
+        p.query = "abc".into();
+        p.retype(); // view 缩到 1 项,sel 钳回
+        assert_eq!(p.view.len(), 1);
+        assert_eq!(p.sel, 0);
+        p.move_up();
+        assert_eq!(p.sel, 0); // 已在首,不越界
+    }
+
+    #[test]
+    fn config_panel_lists_all_config_keys() {
+        let p = config_panel();
+        let keys: Vec<&str> = p.rows.iter().map(|r| r.key.as_str()).collect();
+        for k in agent::CONFIG_KEYS {
+            assert!(keys.contains(k), "配置页缺键 {k}");
+        }
+        assert_eq!(p.rows.len(), agent::CONFIG_KEYS.len());
+    }
+
+    #[test]
+    fn models_panel_selects_current() {
         let list = [
             mi("a", Some(128_000)),
             mi("b", Some(200_000)),
             mi("c", None),
         ];
-        let p = build_model_popup(&list, "b").expect("非空");
-        assert_eq!(p.kind, PopupKind::ModelPick);
-        assert_eq!(p.selected, 1); // 当前模型 "b" 高亮
-        assert_eq!(p.items.len(), p.picks.len()); // items 与 picks 平行
-        assert!(p.items[1].contains("ctx 200K")); // 显示上下文大小
-        assert!(p.items[2].contains("ctx ?")); // 缺 ctx 显 ?
-        assert_eq!(p.picks[1].id, "b");
-        assert_eq!(p.picks[0].ctx, Some(128_000)); // 选中即可缓存的真实窗口
+        let p = models_panel(&list, "b");
+        assert_eq!(p.kind, PanelKind::Models);
+        assert_eq!(p.selected().map(|r| r.key.as_str()), Some("b")); // 当前模型高亮
+        assert_eq!(p.rows[0].ctx, Some(128_000)); // 携真实窗口供选中缓存
+        assert!(p.rows[2].value.contains('?')); // 缺 ctx 显 ?
+    }
+
+    /// iter-35:斜杠即弹 —— 打 `/` 现全表、`/mo` 滤到 `/model*`(`build_popup` 是随打随滤的候选源)。
+    #[test]
+    fn slash_popup_lists_all_and_filters() {
+        let mut all = InputState::default();
+        all.insert_str("/");
+        let p = build_popup(&all).expect("打 / 应现全部命令");
+        assert_eq!(p.items.len(), SLASH_COMMANDS.len());
+        let mut mo = InputState::default();
+        mo.insert_str("/mo");
+        let f = build_popup(&mo).expect("应有候选");
+        assert_eq!(f.items, vec!["/model".to_string(), "/models".to_string()]);
     }
 
     #[test]
-    fn build_model_popup_empty_is_none() {
-        assert!(build_model_popup(&[], "x").is_none());
-    }
-
-    #[test]
-    fn build_model_popup_unknown_current_defaults_zero() {
-        let list = [mi("a", None), mi("b", None)];
-        let p = build_model_popup(&list, "not-in-list").expect("非空");
-        assert_eq!(p.selected, 0); // 当前不在列表 → 落首项
+    fn panel_action_routes_keys() {
+        let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        assert_eq!(panel_action(&press(KeyCode::Up)), PanelAction::Up);
+        assert_eq!(panel_action(&press(KeyCode::Down)), PanelAction::Down);
+        assert_eq!(panel_action(&press(KeyCode::Enter)), PanelAction::Enter);
+        assert_eq!(panel_action(&press(KeyCode::Esc)), PanelAction::Esc);
+        assert_eq!(
+            panel_action(&press(KeyCode::Char('x'))),
+            PanelAction::Char('x')
+        );
+        assert_eq!(
+            panel_action(&press(KeyCode::Backspace)),
+            PanelAction::Backspace
+        );
     }
 
     /// 根因回归:审批态下滚动键**不再误拒**,而是滚动;仅 y/Enter 批准、n/Esc 拒绝,余键忽略。
@@ -2071,8 +2531,6 @@ mod tests {
             items: vec!["/model".to_string()],
             selected: 0,
             anchor: 4,
-            kind: PopupKind::Complete,
-            picks: Vec::new(),
         };
         apply_completion(&mut s, &p);
         assert_eq!(s.buffer, "run /model now");
