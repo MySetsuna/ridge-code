@@ -242,20 +242,6 @@ impl InputState {
         }
         (row, col)
     }
-    /// 光标所在 (逻辑行, **显示单元格列**)(iter-30):CJK/emoji 按实占 2 格累加,
-    /// 真光标据此落点 —— 修「中文输入光标不落末端、偏左」根因。
-    fn cursor_display_col(&self) -> (usize, usize) {
-        let (mut row, mut col) = (0, 0);
-        for c in self.buffer.chars().take(self.cursor) {
-            if c == '\n' {
-                row += 1;
-                col = 0;
-            } else {
-                col += char_cells(c);
-            }
-        }
-        (row, col)
-    }
     fn rows(&self) -> usize {
         self.buffer.chars().filter(|c| *c == '\n').count() + 1
     }
@@ -728,10 +714,59 @@ fn str_cells(s: &str) -> usize {
 /// (iter-30 起用 wcwidth 口径,CJK 实占 2 格,不再低估行数致边框撕裂)。
 fn wrapped_rows(content: &str, width: u16) -> usize {
     let w = width.max(1) as usize;
-    content
-        .split('\n')
-        .map(|l| str_cells(l).div_ceil(w).max(1))
-        .sum()
+    content.split('\n').map(|l| line_visual_rows(l, w)).sum()
+}
+
+/// 一条逻辑行按显示单元格宽做**贪心字符折行**占的可视行数(≥1)。与 [`wrap_input`] 同口径 ——
+/// 宽字符(CJK 占 2 格)不整除宽度时也精确(旧 `div_ceil` 会低估致边框/光标错位)。
+fn line_visual_rows(line: &str, w: usize) -> usize {
+    let mut rows = 1usize;
+    let mut cells = 0usize;
+    for c in line.chars() {
+        let cw = char_cells(c);
+        if cells + cw > w && cells > 0 {
+            rows += 1;
+            cells = 0;
+        }
+        cells += cw;
+    }
+    rows
+}
+
+/// 输入框字符折行(按显示单元格宽,含显式 `\n`)+ 光标可视 (row, col)。**渲染与光标共用同一折行** ——
+/// 修「文字换到第二行时光标仍卡在第一行末」根因(此前渲染走 ratatui 词折行、光标只按 `\n` 算行,两者不一致)。
+fn wrap_input(buffer: &str, cursor: usize, width: u16) -> (Vec<String>, u16, u16) {
+    let w = width.max(1) as usize;
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut cells = 0usize;
+    let (mut crow, mut ccol) = (0u16, 0u16);
+    let mut recorded = false;
+    for (i, c) in buffer.chars().enumerate() {
+        if i == cursor {
+            crow = lines.len() as u16;
+            ccol = cells as u16;
+            recorded = true;
+        }
+        if c == '\n' {
+            lines.push(std::mem::take(&mut line));
+            cells = 0;
+        } else {
+            let cw = char_cells(c);
+            if cells + cw > w && cells > 0 {
+                lines.push(std::mem::take(&mut line));
+                cells = 0;
+            }
+            line.push(c);
+            cells += cw;
+        }
+    }
+    if !recorded {
+        crow = lines.len() as u16; // 光标在末尾
+        ccol = cells as u16;
+    }
+    lines.push(line);
+    (lines, crow, ccol)
 }
 
 /// 静态提交一段文本需占的终端行数(供 `insert_before`)。
@@ -2097,60 +2132,30 @@ fn draw(
 ) {
     let area = frame.area();
     let input_rows = input_height(&ui.input.buffer, area.width.saturating_sub(2), 3, 8);
-    let busy_rows = if ui.busy { 1 } else { 0 };
+    let ctx = ctx_percent(vitals.ctx_used, meta.ctx_window as usize);
+    // 下方状态条(config 模板)——**可换行**(用户需求):按内容折行算高,clamp [1,3]。
+    let sv = StatusVars {
+        provider: meta.provider.clone(),
+        model: meta.model.clone(),
+        ctx: format!("{ctx}%"),
+        tokens: tokens.to_string(),
+        cwd: cwd_name(),
+    };
+    let below_text = render_status_template(&meta.status_bar, &sv);
+    let below_rows = wrapped_rows(&below_text, area.width).clamp(1, 3) as u16;
+    // 四区(用户需求:只留输入框上下两条状态条,删掉与下方重复的顶部状态行):
+    // [0] 输出 / [1] 输入框上状态条(常驻 live 状态)/ [2] 输入框 / [3] 输入框下状态条(可换行)。
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),          // [0] 顶状态行
-            Constraint::Min(1),             // [1] 输出尾
-            Constraint::Length(busy_rows),  // [2] 忙碌粘条(空闲高 0)
-            Constraint::Length(input_rows), // [3] 输入框
-            Constraint::Length(1),          // [4] 自定义底栏
+            Constraint::Min(1),             // [0] 输出尾
+            Constraint::Length(1),          // [1] 输入框上状态条(常驻)
+            Constraint::Length(input_rows), // [2] 输入框
+            Constraint::Length(below_rows), // [3] 输入框下状态条(可换行)
         ])
         .split(area);
-    let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][ui.frame % 10];
-    let status = if ui.busy {
-        format!(" {spinner} {}", ui.phase)
-    } else {
-        " ready".into()
-    };
-    let todo = todo_progress(&ui.todos)
-        .map(|(d, n)| format!(" · todo {d}/{n}"))
-        .unwrap_or_default();
-    let ctx = ctx_percent(vitals.ctx_used, meta.ctx_window as usize);
-    // 顶状态行更显眼(iter-31 需求 3):busy 时徽标转暖色示运行、加 ctx% 段。
-    let badge_bg = if ui.busy { Color::Yellow } else { Color::Cyan };
-    let mut top: Vec<Span> = vec![Span::styled(
-        " RidgeCode ",
-        Style::default()
-            .fg(Color::Black)
-            .bg(badge_bg)
-            .add_modifier(Modifier::BOLD),
-    )];
-    // 地址越狱红标(iter-34):放宽 cwd 沙箱时红底黑字警示,一眼可见。
-    if agent::allow_jailbreak() {
-        top.push(Span::styled(
-            " ⚠JAILBREAK ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(role_color(Role::Error))
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    top.push(Span::raw(format!(
-        " {} · {} · ctx {ctx}% · {} tokens{todo} · {}{}",
-        meta.provider,
-        meta.model,
-        tokens,
-        cwd_name(),
-        status
-    )));
-    frame.render_widget(
-        Paragraph::new(Line::from(top)).style(Style::default().bg(Color::DarkGray)),
-        outer[0],
-    );
-    // 流式尾巴:只画最后 K 行(已完段落随 Superstep 静态提交进历史)。
-    let k = outer[1].height as usize;
+    // [0] 流式尾巴:只画最后 K 行(已完段落随 Superstep 静态提交进历史)。
+    let k = outer[0].height as usize;
     let mut tail: Vec<Line> = stream_tail(&ui.stream, k)
         .into_iter()
         .map(|s| {
@@ -2179,11 +2184,31 @@ fn draw(
             None => tail.push(Line::from(cursor)),
         }
     }
-    frame.render_widget(Paragraph::new(Text::from(tail)), outer[1]);
-    // 忙碌粘条(iter-31 需求 6):输入框上方,运行态·读秒·token·速率·任务进度。仅 busy 时有高度。
+    frame.render_widget(Paragraph::new(Text::from(tail)), outer[0]);
+    // [1] 输入框上状态条(常驻):badge + 越狱标 + (busy → 实时忙碌条 | idle → ready+todo)。
+    // **不含 provider/model/ctx/tokens** —— 那些在下方状态条,避免旧顶栏那种重复。
+    let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][ui.frame % 10];
+    let badge_bg = if ui.busy { Color::Yellow } else { Color::Cyan };
+    let mut above: Vec<Span> = vec![Span::styled(
+        " RidgeCode ",
+        Style::default()
+            .fg(Color::Black)
+            .bg(badge_bg)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if agent::allow_jailbreak() {
+        above.push(Span::styled(
+            " ⚠JAILBREAK ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(role_color(Role::Error))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     if ui.busy {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
+        above.push(Span::styled(
+            format!(
+                " {spinner} {}",
                 fmt_busy_bar(
                     &ui.phase,
                     &ui.todos,
@@ -2191,50 +2216,63 @@ fn draw(
                     vitals.task_tokens,
                     vitals.rate,
                     vitals.queued,
-                ),
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(role_color(Role::Warn))
-                    .add_modifier(Modifier::BOLD),
-            )))
-            .style(Style::default().bg(role_color(Role::Warn))),
-            outer[2],
-        );
+                )
+            ),
+            Style::default()
+                .fg(role_color(Role::Warn))
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        let todo = todo_progress(&ui.todos)
+            .map(|(d, n)| format!(" · todo {d}/{n}"))
+            .unwrap_or_default();
+        above.push(Span::styled(
+            format!(" ready{todo}"),
+            Style::default().fg(role_color(Role::Muted)),
+        ));
     }
     frame.render_widget(
-        Paragraph::new(ui.input.buffer.as_str())
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(role_color(Role::Border)))
-                    .title(" Input (Enter send · Shift/Alt+Enter newline · Tab complete) "),
-            )
-            .wrap(Wrap { trim: false }),
-        outer[3],
+        Paragraph::new(Line::from(above)).style(Style::default().bg(Color::DarkGray)),
+        outer[1],
     );
-    // 自定义底栏(iter-31 需求 3):输入框下方,config `status_bar` 模板渲染。
-    let sv = StatusVars {
-        provider: meta.provider.clone(),
-        model: meta.model.clone(),
-        ctx: format!("{ctx}%"),
-        tokens: tokens.to_string(),
-        cwd: cwd_name(),
-    };
+    // 输入框:**自己字符折行**(与光标同口径),不再用 ratatui 词折行 —— 光标才能跟着折行走。
+    let (input_lines, cur_row, cur_col) = wrap_input(
+        &ui.input.buffer,
+        ui.input.cursor,
+        outer[2].width.saturating_sub(2),
+    );
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            render_status_template(&meta.status_bar, &sv),
-            Style::default().fg(role_color(Role::Muted)),
-        )))
-        .style(Style::default().bg(Color::DarkGray)),
-        outer[4],
+        Paragraph::new(Text::from(
+            input_lines
+                .iter()
+                .map(|l| Line::from(l.as_str()))
+                .collect::<Vec<_>>(),
+        ))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(role_color(Role::Border)))
+                .title(" Input (Enter send · Shift/Alt+Enter newline · Tab complete) "),
+        ),
+        outer[2],
+    );
+    // 输入框下状态条(config `status_bar` 模板)—— **可换行**:高已按折行算好,`.wrap` 落多行。
+    frame.render_widget(
+        Paragraph::new(Text::from(below_text))
+            .wrap(Wrap { trim: false })
+            .style(
+                Style::default()
+                    .fg(role_color(Role::Muted))
+                    .bg(Color::DarkGray),
+            ),
+        outer[3],
     );
     // 真光标(iter-27;iter-30 改按显示单元格列):CJK/emoji 宽字符落点精确,不再偏左。
     // 审批 / 交互页模态开时不落输入光标(iter-35)。
     if approval.is_none() && ui.panel.is_none() {
-        let (row, col) = ui.input.cursor_display_col();
-        let inner = outer[3];
-        let x = (inner.x + 1 + col as u16).min(inner.right().saturating_sub(2));
-        let y = (inner.y + 1 + row as u16).min(inner.bottom().saturating_sub(2));
+        let inner = outer[2];
+        let x = (inner.x + 1 + cur_col).min(inner.right().saturating_sub(2));
+        let y = (inner.y + 1 + cur_row).min(inner.bottom().saturating_sub(2));
         frame.set_cursor_position(Position { x, y });
     }
     // 补全浮窗(iter-27):输入框上方,有界尺寸,高亮选中项。
@@ -2248,8 +2286,8 @@ fn draw(
             .unwrap_or(10)
             .min(48) as u16
             + 4;
-        let x = outer[3].x + 1;
-        let y = outer[3].y.saturating_sub(h);
+        let x = outer[2].x + 1;
+        let y = outer[2].y.saturating_sub(h);
         let rect = Rect {
             x,
             y,
@@ -2708,20 +2746,29 @@ mod tests {
         assert_eq!(char_cells('a'), 1);
         assert_eq!(char_cells('你'), 2);
         assert_eq!(str_cells("ab你好"), 6); // 1+1+2+2
-                                            // 光标显示列:CJK 前缀按 2 格累加,不再偏左。
-        let mut s = InputState::default();
-        s.insert_str("你好a"); // cursor=3(字符序),显示列应 = 2+2+1 = 5
-        assert_eq!(s.cursor, 3);
-        assert_eq!(s.cursor_display_col(), (0, 5));
-        s.left(); // 光标移到 'a' 前(字符序 2)→ 显示列 4
-        assert_eq!(s.cursor_display_col(), (0, 4));
-        // 多行:换行后显示列从 0 起。
-        let mut m = InputState::default();
-        m.insert_str("你\nb");
-        assert_eq!(m.cursor_display_col(), (1, 1));
-        // 折行:CJK 按实占,不再低估行数(3 个全角 = 6 格,宽 4 → 2 行,旧口径误判 1 行)。
+                                            // 折行:CJK 按实占,不再低估行数(3 个全角 = 6 格,宽 4 → 2 行,旧口径误判 1 行)。
         assert_eq!(wrapped_rows("你你你", 4), 2);
         assert_eq!(wrapped_rows("abcd", 4), 1);
+    }
+
+    /// iter-49:输入折行 + 光标同口径(修「文字换到第二行时光标卡首行末」根因)。
+    #[test]
+    fn wrap_input_cursor_follows_soft_wrap() {
+        // 光标显示列:CJK 前缀按 2 格累加(宽足够不折行)。
+        let (_, r, c) = wrap_input("你好a", 3, 80);
+        assert_eq!((r, c), (0, 5)); // 2+2+1
+        let (_, r, c) = wrap_input("你好a", 2, 80); // 光标在 'a' 前
+        assert_eq!((r, c), (0, 4));
+        // 显式换行:光标落第二逻辑行、列从 0 起。
+        let (lines, r, c) = wrap_input("你\nb", 3, 80);
+        assert_eq!((lines.len(), r, c), (2, 1, 1));
+        // **软折行**(bug 修复):宽 2,"abcd" → ["ab","cd"];光标在末尾应落**第二可视行**列 2(此前卡首行)。
+        let (lines, r, c) = wrap_input("abcd", 4, 2);
+        assert_eq!(lines, vec!["ab", "cd"]);
+        assert_eq!((r, c), (1, 2));
+        // 空缓冲:一行、光标 (0,0)。
+        let (lines, r, c) = wrap_input("", 0, 10);
+        assert_eq!((lines.len(), r, c), (1, 0, 0));
     }
 
     /// iter-27:InputState 光标编辑 —— 插删/移动/多行上下列钳位/CJK 多字节安全。
