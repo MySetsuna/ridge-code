@@ -285,6 +285,24 @@ pub fn run_shell(cmd: &str) -> io::Result<ShellResult> {
     })
 }
 
+/// 直接按 argv 执行(iter-46 外置沙箱用):`argv[0]` 是程序,其余是**逐个原样**参数,
+/// **不经 cmd/sh 二次解析** —— 故 argv 末尾的 user_cmd 原样进用户包裹器的解释器,免引号地狱。
+pub fn run_argv(argv: &[String]) -> io::Result<ShellResult> {
+    let Some((program, args)) = argv.split_first() else {
+        return Ok(ShellResult {
+            code: -1,
+            stdout: String::new(),
+            stderr: "sandbox_cmd 为空,无法执行".into(),
+        });
+    };
+    let output = Command::new(program).args(args).output()?;
+    Ok(ShellResult {
+        code: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -714,6 +714,10 @@ pub struct Config {
     pub hooks: Vec<HookCfg>,
     /// 任务完成通知(iter-40 内置 hook):true 则每个任务毕响一声终端铃。默认关。
     pub notify: Option<bool>,
+    /// 外置沙箱包裹(iter-46):配了则 `run_shell` 经它跑,真隔离交平台(docker/wsl/自定义)。
+    /// 模板,`{cwd}` 占位当前工作目录;user_cmd 作最后单个 arg 追加(免二次 shell 引号)。
+    /// 例:`"docker run --rm -v {cwd}:/w -w /w alpine sh -c"`。留空 = 宿主直跑(现状)。
+    pub sandbox_cmd: Option<String>,
 }
 
 /// 一个 Hook(iter-40):某事件发生时跑一条 shell 命令,可选拦截。像 git hooks —— 命令是**用户自己**
@@ -1620,6 +1624,67 @@ fn active_hooks() -> &'static [HookCfg] {
     HOOKS.get().map(|v| v.as_slice()).unwrap_or(&[])
 }
 
+// ─────────────────── 外置沙箱包裹 seam(iter-46)───────────────────
+
+static SANDBOX_CMD: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// 启动时装入 config 的 `sandbox_cmd`(进程级 set-once,与 HOOKS/ALLOW_JAILBREAK 先例一致)。
+/// 配了则 `run_shell` 经它跑(真隔离交平台);None = 宿主直跑。
+pub fn set_sandbox_cmd(cmd: Option<String>) {
+    let _ = SANDBOX_CMD.set(cmd.filter(|s| !s.trim().is_empty()));
+}
+fn active_sandbox_cmd() -> Option<String> {
+    SANDBOX_CMD.get().and_then(|o| o.clone())
+}
+
+/// 引号感知分词(纯):`"..."`/`'...'` 内空白保留,裸词按空白切。给 sandbox_cmd 模板拆 argv。
+pub fn sandbox_split(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    for c in s.chars() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                } else {
+                    cur.push(c);
+                }
+            }
+            None => {
+                if c == '"' || c == '\'' {
+                    quote = Some(c);
+                    started = true;
+                } else if c.is_whitespace() {
+                    if started {
+                        out.push(std::mem::take(&mut cur));
+                        started = false;
+                    }
+                } else {
+                    cur.push(c);
+                    started = true;
+                }
+            }
+        }
+    }
+    if started {
+        out.push(cur);
+    }
+    out
+}
+
+/// 把用户 shell 命令包进 sandbox_cmd 模板(纯):split 模板 → `{cwd}` 替换 → **user_cmd 作最后单个 arg 追加**。
+/// argv 方式(非 shell 字符串拼接)→ user_cmd 原样进用户包裹器的解释器(如 `sh -c`),免跨平台二次引号地狱。
+pub fn sandbox_argv(sandbox_cmd: &str, user_cmd: &str, cwd: &str) -> Vec<String> {
+    let mut argv: Vec<String> = sandbox_split(sandbox_cmd)
+        .into_iter()
+        .map(|a| a.replace("{cwd}", cwd))
+        .collect();
+    argv.push(user_cmd.to_string());
+    argv
+}
+
 /// 选出匹配某事件(+ 工具名)的 hook。`matcher` 缺/空 = 匹配所有工具;否则工具名含该子串。纯函数。
 pub fn hooks_for_event<'a>(hooks: &'a [HookCfg], event: &str, tool: &str) -> Vec<&'a HookCfg> {
     hooks
@@ -1767,7 +1832,19 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
             if let Some(m) = constraint_guard_shell(cmd) {
                 return m;
             }
-            match tools::run_shell(cmd) {
+            // 外置沙箱包裹(iter-46):配了 sandbox_cmd → 经它跑(真隔离交平台);否则宿主直跑。
+            // 危险命令拦截/约束守卫已在上方先过 —— 沙箱是叠加的纵深防御,非替换。
+            let result = match active_sandbox_cmd() {
+                Some(sb) => {
+                    let cwd = std::env::current_dir()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    tracing::debug!(sandbox = %sb, "run_shell via sandbox");
+                    tools::run_argv(&sandbox_argv(&sb, cmd, &cwd))
+                }
+                None => tools::run_shell(cmd),
+            };
+            match result {
                 Ok(r) => format!("exit {}: {}{}", r.code, r.stdout.trim(), r.stderr.trim()),
                 Err(e) => format!("shell error: {e}"),
             }
@@ -3095,6 +3172,46 @@ mod tests {
             low.contains("blocked") || low.contains("dangerous"),
             "logged: {logged}"
         );
+    }
+
+    /// iter-46:sandbox_cmd 模板引号感知分词。
+    #[test]
+    fn sandbox_split_respects_quotes() {
+        assert_eq!(sandbox_split("a b c"), vec!["a", "b", "c"]);
+        // 引号内空白保留、与相邻裸段拼一 arg。
+        assert_eq!(
+            sandbox_split(r#"docker run -v "C:/my proj":/w sh -c"#),
+            vec!["docker", "run", "-v", "C:/my proj:/w", "sh", "-c"]
+        );
+        assert!(sandbox_split("   ").is_empty());
+    }
+
+    /// iter-46:包裹 argv —— {cwd} 替换 + user_cmd 恒作最后单个 arg(含空格不被再切)。
+    #[test]
+    fn sandbox_argv_substitutes_cwd_and_appends_cmd() {
+        let argv = sandbox_argv(
+            "docker run --rm -v {cwd}:/w -w /w alpine sh -c",
+            "ls -la",
+            "/proj x",
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "docker",
+                "run",
+                "--rm",
+                "-v",
+                "/proj x:/w",
+                "-w",
+                "/w",
+                "alpine",
+                "sh",
+                "-c",
+                "ls -la"
+            ]
+        );
+        // user_cmd 恒为最后单个 arg —— 免二次 shell 引号地狱。
+        assert_eq!(argv.last().unwrap(), "ls -la");
     }
 
     /// 驾驭工程:结构化 edit_file tool_call → 精准替换真实文件(而非整文件覆写)。

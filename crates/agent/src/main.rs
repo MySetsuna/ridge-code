@@ -110,6 +110,8 @@ async fn main() -> anyhow::Result<()> {
             // Hook(iter-40):装 config 声明的 hooks + 通知开关,触发 session_start(内置审计留痕)。
             agent::set_hooks(cfg.hooks.clone());
             agent::set_notify(cfg.notify.unwrap_or(false));
+            // 外置沙箱包裹(iter-46):配了则 run_shell 经它跑(真隔离交平台 docker/wsl)。
+            agent::set_sandbox_cmd(cfg.sandbox_cmd.clone());
             agent::fire_session_hooks("session_start", "");
             let agents = Arc::new(build_agents(&cfg, &auth)); // sub-agent 注册表(内置 + 用户 + 命名 provider)
             match task {

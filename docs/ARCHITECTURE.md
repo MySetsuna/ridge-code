@@ -78,6 +78,7 @@ agent 定义 = frontmatter `.md`:内置 fastcontext/explorer/reviewer 编进二�
 
 `read_file` / `read_file_range`(区间读)/ `edit_file`(唯一匹配替换,0 处或多处即报错引导)/ `apply_edits`(多文件原子批量:全体校验唯一匹配 → 落盘,单写失败回滚已写)/ `write_file` / `search`(递归 + glob,SEARCH_CAP 截断提示)/ 跨平台 shell / `is_dangerous_command` 灾难命令硬拦截(任何模式下不可绕过)。
 **写沙箱 jail**(`execute_tool_call` 里 write/edit/apply_edits 路径守卫):`jail = jail_guard(allow_jailbreak(), path)`,`jail_guard` 纯函数 —— 关(默认)时钳在**进程 cwd 子树**,越狱 → `BLOCKED`。**地址越狱开关**(iter-34)= 进程级 `AtomicBool`(`set_allow_jailbreak`/`allow_jailbreak`,启动读 `config.allow_jailbreak`、TUI `/jailbreak [on|off]` 实时切):开则 `jail_guard` 放行 cwd 外写,**但只放宽这一条** —— 危险命令拦截、受保护路径(tests/.git)守卫、只读模式不受影响;开启时 TUI 顶栏红底 `⚠越狱` 徽标警示。默认关,持久化经 `/config set allow_jailbreak true`。
+**外置沙箱包裹 seam**(iter-46,`run_shell` 的 OS 隔离):config `sandbox_cmd`(模板,`{cwd}` 占位)→ 进程级 `SANDBOX_CMD: OnceLock`(`set_sandbox_cmd` 启动装,set-once)。配了则 `run_shell` 走纯核 `sandbox_argv`(`sandbox_split` 引号感知分词 → `{cwd}` 替换 → **user_cmd 作最后单个 arg 追加**)+ `tools::run_argv`(`Command` 直执 argv,**不经 cmd/sh 二次解析** → 免跨平台引号地狱);真隔离交平台(docker/wsl)。**纵深防御**:危险命令拦截 + 约束守卫在包裹**之前**先过(即便沙箱也挡灾难命令)。合「外置能力不进内核」铁律——内核只提包裹接缝,不引 OS 隔离 FFI(AppContainer/Landlock 均驳:重 FFI + 难确定性测)。留空 = 宿主直跑(现状),零行为变化。纯核 `sandbox_split`/`sandbox_argv` 离线可测。
 
 ## 5. mcp:客户端协议层
 
