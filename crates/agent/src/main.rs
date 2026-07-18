@@ -44,24 +44,24 @@ fn handle_meta_flags() -> bool {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "RidgeCode —— 模块化通用 agent CLI(二进制 ridgecode)\n\n\
-             用法:\n  \
-             ridgecode                      交互式 TUI(需密钥:RIDGE_API_KEY 或 config 里 api_key/key_env;非 TTY 则 headless)\n  \
-             ridgecode \"任务\"               一次性任务\n  \
-             ridgecode --resume             恢复上次会话(kill-9/关掉重开后续接)\n\n\
-             选项:\n  \
-             --cwd <dir>                    在目标项目目录里跑\n  \
-             --every <30s|5m|1h>            时间触发器:按间隔重跑该任务(常驻;每轮重载信号复利,Ctrl-C 止)\n  \
-             --yolo/--skip-permissions      skip-danger:工具自动放行不问 [y/N](灾难命令仍拦)\n  \
-             --read-only                    只读模式:只 offer 读/查/研究工具,拒一切写/shell 副作用\n  \
-             --resume/--continue            恢复上次会话\n  \
-             -h/--help、-V/--version        本帮助 / 版本\n\n\
-             TUI 内:斜杠命令 /model /provider /config /agent /compact 等;@path 引用文件、Ctrl-C 中断。\
-             管道/非 TTY:逐行 stdin 当任务(headless,无斜杠命令)。\n\n\
-             配置:~/.ridge/config.json(provider/model/预算/多 mcp/skills;env 覆盖);\
-             TUI 内 /config set <key> <value> 可持久化。密钥:RIDGE_API_KEY env,或 config 档案的 api_key(明文)/key_env(环境变量名)。\
-             ~/.ridge/skills/*/SKILL.md 加领域技能不改源码。\n  \
-             RIDGE_EXTRACT_SIGNALS=1        opt-in:run 收尾用一次 LLM 把轨迹提炼成复利信号(默认关,省 token)。"
+            "RidgeCode —— modular general-purpose agent CLI (binary: ridgecode)\n\n\
+             Usage:\n  \
+             ridgecode                      interactive TUI (needs a key: RIDGE_API_KEY or api_key/key_env in config; non-TTY falls back to headless)\n  \
+             ridgecode \"task\"               one-shot task\n  \
+             ridgecode --resume             resume the last session (continue after kill-9 / reopen)\n\n\
+             Options:\n  \
+             --cwd <dir>                    run inside the target project directory\n  \
+             --every <30s|5m|1h>            time trigger: re-run the task on an interval (resident; reloads compounding signals each round, Ctrl-C to stop)\n  \
+             --yolo/--skip-permissions      skip-danger: auto-approve tools without [y/N] (disaster commands still blocked)\n  \
+             --read-only                    read-only mode: only offer read/search/research tools, reject all write/shell side effects\n  \
+             --resume/--continue            resume the last session\n  \
+             -h/--help, -V/--version        this help / version\n\n\
+             In the TUI: slash commands /model /provider /config /agent /compact etc.; @path to reference a file, Ctrl-C to interrupt.\
+             Pipe/non-TTY: stdin lines are run as tasks (headless, no slash commands).\n\n\
+             Config: ~/.ridge/config.json (provider/model/budget/multiple mcp/skills; env overrides);\
+             /config set <key> <value> in the TUI persists changes. Key: RIDGE_API_KEY env, or a config profile's api_key (plaintext) / key_env (env var name).\
+             ~/.ridge/skills/*/SKILL.md adds domain skills without touching source.\n  \
+             RIDGE_EXTRACT_SIGNALS=1        opt-in: at run end, use one LLM pass to distill the trace into compounding signals (off by default, saves tokens)."
         );
         return true;
     }
@@ -148,10 +148,10 @@ async fn main() -> anyhow::Result<()> {
         }
         None => {
             eprintln!(
-                "[ridgecode] 未取到密钥,跑离线脚本 demo。给密钥即用真实 LLM / TUI,任选一:\n  \
-                 · 设 RIDGE_API_KEY 环境变量;或\n  \
-                 · 在 ~/.ridge/config.json 的某个 providers 档案里填 \"api_key\"(明文,自担风险),\n    \
-                 或把 \"key_env\" 指向一个已 export 的环境变量名。见同目录 config.example.json。\n"
+                "[ridgecode] no key found, running the offline scripted demo. Provide a key to use a real LLM / TUI, pick one:\n  \
+                 · set the RIDGE_API_KEY env var; or\n  \
+                 · put \"api_key\" in one of the providers profiles in ~/.ridge/config.json (plaintext, at your own risk),\n    \
+                 or point \"key_env\" at an already-exported env var name. See config.example.json in the same directory.\n"
             );
             run_demo().await
         }
@@ -168,7 +168,7 @@ fn load_config() -> Config {
     let path = config_path();
     let cfg = Config::load(&path);
     if cfg.provider.is_some() || !cfg.mcp.is_empty() {
-        eprintln!("[ridgecode] 已加载 config {path}");
+        eprintln!("[ridgecode] loaded config {path}");
     }
     cfg
 }
@@ -225,7 +225,7 @@ async fn resolve_configured_mcp(cfg: &Config) -> McpTools {
     for m in &cfg.mcp {
         match StdioTransport::spawn(&m.cmd, &m.args) {
             Ok(t) => clients.push(Arc::new(McpClient::new(m.name.clone(), Box::new(t)))),
-            Err(e) => eprintln!("[ridgecode] MCP 启动失败 {} ({}): {e}", m.name, m.cmd),
+            Err(e) => eprintln!("[ridgecode] MCP startup failed {} ({}): {e}", m.name, m.cmd),
         }
     }
     // 兼容旧 env 单 server。
@@ -234,7 +234,7 @@ async fn resolve_configured_mcp(cfg: &Config) -> McpTools {
             let name = std::env::var("RIDGE_MCP_NAME").unwrap_or_else(|_| "mcp".to_string());
             match StdioTransport::spawn(&cmd, &[]) {
                 Ok(t) => clients.push(Arc::new(McpClient::new(name, Box::new(t)))),
-                Err(e) => eprintln!("[ridgecode] MCP 启动失败 {cmd}: {e}"),
+                Err(e) => eprintln!("[ridgecode] MCP startup failed {cmd}: {e}"),
             }
         }
     }
@@ -243,7 +243,7 @@ async fn resolve_configured_mcp(cfg: &Config) -> McpTools {
     }
     let n = clients.len();
     let tools = resolve_mcp(clients).await;
-    eprintln!("[ridgecode] 已接入 {n} 个 MCP server");
+    eprintln!("[ridgecode] connected {n} MCP server(s)");
     tools
 }
 
@@ -261,7 +261,7 @@ fn load_configured_skills(cfg: &Config) -> Vec<Skill> {
     if !skills.is_empty() {
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         eprintln!(
-            "[ridgecode] 已加载 {} 个 skill:{}",
+            "[ridgecode] loaded {} skill(s): {}",
             skills.len(),
             names.join(", ")
         );
@@ -396,7 +396,7 @@ fn build_agents(cfg: &Config) -> agent::Agents {
     if !defs.is_empty() {
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         eprintln!(
-            "[ridgecode] 已加载 {} 个 sub-agent:{}",
+            "[ridgecode] loaded {} sub-agent(s): {}",
             defs.len(),
             names.join(", ")
         );
@@ -429,7 +429,7 @@ fn real_provider(cfg: &Config) -> Option<Arc<dyn LlmProvider>> {
     for p in &cfg.providers {
         if let Some(key) = p.resolve_key() {
             eprintln!(
-                "[ridgecode] 用 config provider 档案「{}」启动({} · {})",
+                "[ridgecode] starting with config provider profile \"{}\" ({} · {})",
                 p.name, p.kind, p.model
             );
             return Some(make_provider(&p.kind, &p.model, &p.base_url, key));
@@ -466,7 +466,7 @@ async fn run_once(
     )?;
     if let Some(dur) = every {
         eprintln!(
-            "[ridgecode] 时间触发器:每 {}s 跑一次「{task}」(Ctrl-C 止;每轮重载信号复利)",
+            "[ridgecode] time trigger: run \"{task}\" every {}s (Ctrl-C to stop; reloads compounding signals each round)",
             dur.as_secs()
         );
     }
@@ -481,7 +481,7 @@ async fn run_once(
                 maybe_extract_signals(extractor.as_ref(), &out, &source).await;
             }
             // 触发器(常驻)模式下单轮出错不该掀翻整个循环;一次性模式仍向上抛(非零退出)。
-            Err(e) if every.is_some() => eprintln!("[ridgecode] 本轮出错:{e}"),
+            Err(e) if every.is_some() => eprintln!("[ridgecode] error this round: {e}"),
             Err(e) => return Err(e),
         }
         match every {
@@ -533,7 +533,7 @@ async fn headless(
                 let source = trace_and_report(&out);
                 maybe_extract_signals(extractor.as_ref(), &out, &source).await;
             }
-            Err(e) => eprintln!("[ridgecode] 出错:{e}"),
+            Err(e) => eprintln!("[ridgecode] error: {e}"),
         }
     }
     Ok(())
@@ -545,8 +545,8 @@ async fn headless(
 fn trace_and_report(out: &AgentState) -> String {
     let run_dir = run_artifacts_dir();
     match write_run(out, &run_dir) {
-        Ok(()) => eprintln!("[ridgecode] 运行留痕已写 {}", run_dir.display()),
-        Err(e) => eprintln!("[ridgecode] 写运行留痕失败: {e}"),
+        Ok(()) => eprintln!("[ridgecode] run trace written {}", run_dir.display()),
+        Err(e) => eprintln!("[ridgecode] failed to write run trace: {e}"),
     }
     let source = run_dir
         .file_name()
@@ -556,10 +556,13 @@ fn trace_and_report(out: &AgentState) -> String {
     let reason = halt_reason(out);
     if !reason.is_success() {
         // 响亮失败:护栏熔断/未验证时明确播报,别让「悄悄停」被当成成功(loop engineering:fail loudly)。
-        eprintln!("[ridgecode] 停机原因:{}(未通过确定性验证)", reason.as_str());
+        eprintln!(
+            "[ridgecode] halt reason: {} (did not pass deterministic verification)",
+            reason.as_str()
+        );
         // 自动产者:失败落 failure 信号(preserve mistakes),下个会话/下一轮触发自动继承。source=本 run id。
         if let Some(id) = auto_signal_from_run(out, agent::SIGNALS_DIR, &source) {
-            eprintln!("[ridgecode] 已记失败信号 {id}(下个会话将继承)");
+            eprintln!("[ridgecode] recorded failure signal {id} (next session inherits it)");
         }
     }
     print_report(out);
@@ -577,7 +580,7 @@ async fn maybe_extract_signals(
     let ids = extract_signals_from_run(p.as_ref(), out, agent::SIGNALS_DIR, source).await;
     if !ids.is_empty() {
         eprintln!(
-            "[ridgecode] 抽取 {} 条复利信号(下个会话将继承):{}",
+            "[ridgecode] extracted {} compounding signal(s) (next session inherits): {}",
             ids.len(),
             ids.join(", ")
         );
@@ -616,7 +619,7 @@ async fn run_streamed(
         let answer = RichOutput::new().with_color(Color::BrightWhite).bold();
         let mut frame = 0usize;
         let mut printed = 0usize; // 已打印到第几条 message
-        let mut status = String::from("推理中");
+        let mut status = String::from("reasoning");
         let mut streaming = false; // 本超步是否正在逐字流式(流式期间不转 spinner、末尾不重复打)
         let mut last_todos: Vec<Todo> = Vec::new(); // 任务清单变了才重渲染
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(90));
@@ -680,9 +683,9 @@ async fn run_streamed(
 /// spinner 旁边显示的当前阶段。
 fn node_label(node: &str) -> String {
     match node {
-        "reason" => "推理中",
-        "act" => "执行工具",
-        "verify" => "校验中",
+        "reason" => "reasoning",
+        "act" => "running tools",
+        "verify" => "verifying",
         other => other,
     }
     .to_string()
@@ -720,7 +723,7 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         let head: String = s.chars().take(max).collect();
-        format!("{head}… (截断)")
+        format!("{head}… (truncated)")
     }
 }
 
@@ -794,7 +797,7 @@ mod tests {
     #[test]
     fn truncate_caps_long_text() {
         assert_eq!(truncate("abc", 10), "abc");
-        assert!(truncate(&"x".repeat(50), 10).ends_with("… (截断)"));
+        assert!(truncate(&"x".repeat(50), 10).ends_with("… (truncated)"));
     }
 
     /// 会话持久化:存 history → 读回内容一致(kill-9 后 --resume 的基础)。缺文件 → 空。

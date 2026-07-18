@@ -557,14 +557,14 @@ fn config_panel() -> Panel {
             let v = config_value(&cfg, k);
             PanelRow {
                 key: (*k).to_string(),
-                value: if v.is_empty() { "(未设)".into() } else { v },
+                value: if v.is_empty() { "(unset)".into() } else { v },
                 ctx: None,
             }
         })
         .collect();
     Panel::new(
         PanelKind::Config,
-        "配置 · ↑↓ 选 · Enter 改 · 输入过滤 · Esc 关".into(),
+        "Config · ↑↓ select · Enter edit · type to filter · Esc close".into(),
         rows,
     )
 }
@@ -583,7 +583,7 @@ fn provider_panel() -> Panel {
         .collect();
     Panel::new(
         PanelKind::Provider,
-        "Provider · ↑↓ 选 · Enter 切换 · Esc 关".into(),
+        "Provider · ↑↓ select · Enter switch · Esc close".into(),
         rows,
     )
 }
@@ -600,7 +600,7 @@ fn tools_panel(tools: &[String]) -> Panel {
         .collect();
     Panel::new(
         PanelKind::Tools,
-        "工具（只读）· 输入过滤 · Esc 关".into(),
+        "Tools (read-only) · type to filter · Esc close".into(),
         rows,
     )
 }
@@ -620,7 +620,7 @@ fn models_panel(list: &[provider::models::ModelInfo], current: &str) -> Panel {
         .collect();
     let mut p = Panel::new(
         PanelKind::Models,
-        "模型 · ↑↓ 选 · Enter 切换 · 输入过滤 · Esc 关".into(),
+        "Models · ↑↓ select · Enter switch · type to filter · Esc close".into(),
         rows,
     );
     if let Some(pos) = p.view.iter().position(|&i| p.rows[i].key == current) {
@@ -641,7 +641,7 @@ fn agent_panel(defs: &[agent::Agent]) -> Panel {
         .collect();
     Panel::new(
         PanelKind::Agent,
-        "Sub-agent（只读）· 输入过滤 · Esc 关".into(),
+        "Sub-agents (read-only) · type to filter · Esc close".into(),
         rows,
     )
 }
@@ -892,7 +892,7 @@ fn fold_lines(text: &str, max: usize) -> String {
     }
     let hidden = lines.len() - max;
     let mut out = lines[..max].join("\n");
-    out.push_str(&format!("\n… (+{hidden} 行已折叠)"));
+    out.push_str(&format!("\n… (+{hidden} lines folded)"));
     out
 }
 
@@ -905,7 +905,9 @@ const SPLASH: &[&str] = &[
     r" |_| \_\_|\__,_|\__, |\___|\____\___/ \__,_|\___|",
     r"                |___/                            ",
 ];
-const SPLASH_TICKS: usize = 10;
+const SPLASH_TICKS: usize = 14;
+/// banner 最大行宽(用于居中与折行守卫)。
+const SPLASH_W: usize = 48;
 
 /// 帧序列纯函数:第 `tick`/`total` 帧显示前 (maxw·tick/total) 列。首帧零字形,末帧全幅,单调渐显。
 fn splash_frame(tick: usize, total: usize) -> String {
@@ -916,6 +918,39 @@ fn splash_frame(tick: usize, total: usize) -> String {
         .map(|l| l.chars().take(cols).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// banner 在 `width` 内水平居中的左空白列数(纯函数)。
+fn splash_pad(width: usize) -> usize {
+    width.saturating_sub(SPLASH_W) / 2
+}
+
+/// 每行前置 `pad` 空格(动画帧居中用)。
+fn indent(text: &str, pad: usize) -> String {
+    let p = " ".repeat(pad);
+    text.lines()
+        .map(|l| format!("{p}{l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 落定 banner 块(iter-36,纯函数,防「标识乱了」):
+/// 终端宽 ≥ banner 宽 → **居中** ASCII 艺术字(逐行 `trim_end` 去尾空格,故每行 ≤ width 不折行)+ 英文 tagline;
+/// 窄于 banner 宽 → 退化紧凑单行标题(极窄也不折行)。
+fn splash_block(width: usize) -> Vec<String> {
+    if width < SPLASH_W {
+        return vec!["◆ RidgeCode".to_string()];
+    }
+    let pad = " ".repeat(splash_pad(width));
+    let mut out: Vec<String> = SPLASH
+        .iter()
+        .map(|l| format!("{pad}{}", l.trim_end()))
+        .collect();
+    let tag = "modular general-purpose agent framework";
+    let tpad = " ".repeat(width.saturating_sub(tag.chars().count()) / 2);
+    out.push(String::new());
+    out.push(format!("{tpad}{tag}"));
+    out
 }
 
 struct TuiApprover {
@@ -1037,17 +1072,20 @@ pub(super) async fn run(
     let (_guard, mut terminal) = TerminalGuard::enter()?;
     let mut ui = Ui::default();
     ui.note(
-        "RidgeCode  ·  内联模式:输出直接落进终端历史(原生滚动/选取)· Enter 发送 · Ctrl-C 中断 · /help",
+        "RidgeCode  ·  inline mode: output lands in terminal history (native scroll/select) · Enter to send · Ctrl-C to interrupt · /help",
         Color::Cyan,
     );
     if skip_danger {
         ui.note(
-            "⚠ skip-danger: 工具自动放行（灾难命令仍硬拦截）",
+            "⚠ skip-danger: tools auto-approved (disaster commands still hard-blocked)",
             Color::Red,
         );
     }
     if !history.is_empty() {
-        ui.note(format!("已恢复 {} 条会话消息", history.len()), Color::Green);
+        ui.note(
+            format!("restored {} session messages", history.len()),
+            Color::Green,
+        );
     }
     let mut pending: Option<ApprovalRequest> = None;
     let mut task: Option<tokio::task::JoinHandle<()>> = None;
@@ -1105,7 +1143,7 @@ pub(super) async fn run(
                     let done = done_tx.clone();
                     let tokens = token_tx.clone();
                     ui.busy = true;
-                    ui.phase = "推理中".into();
+                    ui.phase = "reasoning".into();
                     ui.stream.clear();
                     ui.stream_tokens = 0;
                     task_started = Some(Instant::now());
@@ -1168,13 +1206,13 @@ pub(super) async fn run(
                             if let Some(r) = pending.take() {
                                 let _ = r.reply.send(true);
                             }
-                            ui.note("✓ 已批准", Color::Green);
+                            ui.note("✓ approved", Color::Green);
                         }
                         ApprovalAction::Reject => {
                             if let Some(r) = pending.take() {
                                 let _ = r.reply.send(false);
                             }
-                            ui.note("✗ 已拒绝", Color::Red);
+                            ui.note("✗ rejected", Color::Red);
                         }
                         ApprovalAction::Scroll(d) => ui.scroll = apply_scroll(ui.scroll, d),
                         ApprovalAction::Ignore => {}
@@ -1244,9 +1282,9 @@ pub(super) async fn run(
                             ui.queued.clear();
                             pending_submit = None;
                             let tail = if dropped > 0 {
-                                format!("已中断当前任务（并清空 {dropped} 条排队）")
+                                format!("interrupted current task (and cleared {dropped} queued)")
                             } else {
-                                "已中断当前任务".into()
+                                "interrupted current task".into()
                             };
                             ui.note(tail, Color::Yellow);
                         }
@@ -1306,7 +1344,7 @@ pub(super) async fn run(
                         if !input.is_empty() {
                             ui.queued.push_back(input.clone());
                             ui.note(
-                                format!("⏳ 已排队（{} 条待跑）: {input}", ui.queued.len()),
+                                format!("⏳ queued ({} pending): {input}", ui.queued.len()),
                                 role_color(Role::Muted),
                             );
                         }
@@ -1387,7 +1425,7 @@ pub(super) async fn run(
                             },
                         );
                     }
-                    Err(e) => ui.note(format!("错误: {e}"), Color::Red),
+                    Err(e) => ui.note(format!("error: {e}"), Color::Red),
                 }
                 // 排队接跑(iter-33):任务毕,取队首交主环顶统一提交点起下一任务。
                 if pending_submit.is_none() {
@@ -1396,14 +1434,17 @@ pub(super) async fn run(
                 dirty = true;
             }
             _ = tick.tick() => {
-                // 启动帧序列(iter-28):空闲时借 tick 渐显 banner(≈1s),末帧整幅入历史。
+                // 启动帧序列(iter-28;iter-36 居中+防折行):空闲时借 tick 渐显 banner,末帧整幅入历史。
                 if ui.splash < SPLASH_TICKS && !ui.busy && pending.is_none() {
                     ui.splash += 1;
+                    let width = terminal.size().map(|s| s.width as usize).unwrap_or(80);
                     if ui.splash == SPLASH_TICKS {
-                        ui.note(SPLASH.join("\n"), role_color(Role::Primary));
+                        // 落定 banner:居中 + 不折行(splash_block 逐行 ≤ width)+ tagline。
+                        ui.note(splash_block(width).join("\n"), role_color(Role::Primary));
                         ui.stream.clear();
                     } else {
-                        ui.stream = splash_frame(ui.splash, SPLASH_TICKS);
+                        // 动画帧与落定 banner 同一居中偏移,消除「揭示→落定」的横跳。
+                        ui.stream = indent(&splash_frame(ui.splash, SPLASH_TICKS), splash_pad(width));
                     }
                     dirty = true;
                 }
@@ -1438,10 +1479,10 @@ fn swap_model(swap: &Arc<SwapProvider>, meta: &mut ReplMeta, model: &str, ui: &m
         Some(key) => {
             swap.swap(make_provider(&meta.provider, model, &meta.base_url, key));
             meta.model = model.to_string();
-            ui.note(format!("已热切换 model={model}"), Color::Green);
+            ui.note(format!("switched model={model}"), Color::Green);
         }
         None => ui.note(
-            "未解析到 API key（设 RIDGE_API_KEY 或 config.json 顶层 api_key），无法切换模型",
+            "no API key resolved (set RIDGE_API_KEY or api_key at config.json top level); cannot switch model",
             Color::Red,
         ),
     }
@@ -1461,11 +1502,11 @@ fn switch_provider(name: &str, meta: &mut ReplMeta, swap: &Arc<SwapProvider>, ui
                 meta.provider = p.kind;
                 meta.model = p.model;
                 meta.base_url = p.base_url;
-                ui.note(format!("已切换 provider {name}"), Color::Green);
+                ui.note(format!("switched provider {name}"), Color::Green);
             }
-            None => ui.note(format!("{} 未设", p.key_env), Color::Red),
+            None => ui.note(format!("{} not set", p.key_env), Color::Red),
         },
-        None => ui.note(format!("没有 provider: {name}"), Color::Red),
+        None => ui.note(format!("no such provider: {name}"), Color::Red),
     }
 }
 
@@ -1525,11 +1566,11 @@ fn panel_enter(ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvider>) {
             match persist_config(&key, &val) {
                 Ok(_) => {
                     apply_config_live(&key, &val, meta, swap, ui);
-                    ui.note(format!("已保存 {key}={val}"), Color::Green);
+                    ui.note(format!("saved {key}={val}"), Color::Green);
                     ui.panel = Some(config_panel());
                 }
                 Err(e) => {
-                    ui.note(format!("写入失败: {e}"), Color::Red);
+                    ui.note(format!("write failed: {e}"), Color::Red);
                     if let Some(p) = ui.panel.as_mut() {
                         p.editing = None;
                     }
@@ -1538,7 +1579,7 @@ fn panel_enter(ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvider>) {
         }
         // 配置页:进入编辑 → 预填当前值(「(未设)」视为空)。
         (PanelKind::Config, None) => {
-            let cur = sel_val.map(|v| if v == "(未设)" { String::new() } else { v });
+            let cur = sel_val.map(|v| if v == "(unset)" { String::new() } else { v });
             if let (Some(p), Some(cur)) = (ui.panel.as_mut(), cur) {
                 p.editing = Some(cur);
             }
@@ -1673,12 +1714,12 @@ async fn run_command(
 ) -> anyhow::Result<bool> {
     match input {
         "/exit" | "/quit" => return Ok(true),
-        "/help" => ui.note("/exit /reset /compact /cost /tools /model [name|pick] /models /provider [list|use <name>|add <name> <kind> <model> <base_url> [key_env]] /agent /config [set key value] /jailbreak [on|off]；@path 引用文件；Ctrl-C 中断；历史滚动/选取用终端原生能力；批准弹窗:y/Enter 批准、n/Esc 拒绝、↑↓ 滚动看详情。", Color::Gray),
+        "/help" => ui.note("/exit /reset /compact /cost /tools /model [name|pick] /models /provider [list|use <name>|add <name> <kind> <model> <base_url> [key_env]] /agent /config [set key value] /jailbreak [on|off]; @path to reference a file; Ctrl-C to interrupt; scroll/select history with the terminal's native keys; approval prompt: y/Enter approve, n/Esc reject, ↑↓ scroll details.", Color::Gray),
         "/tools" => ui.panel = Some(tools_panel(&meta.tools)),
-        "/reset" => { history.clear(); save_session(&session_path(), history); ui.note("上下文已清空", Color::Yellow); }
-        "/compact" => { let n = history.len(); *history = compact_history(std::mem::take(history), 4); ui.note(format!("上下文已压缩: {n} → {} 条", history.len()), Color::Yellow); }
-        "/cost" => ui.note(format!("本会话累计: {tokens} tokens · {turns} 轮任务"), Color::Gray),
-        _ if input == "/model" => ui.note(format!("provider={} · model={} · base_url={}\n热切换: /model <name>；程序内选择器(↑↓ 选、Enter 切): /model pick；实时列表(含上下文大小): /models", meta.provider, meta.model, meta.base_url), Color::Gray),
+        "/reset" => { history.clear(); save_session(&session_path(), history); ui.note("context cleared", Color::Yellow); }
+        "/compact" => { let n = history.len(); *history = compact_history(std::mem::take(history), 4); ui.note(format!("context compacted: {n} → {} messages", history.len()), Color::Yellow); }
+        "/cost" => ui.note(format!("session total: {tokens} tokens · {turns} tasks"), Color::Gray),
+        _ if input == "/model" => ui.note(format!("provider={} · model={} · base_url={}\nhot-swap: /model <name>; in-app picker (↑↓ select, Enter switch): /model pick; live list (with context size): /models", meta.provider, meta.model, meta.base_url), Color::Gray),
         // /models 与 /model pick 都开模型页(iter-35 起交互页统一;实时抓取 + 选中即切)。
         _ if input == "/models" || input == "/model pick" => {
             match current_api_key() {
@@ -1693,26 +1734,26 @@ async fn run_command(
                             }
                             ui.panel = Some(models_panel(&list, &meta.model));
                         }
-                        Ok(Ok(_)) => ui.note("端点返回空模型列表", Color::Yellow),
-                        Ok(Err(e)) => ui.note(format!("抓取模型失败: {e}"), Color::Red),
-                        Err(_) => ui.note("抓取模型超时（15s）", Color::Red),
+                        Ok(Ok(_)) => ui.note("endpoint returned an empty model list", Color::Yellow),
+                        Ok(Err(e)) => ui.note(format!("failed to fetch models: {e}"), Color::Red),
+                        Err(_) => ui.note("fetching models timed out (15s)", Color::Red),
                     }
                 }
-                None => ui.note("未解析到 API key（设 RIDGE_API_KEY 或 config.json 顶层 api_key）", Color::Red),
+                None => ui.note("no API key resolved (set RIDGE_API_KEY or api_key at config.json top level)", Color::Red),
             }
         }
         _ if input.starts_with("/model ") => swap_model(swap, meta, input[7..].trim(), ui),
         _ if input == "/jailbreak" => {
             let on = agent::allow_jailbreak();
-            ui.note(if on { "地址越狱: 开 ⚠（可写 cwd 子树外;危险命令/受保护路径/只读仍拦）。关闭: /jailbreak off" } else { "地址越狱: 关（写限 cwd 子树）。开启: /jailbreak on —— 放宽后顶状态栏标红" }, if on { Color::Red } else { Color::Gray });
+            ui.note(if on { "jailbreak: ON ⚠ (can write outside cwd subtree; disaster commands / protected paths / read-only still blocked). Disable: /jailbreak off" } else { "jailbreak: OFF (writes limited to cwd subtree). Enable: /jailbreak on —— top status bar turns red when on" }, if on { Color::Red } else { Color::Gray });
         }
-        _ if input == "/jailbreak on" => { agent::set_allow_jailbreak(true); ui.note("⚠ 地址越狱已开:可写 cwd 子树外（危险命令/受保护路径/只读仍硬拦）。本会话生效;持久化: /config set allow_jailbreak true", Color::Red); }
-        _ if input == "/jailbreak off" => { agent::set_allow_jailbreak(false); ui.note("地址越狱已关:写路径限回 cwd 子树", Color::Green); }
+        _ if input == "/jailbreak on" => { agent::set_allow_jailbreak(true); ui.note("⚠ jailbreak ON: can write outside cwd subtree (disaster commands / protected paths / read-only still hard-blocked). Session only; to persist: /config set allow_jailbreak true", Color::Red); }
+        _ if input == "/jailbreak off" => { agent::set_allow_jailbreak(false); ui.note("jailbreak OFF: writes limited back to cwd subtree", Color::Green); }
         _ if input == "/config" => ui.panel = Some(config_panel()),
-        _ if input.starts_with("/config set ") => { let parts: Vec<_> = input.splitn(4, ' ').collect(); if parts.len() == 4 { match persist_config(parts[2], parts[3]) { Ok(path) => ui.note(format!("已写入 {path}；下次启动生效"), Color::Green), Err(e) => ui.note(format!("写入失败: {e}"), Color::Red) } } else { ui.note("用法: /config set <key> <value>", Color::Yellow); } }
+        _ if input.starts_with("/config set ") => { let parts: Vec<_> = input.splitn(4, ' ').collect(); if parts.len() == 4 { match persist_config(parts[2], parts[3]) { Ok(path) => ui.note(format!("wrote {path}; takes effect next start"), Color::Green), Err(e) => ui.note(format!("write failed: {e}"), Color::Red) } } else { ui.note("usage: /config set <key> <value>", Color::Yellow); } }
         _ if input == "/provider" || input == "/provider list" => {
             let cfg = Config::load(config_path());
-            if cfg.providers.is_empty() { ui.note("没有 provider 档案。新增: /provider add <name> <kind> <model> <base_url> [key_env]", Color::Gray); }
+            if cfg.providers.is_empty() { ui.note("no provider profiles. Add: /provider add <name> <kind> <model> <base_url> [key_env]", Color::Gray); }
             else { ui.panel = Some(provider_panel()); }
         }
         _ if input.starts_with("/provider add ") => {
@@ -1722,10 +1763,10 @@ async fn run_command(
                     let text = std::fs::read_to_string(&path).unwrap_or_default();
                     match agent::config_add_provider(&text, &profile) {
                         Ok(out) => match std::fs::write(&path, out) {
-                            Ok(_) => ui.note(format!("已加 provider「{}」→ {}（切换: /provider use {}；密钥请设环境变量 {}）", profile.name, path, profile.name, profile.key_env), Color::Green),
-                            Err(e) => ui.note(format!("写 config 失败: {e}"), Color::Red),
+                            Ok(_) => ui.note(format!("added provider \"{}\" → {} (switch: /provider use {}; set the API key in env var {})", profile.name, path, profile.name, profile.key_env), Color::Green),
+                            Err(e) => ui.note(format!("failed to write config: {e}"), Color::Red),
                         },
-                        Err(e) => ui.note(format!("config 变换失败: {e}"), Color::Red),
+                        Err(e) => ui.note(format!("config transform failed: {e}"), Color::Red),
                     }
                 }
                 Err(e) => ui.note(e, Color::Yellow),
@@ -1733,10 +1774,10 @@ async fn run_command(
         }
         _ if input.starts_with("/provider use ") => switch_provider(input[14..].trim(), meta, swap, ui),
         _ if input == "/agent" => {
-            if agents.defs.is_empty() { ui.note("无可用 sub-agent", Color::Gray); }
+            if agents.defs.is_empty() { ui.note("no sub-agents available", Color::Gray); }
             else { ui.panel = Some(agent_panel(&agents.defs)); }
         }
-        _ if input.starts_with('/') => ui.note(format!("未知命令: {input}（/help）"), Color::Yellow),
+        _ if input.starts_with('/') => ui.note(format!("unknown command: {input} (/help)"), Color::Yellow),
         _ => return Ok(false),
     }
     Ok(false)
@@ -1771,7 +1812,7 @@ fn draw_panel(frame: &mut ratatui::Frame, area: Rect, panel: &Panel) {
         .split(inner);
     // 搜索行(编辑态显编辑缓冲)。
     let (head, head_color) = match &panel.editing {
-        Some(buf) => (format!("✎ 新值: {buf}"), role_color(Role::Warn)),
+        Some(buf) => (format!("✎ new value: {buf}"), role_color(Role::Warn)),
         None => (format!("🔍 {}", panel.query), role_color(Role::Muted)),
     };
     frame.render_widget(
@@ -1808,12 +1849,14 @@ fn draw_panel(frame: &mut ratatui::Frame, area: Rect, panel: &Panel) {
         &mut state,
     );
     let hint = if panel.editing.is_some() {
-        "Enter 保存 · Esc 取消"
+        "Enter save · Esc cancel"
     } else {
         match panel.kind {
-            PanelKind::Config => "↑↓ 选 · Enter 改 · 输入过滤 · Esc 关",
-            PanelKind::Models | PanelKind::Provider => "↑↓ 选 · Enter 切换 · 输入过滤 · Esc 关",
-            PanelKind::Tools | PanelKind::Agent => "↑↓ 滚 · 输入过滤 · Esc 关",
+            PanelKind::Config => "↑↓ select · Enter edit · type to filter · Esc close",
+            PanelKind::Models | PanelKind::Provider => {
+                "↑↓ select · Enter switch · type to filter · Esc close"
+            }
+            PanelKind::Tools | PanelKind::Agent => "↑↓ scroll · type to filter · Esc close",
         }
     };
     frame.render_widget(
@@ -1870,7 +1913,7 @@ fn draw(
     // 地址越狱红标(iter-34):放宽 cwd 沙箱时红底黑字警示,一眼可见。
     if agent::allow_jailbreak() {
         top.push(Span::styled(
-            " ⚠越狱 ",
+            " ⚠JAILBREAK ",
             Style::default()
                 .fg(Color::Black)
                 .bg(role_color(Role::Error))
@@ -1947,7 +1990,7 @@ fn draw(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(role_color(Role::Border)))
-                    .title(" 输入（Enter 发送 · Shift/Alt+Enter 换行 · Tab 补全）"),
+                    .title(" Input (Enter send · Shift/Alt+Enter newline · Tab complete) "),
             )
             .wrap(Wrap { trim: false }),
         outer[3],
@@ -2005,7 +2048,7 @@ fn draw(
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" Tab/↑↓ 选 · Enter 用 · Esc 关 "),
+                        .title(" Tab/↑↓ select · Enter use · Esc close "),
                 )
                 .highlight_style(
                     Style::default()
@@ -2026,7 +2069,7 @@ fn draw(
         frame.render_widget(Clear, area);
         let mut lines: Vec<Line> = vec![
             Line::from(Span::styled(
-                format!("⚠ 允许执行 {}？", req.action),
+                format!("⚠ Allow {} ?", req.action),
                 Style::default()
                     .fg(role_color(Role::Warn))
                     .add_modifier(Modifier::BOLD),
@@ -2048,7 +2091,7 @@ fn draw(
         }
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
-            "y/Enter: 批准    n/Esc: 拒绝    ↑↓/PgUp/PgDn: 滚动看详情",
+            "y/Enter: approve    n/Esc: reject    ↑↓/PgUp/PgDn: scroll details",
             Style::default().fg(role_color(Role::Muted)),
         )));
         frame.render_widget(
@@ -2056,7 +2099,7 @@ fn draw(
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" 需要权限 ")
+                        .title(" Permission required ")
                         .border_style(Style::default().fg(role_color(Role::Warn))),
                 )
                 .wrap(Wrap { trim: false })
@@ -2126,8 +2169,8 @@ mod tests {
 
     #[test]
     fn busy_bar_omits_todo_when_empty_and_shows_when_present() {
-        let none = fmt_busy_bar("推理中", &[], 12, 340, 28, 0);
-        assert_eq!(none, "⚡ 推理中 · ⏱ 12s · 340 tok · 28 tok/s");
+        let none = fmt_busy_bar("reasoning", &[], 12, 340, 28, 0);
+        assert_eq!(none, "⚡ reasoning · ⏱ 12s · 340 tok · 28 tok/s");
         let todos = vec![
             Todo {
                 content: "a".into(),
@@ -2138,20 +2181,20 @@ mod tests {
                 status: "in_progress".into(),
             },
         ];
-        let with = fmt_busy_bar("执行中", &todos, 3, 10, 3, 0);
-        assert_eq!(with, "⚡ 执行中 · ⏱ 3s · 10 tok · 3 tok/s · todo 1/2");
+        let with = fmt_busy_bar("acting", &todos, 3, 10, 3, 0);
+        assert_eq!(with, "⚡ acting · ⏱ 3s · 10 tok · 3 tok/s · todo 1/2");
     }
 
     /// iter-33:忙碌粘条显待跑队列深度(纯函数)。
     #[test]
     fn busy_bar_shows_queue_depth() {
         assert_eq!(
-            fmt_busy_bar("推理中", &[], 5, 100, 20, 0),
-            "⚡ 推理中 · ⏱ 5s · 100 tok · 20 tok/s"
+            fmt_busy_bar("reasoning", &[], 5, 100, 20, 0),
+            "⚡ reasoning · ⏱ 5s · 100 tok · 20 tok/s"
         );
         assert_eq!(
-            fmt_busy_bar("推理中", &[], 5, 100, 20, 2),
-            "⚡ 推理中 · ⏱ 5s · 100 tok · 20 tok/s · ⏳2"
+            fmt_busy_bar("reasoning", &[], 5, 100, 20, 2),
+            "⚡ reasoning · ⏱ 5s · 100 tok · 20 tok/s · ⏳2"
         );
     }
 
@@ -2666,7 +2709,7 @@ mod tests {
         let folded = fold_lines(&long, 20);
         assert!(folded.contains("l0") && folded.contains("l19"));
         assert!(!folded.contains("l29"));
-        assert!(folded.contains("+10 行已折叠"));
+        assert!(folded.contains("+10 lines folded"));
     }
 
     /// iter-28:启动帧序列 —— 首帧零字形、末帧全幅、宽度单调不减。
@@ -2683,6 +2726,44 @@ mod tests {
             assert!(glyphs >= prev);
             prev = glyphs;
         }
+    }
+
+    /// iter-36:落定 banner 防「标识乱了」—— 宽则居中艺术字(每行 ≤ width 不折)+ tagline,窄则紧凑单行。
+    #[test]
+    fn splash_block_guards_width() {
+        let wide = splash_block(80);
+        assert!(wide.len() > SPLASH.len()); // 含 tagline
+        for line in &wide {
+            assert!(
+                line.chars().count() <= 80,
+                "banner 行不得超宽致折行: {line:?}"
+            );
+        }
+        assert!(wide.iter().any(|l| l.contains('_'))); // ASCII 艺术字仍在
+        let narrow = splash_block(10);
+        assert_eq!(narrow.len(), 1); // 退化单行
+        assert!(narrow[0].chars().count() <= 12); // 极窄也不折
+        assert!(!has_cjk(&narrow[0]));
+    }
+
+    /// iter-36:所有交互页标题为英文(全局显示英化)。
+    #[test]
+    fn panel_titles_are_english() {
+        let titles = [
+            config_panel().title,
+            provider_panel().title,
+            tools_panel(&[]).title,
+            models_panel(&[], "").title,
+            agent_panel(&[]).title,
+        ];
+        for t in &titles {
+            assert!(!has_cjk(t), "panel 标题应为英文: {t}");
+        }
+    }
+
+    /// 判断串是否含 CJK(用户可见串英化的验收辅助)。
+    fn has_cjk(s: &str) -> bool {
+        s.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
     }
 
     /// iter-26:TODO 进度与清单渲染(状态行计数 + 变更快照历史化)。
