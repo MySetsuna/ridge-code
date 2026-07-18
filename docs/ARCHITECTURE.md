@@ -22,7 +22,7 @@ crates/eval        离线评测 harness(ScriptedProvider 场景:pass/stuck 等)
 - **`state.rs::GraphState`** trait:`type Update` + `fn apply(&mut self, Update)`。reducer **显式强制** —— 每种状态自己声明合并语义,防并发覆盖丢更新。
 - **`graph.rs::StateGraph`** 构建器:`add_node`(异步节点,收状态快照、返回 Update delta)、`add_edge`(静态边,重复 from = fan-out)、`set_entry`、`add_conditional_edge`(router 看**合并后**状态,优先于静态边)、`compile`(校验入口存在、静态边不悬空 → `CompiledGraph`)。节点无出边则隐式 END。
 - **`CompiledGraph::invoke_with(initial, RunConfig, Option<Checkpointer>, Option<StreamEvent 发送端>)`** → `run_loop`:**BSP 超步**执行环。每超步:state.clone 快照 → frontier 全节点吃同一快照、`tokio::spawn` 并发 → 同步点统一 `apply` → 据合并后状态路由。`RunConfig`(Clone)`.max_supersteps` 防跑飞 → `GraphError::StepLimit`。另有 `resume`(从 checkpoint 续跑)。
-- **`invoke_best_of`**(iter-24,Best-of-N 投机分支):`Arc<Self>` + JoinSet 并发 N 份初始状态各跑一遍图;失败分支丢弃,调用方评分器 `Fn(&S)->i64` 择优、平分低索引确定性胜;空/全败 → `GraphError::NoWinner`。**边界**:分支间无副作用隔离(并发真实写会互踩),真实 agent 接入需先做每分支工作区隔离;agent 侧已备确定性评分器 `branch_score`(approved 压倒一切、同侪省 token 胜),未接 CLI 主流程。
+- **`invoke_best_of`**(Best-of-N 投机分支,**通用引擎原语**):`Arc<Self>` + JoinSet 并发 N 份初始状态各跑一遍图;失败分支丢弃,调用方评分器 `Fn(&S)->i64` 择优、平分低索引确定性胜;空/全败 → `GraphError::NoWinner`。分支间无副作用隔离(并发真实写会互踩),真实 agent 接入需先做每分支工作区隔离。**iter-42**:agent 侧曾造的 `workspace.rs`(worktree/影子拷贝隔离 + 胜者合回)与 `branch_score` 评分器 17 轮零接线 → 作被证伪的过度设计**已删**;`invoke_best_of` 作库原语保留(langgraph 自带测试)。
 - **`checkpoint.rs`**:`Checkpoint{step, frontier, state}`;`Checkpointer` trait;`MemoryCheckpointer`(append-only,`history/get(step)/latest` 时间旅行)+ `FileCheckpointer`(落盘)。
 - **`StreamEvent`**:`NodeFinished` / `Superstep{state}`,供 TUI 实时渲染。
 - 错误:库层 `thiserror`(`GraphError`),节点错误归一化 `BoxError`;应用层 `anyhow`。
@@ -62,11 +62,7 @@ crates/eval        离线评测 harness(ScriptedProvider 场景:pass/stuck 等)
 
 agent 定义 = frontmatter `.md`:内置 fastcontext/explorer/reviewer 编进二进制 + `~/.ridge/agents/*.md` 用户目录(同名覆盖)。`Agents{defs, providers}` 注册表;`provider:` 字段引 config 命名档(FastContext 走廉价模型省钱)。主 agent 经 `dispatch_agent` 自动派 / TUI `/agent` 手动派。**双重防御只读**:`READONLY_TOOLS = ["read_file", "search"]` 白名单裁剪(`readonly_tool_specs`),不下放写/shell;`SUBAGENT_MAX_STEPS = 15`。独立上下文、只回结论文本,不回灌工具轨迹 —— 省主上下文 token 的关键。
 
-### 2.7 分支工作区隔离(`workspace.rs`,iter-25)
-
-BoN 真实接入的物理前提(引擎零感知):`Workspace`(GitWorktree / ShadowCopy)。`create_isolated` —— git 仓库先试 `git worktree add --detach`(best-effort),败/非 git 回落影子拷贝(跳过 `.git`/`target`/`.ridge`/`node_modules`);`merge_winner(main, branch, modified_files)` 胜者整文搬运合回(自动建嵌套目录,**全有或全无**回滚);`cleanup` best-effort 清分支。**未接 CLI**:分支 cwd 贯穿 `execute_tool_call` 的接线是下一刀(见 CONTRACT-iteration-25 边界)。
-
-### 2.8 Skills 与项目规则
+### 2.7 Skills 与项目规则
 
 `SKILL.md` 声明式技能:`RIDGE_SKILLS_DIR` env > config `skills_dir` > `~/.ridge/skills`。cwd 的 `CLAUDE.md`/`AGENTS.md` 经 `load_project_rules` 注入 system prompt。`@file` 引用注入正文(MENTION_CAP=20000 截断)。
 

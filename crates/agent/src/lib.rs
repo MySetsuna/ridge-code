@@ -32,8 +32,6 @@ use provider::{CompletionRequest, LlmProvider, Message, Role, ToolCall, ToolSpec
 
 /// 富文本输出层(彩色 / 表格 / 媒体展示)—— 见 [`rich_output`]。
 mod rich_output;
-/// 分支工作区隔离(iter-25):BoN 并发分支的物理互踩防护 + 胜者合回,见 [`workspace`]。
-pub mod workspace;
 pub use rich_output::{
     Color, Formatter, MediaDisplay, MediaInfo, MediaType, RichOutput, TableDisplay,
 };
@@ -1235,14 +1233,6 @@ fn verify_ok(s: &AgentState) -> bool {
     let out = s.tool_output.as_deref();
     out.is_some_and(tool_output_ok)
         || (s.last_action.as_deref() == Some("finish") && !out.is_some_and(tool_output_failed))
-}
-
-/// Best-of-N 分支择优的**确定性**评分(iter-24,配 `CompiledGraph::invoke_best_of`):
-/// approved(过独立 verify)压倒一切;同侪比 token 消耗,省者胜。maker≠checker —— 只认
-/// 确定性信号,不引入模型自评。真实接入待分支工作区隔离(见 guidance-24 边界)。
-pub fn branch_score(s: &AgentState) -> i64 {
-    let base = if s.approved { 1_000_000_000 } else { 0 };
-    base - s.total_tokens as i64
 }
 
 /// 多层独立退出:到回合上限 / 超预算 / 无进展 / 熔断任一命中,循环都该停(loop engineering:停机是设计的一半)。
@@ -4764,23 +4754,5 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["impl add", "test add"]
         );
-    }
-
-    /// iter-24:Best-of-N 确定性评分 —— approved 压倒一切,同侪省 token 者胜。
-    #[test]
-    fn branch_score_prefers_approved_then_cheap() {
-        let mut approved_pricey = AgentState::new("t");
-        approved_pricey.approved = true;
-        approved_pricey.total_tokens = 50_000;
-        let mut rejected_cheap = AgentState::new("t");
-        rejected_cheap.approved = false;
-        rejected_cheap.total_tokens = 10;
-        // approved(哪怕贵)恒胜未 approved(哪怕便宜)。
-        assert!(branch_score(&approved_pricey) > branch_score(&rejected_cheap));
-        // 双 approved:省 token 者胜。
-        let mut approved_cheap = AgentState::new("t");
-        approved_cheap.approved = true;
-        approved_cheap.total_tokens = 100;
-        assert!(branch_score(&approved_cheap) > branch_score(&approved_pricey));
     }
 }
