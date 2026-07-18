@@ -802,6 +802,32 @@ pub fn resolve_key_env(
         .or_else(|| auth.get(name).cloned().filter(|k| !k.is_empty()))
 }
 
+/// 顶层「主 provider」的 key 解析(iter-41 收敛 —— 原 `real_provider` 前 3 档与 `current_api_key`
+/// 各实现一遍,发散风险):`RIDGE_API_KEY` env → 顶层内联 `api_key`(非空)→ 顶层 `key_env`→(env 或
+/// auth.json 密钥库,`login --default` 情形)。都无 → None。`providers[]` 档解析另见 `resolve_key_with`。
+pub fn resolve_top_level_key(
+    cfg: &Config,
+    auth: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    if let Some(k) = std::env::var("RIDGE_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
+    {
+        return Some(k);
+    }
+    if let Some(k) = cfg
+        .api_key
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(k);
+    }
+    cfg.key_env
+        .as_deref()
+        .and_then(|name| resolve_key_env(name, auth))
+}
+
 impl Config {
     /// 从 JSON 文本解析;**解析失败 → 默认空配置**(降级到 env,不崩)。
     pub fn parse(text: &str) -> Self {
@@ -1612,9 +1638,19 @@ fn tool_primary_arg(call: &ToolCall) -> String {
     String::new()
 }
 
+/// hook 命令是否安全(纯):不命中灾难 denylist 即安全。**hook 与 run_shell 工具同守这条硬线**
+/// —— §8 不变量⑦「危险命令拦截不可绕过」对所有 shell 通道成立(iter-41 补:此前 hook 通道漏拦)。
+fn hook_is_safe(command: &str) -> bool {
+    tools::is_dangerous_command(command).is_none()
+}
+
 /// 跑一条 hook 命令(跨平台),把工具名/主参数经 **env**(非全局,只挂这条 Command —— BSP 并发安全)
-/// 注入。返回退出码。best-effort:起不来 → None。
+/// 注入。返回退出码。灾难命令 → 不执行 + 审计留痕 + None;best-effort:起不来 → None。
 fn run_hook_command(command: &str, tool: &str, arg: &str) -> Option<i32> {
+    if !hook_is_safe(command) {
+        audit("hook_blocked", command); // 灾难命令不执行(不可绕过);留痕便于排查误配
+        return None;
+    }
     use std::process::Command;
     let mut c = if cfg!(windows) {
         let mut c = Command::new("cmd");
@@ -3375,6 +3411,30 @@ mod tests {
         assert_eq!(prof.resolve_key_with(&BTreeMap::new()), None);
     }
 
+    /// iter-41:顶层 key 解析收敛核 —— 内联 api_key 优先于 key_env→auth;皆无 → None。
+    #[test]
+    fn resolve_top_level_key_precedence() {
+        use std::collections::BTreeMap;
+        // 顶层内联 api_key(trim)优先,不看 key_env/auth。
+        let inline =
+            Config::parse(r#"{ "api_key": "  sk-top  ", "key_env": "RIDGE_ITER41_UNSET" }"#);
+        let mut auth = BTreeMap::new();
+        auth.insert("RIDGE_ITER41_UNSET".to_string(), "sk-auth".to_string());
+        assert_eq!(
+            resolve_top_level_key(&inline, &auth).as_deref(),
+            Some("sk-top")
+        );
+        // 无内联、key_env 指的槽在 auth → 取 auth(env 未设该唯一名)。
+        let viaenv = Config::parse(r#"{ "key_env": "RIDGE_ITER41_UNSET" }"#);
+        assert_eq!(
+            resolve_top_level_key(&viaenv, &auth).as_deref(),
+            Some("sk-auth")
+        );
+        // 无内联、无 key_env、无 env → None。
+        let none = Config::parse(r#"{ "model": "m" }"#);
+        assert_eq!(resolve_top_level_key(&none, &BTreeMap::new()), None);
+    }
+
     /// login 纯核:写档进 providers[]、make_default 时改顶层四键、**产物绝不含任何 key**、合法 JSON。
     #[test]
     fn apply_login_writes_profile_no_key() {
@@ -4285,6 +4345,16 @@ mod tests {
     fn audit_line_format() {
         assert_eq!(audit_line("session_start", ""), "[session_start]");
         assert_eq!(audit_line("stop", "steps=4"), "[stop] steps=4");
+    }
+
+    /// iter-41:hook 命令同守灾难 denylist(§8 不变量⑦不可绕过对 hook 通道亦成立)。
+    #[test]
+    fn hook_is_safe_blocks_disaster() {
+        assert!(!hook_is_safe("rm -rf /"));
+        assert!(!hook_is_safe("mkfs.ext4 /dev/sda"));
+        assert!(!hook_is_safe(":(){ :|:& };:"));
+        assert!(hook_is_safe("cargo fmt"));
+        assert!(hook_is_safe("echo formatted $RIDGE_TOOL_ARG"));
     }
 
     /// DoD②:/compact 压缩历史 —— 长度显著减少,保留首条(任务)+ 最近 keep 条。

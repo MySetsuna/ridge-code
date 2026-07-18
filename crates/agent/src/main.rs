@@ -5,7 +5,7 @@ use agent::{
     apply_login, auth_parse, auth_upsert, auto_signal_from_run, build_agent, build_llm_agent_full,
     builtin_tool_specs, compact_history, default_tool, est_tokens, expand_mentions,
     extract_signals_from_run, halt_reason, load_commands, load_signal_block, load_skills,
-    null_token_bus, preset_by_id, render_todos, resolve_key_env, resolve_mcp, scripted,
+    null_token_bus, preset_by_id, render_todos, resolve_mcp, resolve_top_level_key, scripted,
     signal_extract_enabled, write_run, AgentState, Approver, AutoApprove, Color, Config, McpTools,
     RichOutput, Skill, SlashCommand, Todo, TokenBus, PROVIDER_PRESETS,
 };
@@ -613,29 +613,9 @@ fn real_provider(
     cfg: &Config,
     auth: &std::collections::BTreeMap<String, String>,
 ) -> Option<Arc<dyn LlmProvider>> {
-    if let Some(key) = std::env::var("RIDGE_API_KEY")
-        .ok()
-        .filter(|k| !k.is_empty())
-    {
-        let (kind, model, base) = resolve_model_info(cfg);
-        return Some(make_provider(&kind, &model, &base, key));
-    }
-    // 顶层内联 api_key:用顶层 provider/model/base_url 身份启动(用户设的默认 model 生效)。
-    if let Some(key) = cfg
-        .api_key
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        let (kind, model, base) = resolve_model_info(cfg);
-        return Some(make_provider(&kind, &model, &base, key));
-    }
-    // 顶层 key_env(`login --default` 设):从 env 或 auth.json 密钥库取顶层 key。
-    if let Some(key) = cfg
-        .key_env
-        .as_deref()
-        .and_then(|name| resolve_key_env(name, auth))
-    {
+    // 顶层 key(iter-41 收敛):RIDGE_API_KEY env → 顶层内联 api_key → 顶层 key_env→(env/auth)。
+    // 命中即用顶层 provider/model/base_url 身份启动(用户设的默认 model 生效)。
+    if let Some(key) = agent::resolve_top_level_key(cfg, auth) {
         let (kind, model, base) = resolve_model_info(cfg);
         return Some(make_provider(&kind, &model, &base, key));
     }

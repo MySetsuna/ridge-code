@@ -1535,27 +1535,10 @@ pub(super) async fn run(
     Ok(())
 }
 
-/// 当前 API key 解析(供 `/models` 抓取、`/model` 热切用):env `RIDGE_API_KEY` > config 顶层内联
-/// `api_key` > 顶层 `key_env`→(env 或 auth.json 密钥库,`login --default` 情形)。都无 → None。
+/// 当前 API key 解析(供 `/models` 抓取、`/model` 热切用):走 iter-41 收敛的
+/// [`resolve_top_level_key`](env `RIDGE_API_KEY` > 顶层内联 `api_key` > 顶层 `key_env`→env/auth)。都无 → None。
 fn current_api_key() -> Option<String> {
-    if let Some(k) = std::env::var("RIDGE_API_KEY")
-        .ok()
-        .filter(|v| !v.is_empty())
-    {
-        return Some(k);
-    }
-    let cfg = Config::load(config_path());
-    if let Some(k) = cfg
-        .api_key
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return Some(k);
-    }
-    cfg.key_env
-        .as_deref()
-        .and_then(|name| resolve_key_env(name, &load_auth()))
+    resolve_top_level_key(&Config::load(config_path()), &load_auth())
 }
 
 /// TUI `/login` 落盘核(与 CLI `run_login` 同语义,精简版):key → auth.json(收权限),
