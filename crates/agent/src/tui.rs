@@ -333,6 +333,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/exit",
     "/help",
     "/model",
+    "/models",
     "/provider",
     "/quit",
     "/reset",
@@ -918,7 +919,9 @@ pub(super) async fn run(
                             &agents,
                             session_tokens,
                             session_turns,
-                        )? {
+                        )
+                        .await?
+                        {
                             break 'main;
                         }
                         if input.starts_with('/') {
@@ -1048,8 +1051,33 @@ pub(super) async fn run(
     Ok(())
 }
 
+/// 当前 API key 解析(供 `/models` 抓取用):env `RIDGE_API_KEY` 优先,否则 config.json 顶层
+/// 内联 `api_key`。都无 → None(命令报错,不抓)。
+fn current_api_key() -> Option<String> {
+    std::env::var("RIDGE_API_KEY")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            Config::load(config_path())
+                .api_key
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+}
+
+/// 上下文窗口人读化:200000 → "200K",1048576 → "1.0M"(纯函数)。
+fn fmt_ctx(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{}K", n / 1_000)
+    } else {
+        n.to_string()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-fn run_command(
+async fn run_command(
     input: &str,
     ui: &mut Ui,
     history: &mut Vec<Message>,
@@ -1061,19 +1089,59 @@ fn run_command(
 ) -> anyhow::Result<bool> {
     match input {
         "/exit" | "/quit" => return Ok(true),
-        "/help" => ui.note("/exit /reset /compact /cost /tools /model [name] /provider /agent /config [set key value]；@path 引用文件；Ctrl-C 中断；历史滚动/选取用终端原生能力；批准弹窗:y/Enter 批准、n/Esc 拒绝、↑↓ 滚动看详情。", Color::Gray),
+        "/help" => ui.note("/exit /reset /compact /cost /tools /model [name] /models /provider [list|use <name>|add <name> <kind> <model> <base_url> [key_env]] /agent /config [set key value]；@path 引用文件；Ctrl-C 中断；历史滚动/选取用终端原生能力；批准弹窗:y/Enter 批准、n/Esc 拒绝、↑↓ 滚动看详情。", Color::Gray),
         "/tools" => ui.note(format!("可用工具({}): {}", meta.tools.len(), meta.tools.join(", ")), Color::Gray),
         "/reset" => { history.clear(); save_session(&session_path(), history); ui.note("上下文已清空", Color::Yellow); }
         "/compact" => { let n = history.len(); *history = compact_history(std::mem::take(history), 4); ui.note(format!("上下文已压缩: {n} → {} 条", history.len()), Color::Yellow); }
         "/cost" => ui.note(format!("本会话累计: {tokens} tokens · {turns} 轮任务"), Color::Gray),
-        _ if input == "/model" => ui.note(format!("provider={} · model={} · base_url={}\n热切换: /model <name>", meta.provider, meta.model, meta.base_url), Color::Gray),
+        _ if input == "/model" => ui.note(format!("provider={} · model={} · base_url={}\n热切换: /model <name>；实时模型列表(含上下文大小): /models", meta.provider, meta.model, meta.base_url), Color::Gray),
+        _ if input == "/models" => {
+            match current_api_key() {
+                Some(key) => {
+                    let http = provider::http::ReqwestClient::new();
+                    let fut = provider::models::fetch_models(&http, &meta.provider, &meta.base_url, &key);
+                    match tokio::time::timeout(Duration::from_secs(15), fut).await {
+                        Ok(Ok(list)) if !list.is_empty() => {
+                            let body = list.iter().map(|m| {
+                                let mark = if m.id == meta.model { "→ " } else { "  " };
+                                match m.context {
+                                    Some(n) => format!("{mark}{}  (ctx {})", m.id, fmt_ctx(n)),
+                                    None => format!("{mark}{}  (ctx ?)", m.id),
+                                }
+                            }).collect::<Vec<_>>().join("\n");
+                            ui.note(format!("{} · {} 个模型（→ 当前 {}）:\n{}", meta.provider, list.len(), meta.model, body), Color::Gray);
+                        }
+                        Ok(Ok(_)) => ui.note("端点返回空模型列表", Color::Yellow),
+                        Ok(Err(e)) => ui.note(format!("抓取模型失败: {e}"), Color::Red),
+                        Err(_) => ui.note("抓取模型超时（15s）", Color::Red),
+                    }
+                }
+                None => ui.note("未解析到 API key（设 RIDGE_API_KEY 或 config.json 顶层 api_key）", Color::Red),
+            }
+        }
         _ if input.starts_with("/model ") => {
             let name = input[7..].trim();
             if let Some(key) = std::env::var("RIDGE_API_KEY").ok().filter(|v| !v.is_empty()) { swap.swap(make_provider(&meta.provider, name, &meta.base_url, key)); meta.model = name.into(); ui.note(format!("已热切换 model={name}"), Color::Green); } else { ui.note("未设 RIDGE_API_KEY，无法切换模型", Color::Red); }
         }
         _ if input == "/config" => ui.note(format!("配置文件: {}（JSON，可直接编辑）\n当前: {} · {}\n持久化: /config set <key> <value>", config_path(), meta.provider, meta.model), Color::Gray),
         _ if input.starts_with("/config set ") => { let parts: Vec<_> = input.splitn(4, ' ').collect(); if parts.len() == 4 { match persist_config(parts[2], parts[3]) { Ok(path) => ui.note(format!("已写入 {path}；下次启动生效"), Color::Green), Err(e) => ui.note(format!("写入失败: {e}"), Color::Red) } } else { ui.note("用法: /config set <key> <value>", Color::Yellow); } }
-        _ if input == "/provider" || input == "/provider list" => { let cfg = Config::load(config_path()); let list = cfg.providers.iter().map(|p| format!("{} · {} · {}", p.name, p.kind, p.model)).collect::<Vec<_>>().join("\n"); ui.note(if list.is_empty() { "没有 provider 档案；/provider add 请在 config.json 添加，或继续使用 /model。".into() } else { list }, Color::Gray); }
+        _ if input == "/provider" || input == "/provider list" => { let cfg = Config::load(config_path()); let list = cfg.providers.iter().map(|p| format!("{} · {} · {}", p.name, p.kind, p.model)).collect::<Vec<_>>().join("\n"); let hint = "\n切换: /provider use <name>；新增: /provider add <name> <kind> <model> <base_url> [key_env]"; ui.note(if list.is_empty() { format!("没有 provider 档案。{hint}") } else { format!("{list}{hint}") }, Color::Gray); }
+        _ if input.starts_with("/provider add ") => {
+            match agent::parse_provider_add(input["/provider add ".len()..].trim()) {
+                Ok(profile) => {
+                    let path = config_path();
+                    let text = std::fs::read_to_string(&path).unwrap_or_default();
+                    match agent::config_add_provider(&text, &profile) {
+                        Ok(out) => match std::fs::write(&path, out) {
+                            Ok(_) => ui.note(format!("已加 provider「{}」→ {}（切换: /provider use {}；密钥请设环境变量 {}）", profile.name, path, profile.name, profile.key_env), Color::Green),
+                            Err(e) => ui.note(format!("写 config 失败: {e}"), Color::Red),
+                        },
+                        Err(e) => ui.note(format!("config 变换失败: {e}"), Color::Red),
+                    }
+                }
+                Err(e) => ui.note(e, Color::Yellow),
+            }
+        }
         _ if input.starts_with("/provider use ") => { let name = input[14..].trim(); if let Some(p) = Config::load(config_path()).providers.into_iter().find(|p| p.name == name) { match std::env::var(&p.key_env).ok().filter(|v| !v.is_empty()) { Some(key) => { swap.swap(make_provider(&p.kind, &p.model, &p.base_url, key)); meta.provider=p.kind; meta.model=p.model; meta.base_url=p.base_url; ui.note(format!("已切换 provider {name}"), Color::Green); }, None => ui.note(format!("{} 未设", p.key_env), Color::Red) } } else { ui.note(format!("没有 provider: {name}"), Color::Red); } }
         _ if input == "/agent" => {
             if agents.defs.is_empty() { ui.note("无可用 sub-agent", Color::Gray); }
@@ -1302,6 +1370,15 @@ mod tests {
     #[test]
     fn final_answer_gets_assistant_marker() {
         assert_eq!(format_event_plain("(final) hello"), "🤖 hello");
+    }
+
+    /// iter-29:上下文窗口人读化。
+    #[test]
+    fn ctx_size_is_human_readable() {
+        assert_eq!(fmt_ctx(128_000), "128K");
+        assert_eq!(fmt_ctx(200_000), "200K");
+        assert_eq!(fmt_ctx(1_048_576), "1.0M");
+        assert_eq!(fmt_ctx(512), "512");
     }
 
     /// 根因回归:审批态下滚动键**不再误拒**,而是滚动;仅 y/Enter 批准、n/Esc 拒绝,余键忽略。

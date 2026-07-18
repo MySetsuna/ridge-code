@@ -737,6 +737,35 @@ pub fn config_add_provider(text: &str, profile: &ProviderProfile) -> Result<Stri
     serde_json::to_string_pretty(&serde_json::Value::Object(root)).map_err(|e| e.to_string())
 }
 
+/// 解析 `/provider add` 的定位参数 → [`ProviderProfile`](纯函数,可单测)。
+/// 语法:`<name> <kind> <model> <base_url> [key_env]`;kind ∈ {openai, anthropic}。
+/// 缺参 / 未知 kind → `Err`(用法提示)。**密钥不在此给** —— 只记 `key_env` 指向,
+/// 明文永不因本路径落盘(`api_key=None` 且 [`ProviderProfile::api_key`] 本就 `skip_serializing`)。
+pub fn parse_provider_add(args: &str) -> Result<ProviderProfile, String> {
+    let f: Vec<&str> = args.split_whitespace().collect();
+    if f.len() < 4 {
+        return Err(
+            "用法: /provider add <name> <kind:openai|anthropic> <model> <base_url> [key_env]"
+                .into(),
+        );
+    }
+    let kind = f[1].to_lowercase();
+    if kind != "openai" && kind != "anthropic" {
+        return Err(format!("未知 kind「{}」,只支持 openai | anthropic", f[1]));
+    }
+    Ok(ProviderProfile {
+        name: f[0].to_string(),
+        kind,
+        model: f[2].to_string(),
+        base_url: f[3].to_string(),
+        key_env: f
+            .get(4)
+            .map(|s| s.to_string())
+            .unwrap_or_else(default_key_env),
+        api_key: None,
+    })
+}
+
 /// 通用 agent 的基础 system prompt(不再只面向编码)。
 const BASE_SYSTEM: &str = "You are a capable agent. Use the provided tools to accomplish the \
      user's task. To change existing files, prefer edit_file (surgical, unique-match replace) over \
@@ -2662,6 +2691,30 @@ mod tests {
             r#"{ "providers": [ { "name": "a", "kind": "openai", "model": "m", "base_url": "u" } ] }"#,
         );
         assert_eq!(d.providers[0].key_env, "RIDGE_API_KEY");
+    }
+
+    /// `/provider add` 参数解析:合法定位参数 → 档案;缺参/未知 kind → Err;经 config_add_provider
+    /// 往返后明文密钥永不落盘。
+    #[test]
+    fn parse_provider_add_ok_bad_and_no_plaintext() {
+        let p = parse_provider_add("mine openai gpt-4o https://api.x.com/v1").unwrap();
+        assert_eq!(p.name, "mine");
+        assert_eq!(p.kind, "openai");
+        assert_eq!(p.model, "gpt-4o");
+        assert_eq!(p.base_url, "https://api.x.com/v1");
+        assert_eq!(p.key_env, "RIDGE_API_KEY"); // 缺省
+        assert!(p.api_key.is_none());
+        // 显式 key_env + kind 大小写不敏感。
+        let p2 = parse_provider_add("m2 Anthropic claude https://a.com/v1 MY_KEY").unwrap();
+        assert_eq!(p2.kind, "anthropic");
+        assert_eq!(p2.key_env, "MY_KEY");
+        // 缺参、未知 kind → Err。
+        assert!(parse_provider_add("mine openai").is_err());
+        assert!(parse_provider_add("mine grok model url").is_err());
+        // 往返:providers 含该档、api_key 键不出现。
+        let out = config_add_provider("{}", &p).unwrap();
+        assert!(out.contains("\"mine\""));
+        assert!(!out.contains("api_key"));
     }
 
     /// 密钥解析:内联 `api_key`(非空)优先于 `key_env`;`api_key` 不回写 config(skip_serializing)。
