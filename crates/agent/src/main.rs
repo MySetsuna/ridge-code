@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use agent::{
     auto_signal_from_run, build_agent, build_llm_agent_full, builtin_tool_specs, compact_history,
-    default_tool, expand_mentions, extract_signals_from_run, halt_reason, load_signal_block,
-    load_skills, null_token_bus, render_todos, resolve_mcp, scripted, signal_extract_enabled,
-    write_run, AgentState, Approver, AutoApprove, Color, Config, McpTools, RichOutput, Skill, Todo,
-    TokenBus,
+    default_tool, est_tokens, expand_mentions, extract_signals_from_run, halt_reason,
+    load_signal_block, load_skills, null_token_bus, render_todos, resolve_mcp, scripted,
+    signal_extract_enabled, write_run, AgentState, Approver, AutoApprove, Color, Config, McpTools,
+    RichOutput, Skill, Todo, TokenBus,
 };
 use langgraph::{CompiledGraph, RunConfig, StreamEvent};
 use mcp::{McpClient, StdioTransport};
@@ -20,6 +20,10 @@ struct ReplMeta {
     provider: String,
     model: String,
     base_url: String,
+    /// 输入框下方自定义状态条模板(iter-31):config `status_bar` 或内置默认。
+    status_bar: String,
+    /// 当前模型上下文窗口(iter-31):ctx% 分母。默认 `DEFAULT_CTX_WINDOW`,`/models` 命中即刷新。
+    ctx_window: u64,
 }
 
 /// ridgecode —— 通用 agent CLI(产品名 RidgeCode)。
@@ -110,6 +114,12 @@ async fn main() -> anyhow::Result<()> {
                         provider: provider_kind,
                         model,
                         base_url,
+                        status_bar: cfg
+                            .status_bar
+                            .clone()
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or_else(|| tui::DEFAULT_STATUS_BAR.to_string()),
+                        ctx_window: tui::DEFAULT_CTX_WINDOW,
                     };
                     // 包一层 SwapProvider,让 TUI 的 /model 能热切换底层模型而不重建图。
                     let swap = Arc::new(SwapProvider::new(p));

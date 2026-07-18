@@ -5,7 +5,7 @@
 
 use std::io;
 use std::sync::{mpsc, Arc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::{
     event::{
@@ -721,6 +721,8 @@ struct Ui {
     frame: usize,
     /// 启动帧序列进度(iter-28):< SPLASH_TICKS 时 tick 驱动渐显,末帧 banner 入历史。
     splash: usize,
+    /// 本任务流式 token 估算累计(iter-31):token_rx 每块 `est_tokens` 累加,Submit 清零、done 保留展示。
+    stream_tokens: usize,
 }
 impl Ui {
     fn note(&mut self, text: impl Into<String>, color: Color) {
@@ -737,23 +739,25 @@ fn flush_commits(terminal: &mut Term, ui: &mut Ui) -> io::Result<()> {
     let width = terminal.size()?.width;
     for (text, color) in ui.drain_commits() {
         let text = fold_lines(&text, FOLD_MAX); // 呈现层折叠(iter-28):历史不刷屏
-        let h = commit_height(&text, width);
+                                                // 块间前置一空白行(iter-31 需求 5):连续输出块视觉分栏,不再贴成一片。
+        let h = commit_height(&text, width) + 1;
         terminal.insert_before(h, |buf| {
-            let lines: Vec<Line> = if text.starts_with("🤖") {
+            let mut lines: Vec<Line> = vec![Line::default()];
+            if text.starts_with("🤖") {
                 // 终答走 md 轻渲染(iter-28):样式已定型,提交时染。
                 let mut in_code = false;
-                text.lines()
-                    .map(|l| {
-                        let (spans, next) = md_line_spans(l, in_code);
-                        in_code = next;
-                        Line::from(spans)
-                    })
-                    .collect()
+                lines.extend(text.lines().map(|l| {
+                    let (spans, next) = md_line_spans(l, in_code);
+                    in_code = next;
+                    Line::from(spans)
+                }));
             } else {
-                text.lines()
-                    .map(|l| Line::from(Span::styled(l.to_owned(), Style::default().fg(color))))
-                    .collect()
-            };
+                lines.extend(
+                    text.lines().map(|l| {
+                        Line::from(Span::styled(l.to_owned(), Style::default().fg(color)))
+                    }),
+                );
+            }
             Paragraph::new(Text::from(lines))
                 .wrap(Wrap { trim: false })
                 .render(buf.area, buf);
@@ -816,6 +820,8 @@ pub(super) async fn run(
     let mut session_tokens = 0usize;
     let mut session_turns = 0usize;
     let mut printed = 0usize;
+    // 忙碌粘条计时(iter-31):任务起点,Submit 置、done/中断清;读秒/速率据此算(app 运行时用 Instant,非脚本)。
+    let mut task_started: Option<Instant> = None;
 
     // 阻塞读线程(iter-23):不开 crossterm `event-stream` feature(免引 futures 依赖),
     // std 线程 `event::read()` 转发进 tokio 通道;主环退出后线程仍阻塞在 read 上,随进程结束回收。
@@ -839,7 +845,19 @@ pub(super) async fn run(
         }
         if should_draw(dirty, ui.busy) {
             ui.frame = ui.frame.wrapping_add(1);
-            terminal.draw(|frame| draw(frame, &ui, &meta, session_tokens, pending.as_ref()))?;
+            let elapsed_ms = task_started.map(|t| t.elapsed().as_millis()).unwrap_or(0);
+            let ctx_used = history
+                .iter()
+                .map(|m| est_tokens(&m.content))
+                .sum::<usize>();
+            let vitals = Vitals {
+                elapsed_s: (elapsed_ms / 1000) as u64,
+                task_tokens: ui.stream_tokens,
+                rate: token_rate(ui.stream_tokens, elapsed_ms),
+                ctx_used,
+            };
+            terminal
+                .draw(|frame| draw(frame, &ui, &meta, session_tokens, &vitals, pending.as_ref()))?;
             dirty = false;
         }
         // 事件驱动多路复用替代固定轮询(iter-23):无事时阻塞挂起,不烧 CPU。
@@ -884,6 +902,7 @@ pub(super) async fn run(
                             *bus.lock().unwrap() = None;
                             ui.busy = false;
                             ui.stream.clear();
+                            task_started = None;
                             ui.note("已中断当前任务", Color::Yellow);
                         }
                     }
@@ -965,6 +984,8 @@ pub(super) async fn run(
                         ui.busy = true;
                         ui.phase = "推理中".into();
                         ui.stream.clear();
+                        ui.stream_tokens = 0;
+                        task_started = Some(Instant::now());
                         printed = 0;
                         task = Some(tokio::spawn(async move {
                             *bus.lock().unwrap() = Some(tokens);
@@ -981,9 +1002,11 @@ pub(super) async fn run(
             }
             Some(token) = token_rx.recv() => {
                 ui.busy = true;
+                ui.stream_tokens += est_tokens(&token);
                 ui.stream.push_str(&token);
                 // 批量排空积压 token,免逐 token 一帧。
                 while let Ok(t) = token_rx.try_recv() {
+                    ui.stream_tokens += est_tokens(&t);
                     ui.stream.push_str(&t);
                 }
                 dirty = true;
@@ -1023,6 +1046,7 @@ pub(super) async fn run(
                 task = None;
                 ui.busy = false;
                 ui.stream.clear();
+                task_started = None;
                 printed = 0;
                 match result {
                     Ok(out) => {
@@ -1100,6 +1124,78 @@ fn fmt_ctx(n: u64) -> String {
     }
 }
 
+// ───────────────────── 状态双栏与 ctx%(iter-31)─────────────────────
+
+/// ctx% 分母未知时的兜底上下文窗口(现代模型常见档)。`/models` 命中当前模型即被真实窗口覆盖。
+pub(super) const DEFAULT_CTX_WINDOW: u64 = 200_000;
+/// 输入框下方自定义状态条内置默认模板。config `status_bar` 留空时用它。
+pub(super) const DEFAULT_STATUS_BAR: &str = " {provider} · {model} · ctx {ctx} · {tokens} tok ";
+
+/// 实时 token 速率(tok/s,纯函数):elapsed 为 0 → 0,防除零。
+fn token_rate(tokens: usize, elapsed_ms: u128) -> u64 {
+    if elapsed_ms == 0 {
+        0
+    } else {
+        (tokens as u128 * 1000 / elapsed_ms) as u64
+    }
+}
+
+/// 上下文占用百分比(纯函数):window 为 0 → 0;上限 100(压缩前估算,超窗即封顶)。
+fn ctx_percent(used: usize, window: usize) -> u16 {
+    if window == 0 {
+        0
+    } else {
+        (used * 100 / window).min(100) as u16
+    }
+}
+
+/// 忙碌粘条文案(需求 6,纯函数):运行态 · 读秒 · token 消耗 · 速率 · 任务进度。
+/// todo 空则省略进度段。计时/计量全由入参给定 —— 零 wall-clock,可纯测。
+fn fmt_busy_bar(phase: &str, todos: &[Todo], elapsed_s: u64, tokens: usize, rate: u64) -> String {
+    let mut s = format!("⚡ {phase} · ⏱ {elapsed_s}s · {tokens} tok · {rate} tok/s");
+    if let Some((d, n)) = todo_progress(todos) {
+        s.push_str(&format!(" · todo {d}/{n}"));
+    }
+    s
+}
+
+/// 自定义底栏占位替换用变量(需求 3)。
+struct StatusVars {
+    provider: String,
+    model: String,
+    ctx: String,
+    tokens: String,
+    cwd: String,
+}
+
+/// 底栏模板渲染(需求 3,纯函数):替换 `{provider}{model}{ctx}{tokens}{cwd}`,
+/// 未知占位原样保留(不吞字符,便于用户排错)。
+fn render_status_template(tmpl: &str, v: &StatusVars) -> String {
+    tmpl.replace("{provider}", &v.provider)
+        .replace("{model}", &v.model)
+        .replace("{ctx}", &v.ctx)
+        .replace("{tokens}", &v.tokens)
+        .replace("{cwd}", &v.cwd)
+}
+
+/// 当前工作目录末段名(状态栏用),取不到 → 空串。
+fn cwd_name() -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|p| p.file_name().map(|x| x.to_string_lossy().to_string()))
+        .unwrap_or_default()
+}
+
+/// 一帧的实时体征(iter-31):由主环据 `Instant`/token 计量算好后传入 `draw`,
+/// draw 只消费数值 —— 计时逻辑不入 draw,便于纯测各格式化函数。
+struct Vitals {
+    elapsed_s: u64,
+    task_tokens: usize,
+    rate: u64,
+    /// 当前 history 估算 token(ctx% 分子)。
+    ctx_used: usize,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_command(
     input: &str,
@@ -1126,6 +1222,10 @@ async fn run_command(
                     let fut = provider::models::fetch_models(&http, &meta.provider, &meta.base_url, &key);
                     match tokio::time::timeout(Duration::from_secs(15), fut).await {
                         Ok(Ok(list)) if !list.is_empty() => {
+                            // 命中当前模型即缓存其真实上下文窗口 → 底栏/顶栏 ctx% 分母转真值(iter-31)。
+                            if let Some(n) = list.iter().find(|m| m.id == meta.model).and_then(|m| m.context) {
+                                meta.ctx_window = n;
+                            }
                             let body = list.iter().map(|m| {
                                 let mark = if m.id == meta.model { "→ " } else { "  " };
                                 match m.context {
@@ -1177,22 +1277,27 @@ async fn run_command(
     Ok(false)
 }
 
-/// Live 视口绘制(iter-26):状态行 + 流式尾巴 + 输入框;审批模态覆整个视口。
+/// Live 视口绘制(iter-26;iter-31 双状态栏):顶状态行 + 输出尾 + [忙碌粘条] + 输入框 + 自定义底栏;
+/// 审批模态覆整个视口。五槽定长布局,忙碌槽空闲时高 0(索引恒定,免条件分支乱套)。
 fn draw(
     frame: &mut ratatui::Frame,
     ui: &Ui,
     meta: &ReplMeta,
     tokens: usize,
+    vitals: &Vitals,
     approval: Option<&ApprovalRequest>,
 ) {
     let area = frame.area();
     let input_rows = input_height(&ui.input.buffer, area.width.saturating_sub(2), 3, 8);
+    let busy_rows = if ui.busy { 1 } else { 0 };
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(input_rows),
+            Constraint::Length(1),          // [0] 顶状态行
+            Constraint::Min(1),             // [1] 输出尾
+            Constraint::Length(busy_rows),  // [2] 忙碌粘条(空闲高 0)
+            Constraint::Length(input_rows), // [3] 输入框
+            Constraint::Length(1),          // [4] 自定义底栏
         ])
         .split(area);
     let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][ui.frame % 10];
@@ -1204,24 +1309,24 @@ fn draw(
     let todo = todo_progress(&ui.todos)
         .map(|(d, n)| format!(" · todo {d}/{n}"))
         .unwrap_or_default();
+    let ctx = ctx_percent(vitals.ctx_used, meta.ctx_window as usize);
+    // 顶状态行更显眼(iter-31 需求 3):busy 时徽标转暖色示运行、加 ctx% 段。
+    let badge_bg = if ui.busy { Color::Yellow } else { Color::Cyan };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
                 " RidgeCode ",
                 Style::default()
                     .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .bg(badge_bg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
-                " {} · {} · {} tokens{todo} · {}{}",
+                " {} · {} · ctx {ctx}% · {} tokens{todo} · {}{}",
                 meta.provider,
                 meta.model,
                 tokens,
-                std::env::current_dir()
-                    .ok()
-                    .and_then(|p| p.file_name().map(|x| x.to_string_lossy().to_string()))
-                    .unwrap_or_default(),
+                cwd_name(),
                 status
             )),
         ]))
@@ -1259,6 +1364,26 @@ fn draw(
         }
     }
     frame.render_widget(Paragraph::new(Text::from(tail)), outer[1]);
+    // 忙碌粘条(iter-31 需求 6):输入框上方,运行态·读秒·token·速率·任务进度。仅 busy 时有高度。
+    if ui.busy {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                fmt_busy_bar(
+                    &ui.phase,
+                    &ui.todos,
+                    vitals.elapsed_s,
+                    vitals.task_tokens,
+                    vitals.rate,
+                ),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(role_color(Role::Warn))
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .style(Style::default().bg(role_color(Role::Warn))),
+            outer[2],
+        );
+    }
     frame.render_widget(
         Paragraph::new(ui.input.buffer.as_str())
             .block(
@@ -1268,12 +1393,28 @@ fn draw(
                     .title(" 输入（Enter 发送 · Shift/Alt+Enter 换行 · Tab 补全）"),
             )
             .wrap(Wrap { trim: false }),
-        outer[2],
+        outer[3],
+    );
+    // 自定义底栏(iter-31 需求 3):输入框下方,config `status_bar` 模板渲染。
+    let sv = StatusVars {
+        provider: meta.provider.clone(),
+        model: meta.model.clone(),
+        ctx: format!("{ctx}%"),
+        tokens: tokens.to_string(),
+        cwd: cwd_name(),
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            render_status_template(&meta.status_bar, &sv),
+            Style::default().fg(role_color(Role::Muted)),
+        )))
+        .style(Style::default().bg(Color::DarkGray)),
+        outer[4],
     );
     // 真光标(iter-27;iter-30 改按显示单元格列):CJK/emoji 宽字符落点精确,不再偏左。
     if approval.is_none() {
         let (row, col) = ui.input.cursor_display_col();
-        let inner = outer[2];
+        let inner = outer[3];
         let x = (inner.x + 1 + col as u16).min(inner.right().saturating_sub(2));
         let y = (inner.y + 1 + row as u16).min(inner.bottom().saturating_sub(2));
         frame.set_cursor_position(Position { x, y });
@@ -1289,8 +1430,8 @@ fn draw(
             .unwrap_or(10)
             .min(48) as u16
             + 4;
-        let x = outer[2].x + 1;
-        let y = outer[2].y.saturating_sub(h);
+        let x = outer[3].x + 1;
+        let y = outer[3].y.saturating_sub(h);
         let rect = Rect {
             x,
             y,
@@ -1403,6 +1544,68 @@ mod tests {
         assert_eq!(fmt_ctx(200_000), "200K");
         assert_eq!(fmt_ctx(1_048_576), "1.0M");
         assert_eq!(fmt_ctx(512), "512");
+    }
+
+    /// iter-31:状态双栏纯函数(零 wall-clock/PTY,计时/计量全由入参给定)。
+    #[test]
+    fn token_rate_guards_div_zero_and_scales() {
+        assert_eq!(token_rate(0, 0), 0); // 未起步:防除零
+        assert_eq!(token_rate(100, 1000), 100); // 100 tok / 1s = 100 tok/s
+        assert_eq!(token_rate(50, 2000), 25); // 50 tok / 2s = 25 tok/s
+    }
+
+    #[test]
+    fn ctx_percent_clamps_and_guards() {
+        assert_eq!(ctx_percent(0, 200_000), 0);
+        assert_eq!(ctx_percent(6_000, 200_000), 3);
+        assert_eq!(ctx_percent(999_999, 100), 100); // 超窗封顶
+        assert_eq!(ctx_percent(500, 0), 0); // 窗口未知:防除零
+    }
+
+    #[test]
+    fn busy_bar_omits_todo_when_empty_and_shows_when_present() {
+        let none = fmt_busy_bar("推理中", &[], 12, 340, 28);
+        assert_eq!(none, "⚡ 推理中 · ⏱ 12s · 340 tok · 28 tok/s");
+        let todos = vec![
+            Todo {
+                content: "a".into(),
+                status: "completed".into(),
+            },
+            Todo {
+                content: "b".into(),
+                status: "in_progress".into(),
+            },
+        ];
+        let with = fmt_busy_bar("执行中", &todos, 3, 10, 3);
+        assert_eq!(with, "⚡ 执行中 · ⏱ 3s · 10 tok · 3 tok/s · todo 1/2");
+    }
+
+    #[test]
+    fn status_template_substitutes_known_and_keeps_unknown() {
+        let v = StatusVars {
+            provider: "anthropic".into(),
+            model: "opus".into(),
+            ctx: "12%".into(),
+            tokens: "500".into(),
+            cwd: "ridge-code".into(),
+        };
+        assert_eq!(
+            render_status_template(" {provider} · {model} · ctx {ctx} · {tokens} tok ", &v),
+            " anthropic · opus · ctx 12% · 500 tok "
+        );
+        // 未知占位原样保留,不吞字符。
+        assert_eq!(
+            render_status_template("{branch}/{cwd}", &v),
+            "{branch}/ridge-code"
+        );
+        // 无占位原样。
+        assert_eq!(render_status_template("plain", &v), "plain");
+    }
+
+    /// est_tokens 跨 crate 可见(ctx% 分子复用同一估算口径)。
+    #[test]
+    fn est_tokens_is_public() {
+        assert!(est_tokens("你好abcd") >= 1);
     }
 
     /// 根因回归:审批态下滚动键**不再误拒**,而是滚动;仅 y/Enter 批准、n/Esc 拒绝,余键忽略。

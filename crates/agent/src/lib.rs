@@ -607,6 +607,9 @@ pub struct Config {
     pub budget_tokens: Option<usize>,
     pub skills_dir: Option<String>,
     pub skip_danger: Option<bool>,
+    /// 输入框下方自定义状态条模板(可选)。占位:`{provider}{model}{ctx}{tokens}{cwd}`。
+    /// 留空则用内置默认模板(见 `tui::DEFAULT_STATUS_BAR`)。
+    pub status_bar: Option<String>,
     /// 要并接的多个 MCP(stdio)服务器。
     pub mcp: Vec<McpServerCfg>,
     /// 命名的 provider 档案(多 provider)—— `/provider use <name>` 可热切换到其中之一。
@@ -1334,7 +1337,7 @@ fn bound_observation(obs: String) -> String {
 
 /// 本地 token 估算(不引 tiktoken):CJK 等非 ASCII 字 ≈ 1 token/字,ASCII ≈ 1 token/4 字符。
 /// 口径同仓内 `bin`/`token-count.mjs`。粗但零依赖、确定可测 —— 只用于「要不要压缩」的触发判断。
-fn est_tokens(text: &str) -> usize {
+pub fn est_tokens(text: &str) -> usize {
     let (mut cjk, mut ascii) = (0usize, 0usize);
     for c in text.chars() {
         if c.is_ascii() {
