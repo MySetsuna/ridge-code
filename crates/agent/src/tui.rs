@@ -352,8 +352,8 @@ const SLASH_COMMANDS: &[&str] = &[
     "/exit",
     "/help",
     "/jailbreak",
+    "/login",
     "/model",
-    "/models",
     "/provider",
     "/quit",
     "/reset",
@@ -1458,18 +1458,43 @@ pub(super) async fn run(
     Ok(())
 }
 
-/// 当前 API key 解析(供 `/models` 抓取用):env `RIDGE_API_KEY` 优先,否则 config.json 顶层
-/// 内联 `api_key`。都无 → None(命令报错,不抓)。
+/// 当前 API key 解析(供 `/models` 抓取、`/model` 热切用):env `RIDGE_API_KEY` > config 顶层内联
+/// `api_key` > 顶层 `key_env`→(env 或 auth.json 密钥库,`login --default` 情形)。都无 → None。
 fn current_api_key() -> Option<String> {
-    std::env::var("RIDGE_API_KEY")
+    if let Some(k) = std::env::var("RIDGE_API_KEY")
         .ok()
         .filter(|v| !v.is_empty())
-        .or_else(|| {
-            Config::load(config_path())
-                .api_key
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
+    {
+        return Some(k);
+    }
+    let cfg = Config::load(config_path());
+    if let Some(k) = cfg
+        .api_key
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(k);
+    }
+    cfg.key_env
+        .as_deref()
+        .and_then(|name| resolve_key_env(name, &load_auth()))
+}
+
+/// TUI `/login` 落盘核(与 CLI `run_login` 同语义,精简版):key → auth.json(收权限),
+/// 档案 + 顶层默认 → config.json。**key 不回显、不进 config**。热切由调用方做。
+fn tui_login(preset: &agent::ProviderPreset, key: &str) -> Result<(), String> {
+    let apath = auth_path();
+    if let Some(dir) = std::path::Path::new(&apath).parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let atext = std::fs::read_to_string(&apath).unwrap_or_default();
+    std::fs::write(&apath, auth_upsert(&atext, preset.key_env, key)).map_err(|e| e.to_string())?;
+    secure_file(&apath);
+    let cpath = config_path();
+    let ctext = std::fs::read_to_string(&cpath).unwrap_or_default();
+    let out = apply_login(&ctext, preset, None, None, true)?;
+    std::fs::write(&cpath, out).map_err(|e| e.to_string())
 }
 
 /// 热切换模型(iter-32 共用路径):密钥经 `current_api_key`(env 优先,回落 config 内联)——
@@ -1496,7 +1521,7 @@ fn switch_provider(name: &str, meta: &mut ReplMeta, swap: &Arc<SwapProvider>, ui
         .into_iter()
         .find(|p| p.name == name)
     {
-        Some(p) => match std::env::var(&p.key_env).ok().filter(|v| !v.is_empty()) {
+        Some(p) => match p.resolve_key_with(&load_auth()) {
             Some(key) => {
                 swap.swap(make_provider(&p.kind, &p.model, &p.base_url, key));
                 meta.provider = p.kind;
@@ -1504,7 +1529,13 @@ fn switch_provider(name: &str, meta: &mut ReplMeta, swap: &Arc<SwapProvider>, ui
                 meta.base_url = p.base_url;
                 ui.note(format!("switched provider {name}"), Color::Green);
             }
-            None => ui.note(format!("{} not set", p.key_env), Color::Red),
+            None => ui.note(
+                format!(
+                    "no key for {} ({}); run: ridgecode login",
+                    p.name, p.key_env
+                ),
+                Color::Red,
+            ),
         },
         None => ui.note(format!("no such provider: {name}"), Color::Red),
     }
@@ -1714,14 +1745,14 @@ async fn run_command(
 ) -> anyhow::Result<bool> {
     match input {
         "/exit" | "/quit" => return Ok(true),
-        "/help" => ui.note("/exit /reset /compact /cost /tools /model [name|pick] /models /provider [list|use <name>|add <name> <kind> <model> <base_url> [key_env]] /agent /config [set key value] /jailbreak [on|off]; @path to reference a file; Ctrl-C to interrupt; scroll/select history with the terminal's native keys; approval prompt: y/Enter approve, n/Esc reject, ↑↓ scroll details.", Color::Gray),
+        "/help" => ui.note("/exit /reset /compact /cost /tools /login [list|<id> <key>] /model [<name>] (no arg = live model picker) /provider [list|use <name>|add <name> <kind> <model> <base_url> [key_env]] /agent /config [set key value] /jailbreak [on|off]; @path to reference a file; Ctrl-C to interrupt; scroll/select history with the terminal's native keys; approval prompt: y/Enter approve, n/Esc reject, ↑↓ scroll details.", Color::Gray),
         "/tools" => ui.panel = Some(tools_panel(&meta.tools)),
         "/reset" => { history.clear(); save_session(&session_path(), history); ui.note("context cleared", Color::Yellow); }
         "/compact" => { let n = history.len(); *history = compact_history(std::mem::take(history), 4); ui.note(format!("context compacted: {n} → {} messages", history.len()), Color::Yellow); }
         "/cost" => ui.note(format!("session total: {tokens} tokens · {turns} tasks"), Color::Gray),
-        _ if input == "/model" => ui.note(format!("provider={} · model={} · base_url={}\nhot-swap: /model <name>; in-app picker (↑↓ select, Enter switch): /model pick; live list (with context size): /models", meta.provider, meta.model, meta.base_url), Color::Gray),
-        // /models 与 /model pick 都开模型页(iter-35 起交互页统一;实时抓取 + 选中即切)。
-        _ if input == "/models" || input == "/model pick" => {
+        // /model 单命令(iter-37 合并):无参 → 实时模型页(↑↓ 选、Enter 切);`/model <name>` → 直接热切。
+        // `/models` `/model pick` 保留为别名(旧肌肉记忆),补全表只呈现 `/model`。
+        _ if input == "/model" || input == "/models" || input == "/model pick" => {
             match current_api_key() {
                 Some(key) => {
                     let http = provider::http::ReqwestClient::new();
@@ -1773,6 +1804,30 @@ async fn run_command(
             }
         }
         _ if input.starts_with("/provider use ") => switch_provider(input[14..].trim(), meta, swap, ui),
+        _ if input == "/login" || input == "/login list" => {
+            let ids: Vec<&str> = PROVIDER_PRESETS.iter().map(|p| p.id).collect();
+            ui.note(format!("built-in providers: {}\nconnect: /login <id> <API_KEY>  —— key → ~/.ridge/auth.json (not config), becomes active now", ids.join(", ")), Color::Gray);
+        }
+        _ if input.starts_with("/login ") => {
+            let rest = input["/login ".len()..].trim();
+            let mut it = rest.split_whitespace();
+            match (it.next(), it.next()) {
+                (Some(id), Some(key)) => match preset_by_id(id) {
+                    Some(preset) => match tui_login(preset, key) {
+                        Ok(()) => {
+                            swap.swap(make_provider(preset.kind, preset.default_model, preset.base_url, key.to_string()));
+                            meta.provider = preset.kind.to_string();
+                            meta.model = preset.default_model.to_string();
+                            meta.base_url = preset.base_url.to_string();
+                            ui.note(format!("logged in to {} · now active (model {})", preset.label, preset.default_model), Color::Green);
+                        }
+                        Err(e) => ui.note(format!("login failed: {e}"), Color::Red),
+                    },
+                    None => ui.note(format!("unknown provider \"{id}\"; see /login list"), Color::Yellow),
+                },
+                _ => ui.note("usage: /login <id> <API_KEY>  (see /login list)", Color::Yellow),
+            }
+        }
         _ if input == "/agent" => {
             if agents.defs.is_empty() { ui.note("no sub-agents available", Color::Gray); }
             else { ui.panel = Some(agent_panel(&agents.defs)); }
@@ -2293,7 +2348,7 @@ mod tests {
         assert!(p.rows[2].value.contains('?')); // 缺 ctx 显 ?
     }
 
-    /// iter-35:斜杠即弹 —— 打 `/` 现全表、`/mo` 滤到 `/model*`(`build_popup` 是随打随滤的候选源)。
+    /// iter-35:斜杠即弹 —— 打 `/` 现全表、`/mo` 滤到 `/model`(iter-37 合并后 `/models` 退出补全表)。
     #[test]
     fn slash_popup_lists_all_and_filters() {
         let mut all = InputState::default();
@@ -2303,7 +2358,7 @@ mod tests {
         let mut mo = InputState::default();
         mo.insert_str("/mo");
         let f = build_popup(&mo).expect("应有候选");
-        assert_eq!(f.items, vec!["/model".to_string(), "/models".to_string()]);
+        assert_eq!(f.items, vec!["/model".to_string()]);
     }
 
     #[test]

@@ -2,11 +2,12 @@ use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 
 use agent::{
-    auto_signal_from_run, build_agent, build_llm_agent_full, builtin_tool_specs, compact_history,
-    default_tool, est_tokens, expand_mentions, extract_signals_from_run, halt_reason,
-    load_signal_block, load_skills, null_token_bus, render_todos, resolve_mcp, scripted,
-    signal_extract_enabled, write_run, AgentState, Approver, AutoApprove, Color, Config, McpTools,
-    RichOutput, Skill, Todo, TokenBus,
+    apply_login, auth_parse, auth_upsert, auto_signal_from_run, build_agent, build_llm_agent_full,
+    builtin_tool_specs, compact_history, default_tool, est_tokens, expand_mentions,
+    extract_signals_from_run, halt_reason, load_signal_block, load_skills, null_token_bus,
+    preset_by_id, render_todos, resolve_key_env, resolve_mcp, scripted, signal_extract_enabled,
+    write_run, AgentState, Approver, AutoApprove, Color, Config, McpTools, RichOutput, Skill, Todo,
+    TokenBus, PROVIDER_PRESETS,
 };
 use langgraph::{CompiledGraph, RunConfig, StreamEvent};
 use mcp::{McpClient, StdioTransport};
@@ -73,6 +74,11 @@ async fn main() -> anyhow::Result<()> {
     if handle_meta_flags() {
         return Ok(());
     }
+    // `login` 子命令:内置供应商一键接入(在解析任务前拦下,免被当成任务串)。
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    if raw.first().map(|s| s.as_str()) == Some("login") {
+        return run_login(&raw[1..]);
+    }
     init_tracing();
     let ParsedArgs {
         task,
@@ -86,8 +92,9 @@ async fn main() -> anyhow::Result<()> {
         std::env::set_current_dir(dir)?;
     }
     let cfg = load_config(); // ~/.ridge/config.json(env 仍覆盖)
+    let auth = load_auth(); // ~/.ridge/auth.json 密钥库(login 存的 key)
 
-    match real_provider(&cfg) {
+    match real_provider(&cfg, &auth) {
         Some(p) => {
             let mcp = resolve_configured_mcp(&cfg).await; // config 多 server + 兼容旧 env 单 server
             let skills = load_configured_skills(&cfg); // 声明式技能(领域知识)
@@ -95,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
             let skip_danger = cli_skip_danger || cfg.skip_danger.unwrap_or(false);
             // 地址越狱(iter-34):启动从 config 置进程级开关,默认关(TUI 可 /jailbreak 实时切)。
             agent::set_allow_jailbreak(cfg.allow_jailbreak.unwrap_or(false));
-            let agents = Arc::new(build_agents(&cfg)); // sub-agent 注册表(内置 + 用户 + 命名 provider)
+            let agents = Arc::new(build_agents(&cfg, &auth)); // sub-agent 注册表(内置 + 用户 + 命名 provider)
             match task {
                 Some(t) => run_once(p, mcp, skills, &t, budget, agents, read_only, every).await, // 一次性 / --every 触发器
                 None => {
@@ -191,6 +198,130 @@ fn ridge_home() -> String {
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_default();
     format!("{home}/.ridge")
+}
+
+/// `~/.ridge/auth.json` 密钥库路径(`login` 存的 API key 的家;**独立于 config,key 不进 config**)。
+fn auth_path() -> String {
+    std::env::var("RIDGE_AUTH").unwrap_or_else(|_| format!("{}/auth.json", ridge_home()))
+}
+
+/// 读密钥库 → `key_env → key` 映射(读不到/坏 → 空表)。供启动解析各 provider 的 key。
+fn load_auth() -> std::collections::BTreeMap<String, String> {
+    auth_parse(&std::fs::read_to_string(auth_path()).unwrap_or_default())
+}
+
+/// best-effort 收紧文件权限到仅属主可读写(unix 0600);非 unix no-op。
+fn secure_file(path: &str) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// 打印内置供应商 preset 表(`login` 无参 / `--list`)。
+fn print_presets() {
+    println!("Built-in providers (ridgecode login <id> [KEY]):\n");
+    for p in PROVIDER_PRESETS {
+        println!(
+            "  {:<12} {:<34} {} · {}",
+            p.id, p.label, p.default_model, p.base_url
+        );
+    }
+    println!(
+        "\nExample:  ridgecode login deepseek sk-...            (registers + sets as default)\n\
+         \x20         ridgecode login kimi --no-default          (add as a switchable profile)\n\
+         Key goes to ~/.ridge/auth.json (never into config.json). Omit KEY to be prompted on stdin."
+    );
+}
+
+/// `ridgecode login` 子命令:内置供应商一键接入。**key 只进 auth.json,绝不进 config、绝不回显。**
+///   ridgecode login | login --list                     列出内置供应商
+///   ridgecode login <id> [KEY] [--model M] [--name N] [--no-default]
+/// 缺 KEY 则从 stdin 读一行(避免落进 shell 历史 / 进程参数)。默认设为启动默认档;`--no-default` 只登记。
+fn run_login(args: &[String]) -> anyhow::Result<()> {
+    let mut positional: Vec<&str> = Vec::new();
+    let mut model: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut make_default = true;
+    let mut list = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--list" | "-l" => list = true,
+            "--no-default" => make_default = false,
+            "--default" => make_default = true,
+            "--model" => model = it.next().cloned(),
+            "--name" => name = it.next().cloned(),
+            _ => positional.push(a),
+        }
+    }
+    if list || positional.is_empty() {
+        print_presets();
+        return Ok(());
+    }
+    let id = positional[0];
+    let Some(preset) = preset_by_id(id) else {
+        anyhow::bail!("unknown provider \"{id}\". Run `ridgecode login --list` to see built-ins.");
+    };
+    // key:参数给了用参数;否则从 stdin 读一行(不回显保证不了,但不落 argv/历史)。
+    let key = match positional.get(1) {
+        Some(k) => k.to_string(),
+        None => {
+            eprint!("Paste API key for {} ({}): ", preset.label, preset.key_env);
+            std::io::stderr().flush().ok();
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            line.trim().to_string()
+        }
+    };
+    if key.is_empty() {
+        anyhow::bail!("no API key provided; aborted (nothing written).");
+    }
+    // 1) key → auth.json(独立密钥库,收紧权限)。
+    let auth_file = {
+        let path = auth_path();
+        if let Some(dir) = std::path::Path::new(&path).parent() {
+            std::fs::create_dir_all(dir).map_err(|e| anyhow::anyhow!(e))?;
+        }
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        std::fs::write(&path, auth_upsert(&text, preset.key_env, &key))
+            .map_err(|e| anyhow::anyhow!(e))?;
+        secure_file(&path);
+        path
+    };
+    // 2) 档案 → config.json(经纯核;产物不含 key)。
+    let cfg_path = config_path();
+    let cfg_text = std::fs::read_to_string(&cfg_path).unwrap_or_default();
+    let updated = apply_login(
+        &cfg_text,
+        preset,
+        name.as_deref(),
+        model.as_deref(),
+        make_default,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+    if let Some(dir) = std::path::Path::new(&cfg_path).parent() {
+        std::fs::create_dir_all(dir).map_err(|e| anyhow::anyhow!(e))?;
+    }
+    std::fs::write(&cfg_path, updated).map_err(|e| anyhow::anyhow!(e))?;
+
+    let prof_name = name.as_deref().unwrap_or(preset.id);
+    let model_used = model.as_deref().unwrap_or(preset.default_model);
+    println!("[OK] logged in to {} ({})", preset.label, preset.id);
+    println!(
+        "     key saved  -> {auth_file}  (slot {}, chmod 600 where supported)",
+        preset.key_env
+    );
+    println!("     profile    -> {cfg_path}  (name \"{prof_name}\", model {model_used})");
+    if make_default {
+        println!("     set as the startup default provider. Just run: ridgecode");
+    } else {
+        println!("     registered as a profile. Switch in the TUI with: /provider use {prof_name}");
+    }
+    Ok(())
 }
 
 /// 会话持久化文件:`RIDGE_SESSION` 或 `~/.ridge/session.json`。存 TUI/headless 会话的对话 history,
@@ -374,7 +505,7 @@ fn make_provider(kind: &str, model: &str, base_url: &str, key: String) -> Arc<dy
 
 /// 组装 sub-agent 注册表:**内置 agent**(fastcontext/explorer/reviewer)+ 用户 `agents` 目录
 /// (同名覆盖内置)+ 命名 provider 档案(能从各自 KEY_ENV 取到密钥的那些,供 agent 的 `provider:` 引用)。
-fn build_agents(cfg: &Config) -> agent::Agents {
+fn build_agents(cfg: &Config, auth: &std::collections::BTreeMap<String, String>) -> agent::Agents {
     let dir =
         std::env::var("RIDGE_AGENTS_DIR").unwrap_or_else(|_| format!("{}/agents", ridge_home()));
     let mut defs = agent::builtin_agents();
@@ -386,7 +517,7 @@ fn build_agents(cfg: &Config) -> agent::Agents {
     }
     let mut providers = std::collections::HashMap::new();
     for p in &cfg.providers {
-        if let Some(key) = p.resolve_key() {
+        if let Some(key) = p.resolve_key_with(auth) {
             providers.insert(
                 p.name.clone(),
                 make_provider(&p.kind, &p.model, &p.base_url, key),
@@ -408,7 +539,10 @@ fn build_agents(cfg: &Config) -> agent::Agents {
 /// 1. **`RIDGE_API_KEY` env**(传统/最高优先)→ 配 env>config 解析出的 provider 身份;
 /// 2. **config `providers[]` 档案**:取第一个能解析出密钥的档案(内联 `api_key` 或 `key_env`→env),
 ///    直接用它的 kind/model/base_url 启动 —— **config.json 即可跑,无需 `RIDGE_API_KEY`**。
-fn real_provider(cfg: &Config) -> Option<Arc<dyn LlmProvider>> {
+fn real_provider(
+    cfg: &Config,
+    auth: &std::collections::BTreeMap<String, String>,
+) -> Option<Arc<dyn LlmProvider>> {
     if let Some(key) = std::env::var("RIDGE_API_KEY")
         .ok()
         .filter(|k| !k.is_empty())
@@ -426,8 +560,17 @@ fn real_provider(cfg: &Config) -> Option<Arc<dyn LlmProvider>> {
         let (kind, model, base) = resolve_model_info(cfg);
         return Some(make_provider(&kind, &model, &base, key));
     }
+    // 顶层 key_env(`login --default` 设):从 env 或 auth.json 密钥库取顶层 key。
+    if let Some(key) = cfg
+        .key_env
+        .as_deref()
+        .and_then(|name| resolve_key_env(name, auth))
+    {
+        let (kind, model, base) = resolve_model_info(cfg);
+        return Some(make_provider(&kind, &model, &base, key));
+    }
     for p in &cfg.providers {
-        if let Some(key) = p.resolve_key() {
+        if let Some(key) = p.resolve_key_with(auth) {
             eprintln!(
                 "[ridgecode] starting with config provider profile \"{}\" ({} · {})",
                 p.name, p.kind, p.model
