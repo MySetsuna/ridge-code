@@ -424,6 +424,10 @@ async fn run_login_claude_oauth(no_verify: bool) -> anyhow::Result<()> {
     let state = oauth::random_token();
     let url = oauth::authorize_url(&pkce.challenge, &state);
     println!("\n== ridgecode login --claude (OAuth 订阅登录) ==\n");
+    println!(
+        "注:claude.ai 有地域限制。所在区域若无法直连,浏览器需走代理打开下方 URL;\n   \
+         并给本进程设 HTTP_PROXY/HTTPS_PROXY 环境变量 —— token 交换/刷新会自动走它。\n"
+    );
     println!("1) 在浏览器打开以下 URL,用你的 Claude 订阅账号授权:\n\n{url}\n");
     println!("2) 授权后页面会显示形如 `code#state` 的码。粘贴到此处并回车:");
     eprint!("code: ");
