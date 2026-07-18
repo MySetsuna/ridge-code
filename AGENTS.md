@@ -57,6 +57,6 @@ crates/agent      (装配 agent 图 + 二进制 ridge)
 ## 工程约定
 
 - 依赖版本统一在根 `Cargo.toml` 的 `[workspace.dependencies]`,子 crate 用 `dep.workspace = true`。
-- 可观测走 `tracing`(暂未接),别用 `println!` 调试;`println!` 只用于 demo 的最终报告。
+- 可观测走 `tracing`(已接:`init_tracing` 装 subscriber + 核心闭环埋点 —— `execute_tool_call`/reason 节点 LLM 调用/`write_run` 收尾;`RUST_LOG=agent=debug,langgraph=debug ridgecode …` 可观每步),别用 `println!` 调试;`println!` 只用于 demo 的最终报告。
 - provider 边界(未来接 LLM/MCP 时):第三方 SDK 包在自己的 trait 后,别让引擎直接依赖具体实现。
 - 新代码必须 `cargo fmt` + `clippy -D warnings` 干净(CI 卡)。非平凡逻辑留一个可跑的测试。

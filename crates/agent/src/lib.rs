@@ -1752,12 +1752,15 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
     if let Some(blocked) = run_pre_tool_hooks(call) {
         return blocked;
     }
+    // 可观测(iter-44):核心动作埋点。`RUST_LOG=agent=debug` 可观 agent 每步工具调用。
+    tracing::debug!(tool = %call.name, "tool call");
     let arg = |k: &str| call.arguments.get(k).and_then(|v| v.as_str()).unwrap_or("");
     let obs = match call.name.as_str() {
         "run_shell" => {
             let cmd = arg("cmd");
             // 危险命令拦截:即使用户批准也拒绝(无沙箱阶段的安全硬门槛)。
             if let Some(why) = tools::is_dangerous_command(cmd) {
+                tracing::warn!(tool = %call.name, reason = %why, "blocked dangerous command");
                 return format!("BLOCKED (dangerous: {why}) —— 拒绝执行 `{cmd}`");
             }
             // 约束守卫:删/清空受保护路径(测试)→ 拒(防奖励黑客)。
@@ -1870,6 +1873,7 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
         other => format!("tool error: 未知工具 `{other}`;请只调用系统所列工具"),
     };
     run_post_tool_hooks(call); // post_tool hook(iter-40):工具跑完 fire-and-forget(如写后格式化)。
+    tracing::debug!(tool = %call.name, ok = !obs.contains(" error:"), "tool done");
     obs
 }
 
@@ -2500,8 +2504,15 @@ fn build_core(
                     let _ = tx.send(t);
                 }
             };
+            tracing::debug!(step = s.steps + 1, msgs = req.messages.len(), "llm request");
             let completion = provider.complete_streaming(&req, &on_token).await?;
             let tokens = completion.usage.total() as usize; // 成本记账
+            tracing::debug!(
+                step = s.steps + 1,
+                tokens,
+                tool_calls = completion.tool_calls.len(),
+                "llm response"
+            );
             let asst_text = completion.text.clone();
             let patch = if let Some(call) = completion.tool_calls.into_iter().next() {
                 // maker 想用工具 → 记 assistant(带 tool_calls)进 history,交给 act 执行。
@@ -2806,11 +2817,20 @@ pub fn halt_reason(s: &AgentState) -> HaltReason {
 /// 但存**项目级** `.ridge/signals`(跨 run 共享 → 才复利),非 run 级子目录;溯源靠 signal 的 `source` 字段回指本 run。
 pub fn write_run(out: &AgentState, run_dir: impl AsRef<std::path::Path>) -> std::io::Result<()> {
     let dir = run_dir.as_ref();
+    let reason = halt_reason(out);
+    // 可观测(iter-44):run 收尾一条 info 事件(停机原因/步数/token)。
+    tracing::info!(
+        reason = %reason.as_str(),
+        steps = out.steps,
+        tokens = out.total_tokens,
+        approved = out.approved,
+        "run complete"
+    );
     std::fs::create_dir_all(dir)?;
     let manifest = serde_json::json!({
         "task": out.task,
         "approved": out.approved,
-        "halt_reason": halt_reason(out).as_str(),
+        "halt_reason": reason.as_str(),
         "steps": out.steps,
         "tokens": out.total_tokens,
     });
@@ -3025,6 +3045,56 @@ mod tests {
         assert!(obs.contains("wrote"), "{obs}");
         assert_eq!(tools::read_file(&path).unwrap(), "physical closure");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// iter-44:核心动作可观测 —— 危险命令拦截被 tracing 观测到(确定性、无文件副作用)。
+    /// 线程本地 subscriber 捕获:execute_tool_call 同步、在测试线程跑,故可捕。
+    #[test]
+    fn execute_tool_call_traces_blocked_dangerous_command() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for BufWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+            type Writer = BufWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(BufWriter(buf.clone()))
+            .finish();
+
+        let out = tracing::subscriber::with_default(sub, || {
+            let call = ToolCall {
+                id: "d".to_string(),
+                name: "run_shell".to_string(),
+                arguments: serde_json::json!({"cmd": "rm -rf /"}),
+            };
+            execute_tool_call(&call)
+        });
+        assert!(out.starts_with("BLOCKED"), "{out}"); // 无文件副作用
+        let logged = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(logged.contains("run_shell"), "logged: {logged}");
+        let low = logged.to_lowercase();
+        assert!(
+            low.contains("blocked") || low.contains("dangerous"),
+            "logged: {logged}"
+        );
     }
 
     /// 驾驭工程:结构化 edit_file tool_call → 精准替换真实文件(而非整文件覆写)。
