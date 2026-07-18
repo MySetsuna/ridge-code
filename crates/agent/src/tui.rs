@@ -1493,8 +1493,16 @@ pub(super) async fn run(
                                 Color::Red
                             },
                         );
+                        // Hook(iter-40):任务毕 → 审计留痕 +(notify)响铃 + config stop hook。
+                        agent::fire_session_hooks(
+                            "stop",
+                            &format!("steps={} tokens={}", out.steps, out.total_tokens),
+                        );
                     }
-                    Err(e) => ui.note(format!("error: {e}"), Color::Red),
+                    Err(e) => {
+                        ui.note(format!("error: {e}"), Color::Red);
+                        agent::fire_session_hooks("stop", "error");
+                    }
                 }
                 // 排队接跑(iter-33):任务毕,取队首交主环顶统一提交点起下一任务。
                 if pending_submit.is_none() {

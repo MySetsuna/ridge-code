@@ -712,6 +712,26 @@ pub struct Config {
     pub mcp: Vec<McpServerCfg>,
     /// 命名的 provider 档案(多 provider)—— `/provider use <name>` 可热切换到其中之一。
     pub providers: Vec<ProviderProfile>,
+    /// 自定义 Hook(iter-40):事件触发点跑一条 shell,可拦截。见 [`HookCfg`]。
+    pub hooks: Vec<HookCfg>,
+    /// 任务完成通知(iter-40 内置 hook):true 则每个任务毕响一声终端铃。默认关。
+    pub notify: Option<bool>,
+}
+
+/// 一个 Hook(iter-40):某事件发生时跑一条 shell 命令,可选拦截。像 git hooks —— 命令是**用户自己**
+/// config 里写的(其机器其配置)。命令运行时注入 env `RIDGE_TOOL`(工具名)/`RIDGE_TOOL_ARG`(主参数)。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct HookCfg {
+    /// `pre_tool` | `post_tool` | `session_start` | `stop`。
+    pub event: String,
+    /// 工具名匹配子串(仅 `*_tool` 事件;缺/空 = 匹配所有工具)。
+    #[serde(default)]
+    pub matcher: Option<String>,
+    /// 要跑的 shell 命令。
+    pub command: String,
+    /// 仅 `pre_tool`:命令**非 0 退出**则**拦下该工具**(BLOCKED,不执行)。
+    #[serde(default)]
+    pub blocking: Option<bool>,
 }
 
 /// 一个要并接的 MCP 服务器(stdio):可执行文件 + 参数 + 命名空间名。
@@ -1549,10 +1569,147 @@ fn read_only_block(read_only: bool, name: &str) -> Option<String> {
         .then(|| format!("BLOCKED (read-only): 只读模式拒绝副作用工具 {name}"))
 }
 
+// ───────────────────────── Hook 引擎(iter-40)─────────────────────────
+
+static HOOKS: std::sync::OnceLock<Vec<HookCfg>> = std::sync::OnceLock::new();
+static NOTIFY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 启动时装入用户 config 的 hooks(进程级 set-once,与 DYNAMIC_COMMANDS/ALLOW_JAILBREAK 先例一致)。
+pub fn set_hooks(hooks: Vec<HookCfg>) {
+    let _ = HOOKS.set(hooks);
+}
+/// 任务完成响铃开关(内置通知 hook)。
+pub fn set_notify(on: bool) {
+    NOTIFY.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+fn active_hooks() -> &'static [HookCfg] {
+    HOOKS.get().map(|v| v.as_slice()).unwrap_or(&[])
+}
+
+/// 选出匹配某事件(+ 工具名)的 hook。`matcher` 缺/空 = 匹配所有工具;否则工具名含该子串。纯函数。
+pub fn hooks_for_event<'a>(hooks: &'a [HookCfg], event: &str, tool: &str) -> Vec<&'a HookCfg> {
+    hooks
+        .iter()
+        .filter(|h| {
+            h.event == event
+                && h.matcher
+                    .as_deref()
+                    .map(|m| m.is_empty() || tool.contains(m))
+                    .unwrap_or(true)
+        })
+        .collect()
+}
+
+/// 工具调用的「主参数」(喂给 hook 的 `RIDGE_TOOL_ARG`):按常见键取一个。纯函数。
+fn tool_primary_arg(call: &ToolCall) -> String {
+    for k in ["cmd", "path", "query", "url", "task"] {
+        if let Some(s) = call.arguments.get(k).and_then(|v| v.as_str()) {
+            if !s.is_empty() {
+                return s.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+/// 跑一条 hook 命令(跨平台),把工具名/主参数经 **env**(非全局,只挂这条 Command —— BSP 并发安全)
+/// 注入。返回退出码。best-effort:起不来 → None。
+fn run_hook_command(command: &str, tool: &str, arg: &str) -> Option<i32> {
+    use std::process::Command;
+    let mut c = if cfg!(windows) {
+        let mut c = Command::new("cmd");
+        c.args(["/C", command]);
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(command);
+        c
+    };
+    c.env("RIDGE_TOOL", tool).env("RIDGE_TOOL_ARG", arg);
+    c.output().ok().map(|o| o.status.code().unwrap_or(-1))
+}
+
+/// pre_tool hook:任一 **blocking** hook 命令非 0 退出 → 返回 BLOCKED(拦下工具)。否则 None(放行)。
+fn run_pre_tool_hooks(call: &ToolCall) -> Option<String> {
+    let arg = tool_primary_arg(call);
+    for h in hooks_for_event(active_hooks(), "pre_tool", &call.name) {
+        let code = run_hook_command(&h.command, &call.name, &arg);
+        if h.blocking.unwrap_or(false) && code.map(|c| c != 0).unwrap_or(true) {
+            return Some(format!(
+                "BLOCKED (pre_tool hook rejected `{}`) —— 见 config.hooks",
+                call.name
+            ));
+        }
+    }
+    None
+}
+
+/// post_tool hook:工具跑完 fire-and-forget(如写文件后格式化)。
+fn run_post_tool_hooks(call: &ToolCall) {
+    let arg = tool_primary_arg(call);
+    for h in hooks_for_event(active_hooks(), "post_tool", &call.name) {
+        let _ = run_hook_command(&h.command, &call.name, &arg);
+    }
+}
+
+/// 审计行格式(纯函数,不含时间戳 —— 时间戳由 [`audit`] 落盘时前置,保持本函数确定性可测)。
+pub fn audit_line(event: &str, detail: &str) -> String {
+    if detail.is_empty() {
+        format!("[{event}]")
+    } else {
+        format!("[{event}] {detail}")
+    }
+}
+
+/// 会话审计留痕(内置 hook,总是开):事件追加进 `~/.ridge/audit.log`(前置 epoch 秒)。best-effort。
+fn audit(event: &str, detail: &str) {
+    let Some(home) = std::env::var("USERPROFILE")
+        .ok()
+        .or_else(|| std::env::var("HOME").ok())
+    else {
+        return;
+    };
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = format!("{home}/.ridge/audit.log");
+    if let Some(dir) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "{ts} {}", audit_line(event, detail));
+    }
+}
+
+/// 触发会话级 hook(`session_start` / `stop`):内置审计 + config 声明的会话 hook;`stop` 且 notify 开则响铃。
+/// `detail` 进审计行(如 stop 带步数)。供 main/tui 生命周期调。
+pub fn fire_session_hooks(event: &str, detail: &str) {
+    audit(event, detail);
+    for h in hooks_for_event(active_hooks(), event, "") {
+        let _ = run_hook_command(&h.command, event, detail);
+    }
+    if event == "stop" && NOTIFY.load(std::sync::atomic::Ordering::Relaxed) {
+        eprint!("\x07"); // 终端铃:任务完成通知(内置 hook)
+        use std::io::Write;
+        let _ = std::io::stderr().flush();
+    }
+}
+
 /// 执行一个结构化工具调用,返回给模型看的观察结果(observation)。用真实的 `tools` crate 干活。
+/// iter-40:前后各串一层 hook(pre_tool 可拦截 / post_tool fire-and-forget)。
 pub fn execute_tool_call(call: &ToolCall) -> String {
+    // pre_tool hook(iter-40):blocking hook 拒绝 → 不执行工具。
+    if let Some(blocked) = run_pre_tool_hooks(call) {
+        return blocked;
+    }
     let arg = |k: &str| call.arguments.get(k).and_then(|v| v.as_str()).unwrap_or("");
-    match call.name.as_str() {
+    let obs = match call.name.as_str() {
         "run_shell" => {
             let cmd = arg("cmd");
             // 危险命令拦截:即使用户批准也拒绝(无沙箱阶段的安全硬门槛)。
@@ -1667,7 +1824,9 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
         // 未知/幻觉工具名:归一化为 **error**(含 " error:" → 喂失败信号 + 熔断计数),
         // 并提示只调系统所列工具。此前回 "unknown tool" 不含判据词 → 幻觉工具静默空转不计错。
         other => format!("tool error: 未知工具 `{other}`;请只调用系统所列工具"),
-    }
+    };
+    run_post_tool_hooks(call); // post_tool hook(iter-40):工具跑完 fire-and-forget(如写后格式化)。
+    obs
 }
 
 /// 把当前状态铺成给 provider 的消息序列:system(含注入的技能)+ **真实多轮 history**
@@ -4093,6 +4252,39 @@ mod tests {
         assert!(resolve_command("cooking", &cmds).is_some()); // skill 命令
         assert!(resolve_command("nope", &cmds).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// iter-40:hook 事件+matcher 过滤 + 审计行格式。
+    #[test]
+    fn hooks_for_event_filters() {
+        let cfg = Config::parse(
+            r#"{"hooks":[
+                {"event":"pre_tool","matcher":"run_shell","command":"guard.sh","blocking":true},
+                {"event":"post_tool","command":"fmt.sh"},
+                {"event":"stop","command":"notify.sh"}
+            ]}"#,
+        );
+        assert_eq!(cfg.hooks.len(), 3);
+        // pre_tool + matcher:命中 run_shell、不命中 read_file。
+        let pre = hooks_for_event(&cfg.hooks, "pre_tool", "run_shell");
+        assert_eq!(pre.len(), 1);
+        assert_eq!(pre[0].blocking, Some(true));
+        assert!(hooks_for_event(&cfg.hooks, "pre_tool", "read_file").is_empty());
+        // post_tool 无 matcher → 匹配任意工具。
+        assert_eq!(
+            hooks_for_event(&cfg.hooks, "post_tool", "write_file").len(),
+            1
+        );
+        // stop 会话事件命中;无声明的事件为空。
+        assert_eq!(hooks_for_event(&cfg.hooks, "stop", "").len(), 1);
+        assert!(hooks_for_event(&cfg.hooks, "session_start", "").is_empty());
+    }
+
+    /// iter-40:审计行格式(纯,无时间戳)。
+    #[test]
+    fn audit_line_format() {
+        assert_eq!(audit_line("session_start", ""), "[session_start]");
+        assert_eq!(audit_line("stop", "steps=4"), "[stop] steps=4");
     }
 
     /// DoD②:/compact 压缩历史 —— 长度显著减少,保留首条(任务)+ 最近 keep 条。

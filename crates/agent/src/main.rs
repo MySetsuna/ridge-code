@@ -102,6 +102,10 @@ async fn main() -> anyhow::Result<()> {
             let skip_danger = cli_skip_danger || cfg.skip_danger.unwrap_or(false);
             // 地址越狱(iter-34):启动从 config 置进程级开关,默认关(TUI 可 /jailbreak 实时切)。
             agent::set_allow_jailbreak(cfg.allow_jailbreak.unwrap_or(false));
+            // Hook(iter-40):装 config 声明的 hooks + 通知开关,触发 session_start(内置审计留痕)。
+            agent::set_hooks(cfg.hooks.clone());
+            agent::set_notify(cfg.notify.unwrap_or(false));
+            agent::fire_session_hooks("session_start", "");
             let agents = Arc::new(build_agents(&cfg, &auth)); // sub-agent 注册表(内置 + 用户 + 命名 provider)
             match task {
                 Some(t) => run_once(p, mcp, skills, &t, budget, agents, read_only, every).await, // 一次性 / --every 触发器
@@ -687,10 +691,14 @@ async fn run_once(
         match run_streamed(&app, state, &bus).await {
             Ok(out) => {
                 let source = trace_and_report(&out);
+                agent::fire_session_hooks("stop", &format!("steps={}", out.steps)); // iter-40
                 maybe_extract_signals(extractor.as_ref(), &out, &source).await;
             }
             // 触发器(常驻)模式下单轮出错不该掀翻整个循环;一次性模式仍向上抛(非零退出)。
-            Err(e) if every.is_some() => eprintln!("[ridgecode] error this round: {e}"),
+            Err(e) if every.is_some() => {
+                agent::fire_session_hooks("stop", "error");
+                eprintln!("[ridgecode] error this round: {e}");
+            }
             Err(e) => return Err(e),
         }
         match every {
@@ -740,9 +748,13 @@ async fn headless(
                 history = out.history.clone();
                 save_session(&session_path(), &history); // 每轮落盘 → --resume 可恢复
                 let source = trace_and_report(&out);
+                agent::fire_session_hooks("stop", &format!("steps={}", out.steps)); // iter-40
                 maybe_extract_signals(extractor.as_ref(), &out, &source).await;
             }
-            Err(e) => eprintln!("[ridgecode] error: {e}"),
+            Err(e) => {
+                agent::fire_session_hooks("stop", "error");
+                eprintln!("[ridgecode] error: {e}");
+            }
         }
     }
     Ok(())

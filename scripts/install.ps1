@@ -70,6 +70,7 @@ $exampleJson = @'
   "api_key": "把你的 API Key 明文填这里即可直接启动;不想明文就删掉此行,改为设 RIDGE_API_KEY 环境变量",
   "budget_tokens": 200000,
   "skip_danger": false,
+  "notify": false,
   "providers": [
     {
       "name": "kimi",
@@ -81,6 +82,10 @@ $exampleJson = @'
   ],
   "mcp": [
     { "name": "notebooklm", "cmd": "notebooklm-mcp" }
+  ],
+  "hooks": [
+    { "event": "post_tool", "matcher": "write_file", "command": "echo formatted $RIDGE_TOOL_ARG" },
+    { "event": "pre_tool", "matcher": "run_shell", "command": "exit 0", "blocking": true }
   ]
 }
 '@
