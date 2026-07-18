@@ -224,7 +224,7 @@ impl InputState {
         }
         self.cursor = i;
     }
-    /// 光标所在 (逻辑行, 列)。
+    /// 光标所在 (逻辑行, 字符列)。
     fn row_col(&self) -> (usize, usize) {
         let (mut row, mut col) = (0, 0);
         for c in self.buffer.chars().take(self.cursor) {
@@ -233,6 +233,20 @@ impl InputState {
                 col = 0;
             } else {
                 col += 1;
+            }
+        }
+        (row, col)
+    }
+    /// 光标所在 (逻辑行, **显示单元格列**)(iter-30):CJK/emoji 按实占 2 格累加,
+    /// 真光标据此落点 —— 修「中文输入光标不落末端、偏左」根因。
+    fn cursor_display_col(&self) -> (usize, usize) {
+        let (mut row, mut col) = (0, 0);
+        for c in self.buffer.chars().take(self.cursor) {
+            if c == '\n' {
+                row += 1;
+                col = 0;
+            } else {
+                col += char_cells(c);
             }
         }
         (row, col)
@@ -434,13 +448,23 @@ fn should_draw(dirty: bool, busy: bool) -> bool {
     dirty || busy
 }
 
-/// 折行行数(iter-26 抽取,`input_height`/`commit_height` 共用):按字符数近似显示宽。
-/// ponytail: CJK 宽字符按 1 格计,偏差可容;要精确再引 wcwidth 口径。
+/// 单字符终端单元格宽度(wcwidth 口径):CJK/emoji=2、控制/零宽=0、常规=1(iter-30)。
+fn char_cells(c: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+}
+
+/// 字符串显示单元格宽度(iter-30):替代 `.chars().count()`,CJK/emoji 按实占计。
+fn str_cells(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
+
+/// 折行行数(iter-26 抽取,`input_height`/`commit_height` 共用):按**显示单元格宽**折行
+/// (iter-30 起用 wcwidth 口径,CJK 实占 2 格,不再低估行数致边框撕裂)。
 fn wrapped_rows(content: &str, width: u16) -> usize {
     let w = width.max(1) as usize;
     content
         .split('\n')
-        .map(|l| l.chars().count().div_ceil(w).max(1))
+        .map(|l| str_cells(l).div_ceil(w).max(1))
         .sum()
 }
 
@@ -1246,9 +1270,9 @@ fn draw(
             .wrap(Wrap { trim: false }),
         outer[2],
     );
-    // 真光标(iter-27):按逻辑行列落在输入框内(钳在框内;审批模态时不显)。
+    // 真光标(iter-27;iter-30 改按显示单元格列):CJK/emoji 宽字符落点精确,不再偏左。
     if approval.is_none() {
-        let (row, col) = ui.input.row_col();
+        let (row, col) = ui.input.cursor_display_col();
         let inner = outer[2];
         let x = (inner.x + 1 + col as u16).min(inner.right().saturating_sub(2));
         let y = (inner.y + 1 + row as u16).min(inner.bottom().saturating_sub(2));
@@ -1260,7 +1284,7 @@ fn draw(
         let w = p
             .items
             .iter()
-            .map(|s| s.chars().count())
+            .map(|s| str_cells(s))
             .max()
             .unwrap_or(10)
             .min(48) as u16
@@ -1524,6 +1548,29 @@ mod tests {
             ),
             InputAction::Ignore
         );
+    }
+
+    /// iter-30:wcwidth 显示宽度 —— CJK/emoji 占 2 格,光标显示列按实占累加,折行按实占计。
+    #[test]
+    fn wcwidth_display_columns() {
+        // 单字符 / 字符串单元格宽。
+        assert_eq!(char_cells('a'), 1);
+        assert_eq!(char_cells('你'), 2);
+        assert_eq!(str_cells("ab你好"), 6); // 1+1+2+2
+                                            // 光标显示列:CJK 前缀按 2 格累加,不再偏左。
+        let mut s = InputState::default();
+        s.insert_str("你好a"); // cursor=3(字符序),显示列应 = 2+2+1 = 5
+        assert_eq!(s.cursor, 3);
+        assert_eq!(s.cursor_display_col(), (0, 5));
+        s.left(); // 光标移到 'a' 前(字符序 2)→ 显示列 4
+        assert_eq!(s.cursor_display_col(), (0, 4));
+        // 多行:换行后显示列从 0 起。
+        let mut m = InputState::default();
+        m.insert_str("你\nb");
+        assert_eq!(m.cursor_display_col(), (1, 1));
+        // 折行:CJK 按实占,不再低估行数(3 个全角 = 6 格,宽 4 → 2 行,旧口径误判 1 行)。
+        assert_eq!(wrapped_rows("你你你", 4), 2);
+        assert_eq!(wrapped_rows("abcd", 4), 1);
     }
 
     /// iter-27:InputState 光标编辑 —— 插删/移动/多行上下列钳位/CJK 多字节安全。
