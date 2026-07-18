@@ -11,6 +11,8 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }  # detect_net 用 join! + time::timeout 并发探针
+sha2 = { workspace = true }       # OAuth PKCE S256 challenge(iter-43)
+getrandom = { workspace = true }  # PKCE verifier / state 安全随机(iter-43)
 
 [dev-dependencies]
 tokio = { workspace = true }

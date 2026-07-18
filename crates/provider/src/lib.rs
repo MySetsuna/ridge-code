@@ -603,6 +603,191 @@ pub mod http {
     }
 }
 
+/// OAuth 2.0 (PKCE) 订阅登录 —— `ridgecode login --claude`(iter-43)。
+///
+/// 纯核(PKCE / 授权 URL / token 解析 / 刷新判定 / base64url)离线可测;实际 token 交换与刷新
+/// 走 [`http::HttpClient`] 接缝,测试注入捕获替身零联网。
+///
+/// **诚实的验证边界**:确定性测试证明「机器」正确(给定常量);Anthropic 活 OAuth 端点 /
+/// client_id / 所需 system 前缀 / beta header 值属 ToS 灰区且需订阅,**由用户实跑
+/// `ridgecode login --claude` 验证**。常量集中于 [`anthropic_oauth`],补全侧 base_url 可配置覆盖。
+pub mod oauth {
+    use super::http::HttpClient;
+    use super::ProviderError;
+    use serde::{Deserialize, Serialize};
+    use serde_json::{json, Value};
+
+    /// Anthropic 公开的 Claude Code OAuth client 常量(尽力值;活端点由用户实跑验证)。
+    pub mod anthropic_oauth {
+        pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+        /// Claude Pro/Max **订阅**授权页(区别于 console 的 API-key 档)。
+        pub const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
+        pub const TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
+        pub const REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
+        pub const SCOPES: &str = "org:create_api_key user:profile user:inference";
+        /// 补全侧 OAuth 路径必带的 beta 头值。
+        pub const BETA: &str = "oauth-2025-04-20";
+        /// OAuth 路径要求 system 首块声明 Claude Code 身份(否则 API 拒);属活验证边界。
+        pub const SYSTEM_IDENTITY: &str =
+            "You are Claude Code, Anthropic's official CLI for Claude.";
+    }
+
+    /// 无填充 base64url 编码(RFC 4648 §5;非 crypto,纯编码,手写 + 测,省一依赖)。
+    pub fn base64url_nopad(bytes: &[u8]) -> String {
+        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        for chunk in bytes.chunks(3) {
+            let b0 = chunk[0] as u32;
+            let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+            let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+            let n = (b0 << 16) | (b1 << 8) | b2;
+            out.push(T[((n >> 18) & 63) as usize] as char);
+            out.push(T[((n >> 12) & 63) as usize] as char);
+            if chunk.len() > 1 {
+                out.push(T[((n >> 6) & 63) as usize] as char);
+            }
+            if chunk.len() > 2 {
+                out.push(T[(n & 63) as usize] as char);
+            }
+        }
+        out
+    }
+
+    /// PKCE 对:`challenge = base64url_nopad(sha256(verifier))`(S256)。
+    #[derive(Clone, Debug)]
+    pub struct Pkce {
+        pub verifier: String,
+        pub challenge: String,
+    }
+
+    impl Pkce {
+        /// 由 verifier **纯派生** challenge(可测)。
+        pub fn from_verifier(verifier: impl Into<String>) -> Self {
+            use sha2::{Digest, Sha256};
+            let verifier = verifier.into();
+            let digest = Sha256::digest(verifier.as_bytes());
+            Self {
+                challenge: base64url_nopad(&digest),
+                verifier,
+            }
+        }
+
+        /// 新随机 PKCE(32 字节 OS 随机 → base64url verifier)。非纯(随机),薄封装。
+        pub fn generate() -> Self {
+            Self::from_verifier(random_token())
+        }
+    }
+
+    /// 32 字节 OS 安全随机 → base64url(PKCE verifier / state 用)。
+    /// 熵源不可用极罕见;失败即 panic —— 无法安全登录好过用弱随机。
+    pub fn random_token() -> String {
+        let mut buf = [0u8; 32];
+        getrandom::getrandom(&mut buf).expect("OS entropy source unavailable");
+        base64url_nopad(&buf)
+    }
+
+    /// 存储 / 传递的 OAuth 凭据(serde 落 `oauth.json`)。
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct OAuthToken {
+        pub access_token: String,
+        pub refresh_token: String,
+        /// 过期时刻(epoch 秒)。刷新判定用它 —— 纯函数 now 传参,不读墙钟。
+        pub expires_at_epoch: u64,
+    }
+
+    impl OAuthToken {
+        /// 需要刷新?(含 60s 余量;now 传参保证可测)。
+        pub fn needs_refresh(&self, now_epoch: u64) -> bool {
+            now_epoch + 60 >= self.expires_at_epoch
+        }
+    }
+
+    /// 构造 Anthropic 订阅授权 URL(纯)。用户浏览器打开它授权,回调页给出 `code#state`。
+    pub fn authorize_url(challenge: &str, state: &str) -> String {
+        use anthropic_oauth::*;
+        let scope_enc = SCOPES.replace(' ', "%20");
+        let redirect_enc = REDIRECT_URI.replace(':', "%3A").replace('/', "%2F");
+        format!(
+            "{AUTHORIZE_URL}?code=true&client_id={CLIENT_ID}&response_type=code\
+             &redirect_uri={redirect_enc}&scope={scope_enc}\
+             &code_challenge={challenge}&code_challenge_method=S256&state={state}"
+        )
+    }
+
+    /// 从 token 端点 JSON 解析 [`OAuthToken`](纯;`expires_at = now + expires_in`)。
+    /// 刷新响应可能不带新 refresh_token → 回落用旧的(`fallback_refresh`)。
+    pub fn parse_token_response(
+        v: &Value,
+        now_epoch: u64,
+        fallback_refresh: Option<&str>,
+    ) -> Result<OAuthToken, ProviderError> {
+        let access_token = v["access_token"]
+            .as_str()
+            .ok_or("token response missing access_token")?
+            .to_string();
+        let refresh_token = v["refresh_token"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| fallback_refresh.map(str::to_string))
+            .ok_or("token response missing refresh_token")?;
+        let expires_in = v["expires_in"].as_u64().unwrap_or(3600);
+        Ok(OAuthToken {
+            access_token,
+            refresh_token,
+            expires_at_epoch: now_epoch + expires_in,
+        })
+    }
+
+    /// 授权码换 token(HTTP 走接缝)。`code_and_state` 为回调页给的 `code#state`,拆开回填。
+    pub async fn exchange_code(
+        http: &dyn HttpClient,
+        code_and_state: &str,
+        verifier: &str,
+        now_epoch: u64,
+    ) -> Result<OAuthToken, ProviderError> {
+        use anthropic_oauth::*;
+        let (code, state) = split_code_state(code_and_state);
+        let body = json!({
+            "grant_type": "authorization_code",
+            "code": code,
+            "state": state,
+            "client_id": CLIENT_ID,
+            "redirect_uri": REDIRECT_URI,
+            "code_verifier": verifier,
+        });
+        let v = http.post_json(TOKEN_URL, &json_headers(), &body).await?;
+        parse_token_response(&v, now_epoch, None)
+    }
+
+    /// refresh_token 换新 token(HTTP 走接缝)。
+    pub async fn refresh(
+        http: &dyn HttpClient,
+        refresh_token: &str,
+        now_epoch: u64,
+    ) -> Result<OAuthToken, ProviderError> {
+        use anthropic_oauth::*;
+        let body = json!({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": CLIENT_ID,
+        });
+        let v = http.post_json(TOKEN_URL, &json_headers(), &body).await?;
+        parse_token_response(&v, now_epoch, Some(refresh_token))
+    }
+
+    fn json_headers() -> Vec<(String, String)> {
+        vec![("Content-Type".to_string(), "application/json".to_string())]
+    }
+
+    /// 回调页返回 `code#state`;拆成 (code, state)。无 `#` 则 state 空。
+    fn split_code_state(s: &str) -> (String, String) {
+        match s.trim().split_once('#') {
+            Some((c, st)) => (c.to_string(), st.to_string()),
+            None => (s.trim().to_string(), String::new()),
+        }
+    }
+}
+
 /// 实时模型目录 —— 向某 provider 的 `{base_url}/models` 发鉴权 GET,解析出模型 id 与
 /// (端点自报的)上下文窗口大小。抓取只走 [`http::HttpClient`] 接缝,测试注入替身 → 零网络可测。
 pub mod models {
@@ -1311,7 +1496,10 @@ impl LlmProvider for OpenAiProvider {
 pub struct AnthropicProvider {
     base_url: String,
     model: String,
-    api_key: String,
+    /// api-key 模式:走 `x-api-key`;**oauth 模式**(iter-43):此处存 access_token,走 `Bearer`。
+    secret: String,
+    /// iter-43:true → `Authorization: Bearer` + `anthropic-beta`(去 `x-api-key`),订阅登录用。
+    oauth: bool,
     max_tokens: u32,
     http: Arc<dyn HttpClient>,
 }
@@ -1325,9 +1513,23 @@ impl AnthropicProvider {
         Self {
             base_url: base_url.into(),
             model: model.into(),
-            api_key: api_key.into(),
+            secret: api_key.into(),
+            oauth: false,
             max_tokens: 4096,
             http: Arc::new(ReqwestClient::new()),
+        }
+    }
+
+    /// OAuth 订阅模式(iter-43):`access_token` 走 `Authorization: Bearer` + `anthropic-beta`,
+    /// 且 system 首块注入 Claude Code 身份(OAuth 路径要求)。见 [`oauth`] 的验证边界。
+    pub fn new_oauth(
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+        access_token: impl Into<String>,
+    ) -> Self {
+        Self {
+            oauth: true,
+            ..Self::new(base_url, model, access_token)
         }
     }
 
@@ -1340,13 +1542,39 @@ impl AnthropicProvider {
 #[async_trait::async_trait]
 impl LlmProvider for AnthropicProvider {
     async fn complete(&self, req: &CompletionRequest) -> Result<Completion, ProviderError> {
+        // oauth 路径:前置一条 Claude Code 身份 system(build_request 会 join 进顶层 system)。
+        let oauth_req;
+        let req = if self.oauth {
+            let mut m = req.clone();
+            m.messages
+                .insert(0, Message::system(oauth::anthropic_oauth::SYSTEM_IDENTITY));
+            oauth_req = m;
+            &oauth_req
+        } else {
+            req
+        };
         let body = anthropic::build_request(&self.model, self.max_tokens, req);
         let url = format!("{}/messages", self.base_url.trim_end_matches('/'));
-        let headers = [
-            ("x-api-key".to_string(), self.api_key.clone()),
-            ("anthropic-version".to_string(), "2023-06-01".to_string()),
-            ("Content-Type".to_string(), "application/json".to_string()),
-        ];
+        let headers = if self.oauth {
+            vec![
+                (
+                    "Authorization".to_string(),
+                    format!("Bearer {}", self.secret),
+                ),
+                (
+                    "anthropic-beta".to_string(),
+                    oauth::anthropic_oauth::BETA.to_string(),
+                ),
+                ("anthropic-version".to_string(), "2023-06-01".to_string()),
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ]
+        } else {
+            vec![
+                ("x-api-key".to_string(), self.secret.clone()),
+                ("anthropic-version".to_string(), "2023-06-01".to_string()),
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ]
+        };
         let resp = self.http.post_json(&url, &headers, &body).await?;
         anthropic::parse_response(&resp)
     }
@@ -1772,5 +2000,114 @@ mod tests {
         // system 抽成顶层参数,不混进 messages。
         assert_eq!(seen.body["system"], "be terse");
         assert_eq!(seen.body["messages"][0]["role"], "user");
+    }
+
+    // ── iter-43 · OAuth(PKCE)订阅登录 ─────────────────────────────
+
+    #[test]
+    fn base64url_nopad_matches_rfc4648_vectors() {
+        assert_eq!(oauth::base64url_nopad(b""), "");
+        assert_eq!(oauth::base64url_nopad(b"f"), "Zg");
+        assert_eq!(oauth::base64url_nopad(b"fo"), "Zm8");
+        assert_eq!(oauth::base64url_nopad(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn pkce_challenge_is_s256_base64url_of_verifier() {
+        // RFC 7636 附录 B 的规范向量。
+        let pkce = oauth::Pkce::from_verifier("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+        assert_eq!(
+            pkce.challenge,
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    #[test]
+    fn authorize_url_carries_challenge_scopes_state() {
+        let url = oauth::authorize_url("CHAL123", "STATE789");
+        assert!(url.contains("code_challenge=CHAL123"));
+        assert!(url.contains("code_challenge_method=S256"));
+        assert!(url.contains("state=STATE789"));
+        assert!(url.contains("client_id="));
+        assert!(url.contains("scope=org"));
+    }
+
+    #[test]
+    fn parse_token_response_sets_expiry_from_now() {
+        let v = json!({"access_token":"acc","refresh_token":"ref","expires_in":3600});
+        let t = oauth::parse_token_response(&v, 1000, None).unwrap();
+        assert_eq!(t.access_token, "acc");
+        assert_eq!(t.refresh_token, "ref");
+        assert_eq!(t.expires_at_epoch, 4600);
+    }
+
+    #[test]
+    fn parse_token_response_falls_back_refresh_when_absent() {
+        // 刷新响应常不带新 refresh_token → 回落旧的。
+        let v = json!({"access_token":"acc2","expires_in":100});
+        let t = oauth::parse_token_response(&v, 0, Some("old-refresh")).unwrap();
+        assert_eq!(t.refresh_token, "old-refresh");
+    }
+
+    #[test]
+    fn needs_refresh_true_past_expiry_false_when_fresh() {
+        let t = oauth::OAuthToken {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            expires_at_epoch: 4600,
+        };
+        assert!(!t.needs_refresh(1000)); // 远未过期
+        assert!(t.needs_refresh(5000)); // 已过期
+        assert!(t.needs_refresh(4550)); // 60s 余量内也要刷
+    }
+
+    #[tokio::test]
+    async fn anthropic_oauth_headers_use_bearer_beta_not_apikey() {
+        let cap = Arc::new(CapturingHttp::new(
+            json!({"content":[{"type":"text","text":"ok"}]}),
+        ));
+        let p = AnthropicProvider::new_oauth("https://api.anthropic.com/v1", "claude-x", "tok-abc")
+            .with_http(cap.clone());
+        p.complete(&CompletionRequest {
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+        })
+        .await
+        .unwrap();
+
+        let seen = cap.seen();
+        assert!(seen
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v == "Bearer tok-abc"));
+        assert!(seen.headers.iter().any(|(k, _)| k == "anthropic-beta"));
+        // oauth 模式绝不发 x-api-key。
+        assert!(!seen.headers.iter().any(|(k, _)| k == "x-api-key"));
+        // system 首块注入了 Claude Code 身份(OAuth 路径要求)。
+        assert!(seen.body["system"]
+            .as_str()
+            .unwrap()
+            .contains("Claude Code"));
+    }
+
+    #[tokio::test]
+    async fn exchange_code_and_refresh_parse_via_fake_http() {
+        let cap = Arc::new(CapturingHttp::new(
+            json!({"access_token":"A","refresh_token":"R","expires_in":3600}),
+        ));
+        let t = oauth::exchange_code(cap.as_ref(), "the-code#the-state", "verifier-x", 10)
+            .await
+            .unwrap();
+        assert_eq!(t.access_token, "A");
+        assert_eq!(t.expires_at_epoch, 3610);
+        // 交换请求体带 grant_type / code / code_verifier。
+        let seen = cap.seen();
+        assert_eq!(seen.body["grant_type"], "authorization_code");
+        assert_eq!(seen.body["code"], "the-code");
+        assert_eq!(seen.body["code_verifier"], "verifier-x");
+
+        let r = oauth::refresh(cap.as_ref(), "R", 20).await.unwrap();
+        assert_eq!(r.access_token, "A");
+        assert_eq!(r.expires_at_epoch, 3620);
     }
 }

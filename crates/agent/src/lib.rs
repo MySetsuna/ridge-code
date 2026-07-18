@@ -1100,7 +1100,7 @@ pub fn preset_to_profile(
 }
 
 /// 解析 `~/.ridge/auth.json` 密钥库文本 → `key_env → key` 映射。坏/空/非对象 → 空表(不崩)。
-/// 只收字符串值(未来 OAuth 档为对象,本轮跳过对象值 —— 前向兼容接缝)。
+/// 只收字符串值;OAuth 凭据(对象)另存独立 `oauth.json`(见 [`oauth_parse`]),此处仍跳过任何对象值。
 pub fn auth_parse(text: &str) -> std::collections::BTreeMap<String, String> {
     match serde_json::from_str::<serde_json::Value>(text) {
         Ok(serde_json::Value::Object(m)) => m
@@ -1126,6 +1126,24 @@ pub fn auth_upsert(text: &str, key_env: &str, key: &str) -> String {
 /// 从密钥库文本取某槽的 key。
 pub fn auth_get(text: &str, key_env: &str) -> Option<String> {
     auth_parse(text).remove(key_env)
+}
+
+/// OAuth 凭据库(iter-43)纯核:`~/.ridge/oauth.json` = `{ provider: OAuthToken }`。
+/// **独立于** config.json(key 不进 config)与 auth.json(那是明文字符串 key)。坏/空 → 空表(不崩)。
+pub fn oauth_parse(text: &str) -> std::collections::BTreeMap<String, provider::oauth::OAuthToken> {
+    serde_json::from_str(text).unwrap_or_default()
+}
+
+/// 往 OAuth 库文本写入/覆盖某 provider 的 token,**保留其余**,返回美化 JSON(写盘 + 收权限由调用方做)。
+pub fn oauth_upsert(text: &str, provider_id: &str, token: &provider::oauth::OAuthToken) -> String {
+    let mut map = oauth_parse(text);
+    map.insert(provider_id.to_string(), token.clone());
+    serde_json::to_string_pretty(&map).unwrap_or_else(|_| "{}".into())
+}
+
+/// 从 OAuth 库文本取某 provider 的 token。
+pub fn oauth_get(text: &str, provider_id: &str) -> Option<provider::oauth::OAuthToken> {
+    oauth_parse(text).remove(provider_id)
 }
 
 /// `login` 的纯核:据 preset 把一个档案加/覆盖进 config 文本的 `providers[]`(经
@@ -3423,6 +3441,28 @@ mod tests {
         // 无内联、无 key_env、无 env → None。
         let none = Config::parse(r#"{ "model": "m" }"#);
         assert_eq!(resolve_top_level_key(&none, &BTreeMap::new()), None);
+    }
+
+    /// iter-43:OAuth 凭据库 upsert→parse→get 身份;空/坏文本 → 空表(不崩)。
+    #[test]
+    fn oauth_store_roundtrips() {
+        let tok = provider::oauth::OAuthToken {
+            access_token: "acc".into(),
+            refresh_token: "ref".into(),
+            expires_at_epoch: 4600,
+        };
+        let text = oauth_upsert("", "anthropic", &tok);
+        assert_eq!(oauth_get(&text, "anthropic"), Some(tok.clone()));
+        // 覆盖同 provider、保留其余。
+        let tok2 = provider::oauth::OAuthToken {
+            access_token: "acc2".into(),
+            ..tok.clone()
+        };
+        let text2 = oauth_upsert(&text, "anthropic", &tok2);
+        assert_eq!(oauth_get(&text2, "anthropic").unwrap().access_token, "acc2");
+        // 坏/空文本 → 空表,不 panic。
+        assert!(oauth_parse("not json").is_empty());
+        assert!(oauth_get("", "anthropic").is_none());
     }
 
     /// login 纯核:写档进 providers[]、make_default 时改顶层四键、**产物绝不含任何 key**、合法 JSON。
