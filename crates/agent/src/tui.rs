@@ -1487,7 +1487,10 @@ pub(super) async fn run(
                     }
                     StreamEvent::Superstep { state, .. } => {
                         for m in state.messages.iter().skip(printed) {
-                            ui.note(format_event_plain(m), event_color(m));
+                            // 总览化(用户需求):读只显路径、写显预览、改显 ± diff;减噪。
+                            for (line, color) in summarize_event(m) {
+                                ui.note(line, color);
+                            }
                         }
                         printed = state.messages.len();
                         // TODO 变更 → 清单快照静态提交进历史(取代旧侧边栏面板)。
@@ -2369,6 +2372,105 @@ fn format_event_plain(m: &str) -> String {
         .map(|x| format!("🤖 {x}"))
         .unwrap_or_else(|| m.to_owned())
 }
+
+/// 按字符数截断(避免单行刷屏);超出加省略。
+fn clip(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(n).collect::<String>())
+    }
+}
+
+/// 把一条 agent 消息转成**总览化**显示行(可多行,各带色)。核心:给总览、减细节 ——
+/// 读文件只显路径(不倒内容)、写文件显首几行预览、改文件显 ± 着色 diff(形如 git diff)。
+/// **全文/全量在 run trace**;inline 已提交行不可回改,故预览截断并标注(替代「展开」)。
+fn summarize_event(m: &str) -> Vec<(String, Color)> {
+    let info = role_color(Role::Info);
+    // tool_call:`reason#N: tool_call {name} {json}`
+    if let Some(rest) = m.strip_prefix("reason#") {
+        if let Some(idx) = rest.find(": tool_call ") {
+            let body = &rest[idx + ": tool_call ".len()..];
+            if let Some((name, args_str)) = body.split_once(' ') {
+                let args: serde_json::Value = serde_json::from_str(args_str).unwrap_or_default();
+                let arg = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
+                return match name {
+                    "read_file" => vec![(format!("  ⋯ 读 {}", arg("path")), info)],
+                    "write_file" => {
+                        let mut out = vec![(format!("  ⋯ 写 {}", arg("path")), info)];
+                        out.extend(preview_lines(arg("contents"), 8));
+                        out
+                    }
+                    "edit_file" => {
+                        let mut out = vec![(format!("  ⋯ 改 {}", arg("path")), info)];
+                        out.extend(diff_lines(arg("old_string"), arg("new_string")));
+                        out
+                    }
+                    "apply_edits" => vec![(format!("  ⋯ 批量改 {}", arg("path")), info)],
+                    "run_shell" => vec![(
+                        format!(
+                            "  ⋯ $ {}",
+                            clip(arg("cmd").lines().next().unwrap_or(""), 160)
+                        ),
+                        info,
+                    )],
+                    "search" => vec![(format!("  ⋯ 搜 {}", arg("pattern")), info)],
+                    other => vec![(format!("  ⋯ {other}"), info)],
+                };
+            }
+        }
+    }
+    // 观察:`act: {name} -> {obs}`。读文件的内容已在 tool_call 行体现 → act 只回执一行(丢内容噪声)。
+    if let Some(rest) = m.strip_prefix("act: ") {
+        if let Some((name, obs)) = rest.split_once(" -> ") {
+            let ok = role_color(Role::Success);
+            if name == "read_file" {
+                return vec![(format!("  ✓ 读完 ({} 字)", obs.chars().count()), ok)];
+            }
+            let head = clip(obs.lines().next().unwrap_or(""), 200);
+            return vec![(format!("  ✓ {name}: {head}"), ok)];
+        }
+    }
+    vec![(format_event_plain(m), event_color(m))]
+}
+
+/// 写文件内容预览:首 `max` 行(每行截断),超出标注剩余行数(全文见 trace)。
+fn preview_lines(content: &str, max: usize) -> Vec<(String, Color)> {
+    let muted = role_color(Role::Muted);
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out: Vec<(String, Color)> = lines
+        .iter()
+        .take(max)
+        .map(|l| (format!("  │ {}", clip(l, 200)), muted))
+        .collect();
+    if lines.len() > max {
+        out.push((
+            format!("  │ … (+{} 行,全文见 trace)", lines.len() - max),
+            muted,
+        ));
+    }
+    out
+}
+
+/// edit_file 的 git-diff 式呈现:old 行 `-`(红)、new 行 `+`(绿),各截断 + 限行。
+fn diff_lines(old: &str, new: &str) -> Vec<(String, Color)> {
+    let (red, green) = (role_color(Role::Error), role_color(Role::Success));
+    let mut out = Vec::new();
+    let cap = 12;
+    for l in old.lines().take(cap) {
+        out.push((format!("  - {}", clip(l, 200)), red));
+    }
+    if old.lines().count() > cap {
+        out.push(("  - …".to_string(), red));
+    }
+    for l in new.lines().take(cap) {
+        out.push((format!("  + {}", clip(l, 200)), green));
+    }
+    if new.lines().count() > cap {
+        out.push(("  + …".to_string(), green));
+    }
+    out
+}
 /// 事件行配色:经语义角色取色(iter-28 收口);终答用 White(具名 ANSI,非角色)。
 fn event_color(m: &str) -> Color {
     if m.starts_with("verify: PASS") {
@@ -2395,6 +2497,36 @@ mod tests {
     #[test]
     fn final_answer_gets_assistant_marker() {
         assert_eq!(format_event_plain("(final) hello"), "🤖 hello");
+    }
+
+    /// iter-50:输出流总览化 —— 读只显路径、读回执丢内容、改显 ± diff、写显预览。
+    #[test]
+    fn summarize_event_overviews_tools() {
+        // 读:只显路径,不倒内容。
+        let r = summarize_event(r#"reason#1: tool_call read_file {"path":"src/x.rs"}"#);
+        assert_eq!(r.len(), 1);
+        assert!(r[0].0.contains("读 src/x.rs"), "{}", r[0].0);
+        // 读回执:丢内容,只回执字数。
+        let a = summarize_event("act: read_file -> 一二三四五");
+        assert!(a[0].0.contains("读完"), "{}", a[0].0);
+        assert!(!a[0].0.contains("一二三"), "内容不应回显");
+        // 改:git-diff 式 ± 行,红减绿增。
+        let e = summarize_event(
+            r#"reason#2: tool_call edit_file {"path":"a.rs","old_string":"let n=1;","new_string":"let n=2;"}"#,
+        );
+        assert!(e[0].0.contains("改 a.rs"), "{}", e[0].0);
+        assert!(e.iter().any(|(l, c)| l.starts_with("  - ")
+            && l.contains("n=1")
+            && *c == role_color(Role::Error)));
+        assert!(e.iter().any(|(l, c)| l.starts_with("  + ")
+            && l.contains("n=2")
+            && *c == role_color(Role::Success)));
+        // 写:路径 + 内容预览行。
+        let w = summarize_event(
+            r#"reason#3: tool_call write_file {"path":"b.rs","contents":"line1\nline2"}"#,
+        );
+        assert!(w[0].0.contains("写 b.rs"), "{}", w[0].0);
+        assert!(w.iter().any(|(l, _)| l.contains("line1")));
     }
 
     /// iter-29:上下文窗口人读化。
