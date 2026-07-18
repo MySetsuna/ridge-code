@@ -512,11 +512,25 @@ pub mod http {
         client: reqwest::Client,
     }
 
+    /// LLM 请求超时秒数(env `RIDGE_HTTP_TIMEOUT` 可调,默认 180)。**防端点卡住令任务永久 hang** ——
+    /// 无超时时,GLM 等端点偶发流式卡住会冻住整个 reason 节点(超步内 await 永不返回,`max_supersteps`
+    /// 拦不住)。非流式=整请求超时;流式=响应头等待 + **逐块 idle** 超时(不误杀正常慢流)。
+    fn timeout_secs() -> u64 {
+        std::env::var("RIDGE_HTTP_TIMEOUT")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(180)
+    }
+
     impl ReqwestClient {
         pub fn new() -> Self {
-            Self {
-                client: reqwest::Client::new(),
-            }
+            // connect 超时防连接挂死;逐调用另加请求/idle 超时(见各方法)。
+            let client = reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
+            Self { client }
         }
     }
 
@@ -534,7 +548,11 @@ pub mod http {
             headers: &[(String, String)],
             body: &Value,
         ) -> Result<Value, ProviderError> {
-            let mut rb = self.client.post(url).json(body);
+            let mut rb = self
+                .client
+                .post(url)
+                .json(body)
+                .timeout(std::time::Duration::from_secs(timeout_secs()));
             for (k, v) in headers {
                 rb = rb.header(k.as_str(), v.as_str());
             }
@@ -552,7 +570,10 @@ pub mod http {
             url: &str,
             headers: &[(String, String)],
         ) -> Result<Value, ProviderError> {
-            let mut rb = self.client.get(url);
+            let mut rb = self
+                .client
+                .get(url)
+                .timeout(std::time::Duration::from_secs(timeout_secs()));
             for (k, v) in headers {
                 rb = rb.header(k.as_str(), v.as_str());
             }
@@ -576,15 +597,28 @@ pub mod http {
             for (k, v) in headers {
                 rb = rb.header(k.as_str(), v.as_str());
             }
-            let mut resp = rb.send().await?;
+            let dur = std::time::Duration::from_secs(timeout_secs());
+            // 响应头等待超时:端点接了连接却不回头 → 中止,不永久 hang。
+            let mut resp =
+                tokio::time::timeout(dur, rb.send())
+                    .await
+                    .map_err(|_| -> ProviderError {
+                        "stream request timed out waiting for response headers".into()
+                    })??;
             let status = resp.status();
             if !status.is_success() {
                 let t = resp.text().await.unwrap_or_default();
                 return Err(format!("http {status}: {t}").into());
             }
             // `chunk()` 增量读 body(无需 reqwest "stream" feature),按 \n 切出完整 SSE 行。
+            // **逐块 idle 超时**(根因修复):流中途卡住(无数据/SSE 不发 `[DONE]`)→ 中止,
+            // 不令 reason 节点永久冻结;正常慢流每块刷新计时,不误杀。
             let mut buf = String::new();
-            while let Some(bytes) = resp.chunk().await? {
+            loop {
+                let next = tokio::time::timeout(dur, resp.chunk()).await.map_err(
+                    |_| -> ProviderError { "stream stalled (no data within idle timeout)".into() },
+                )??;
+                let Some(bytes) = next else { break };
                 buf.push_str(&String::from_utf8_lossy(&bytes));
                 while let Some(nl) = buf.find('\n') {
                     let line = buf[..nl].trim().to_string();

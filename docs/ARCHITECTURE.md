@@ -71,6 +71,7 @@ agent 定义 = frontmatter `.md`:内置 fastcontext/explorer/reviewer 编进二�
 - `Role/Message`(tool_calls + tool_call_id 归一化)、`ToolSpec`(name/description/JSON Schema)、`ToolCall`(arguments 已解析成 Value)、`Completion{text, tool_calls, usage}`、`CompletionRequest`。
 - **`LlmProvider`** trait:`complete` + `complete_streaming`(SSE 逐 token 回调,默认回落到 complete —— 不支持流式的 provider 零改动)。实现:`AnthropicProvider`(`new` = `x-api-key` 档;**`new_oauth` = OAuth 订阅 bearer 档**,iter-43:`Authorization: Bearer` + `anthropic-beta` + system 首块注入 Claude Code 身份)/ `OpenAiProvider`(HTTP,`HttpClient` 传输接缝可离线测,`StreamAcc` 累积 SSE)/ `ScriptedProvider`(离线按序吐预设 Completion,demo/测试用)。
 - **`SwapProvider`**:`Mutex<Arc<dyn LlmProvider>>` 热切换 —— TUI `/model` `/provider use` 换芯不重建图;锁只持到 clone,不跨 await。
+- **`ReqwestClient` 超时护栏**(iter-47 根因修复):真实 HTTP 客户端设 `connect_timeout(30s)` + 逐调用超时——非流式整请求超时,**流式则响应头等待 + 逐块 idle 超时**(`tokio::time::timeout` 包 `send`/`chunk`)。**没有它**,端点(如 GLM 经代理)偶发流式卡住会令 reason 节点在超步内 `await` 永不返回 → 任务永久冻结(`max_supersteps`/`MAX_STEPS` 在超步**之间**检查,拦不住超步**内**的 hang)。超时秒数 env `RIDGE_HTTP_TIMEOUT` 可调(默认 180)。
 - web 工具:`web_search`(GFW 探测自动换引擎、无 key 多引擎 fallback)+ `fetch_url`(抓正文),`WebFetch` 接缝可离线测。
 - **`provider::models`**(iter-29):`fetch_models(HttpClient, kind, base_url, key)` 向 `{base_url}/models` 发鉴权 GET(`HttpClient::get_json` —— 对称 `post_json`,默认 Err 仅 `ReqwestClient` 真实现)→ `parse_model_list`(**纯函数**,兼容 OpenAI/OpenRouter/Anthropic 的 `{data:[..]}` + 顶层数组,坏/空 → 空列表;context 多路探测含嵌套 `top_provider.context_length`)→ `Vec<ModelInfo{id, context: Option<u64>}>`。供 TUI `/models` 列实时模型 + 上下文大小。
 
