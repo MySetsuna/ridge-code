@@ -359,6 +359,24 @@ struct Popup {
     selected: usize,
     /// 被补全词的起始**字符**偏移(应用时替换 [anchor, cursor))。
     anchor: usize,
+    /// 浮窗性质(iter-32):文本补全 vs 选中即执行动作(模型选择器)。
+    kind: PopupKind,
+    /// 仅 `ModelPick` 填,与 `items` 平行:选中项的模型 id + 上下文窗口。
+    picks: Vec<ModelPick>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PopupKind {
+    /// `/`、`@` 文本补全:Enter 把选中项写回输入缓冲。
+    Complete,
+    /// 模型选择器(iter-32):Enter 热切换模型,不碰输入缓冲。
+    ModelPick,
+}
+
+/// 模型选择器一项(iter-32):切换目标 id + 其真实上下文窗口(选中即缓存为 ctx% 分母)。
+struct ModelPick {
+    id: String,
+    ctx: Option<u64>,
 }
 
 /// 光标前当前词(空白定界):(起始字符偏移, 词)。
@@ -418,6 +436,8 @@ fn build_popup(input: &InputState) -> Option<Popup> {
             items,
             selected: 0,
             anchor,
+            kind: PopupKind::Complete,
+            picks: Vec::new(),
         });
     }
     if let Some(at) = word.rfind('@') {
@@ -429,9 +449,41 @@ fn build_popup(input: &InputState) -> Option<Popup> {
             items,
             selected: 0,
             anchor,
+            kind: PopupKind::Complete,
+            picks: Vec::new(),
         });
     }
     None
+}
+
+/// 模型选择器浮窗(iter-32,纯函数):实时模型列表 → 选中即切换的浮窗。
+/// items 显示 `id · ctx X`;`picks` 平行携 id+ctx;`selected` 落在当前模型(无匹配则 0)。
+/// 空列表 → None(无可选)。
+fn build_model_popup(models: &[provider::models::ModelInfo], current: &str) -> Option<Popup> {
+    if models.is_empty() {
+        return None;
+    }
+    let mut items = Vec::with_capacity(models.len());
+    let mut picks = Vec::with_capacity(models.len());
+    let mut selected = 0;
+    for (i, m) in models.iter().enumerate() {
+        let ctx = m.context.map(fmt_ctx).unwrap_or_else(|| "?".into());
+        items.push(format!("{}  ·  ctx {ctx}", m.id));
+        picks.push(ModelPick {
+            id: m.id.clone(),
+            ctx: m.context,
+        });
+        if m.id == current {
+            selected = i;
+        }
+    }
+    Some(Popup {
+        items,
+        selected,
+        anchor: 0,
+        kind: PopupKind::ModelPick,
+        picks,
+    })
 }
 
 /// 应用选中项:替换 [anchor, cursor) 区间的词,光标落在补全末尾。
@@ -943,7 +995,18 @@ pub(super) async fn run(
                     }
                     InputAction::PopupApply => {
                         if let Some(p) = ui.popup.take() {
-                            apply_completion(&mut ui.input, &p);
+                            match p.kind {
+                                PopupKind::Complete => apply_completion(&mut ui.input, &p),
+                                PopupKind::ModelPick => {
+                                    // 选中即热切换 + 缓存该模型真实上下文窗口(ctx% 分母转真值,iter-32)。
+                                    if let Some(pick) = p.picks.get(p.selected) {
+                                        if let Some(w) = pick.ctx {
+                                            meta.ctx_window = w;
+                                        }
+                                        swap_model(&swap, &mut meta, &pick.id, &mut ui);
+                                    }
+                                }
+                            }
                         }
                     }
                     InputAction::PopupClose => ui.popup = None,
@@ -1113,6 +1176,22 @@ fn current_api_key() -> Option<String> {
         })
 }
 
+/// 热切换模型(iter-32 共用路径):密钥经 `current_api_key`(env 优先,回落 config 内联)——
+/// `/model <name>` 文本命令与模型选择器浮窗同走此路,顺带修「内联 key 无法切模型」根因。
+fn swap_model(swap: &Arc<SwapProvider>, meta: &mut ReplMeta, model: &str, ui: &mut Ui) {
+    match current_api_key() {
+        Some(key) => {
+            swap.swap(make_provider(&meta.provider, model, &meta.base_url, key));
+            meta.model = model.to_string();
+            ui.note(format!("已热切换 model={model}"), Color::Green);
+        }
+        None => ui.note(
+            "未解析到 API key（设 RIDGE_API_KEY 或 config.json 顶层 api_key），无法切换模型",
+            Color::Red,
+        ),
+    }
+}
+
 /// 上下文窗口人读化:200000 → "200K",1048576 → "1.0M"(纯函数)。
 fn fmt_ctx(n: u64) -> String {
     if n >= 1_000_000 {
@@ -1209,12 +1288,30 @@ async fn run_command(
 ) -> anyhow::Result<bool> {
     match input {
         "/exit" | "/quit" => return Ok(true),
-        "/help" => ui.note("/exit /reset /compact /cost /tools /model [name] /models /provider [list|use <name>|add <name> <kind> <model> <base_url> [key_env]] /agent /config [set key value]；@path 引用文件；Ctrl-C 中断；历史滚动/选取用终端原生能力；批准弹窗:y/Enter 批准、n/Esc 拒绝、↑↓ 滚动看详情。", Color::Gray),
+        "/help" => ui.note("/exit /reset /compact /cost /tools /model [name|pick] /models /provider [list|use <name>|add <name> <kind> <model> <base_url> [key_env]] /agent /config [set key value]；@path 引用文件；Ctrl-C 中断；历史滚动/选取用终端原生能力；批准弹窗:y/Enter 批准、n/Esc 拒绝、↑↓ 滚动看详情。", Color::Gray),
         "/tools" => ui.note(format!("可用工具({}): {}", meta.tools.len(), meta.tools.join(", ")), Color::Gray),
         "/reset" => { history.clear(); save_session(&session_path(), history); ui.note("上下文已清空", Color::Yellow); }
         "/compact" => { let n = history.len(); *history = compact_history(std::mem::take(history), 4); ui.note(format!("上下文已压缩: {n} → {} 条", history.len()), Color::Yellow); }
         "/cost" => ui.note(format!("本会话累计: {tokens} tokens · {turns} 轮任务"), Color::Gray),
-        _ if input == "/model" => ui.note(format!("provider={} · model={} · base_url={}\n热切换: /model <name>；实时模型列表(含上下文大小): /models", meta.provider, meta.model, meta.base_url), Color::Gray),
+        _ if input == "/model" => ui.note(format!("provider={} · model={} · base_url={}\n热切换: /model <name>；程序内选择器(↑↓ 选、Enter 切): /model pick；实时列表(含上下文大小): /models", meta.provider, meta.model, meta.base_url), Color::Gray),
+        _ if input == "/model pick" => {
+            match current_api_key() {
+                Some(key) => {
+                    let http = provider::http::ReqwestClient::new();
+                    let fut = provider::models::fetch_models(&http, &meta.provider, &meta.base_url, &key);
+                    match tokio::time::timeout(Duration::from_secs(15), fut).await {
+                        Ok(Ok(list)) if !list.is_empty() => {
+                            ui.popup = build_model_popup(&list, &meta.model);
+                            ui.note(format!("模型选择器（{} 个）：↑↓ 选 · Enter 切 · Esc 关", list.len()), Color::Gray);
+                        }
+                        Ok(Ok(_)) => ui.note("端点返回空模型列表", Color::Yellow),
+                        Ok(Err(e)) => ui.note(format!("抓取模型失败: {e}"), Color::Red),
+                        Err(_) => ui.note("抓取模型超时（15s）", Color::Red),
+                    }
+                }
+                None => ui.note("未解析到 API key（设 RIDGE_API_KEY 或 config.json 顶层 api_key）", Color::Red),
+            }
+        }
         _ if input == "/models" => {
             match current_api_key() {
                 Some(key) => {
@@ -1243,10 +1340,7 @@ async fn run_command(
                 None => ui.note("未解析到 API key（设 RIDGE_API_KEY 或 config.json 顶层 api_key）", Color::Red),
             }
         }
-        _ if input.starts_with("/model ") => {
-            let name = input[7..].trim();
-            if let Some(key) = std::env::var("RIDGE_API_KEY").ok().filter(|v| !v.is_empty()) { swap.swap(make_provider(&meta.provider, name, &meta.base_url, key)); meta.model = name.into(); ui.note(format!("已热切换 model={name}"), Color::Green); } else { ui.note("未设 RIDGE_API_KEY，无法切换模型", Color::Red); }
-        }
+        _ if input.starts_with("/model ") => swap_model(swap, meta, input[7..].trim(), ui),
         _ if input == "/config" => ui.note(format!("配置文件: {}（JSON，可直接编辑）\n当前: {} · {}\n持久化: /config set <key> <value>", config_path(), meta.provider, meta.model), Color::Gray),
         _ if input.starts_with("/config set ") => { let parts: Vec<_> = input.splitn(4, ' ').collect(); if parts.len() == 4 { match persist_config(parts[2], parts[3]) { Ok(path) => ui.note(format!("已写入 {path}；下次启动生效"), Color::Green), Err(e) => ui.note(format!("写入失败: {e}"), Color::Red) } } else { ui.note("用法: /config set <key> <value>", Color::Yellow); } }
         _ if input == "/provider" || input == "/provider list" => { let cfg = Config::load(config_path()); let list = cfg.providers.iter().map(|p| format!("{} · {} · {}", p.name, p.kind, p.model)).collect::<Vec<_>>().join("\n"); let hint = "\n切换: /provider use <name>；新增: /provider add <name> <kind> <model> <base_url> [key_env]"; ui.note(if list.is_empty() { format!("没有 provider 档案。{hint}") } else { format!("{list}{hint}") }, Color::Gray); }
@@ -1608,6 +1702,43 @@ mod tests {
         assert!(est_tokens("你好abcd") >= 1);
     }
 
+    /// iter-32:模型选择器浮窗构造(纯函数)。
+    fn mi(id: &str, ctx: Option<u64>) -> provider::models::ModelInfo {
+        provider::models::ModelInfo {
+            id: id.into(),
+            context: ctx,
+        }
+    }
+
+    #[test]
+    fn build_model_popup_selects_current_and_formats() {
+        let list = [
+            mi("a", Some(128_000)),
+            mi("b", Some(200_000)),
+            mi("c", None),
+        ];
+        let p = build_model_popup(&list, "b").expect("非空");
+        assert_eq!(p.kind, PopupKind::ModelPick);
+        assert_eq!(p.selected, 1); // 当前模型 "b" 高亮
+        assert_eq!(p.items.len(), p.picks.len()); // items 与 picks 平行
+        assert!(p.items[1].contains("ctx 200K")); // 显示上下文大小
+        assert!(p.items[2].contains("ctx ?")); // 缺 ctx 显 ?
+        assert_eq!(p.picks[1].id, "b");
+        assert_eq!(p.picks[0].ctx, Some(128_000)); // 选中即可缓存的真实窗口
+    }
+
+    #[test]
+    fn build_model_popup_empty_is_none() {
+        assert!(build_model_popup(&[], "x").is_none());
+    }
+
+    #[test]
+    fn build_model_popup_unknown_current_defaults_zero() {
+        let list = [mi("a", None), mi("b", None)];
+        let p = build_model_popup(&list, "not-in-list").expect("非空");
+        assert_eq!(p.selected, 0); // 当前不在列表 → 落首项
+    }
+
     /// 根因回归:审批态下滚动键**不再误拒**,而是滚动;仅 y/Enter 批准、n/Esc 拒绝,余键忽略。
     #[test]
     fn approval_scroll_keys_do_not_reject() {
@@ -1858,6 +1989,8 @@ mod tests {
             items: vec!["/model".to_string()],
             selected: 0,
             anchor: 4,
+            kind: PopupKind::Complete,
+            picks: Vec::new(),
         };
         apply_completion(&mut s, &p);
         assert_eq!(s.buffer, "run /model now");
