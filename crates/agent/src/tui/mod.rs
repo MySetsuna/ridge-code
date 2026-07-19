@@ -210,6 +210,9 @@ pub(super) async fn run(
         on.then(|| dir.join("keylog.txt"))
     };
 
+    // 「已按下集」:去重 Windows 每键的 Press+Release,并识别输入法「仅 Release」的悬空字符注入。
+    let mut pressed: std::collections::HashSet<KeyCode> = std::collections::HashSet::new();
+
     'main: loop {
         // 统一提交点(iter-33):非 busy 时消费 pending_submit —— 键入的新提交,或上一任务毕后接跑的队首。
         // 起任务/跑命令的逻辑**只此一处**(键 Submit 臂与 done 队列接跑共用),消除重复。
@@ -295,9 +298,12 @@ pub(super) async fn run(
                     continue;
                 }
                 let Event::Key(key) = ev else { continue };
-                if key.kind != KeyEventKind::Press {
+                // 去重 Windows 的 Press+Release 双触发,并**兜住输入法「仅 Release」的字符注入**
+                //(实测:某些中文/国际输入法把空格键作为 Char('\u{a0}') 且只发 Release,旧「只收 Press」
+                // 逻辑整个丢弃 → 打不出空格)。顺带把 no-break/全角空格归一为普通空格。见 `decide_key`。
+                let Some(key) = decide_key(&mut pressed, &key) else {
                     continue;
-                }
+                };
                 if pending.is_some() {
                     // 模态状态机:审批态下滚动键**只滚不拒**(可先看 diff),仅 y/Enter 批准、n/Esc 拒绝,余键忽略。
                     match approval_action(key.code) {

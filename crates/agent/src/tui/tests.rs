@@ -252,6 +252,49 @@ fn panel_action_routes_keys() {
     );
 }
 
+/// 根因回归(输入法吞空格):去重 Windows 双触发 + 兜住输入法「仅 Release」的字符注入 +
+/// no-break(U+00A0)/全角(U+3000)空格归一。实测某输入法把空格键作为 `Char('\u{a0}')` 只发 Release,
+/// 旧「只收 Press」把它整个丢弃 → 打不出空格。
+#[test]
+fn decide_key_dedups_and_recovers_ime_space() {
+    use std::collections::HashSet;
+    let mut p: HashSet<KeyCode> = HashSet::new();
+    let press = |c| KeyEvent::new_with_kind(c, KeyModifiers::NONE, KeyEventKind::Press);
+    let release = |c| KeyEvent::new_with_kind(c, KeyModifiers::NONE, KeyEventKind::Release);
+
+    // 正常键:Press 处理;其后的 Release 丢弃(免 Windows 双触发)。
+    assert_eq!(
+        decide_key(&mut p, &press(KeyCode::Char('a'))).map(|k| k.code),
+        Some(KeyCode::Char('a'))
+    );
+    assert!(decide_key(&mut p, &release(KeyCode::Char('a'))).is_none());
+
+    // 输入法空格:Char('\u{a0}') 仅 Release(悬空)→ 收下,归一为普通空格、以 Press 呈现给下游。
+    let k = decide_key(&mut p, &release(KeyCode::Char('\u{a0}'))).expect("悬空字符 Release 应收下");
+    assert_eq!(
+        k.code,
+        KeyCode::Char(' '),
+        "no-break space 应归一为普通空格"
+    );
+    assert_eq!(k.kind, KeyEventKind::Press, "应以 Press 呈现给下游");
+    assert_eq!(
+        decide_key(&mut p, &release(KeyCode::Char('\u{3000}')))
+            .unwrap()
+            .code,
+        KeyCode::Char(' '),
+        "全角空格同样归一"
+    );
+
+    // 悬空的**非字符** Release(如启动残留的 Enter 松键)→ 忽略,不误触发 Submit。
+    assert!(decide_key(&mut p, &release(KeyCode::Enter)).is_none());
+
+    // Unix 口径:只有 Press、无 Release,普通空格照常处理。
+    assert_eq!(
+        decide_key(&mut p, &press(KeyCode::Char(' '))).map(|k| k.code),
+        Some(KeyCode::Char(' '))
+    );
+}
+
 /// 根因回归:审批态下滚动键**不再误拒**,而是滚动;仅 y/Enter 批准、n/Esc 拒绝,余键忽略。
 #[test]
 fn approval_scroll_keys_do_not_reject() {

@@ -64,6 +64,46 @@ pub(crate) enum InputAction {
     Ignore,
 }
 
+/// 一次原始按键事件的**去重 + 归一决策**(纯函数,可测)。跨平台键事件不一致:Windows 每键发
+/// Press+Release,Unix(Kitty 未开 REPORT_EVENT_TYPES)只发 Press;而某些输入法把空格键作为
+/// `Char('\u{a0}')`(no-break space)且**只发 Release**注入 —— 旧「只收 Press」逻辑会把它整个丢弃。
+///
+/// 规则:
+/// - Press / Repeat → 收下(并记入 `pressed`);
+/// - Release 若配得上先前 Press(正常松键)→ 丢弃(免 Windows 双触发),并从 `pressed` 移除;
+/// - **悬空** Release(配不上任何 Press)→ 仅当是**字符键**才收下(= 输入法注入;非字符如启动残留的
+///   Enter 松键则忽略,免误触发)。
+///
+/// 收下者一律以 **Press** 呈现给下游(下游 `input_action`/`panel_action` 内部只认 Press),并把
+/// no-break(U+00A0)/全角(U+3000)空格**归一为普通空格**(否则显示像空格但按 `' '` 分词的命令会失败)。
+/// 返回 `Some(归一后的 Press 事件)` = 处理;`None` = 忽略。
+pub(crate) fn decide_key(
+    pressed: &mut std::collections::HashSet<KeyCode>,
+    ev: &KeyEvent,
+) -> Option<KeyEvent> {
+    let process = match ev.kind {
+        KeyEventKind::Press | KeyEventKind::Repeat => {
+            pressed.insert(ev.code);
+            true
+        }
+        KeyEventKind::Release => {
+            if pressed.remove(&ev.code) {
+                false // 正常松键:对应的 Press 已处理过
+            } else {
+                matches!(ev.code, KeyCode::Char(_)) // 悬空 Release:仅字符(输入法注入)才收
+            }
+        }
+    };
+    if !process {
+        return None;
+    }
+    let code = match ev.code {
+        KeyCode::Char('\u{a0}') | KeyCode::Char('\u{3000}') => KeyCode::Char(' '),
+        other => other,
+    };
+    Some(KeyEvent::new(code, ev.modifiers))
+}
+
 pub(crate) fn input_action(key: &KeyEvent, busy: bool, popup_open: bool) -> InputAction {
     if key.kind != KeyEventKind::Press {
         return InputAction::Ignore;
