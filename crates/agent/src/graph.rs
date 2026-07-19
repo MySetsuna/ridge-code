@@ -621,6 +621,40 @@ mod tests {
         assert_eq!(out.steps, 2);
     }
 
+    /// 回归(误报根治):模型读到**内容含 "error"/"failed" 字样但操作成功**的输出后 finish →
+    /// 应**接受完成**(approved),不再被松散子串误判失败、踢进「否决→回 reason→再收尾」无尽环。
+    #[tokio::test]
+    async fn finish_accepted_despite_scary_substrings_in_content() {
+        use provider::{Completion, ScriptedProvider};
+        let mut path = std::env::temp_dir();
+        path.push("ridge_scary_substrings.txt");
+        std::fs::write(&path, "build log: 0 errors, 0 failed — all good").unwrap();
+
+        let scripted = ScriptedProvider::new(vec![
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": path.to_str().unwrap()}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                text: "日志显示 0 报错,收工".to_string(),
+                ..Default::default()
+            },
+        ]);
+        let app = build_llm_agent(Arc::new(scripted)).unwrap();
+        let out = app.invoke(AgentState::new("看下构建日志")).await.unwrap();
+
+        assert!(
+            out.approved,
+            "内容含 error/failed 字样但操作成功,finish 应被接受,不该误否"
+        );
+        assert_eq!(out.steps, 2, "read_file -> finish,不空转");
+        std::fs::remove_file(&path).ok();
+    }
+
     /// 通用性:开放式任务(工具输出无 exit0/passed 也无失败信号)+ 模型 finish → 接受完成,不空转到上限。
     /// (修复 MCP 信息类任务空转烧 token 的问题。)
     #[tokio::test]
@@ -711,6 +745,54 @@ mod tests {
             .any(|m| m.content.contains("[WRAPUP_MARK]")));
     }
 
+    /// 回归:模型「调一次失败工具 → 直接 finish」时,不得回 reason 原地空转再收尾(旧 bug:无尽收尾环,
+    /// act 不跑 → stall/err_streak 冻结,唯一出口 step_cap=2000,白烧 token)。新路由:否决的 finish 一次
+    /// wrapup 即 END。用离线 provider,零联网、确定性。
+    #[tokio::test]
+    async fn rejected_finish_does_not_spin_and_wraps_up_once() {
+        use provider::{Completion, ScriptedProvider};
+        let scripted = ScriptedProvider::new(vec![
+            // 第 1 轮:调 read_file 读不存在的文件 → 观察含 "read error:"(失败信号)。
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "no/such/xyzzy-nope.txt"}),
+                }],
+                ..Default::default()
+            },
+            // 第 2 轮:模型不再调工具、直接给终答(finish)。verify 因上一步失败信号否决之。
+            Completion {
+                text: "我看了下,应该好了".to_string(),
+                ..Default::default()
+            },
+            // wrapup 的 provider.complete 取这条:诚实交接。旧 bug 下永远走不到 wrapup(在 reason↔verify 空转)。
+            Completion {
+                text: "已尝试读取但文件不存在;建议确认路径后重试。[WRAP]".to_string(),
+                ..Default::default()
+            },
+        ]);
+        let app = build_llm_agent(Arc::new(scripted)).unwrap();
+        let out = app.invoke(AgentState::new("读个文件")).await.unwrap();
+
+        assert!(!out.approved, "有失败信号不应伪装成功");
+        assert_eq!(
+            out.steps, 2,
+            "read_file -> finish 即收 wrapup,不得空转至 step_cap"
+        );
+        assert_eq!(
+            halt_reason(&out),
+            HaltReason::Unverified,
+            "非护栏熔断、模型自判完成却未验证通过 → unverified"
+        );
+        assert!(
+            out.messages
+                .iter()
+                .any(|m| m.contains("[WRAP]") && m.contains("(final)")),
+            "应有且仅经一次 wrapup 收束陈述作为 (final) 终答"
+        );
+    }
+
     /// #2 路由(纯函数):通过 → END;护栏熔断且未过 → wrapup;未过但可继续 → reason。
     #[test]
     fn verify_route_llm_sends_guardrail_halt_to_wrapup() {
@@ -726,6 +808,16 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(verify_route_llm(&over_budget), vec!["wrapup".to_string()]);
+        // 模型已自判 finish 却未通过验证(非 must_stop)→ 收 wrapup,**不**回 reason 空转成环。
+        let rejected_finish = AgentState {
+            last_action: Some("finish".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            verify_route_llm(&rejected_finish),
+            vec!["wrapup".to_string()],
+            "否决的 finish 须走 wrapup,不得回 reason(否则无尽收尾环)"
+        );
         assert_eq!(
             verify_route_llm(&AgentState::default()),
             vec!["reason".to_string()]

@@ -79,14 +79,16 @@ pub(crate) fn tool_output_ok(o: &str) -> bool {
     o.starts_with("exit 0:") || (o.contains("passed") && !o.contains("failed"))
 }
 
-/// 确定性**失败**信号(编译/测试出错、非 0 退出、被拦截/拒绝)。`pub`:除 verify 判据外,
-/// TUI `summarize_event` 也复用它把失败观察显红(**单一真相**:显红 ⇔ verify 判失败)。
+/// 确定性**失败**信号 = 与 [`is_error_observation`](exec) **同一结构化判据**(单一真相,免判据分叉):
+/// 非零 `exit N` / 工具操作错误前缀 ` error:`(read/write/edit/shell/mcp/tool error:)/ `BLOCKED` /
+/// `permission denied`。verify 的 finish 否决、熔断计数(`err_streak`)、TUI 显红共用之。
+///
+/// **刻意不认**裸 `error`/`failed` 内容子串:那会把 grep 命中含 "error" 的行、日志正文、`0 failed`/
+/// `0 errors` 等**正常输出**误判失败,把模型「已完成的收尾」踢进「否决 → 回 reason → 再收尾」的无尽环
+/// (act 不跑 → stall/err_streak 冻结,唯一出口 step_cap,白烧 token)。语义级「测试确实没过」交独立
+/// reviewer 判(maker≠checker);内核只认**不可伪造**的结构信号(退出码由 harness 产、位于行首)。
 pub fn tool_output_failed(o: &str) -> bool {
-    o.contains("failed")
-        || o.contains("error")
-        || o.contains("BLOCKED")
-        || o.contains("permission denied")
-        || (o.starts_with("exit ") && !o.starts_with("exit 0"))
+    crate::exec::is_error_observation(o)
 }
 
 /// verify 判据(通用 agent):
@@ -127,13 +129,19 @@ pub(crate) fn verify_route(s: &AgentState) -> Vec<String> {
     }
 }
 
-/// verify 之后的路由(**LLM 路径**):通过 → END;护栏熔断(超预算/回合上限/无进展/连错)且未通过
-/// → 先走 `wrapup` 让模型产一段**面向用户的收束陈述**(为何停 / 已成 / 待办 / 阻塞)再 END;
-/// 其余(未过但可继续)→ 回 reason。这样「停机不再哑然」——机器原因(#1)+ 模型自述(#2)双管齐下。
+/// verify 之后的路由(**LLM 路径**):通过 → END;否则一律 → `wrapup`(产一段**面向用户的收束陈述**:
+/// 为何停 / 已成 / 待办 / 阻塞)再 END。两类未过都收 wrapup:①护栏熔断(超预算/回合上限/无进展/连错);
+/// ②模型已自判 `finish` 却未通过验证。
+///
+/// ②必须收 wrapup 而非回 reason:verify 只在 `finish` 或 must_stop 后到达(见 `reason_route`),
+/// 故「未过且非 must_stop」恒是「模型已 finish 却被否」。回 reason 只会让模型见几乎不变的状态**原地再收尾**,
+/// 而此环中 `act` 从不跑 → `stall`/`err_streak` 皆冻结、两个熔断器都失灵,唯一出口是 `steps` 撞 `MAX_STEPS`(2000),
+/// 白烧 token 空转收尾。收 wrapup:出一段诚实交接后隐式 END,不成环、不伪装成功。
+/// (下面 `reason` 分支在真实图中不可达 —— verify 前必为 finish/must_stop —— 保留仅为函数完备与防御。)
 pub(crate) fn verify_route_llm(s: &AgentState) -> Vec<String> {
     if s.approved {
         vec![END.to_string()]
-    } else if must_stop(s) {
+    } else if must_stop(s) || s.last_action.as_deref() == Some("finish") {
         vec!["wrapup".to_string()]
     } else {
         vec!["reason".to_string()]
@@ -281,6 +289,36 @@ mod tests {
             sys.contains(tools::default_shell()),
             "应含宿主默认 shell 名"
         );
+    }
+
+    /// 失败判据**结构化**(单一真相,不认裸子串):正常输出含 "error"/"failed" 字样(grep 命中、
+    /// 日志、`0 failed`)**不**判失败 —— 免把已完成的收尾误踢进无尽环;结构信号(非零 exit / ` error:` /
+    /// BLOCKED / permission)仍判失败,与 [`is_error_observation`] 逐例同源。
+    #[test]
+    fn tool_output_failed_is_structural_not_substring() {
+        // 正常内容含吓人字样 → 不判失败(旧松散判据的误报源、无尽收尾环的触发器)。
+        assert!(!tool_output_failed("grep 命中: src/x.rs 处理 error 分支"));
+        assert!(!tool_output_failed(
+            "build log: 0 errors, 0 failed — all good"
+        ));
+        assert!(!tool_output_failed("exit 0: ok"));
+        // 结构信号仍判失败(不可伪造)。
+        assert!(tool_output_failed("exit 1: boom"));
+        assert!(tool_output_failed("read error: no such file"));
+        assert!(tool_output_failed("BLOCKED (dangerous: rm -rf)"));
+        assert!(tool_output_failed("permission denied by user: run_shell"));
+        // 与结构化判据逐例同源(免判据分叉)。
+        for o in [
+            "grep: error 分支",
+            "0 errors, 0 failed",
+            "exit 0: ok",
+            "exit 1: boom",
+            "read error: x",
+            "BLOCKED xxx",
+            "permission denied yyy",
+        ] {
+            assert_eq!(tool_output_failed(o), crate::exec::is_error_observation(o));
+        }
     }
 
     /// harness-aware 系统提示词:把 iter-17/19/20 后新成的**物理契约**讲给模型 ——
