@@ -12,8 +12,23 @@ permissions:
   contents: write
 
 jobs:
+  # 先建好 Release(幂等),再让矩阵各目标往里传产物 —— 根除「五 job 并发抢着创建 Release
+  # 全落空、轮询 release not found 超时」的竞态(此前偶发全败,靠重跑碰运气)。
+  create-release:
+    name: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+                 --title "$GITHUB_REF_NAME" --generate-notes
+
   build:
     name: ${{ matrix.target }}
+    needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
