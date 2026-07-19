@@ -11,8 +11,30 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-/// 读文件全文。
+/// 读文件全文。读到**目录**则不抛裸 OS 错(Windows 报「拒绝访问 (os error 5)」会误导 agent 反复瞎试),
+/// 而是列出该目录条目(子目录带 `/` 后缀)—— agent 读到目录多半就是想看里面有什么,直接给它。
 pub fn read_file(path: impl AsRef<Path>) -> io::Result<String> {
+    let path = path.as_ref();
+    if path.is_dir() {
+        let mut names: Vec<String> = std::fs::read_dir(path)?
+            .filter_map(|e| e.ok())
+            .map(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    format!("{n}/")
+                } else {
+                    n
+                }
+            })
+            .collect();
+        names.sort();
+        return Ok(format!(
+            "[目录 {}] {} 项(read_file 只读文件;下列为条目,读内容请对具体文件再 read_file):\n{}",
+            path.display(),
+            names.len(),
+            names.join("\n")
+        ));
+    }
     std::fs::read_to_string(path)
 }
 
@@ -184,9 +206,13 @@ fn search_dir(
     Ok(())
 }
 
-/// 极简 glob:`*` / `*.rs`(后缀)/ `main.*`(前缀)/ 精确名。ponytail: 只认单个 `*`,够用即可。
+/// 极简 glob:`*` / `*.rs`(后缀)/ `main.*`(前缀)/ 精确名;`**/` 递归前缀等价于无前缀
+/// —— search 本就深搜所有子目录,故 `**/*.rs` 应同 `*.rs`。令**业界标准写法** `**/*.rs`
+/// 正常命中,不再因不识 `**/` 而静默返回「(no matches)」误导 agent(实测踩坑)。
+/// ponytail: 只认单个 `*` + 可选 `**/` 前缀;匹配**文件名**非全路径,故 `src/**/*.rs` 式路径 glob 不支持。
 fn glob_match(pat: &str, name: &str) -> bool {
-    if pat == "*" || pat.is_empty() {
+    let pat = pat.strip_prefix("**/").unwrap_or(pat);
+    if pat == "*" || pat == "**" || pat.is_empty() {
         true
     } else if let Some(suffix) = pat.strip_prefix('*') {
         name.ends_with(suffix)
@@ -544,6 +570,51 @@ mod tests {
         assert!(glob_match("Cargo.*", "Cargo.toml"));
         assert!(glob_match("Cargo.toml", "Cargo.toml"));
         assert!(!glob_match("Cargo.toml", "cargo.toml"));
+        // `**/` 递归前缀(业界标准写法)须等价于无前缀 —— 曾因不识 `**/` 静默零结果误导 agent。
+        assert!(
+            glob_match("**/*.rs", "command.rs"),
+            "**/*.rs 应命中 .rs 文件名"
+        );
+        assert!(!glob_match("**/*.rs", "notes.txt"));
+        assert!(glob_match("**/*", "whatever"));
+        assert!(glob_match("**/Cargo.toml", "Cargo.toml"));
+    }
+
+    /// 回归:标准 `**/*.rs` glob 从根**递归**命中子目录里的 .rs(曾静默返回「无匹配」)。
+    #[test]
+    fn search_recursive_glob_double_star_matches() {
+        let dir = std::env::temp_dir().join("ridge_search_recursive");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        write_file(dir.join("sub").join("deep.rs"), "struct Command;\n").unwrap();
+        let hits = search(&dir, "Command", "**/*.rs").unwrap();
+        assert!(
+            hits.contains("deep.rs:1:"),
+            "**/*.rs 应递归命中子目录 .rs: {hits}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 回归:read_file 读到目录 → 列条目(不抛裸 OS 错误导 agent)。
+    #[test]
+    fn read_file_on_dir_lists_entries() {
+        let dir = std::env::temp_dir().join("ridge_readdir_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        write_file(dir.join("a.rs"), "x").unwrap();
+        let out = read_file(&dir).unwrap();
+        assert!(out.contains("[目录"), "应标注是目录: {out}");
+        assert!(out.contains("a.rs"), "应列出文件: {out}");
+        assert!(out.contains("nested/"), "子目录应带 / 后缀: {out}");
+        assert!(
+            !is_error_observation_like(&out),
+            "不应是裸错误(误导判据): {out}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    // 轻量本地判据(避免依赖 agent crate):目录列表不应含裸 OS 错误串。
+    fn is_error_observation_like(s: &str) -> bool {
+        s.contains("error") || s.contains("拒绝访问") || s.contains("os error")
     }
 
     #[test]
