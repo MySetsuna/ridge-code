@@ -2,14 +2,15 @@ use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 
 use agent::{
-    apply_login, auth_parse, auth_upsert, auto_signal_from_run, build_agent, build_llm_agent_full,
-    builtin_tool_specs, compact_history, default_tool, est_tokens, expand_mentions,
-    extract_signals_from_run, halt_reason, load_commands, load_signal_block, load_skills,
-    null_token_bus, preset_by_id, render_todos, resolve_mcp, resolve_top_level_key, scripted,
-    signal_extract_enabled, tool_output_failed, write_run, AgentState, Approver, AutoApprove,
-    Color, Config, McpTools, RichOutput, Skill, SlashCommand, Todo, TokenBus, PROVIDER_PRESETS,
+    agent_run_config, apply_login, auth_parse, auth_upsert, auto_signal_from_run, build_agent,
+    build_llm_agent_full, builtin_tool_specs, compact_history, default_tool, est_tokens,
+    expand_mentions, extract_signals_from_run, halt_reason, load_commands, load_signal_block,
+    load_skills, null_token_bus, preset_by_id, render_todos, resolve_mcp, resolve_top_level_key,
+    scripted, signal_extract_enabled, tool_output_failed, write_run, AgentState, Approver,
+    AutoApprove, Color, Config, McpTools, RichOutput, Skill, SlashCommand, Todo, TokenBus,
+    PROVIDER_PRESETS,
 };
-use langgraph::{CompiledGraph, RunConfig, StreamEvent};
+use langgraph::{CompiledGraph, StreamEvent};
 use mcp::{McpClient, StdioTransport};
 use provider::{AnthropicProvider, LlmProvider, Message, OpenAiProvider, SwapProvider};
 
@@ -79,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
     // `login` 子命令:内置供应商一键接入(在解析任务前拦下,免被当成任务串)。
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.first().map(|s| s.as_str()) == Some("login") {
+        apply_config_proxy(&load_config()); // CLI login 的连通校验也走 config 里配的代理
         return run_login(&raw[1..]).await;
     }
     init_tracing();
@@ -94,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
         std::env::set_current_dir(dir)?;
     }
     let cfg = load_config(); // ~/.ridge/config.json(env 仍覆盖)
+    apply_config_proxy(&cfg); // 配了 proxy 则注入 HTTP(S)_PROXY,出站 HTTP 走它(墙内接 x.ai/claude 等)
     let auth = load_auth(); // ~/.ridge/auth.json 密钥库(login 存的 key)
 
     // key 优先(env/inline/key_env/providers[]);全无则回退 OAuth 订阅凭据(iter-43:login --claude)。
@@ -194,6 +197,40 @@ fn load_config() -> Config {
         eprintln!("[ridgecode] loaded config {path}");
     }
     cfg
+}
+
+/// 把代理串注入进程 `HTTP(S)_PROXY`(大小写各一,reqwest/curl 皆认)。空串 = 不动。
+/// 此后**新建**的 reqwest 客户端(provider 补全 / 登录 verify / 联网抓取)出站即走它。
+/// `/config set proxy` 的 live 应用与启动注入共用本函数(强制覆盖:用户既已明设,以其为准)。
+pub(crate) fn apply_proxy_env(proxy: &str) {
+    let p = proxy.trim();
+    if p.is_empty() {
+        return;
+    }
+    for var in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+        std::env::set_var(var, p);
+    }
+}
+
+/// 启动时据 config 落代理:配了 `proxy` 且进程**未**显式设 HTTP(S)_PROXY 才注入 —— 让 shell 的
+/// 临时 env 覆盖优先(与其余 env-覆盖-config 的约定一致)。见 [`apply_proxy_env`]。
+fn apply_config_proxy(cfg: &Config) {
+    let Some(p) = cfg
+        .proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    let env_set = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]
+        .iter()
+        .any(|v| std::env::var_os(v).map(|x| !x.is_empty()).unwrap_or(false));
+    if env_set {
+        return; // 尊重进程已有的显式代理
+    }
+    apply_proxy_env(p);
+    eprintln!("[ridgecode] proxy ← config: {p}");
 }
 
 /// 把一个标量键持久化进 config.json(保留其余键;目录/文件不存在则新建)。

@@ -1,12 +1,22 @@
-use langgraph::GraphState;
+use langgraph::{GraphState, RunConfig};
 use provider::{Message, ToolCall};
 use std::collections::BTreeSet;
 
-/// 回合硬上限 —— **防跑飞的后备护栏**,非正常终止手段。真正的停机主力是:`approved`(目标达成)、
-/// 预算熔断(`budget_tokens`)、无进展检测(`stalled`)。旧值 8 过低,真实多文件任务动辄十数次工具调用即被腰斩;
-/// 提到 30(≈60 超步,稳在引擎默认 100 超步之下,无需动引擎/RunConfig)。要更长任务:设 `budget_tokens` 控成本、
-/// 或后续把本上限做成可配 + 按其派生引擎超步上限(见 CONTRACT-iteration-15)。
-pub const MAX_STEPS: usize = 30;
+/// 回合上限 —— **防跑飞的后备护栏**,非正常终止手段。真正的停机主力是:`approved`(目标达成)、
+/// 无进展检测(`stalled`,连 3 轮同输出即停)、连错熔断(`circuit_broken`,连 5 轮报错即停)。
+/// 抬到 2000:让**真实长任务能跑完**,而非被腰斩(用户诉求)。命中此上限**不是硬杀**——经 `wrapup`
+/// 软中止,让模型总结进度 + 规划后续供用户参考(见 `verify_route_llm`)。预算护栏默认关(`budget_tokens=0`),
+/// 卡死由 stall/circuit 早停兜底,故 2000 只有**持续有进展**的长任务才会触达。
+/// 注意:上限一抬,引擎超步上限须随之派生(见 [`agent_run_config`]),否则先撞引擎默认 100 超步的 `StepLimit`。
+pub const MAX_STEPS: usize = 2000;
+
+/// 本 agent 的运行参数:引擎超步上限据 [`MAX_STEPS`] **派生**(每 step ≈ 2 超步 reason+act,
+/// 加收尾余量 verify+wrapup)。使「跑多久」真正由 MAX_STEPS 决定,不被引擎默认 100 超步提前腰斩。
+pub fn agent_run_config() -> RunConfig {
+    RunConfig {
+        max_supersteps: MAX_STEPS * 2 + 50,
+    }
+}
 
 /// 一条任务清单项(像 Claude Code 的 TodoWrite):`status` ∈ `pending` / `in_progress` / `completed`。
 #[derive(Clone, Debug, PartialEq)]

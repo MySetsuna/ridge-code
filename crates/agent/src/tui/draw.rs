@@ -129,8 +129,10 @@ pub(crate) fn draw(
         ])
         .split(area);
     // [0] 流式尾巴:只画最后 K 行(已完段落随 Superstep 静态提交进历史)。
+    // 分道显示:**回答**(白·粗)恒显且优先占行;其上用剩余行显**思考**(灰·暗),
+    // 免把回答当思考、也不让长思考挤掉回答。回答空(仍在思考)时全用来显思考。
     let k = outer[0].height as usize;
-    let mut tail: Vec<Line> = stream_tail(&ui.stream, k)
+    let answer_lines: Vec<Line> = stream_tail(&ui.stream, k)
         .into_iter()
         .map(|s| {
             Line::from(Span::styled(
@@ -141,6 +143,19 @@ pub(crate) fn draw(
             ))
         })
         .collect();
+    let mut tail: Vec<Line> = Vec::with_capacity(k);
+    let remaining = k.saturating_sub(answer_lines.len());
+    if remaining > 0 && !ui.reasoning.is_empty() {
+        for s in stream_tail(&ui.reasoning, remaining) {
+            tail.push(Line::from(Span::styled(
+                s.to_owned(),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM | Modifier::ITALIC),
+            )));
+        }
+    }
+    tail.extend(answer_lines);
     // 流式呼吸游标(iter-28):busy 时尾缀青色 █,按帧奇偶 BOLD/DIM 交替。
     if ui.busy {
         let cursor = Span::styled(

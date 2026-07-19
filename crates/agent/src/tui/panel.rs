@@ -95,6 +95,7 @@ pub(crate) fn config_value(cfg: &Config, key: &str) -> String {
             .allow_jailbreak
             .map(|b| b.to_string())
             .unwrap_or_default(),
+        "proxy" => cfg.proxy.clone().unwrap_or_default(),
         _ => String::new(),
     }
 }

@@ -62,19 +62,60 @@ fn plain_text_response_has_no_tool_calls() {
 }
 
 #[test]
-fn strips_thinking_tags_from_content() {
-    // 成对块。
-    assert_eq!(strip_thinking("<think>reasoning here</think>pong"), "pong");
-    // GLM 实测:游离的 </think> 漏进正文。
-    assert_eq!(
-        strip_thinking("\nresult\n</think>\nThe answer"),
-        "result\n\nThe answer".trim()
-    );
-    // 无标签原样(去首尾空白)。
+fn splits_thinking_from_answer() {
+    // 成对块:块内为思考,块外为回答。
+    let (a, t) = extract_inline_think("<think>reasoning here</think>pong");
+    assert_eq!((a.as_str(), t.as_str()), ("pong", "reasoning here"));
+    // GLM 实测:**裸 `</think>`**(无起始标签)漏进正文 → 其前为思考、其后为回答。
+    // (旧代码只删标签、把「思考」并进回答显示,正是用户所诉「回答/思考错位」根因,此处订正。)
+    let (a, t) = extract_inline_think("\nresult\n</think>\nThe answer");
+    assert_eq!((a.as_str(), t.as_str()), ("The answer", "result"));
+    // 孤立未闭合 `<think>`(流式截断)→ 其后全为思考。
+    let (a, t) = extract_inline_think("ans<think>tail thinking");
+    assert_eq!((a.as_str(), t.as_str()), ("ans", "tail thinking"));
+    // 无标签原样(去首尾空白),全为回答。
     assert_eq!(strip_thinking("  clean  "), "clean");
 
-    let wire = json!({"choices": [{"message": {"content": "<think>x</think>done"}}]});
-    assert_eq!(openai::parse_response(&wire).unwrap().text, "done");
+    // 非流式:独立 `reasoning_content` 字段 → 进 reasoning,`content` 进 text(GLM 主路径)。
+    let wire =
+        json!({"choices": [{"message": {"content": "done", "reasoning_content": "let me think"}}]});
+    let c = openai::parse_response(&wire).unwrap();
+    assert_eq!(
+        (c.text.as_str(), c.reasoning.as_str()),
+        ("done", "let me think")
+    );
+    // 非流式:inline `<think>` 仍被剥净并归入 reasoning。
+    let wire2 = json!({"choices": [{"message": {"content": "<think>x</think>done"}}]});
+    let c2 = openai::parse_response(&wire2).unwrap();
+    assert_eq!((c2.text.as_str(), c2.reasoning.as_str()), ("done", "x"));
+}
+
+/// 流式:`reasoning_content` 增量走 [`StreamChunk::Reasoning`],`content` 走 `Answer`,两路互不污染。
+#[tokio::test]
+async fn streaming_splits_reasoning_and_answer() {
+    let frames: Vec<String> = vec![
+        r#"{"choices":[{"delta":{"reasoning_content":"想一下"}}]}"#.into(),
+        r#"{"choices":[{"delta":{"content":"你好"}}]}"#.into(),
+        r#"{"choices":[{"delta":{"content":",世界"}}]}"#.into(),
+        r#"{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3}}"#.into(),
+    ];
+    let p = OpenAiProvider::new("http://unused", "gpt-x", "key")
+        .with_http(Arc::new(FakeStream(frames)));
+    let req = CompletionRequest {
+        messages: vec![Message::user("hi")],
+        tools: vec![],
+    };
+    let answer = std::sync::Mutex::new(String::new());
+    let reasoning = std::sync::Mutex::new(String::new());
+    let on_token = |c: StreamChunk| match c {
+        StreamChunk::Answer(t) => answer.lock().unwrap().push_str(&t),
+        StreamChunk::Reasoning(t) => reasoning.lock().unwrap().push_str(&t),
+    };
+    let c = p.complete_streaming(&req, &on_token).await.unwrap();
+    assert_eq!(c.text, "你好,世界");
+    assert_eq!(c.reasoning, "想一下");
+    assert_eq!(*answer.lock().unwrap(), "你好,世界");
+    assert_eq!(*reasoning.lock().unwrap(), "想一下");
 }
 
 /// 多轮工具历史 → OpenAI wire:assistant 带 tool_calls,工具结果是 role=tool + tool_call_id。
@@ -287,7 +328,11 @@ async fn openai_streaming_assembles_text_tokens_toolcalls_usage() {
         tools: vec![],
     };
     let streamed = std::sync::Mutex::new(String::new());
-    let on_token = |t: String| streamed.lock().unwrap().push_str(&t);
+    let on_token = |c: StreamChunk| {
+        if let StreamChunk::Answer(t) = c {
+            streamed.lock().unwrap().push_str(&t);
+        }
+    };
     let c = p.complete_streaming(&req, &on_token).await.unwrap();
     // 逐字回调拼起来 == 完整文本。
     assert_eq!(*streamed.lock().unwrap(), "你好,世界");
@@ -311,7 +356,11 @@ async fn streaming_falls_back_to_whole_text() {
     };
     let got = std::sync::Mutex::new(String::new());
     let c = p
-        .complete_streaming(&req, &|t: String| got.lock().unwrap().push_str(&t))
+        .complete_streaming(&req, &|c: StreamChunk| {
+            if let StreamChunk::Answer(t) = c {
+                got.lock().unwrap().push_str(&t);
+            }
+        })
         .await
         .unwrap();
     assert_eq!(c.text, "整段回答");

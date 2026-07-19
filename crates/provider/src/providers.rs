@@ -51,7 +51,7 @@ impl LlmProvider for OpenAiProvider {
     async fn complete_streaming(
         &self,
         req: &CompletionRequest,
-        on_token: &(dyn Fn(String) + Send + Sync),
+        on_token: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<Completion, ProviderError> {
         let mut body = openai::build_request(&self.model, req);
         body["stream"] = Value::Bool(true);
@@ -79,8 +79,11 @@ impl LlmProvider for OpenAiProvider {
             // 传输不支持流式(或流式失败)→ 降级到整段 complete(不丢功能)。
             Err(_) => {
                 let c = self.complete(req).await?;
+                if !c.reasoning.is_empty() {
+                    on_token(StreamChunk::Reasoning(c.reasoning.clone()));
+                }
                 if !c.text.is_empty() {
-                    on_token(c.text.clone());
+                    on_token(StreamChunk::Answer(c.text.clone()));
                 }
                 Ok(c)
             }

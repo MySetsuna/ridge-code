@@ -108,9 +108,22 @@ impl Usage {
 /// 一次补全结果:自然语言文本 + 若干工具调用 + token 用量。
 #[derive(Clone, Debug, Default)]
 pub struct Completion {
+    /// 面向用户的**回答**(OpenAI `content` / Anthropic text),已剥除思考。
     pub text: String,
+    /// 思考模型的**推理正文**(GLM `reasoning_content` / inline `<think>`)。仅供展示,
+    /// **不回灌** history(免污染上下文、免端点拒收)。无思考则空。
+    pub reasoning: String,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Usage,
+}
+
+/// 流式增量的一段。思考模型(GLM 等)两路输出:`Answer` = 回答正文(`content`),
+/// `Reasoning` = 思考(`reasoning_content`)。TUI/headless 据此**分区分色**——回答恒显(白),
+/// 思考灰显。旧代码把二者塌缩成一路、再粗剪,遂令回答被吞或误当思考,此枚举为根治。
+#[derive(Clone, Debug)]
+pub enum StreamChunk {
+    Answer(String),
+    Reasoning(String),
 }
 
 /// 一次补全请求:对话历史 + 可用工具。
@@ -120,21 +133,58 @@ pub struct CompletionRequest {
     pub tools: Vec<ToolSpec>,
 }
 
-/// 剥掉思考模型漏进正文的 `<think>...</think>` 块与游离标签(如 GLM 会把 `</think>` 漏进 content)。
-pub(crate) fn strip_thinking(text: &str) -> String {
-    let mut s = text.to_string();
-    // 成对的 <think>...</think> 块整段删掉。
-    while let (Some(a), Some(b)) = (s.find("<think>"), s.find("</think>")) {
-        if b > a {
-            s.replace_range(a..b + "</think>".len(), "");
-        } else {
-            break; // 闭合早于开启 → 交给下面的游离标签清理
+/// 从正文**剥出** inline 思考,返回 `(净回答, 思考)`。覆盖思考模型三种漏法:
+/// ①成对 `<think>…</think>`;②**裸 `</think>`**(无起始标签 —— GLM 常态:思考在前、答案在后,
+/// 以裸 `</think>` 分隔 → 其前全为思考,旧代码只删标签、把思考并进回答,是「回答被当思考」之一因);
+/// ③孤立未闭合 `<think>`(流式截断)→ 其后全为思考。多段循环处理。
+pub(crate) fn extract_inline_think(text: &str) -> (String, String) {
+    let (mut answer, mut think) = (String::new(), String::new());
+    let mut rest = text;
+    while !rest.is_empty() {
+        let a = rest.find("<think>");
+        let b = rest.find("</think>");
+        match (a, b) {
+            // 成对 `<think>…</think>`:块前是回答,块内是思考。
+            (Some(a), Some(b)) if a < b => {
+                answer.push_str(&rest[..a]);
+                think.push_str(&rest[a + "<think>".len()..b]);
+                rest = &rest[b + "</think>".len()..];
+            }
+            // 孤立未闭合 `<think>`(流式截断):其后全为思考。
+            (Some(a), None) => {
+                answer.push_str(&rest[..a]);
+                think.push_str(&rest[a + "<think>".len()..]);
+                rest = "";
+            }
+            // 裸/前置 `</think>`(含 a≥b 的错序):其前皆思考(GLM 无起始标签的常态)。
+            (_, Some(b)) => {
+                think.push_str(&rest[..b]);
+                rest = &rest[b + "</think>".len()..];
+            }
+            // 无任何标签:剩余全是回答。
+            (None, None) => {
+                answer.push_str(rest);
+                rest = "";
+            }
         }
     }
-    s.replace("<think>", "")
-        .replace("</think>", "")
-        .trim()
-        .to_string()
+    (answer.trim().to_string(), think.trim().to_string())
+}
+
+/// 分出 `(回答, 思考)`:把 content 里的 inline 思考剥出,与独立 `reasoning_content` 字段合并。
+pub(crate) fn split_thinking(content: &str, reasoning_field: &str) -> (String, String) {
+    let (answer, inline) = extract_inline_think(content);
+    let reasoning = match (reasoning_field.trim().is_empty(), inline.is_empty()) {
+        (true, _) => inline,
+        (false, true) => reasoning_field.trim().to_string(),
+        (false, false) => format!("{}\n{inline}", reasoning_field.trim()),
+    };
+    (answer, reasoning)
+}
+
+/// 只要回答、丢思考的便捷包装(保留旧调用点/测试)。
+pub(crate) fn strip_thinking(text: &str) -> String {
+    extract_inline_think(text).0
 }
 
 /// LLM provider 抽象。真实实现(Anthropic/OpenAI HTTP)与离线 [`ScriptedProvider`] 都藏在这后面。
@@ -149,11 +199,14 @@ pub trait LlmProvider: Send + Sync {
     async fn complete_streaming(
         &self,
         req: &CompletionRequest,
-        on_token: &(dyn Fn(String) + Send + Sync),
+        on_token: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<Completion, ProviderError> {
         let c = self.complete(req).await?;
+        if !c.reasoning.is_empty() {
+            on_token(StreamChunk::Reasoning(c.reasoning.clone()));
+        }
         if !c.text.is_empty() {
-            on_token(c.text.clone());
+            on_token(StreamChunk::Answer(c.text.clone()));
         }
         Ok(c)
     }
@@ -192,7 +245,7 @@ impl LlmProvider for SwapProvider {
     async fn complete_streaming(
         &self,
         req: &CompletionRequest,
-        on_token: &(dyn Fn(String) + Send + Sync),
+        on_token: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<Completion, ProviderError> {
         self.current().complete_streaming(req, on_token).await
     }

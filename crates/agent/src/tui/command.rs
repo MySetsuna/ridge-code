@@ -144,6 +144,8 @@ pub(crate) fn apply_config_live(
                 val.to_string()
             }
         }
+        // 代理即时注入 env:下一次登录 verify / 新建 provider 立即走它,无需重启。
+        "proxy" => crate::apply_proxy_env(val),
         _ => {} // budget_tokens/skills_dir/skip_danger:仅持久化,下次启动生效。
     }
 }

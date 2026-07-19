@@ -7,7 +7,7 @@ use crate::mcp_tools::*;
 use crate::observe::*;
 use crate::state::*;
 use langgraph::{CompiledGraph, GraphError, StateGraph};
-use provider::{CompletionRequest, LlmProvider, Message, Role};
+use provider::{CompletionRequest, LlmProvider, Message, Role, StreamChunk};
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -15,9 +15,10 @@ use std::sync::Arc;
 //(signals.rs 经 `use crate::graph::*` 依赖它,不在本次改动范围内)。
 pub(crate) use crate::orchestrate::halt_reason;
 
-/// 流式 token 总线:REPL 每回合把一个 sender 塞进来,reason 节点边收 provider 的增量文本
-/// 边往里发,REPL 侧就能**逐字显示**(像 Claude Code)。`None` = 该回合不流式。
-pub type TokenBus = Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>;
+/// 流式 token 总线:REPL 每回合把一个 sender 塞进来,reason 节点边收 provider 的增量
+/// 边往里发,REPL 侧就能**逐字显示**(像 Claude Code)。载 [`StreamChunk`] 以**分道**回答/思考
+/// (回答恒显、思考灰显)。`None` = 该回合不流式。
+pub type TokenBus = Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<StreamChunk>>>>;
 
 /// 一个「永不流式」的空总线(测试 / 非交互装配用)。
 pub fn null_token_bus() -> TokenBus {
@@ -144,10 +145,10 @@ fn build_core(
                 messages: to_messages(&system, &s),
                 tools,
             };
-            // 流式:provider 每吐一段文本就发进总线,REPL 侧逐字显示。无总线 sender 则等同整段。
-            let on_token = move |t: String| {
+            // 流式:provider 每吐一段(回答/思考)就发进总线,REPL 侧分道逐字显示。无 sender 则等同整段。
+            let on_token = move |chunk: StreamChunk| {
                 if let Some(tx) = bus.lock().unwrap().as_ref() {
-                    let _ = tx.send(t);
+                    let _ = tx.send(chunk);
                 }
             };
             tracing::debug!(step = s.steps + 1, msgs = req.messages.len(), "llm request");
@@ -319,10 +320,50 @@ fn build_core(
         }
     }
 
+    // 收束回合(#2 / 软中止):运行到达安全上限(回合上限)或卡死(无进展/连错)时,不再哑然腰斩,
+    // 而是**软暂停**——让模型产一段面向用户的交接:已完成 / 还剩什么 / 建议的后续步骤,供用户参考续跑。
+    // 一次非流式补全、不 offer 工具(逼其只出文本)、无出边 → 隐式 END,天然不成环、不会二次熔断。
+    let provider_wrap = provider.clone();
+    let system_wrap = system.clone();
+    g.add_node("wrapup", move |s: AgentState| {
+        let provider = provider_wrap.clone();
+        let system = system_wrap.clone();
+        async move {
+            let reason = halt_reason(&s);
+            let mut messages = to_messages(&system, &s);
+            messages.push(Message::new(
+                Role::System,
+                format!(
+                    "本轮到此**软暂停**(原因:{}。不是失败,且已不能再调用工具)。请用**用户的语言**\
+                     写一段供用户参考的交接说明:①目前已完成/已改动了什么;②还剩什么没做;\
+                     ③若要继续,给出具体、可直接照做的后续步骤或计划。直接说给用户听,\
+                     别提「护栏/节点/超步」等内部机制。",
+                    reason.as_str()
+                ),
+            ));
+            let req = CompletionRequest {
+                messages,
+                tools: vec![],
+            };
+            // 交接说明生成失败也不阻断收尾(给个占位文本),halt_reason 仍据终态判定不变。
+            let (text, tokens) = match provider.complete(&req).await {
+                Ok(c) => (c.text, c.usage.total() as usize),
+                Err(e) => (format!("(交接说明生成失败:{e})"), 0),
+            };
+            Ok::<_, Infallible>(Patch::Batch(vec![
+                Patch::AddTokens(tokens),
+                // 以 `(final)` 约定渲染成模型终答(🤖 白);⏸ 标记「软暂停」+ 原因,供用户一眼分辨非正常完成。
+                Patch::Message(format!("(final) ⏸ [{}] {}", reason.as_str(), text)),
+                Patch::PushHistory(Message::assistant(text)),
+            ]))
+        }
+    });
+
     g.set_entry("reason");
     g.add_conditional_edge("reason", reason_route);
     g.add_edge("act", "reason");
-    g.add_conditional_edge("verify", verify_route);
+    // LLM 路径专用 verify 路由:熔断 → wrapup(收束回合)→ 隐式 END。
+    g.add_conditional_edge("verify", verify_route_llm);
 
     g.compile()
 }
@@ -367,6 +408,7 @@ mod tests {
     }
 
     /// 大脑永不收工 + 工具永远失败:循环必须在回合上限处停机,而不是烧到天荒地老。
+    /// 从**已接近上限**起跑,只需几步即触达 —— 快、且不依赖 `MAX_STEPS` 的具体值(现为 2000)。
     #[tokio::test]
     async fn broken_loop_terminates_at_cap() {
         struct NeverDone;
@@ -378,13 +420,12 @@ mod tests {
         let tool: Tool = Arc::new(|_a: &str| "tests: 1 failed".to_string());
         let app = build_agent(Arc::new(NeverDone), tool).unwrap();
 
+        let start = AgentState {
+            steps: MAX_STEPS - 2,
+            ..AgentState::new("impossible")
+        };
         let out = app
-            .invoke_with(
-                AgentState::new("impossible"),
-                &RunConfig::default(),
-                None,
-                None,
-            )
+            .invoke_with(start, &RunConfig::default(), None, None)
             .await
             .unwrap();
 
@@ -544,10 +585,13 @@ mod tests {
             Arc::new(reviewer),
         )
         .unwrap();
-        let out = app
-            .invoke(AgentState::new("make tests pass"))
-            .await
-            .unwrap();
+        // 近上限起跑:reviewer 每轮打回 → 本会一路重试到步上限;seed 令其两步即触达软中止,
+        // 快且不改断言本意(reviewer REJECT → 终不批准)。
+        let start = AgentState {
+            steps: MAX_STEPS - 2,
+            ..AgentState::new("make tests pass")
+        };
+        let out = app.invoke(start).await.unwrap();
 
         assert!(!out.approved, "独立 reviewer 应拦下作弊,即使确定性闸已过");
         assert!(out.messages.iter().any(|m| m.contains("reviewer REJECT")));
@@ -606,5 +650,85 @@ mod tests {
         assert!(out.approved, "模型 finish 且无失败信号 → 接受,不该空转");
         assert_eq!(out.steps, 2);
         std::fs::remove_file(&path).ok();
+    }
+
+    /// #2 收束回合:护栏熔断(超预算)后不哑然 END,而是先经 `wrapup` 让模型产一段
+    /// 面向用户的收束陈述(带停机原因标记),再结束。用离线 ScriptedProvider 模拟「反复调工具、
+    /// 从不完成」直到超预算,零联网。
+    #[tokio::test]
+    async fn guardrail_halt_runs_wrapup_summary() {
+        use provider::{Completion, ScriptedProvider, Usage};
+        // 每次 reason 都调一个**必失败**的工具(读不存在的文件 → 非成功信号 → verify 不放行),
+        // 且每步计 100 token;预算 150 → 第 2 次 reason 即超预算熔断。第 3 条(complete)是收束陈述。
+        let tool_call = || Completion {
+            tool_calls: vec![ToolCall {
+                id: "t".to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "no/such/xyzzy-does-not-exist.txt"}),
+            }],
+            usage: Usage {
+                prompt_tokens: 100,
+                completion_tokens: 0,
+            },
+            ..Default::default()
+        };
+        let scripted = ScriptedProvider::new(vec![
+            tool_call(),
+            tool_call(),
+            // wrapup 的 provider.complete(非流式)取到这条:模型的收束陈述。
+            Completion {
+                text: "已完成读取尝试;还差有效文件路径;建议确认路径后重试。[WRAPUP_MARK]"
+                    .to_string(),
+                ..Default::default()
+            },
+        ]);
+        let app = build_llm_agent(Arc::new(scripted)).unwrap();
+        let out = app
+            .invoke(AgentState::new("读取某文件").with_budget(150))
+            .await
+            .unwrap();
+
+        assert!(!out.approved, "护栏熔断不应伪装成成功");
+        assert_eq!(halt_reason(&out), HaltReason::Budget, "停机原因应为超预算");
+        // 收束陈述已产出并作为 (final) 终答呈现,且带停机原因标记。
+        let wrapup = out
+            .messages
+            .iter()
+            .find(|m| m.contains("[WRAPUP_MARK]"))
+            .expect("应有一条收束陈述");
+        assert!(
+            wrapup.contains("(final)"),
+            "收束陈述应以 (final) 终答样式呈现"
+        );
+        assert!(
+            wrapup.contains("budget_exceeded"),
+            "收束陈述应前置停机原因标记"
+        );
+        // 收束陈述也进了模型历史(供续轮/审计)。
+        assert!(out
+            .history
+            .iter()
+            .any(|m| m.content.contains("[WRAPUP_MARK]")));
+    }
+
+    /// #2 路由(纯函数):通过 → END;护栏熔断且未过 → wrapup;未过但可继续 → reason。
+    #[test]
+    fn verify_route_llm_sends_guardrail_halt_to_wrapup() {
+        use langgraph::END;
+        let approved = AgentState {
+            approved: true,
+            ..Default::default()
+        };
+        assert_eq!(verify_route_llm(&approved), vec![END.to_string()]);
+        let over_budget = AgentState {
+            budget_tokens: 100,
+            total_tokens: 100,
+            ..Default::default()
+        };
+        assert_eq!(verify_route_llm(&over_budget), vec!["wrapup".to_string()]);
+        assert_eq!(
+            verify_route_llm(&AgentState::default()),
+            vec!["reason".to_string()]
+        );
     }
 }

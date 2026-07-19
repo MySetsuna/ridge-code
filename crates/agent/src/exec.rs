@@ -142,6 +142,36 @@ pub(crate) fn parse_todos(call: &ToolCall) -> Vec<Todo> {
         .collect()
 }
 
+/// 失败的 run_shell 观察是否该附「Unix 语法撞 PowerShell」纠错提示:
+/// 弱模型惯发 `ls -la`/`grep`/`cat`/`&&`/`~/` 等 bash 语法,撞上 Windows 默认 PowerShell 条条失败、
+/// 空耗回合(半途而废主因之一)。命中 Unix 特征 **且** 用的是 PowerShell/cmd → 给一句可执行的自愈路径。
+/// 已传 bash/sh/pwsh 则不提示(那不是 PS 语法问题)。
+fn unix_syntax_hint(cmd: &str, shell_used: &str) -> Option<&'static str> {
+    if !matches!(shell_used, "powershell" | "cmd") {
+        return None;
+    }
+    const UNIXISMS: [&str; 14] = [
+        "ls -",
+        " -la",
+        " -al",
+        "grep ",
+        "cat ",
+        "head -",
+        "tail -",
+        "rm -",
+        "mkdir -p",
+        "~/",
+        "/dev/null",
+        "export ",
+        "sed -",
+        " && ",
+    ];
+    UNIXISMS.iter().any(|p| cmd.contains(p)).then_some(
+        "  💡 失败疑因把 Unix/bash 语法用在 PowerShell:改用 PS 写法(ls、Select-String、Get-Content;\
+         多命令用 `;` 串联而非 `&&`),或给 run_shell 传 shell:\"bash\"(若 host_env 列了 bash)重试。",
+    )
+}
+
 /// 执行一个结构化工具调用,返回给模型看的观察结果(observation)。用真实的 `tools` crate 干活。
 /// iter-40:前后各串一层 hook(pre_tool 可拦截 / post_tool fire-and-forget)。
 pub fn execute_tool_call(call: &ToolCall) -> String {
@@ -181,7 +211,25 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
                 }
             };
             match result {
-                Ok(r) => format!("exit {}: {}{}", r.code, r.stdout.trim(), r.stderr.trim()),
+                Ok(r) => {
+                    let mut obs =
+                        format!("exit {}: {}{}", r.code, r.stdout.trim(), r.stderr.trim());
+                    // 失败且疑似把 Unix/bash 语法用在 PowerShell → 附纠错提示,助弱模型一次自愈,
+                    // 省掉「ls -la 条条失败」式空耗步(半途而废主因之一)。
+                    if r.code != 0 {
+                        let shell = arg("shell").to_lowercase();
+                        let used = if shell.is_empty() {
+                            tools::default_shell()
+                        } else {
+                            shell.as_str()
+                        };
+                        if let Some(hint) = unix_syntax_hint(cmd, used) {
+                            obs.push('\n');
+                            obs.push_str(hint);
+                        }
+                    }
+                    obs
+                }
                 Err(e) => format!("shell error: {e}"),
             }
         }
@@ -298,6 +346,18 @@ mod tests {
     use crate::*;
     use langgraph::GraphState;
     use std::sync::Arc;
+
+    /// Unix 语法撞 PowerShell 的纠错提示:命中 bash 特征且用 PS/cmd → 提示;已用 bash 或本就是 PS 命令 → 不提示。
+    #[test]
+    fn unix_syntax_hint_only_fires_for_bashism_on_powershell() {
+        assert!(unix_syntax_hint("ls -la ~/.ridge", "powershell").is_some());
+        assert!(unix_syntax_hint("cat foo && grep bar", "cmd").is_some());
+        // 已显式用 bash → 不是 PS 语法问题,不提示。
+        assert!(unix_syntax_hint("ls -la ~/.ridge", "bash").is_none());
+        // 纯 PowerShell 命令(无 bash 特征)失败 → 不误报(如真实构建/命令错)。
+        assert!(unix_syntax_hint("Get-ChildItem C:\\code", "powershell").is_none());
+        assert!(unix_syntax_hint("cargo build", "powershell").is_none());
+    }
 
     /// 验证器抗奖励黑客:成功信号是**行首前缀** `exit 0:`,而非任意位置的 "exit 0" 子串。
     /// 失败命令(`exit 7:`)正文即便含 "exit 0" 文本,也不得被判成功;真实 `exit 0:` 成功仍认。
@@ -619,7 +679,12 @@ mod tests {
         ]);
         let app = build_llm_agent_gated(Arc::new(scripted), McpTools::empty(), Arc::new(AutoDeny))
             .unwrap();
-        let out = app.invoke(AgentState::new("build")).await.unwrap();
+        // 近上限起跑:被拒→verify 失败→重试,本会一路到步上限;seed 令两步即触达软中止,快且断言不变。
+        let start = AgentState {
+            steps: MAX_STEPS - 2,
+            ..AgentState::new("build")
+        };
+        let out = app.invoke(start).await.unwrap();
 
         assert!(out.messages.iter().any(|m| m.contains("permission denied")));
         assert!(!out.approved, "被拒的工具没真跑,拿不到 exit 0");

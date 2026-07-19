@@ -1,5 +1,6 @@
 use super::{
-    strip_thinking, Completion, CompletionRequest, Message, ProviderError, Role, ToolCall, Usage,
+    split_thinking, Completion, CompletionRequest, Message, ProviderError, Role, StreamChunk,
+    ToolCall, Usage,
 };
 use serde_json::{json, Value};
 
@@ -51,7 +52,11 @@ fn message_to_wire(m: &Message) -> Value {
 /// OpenAI 的 `function.arguments` 是 JSON **字符串**,这里解开成对象。
 pub fn parse_response(v: &Value) -> Result<Completion, ProviderError> {
     let msg = &v["choices"][0]["message"];
-    let text = strip_thinking(msg["content"].as_str().unwrap_or(""));
+    // 两路分流:content 的 inline `<think>` 剥出,并与独立 `reasoning_content` 字段(GLM 等)合并。
+    let (text, reasoning) = split_thinking(
+        msg["content"].as_str().unwrap_or(""),
+        msg["reasoning_content"].as_str().unwrap_or(""),
+    );
     let mut tool_calls = Vec::new();
     if let Some(arr) = msg["tool_calls"].as_array() {
         for tc in arr {
@@ -70,6 +75,7 @@ pub fn parse_response(v: &Value) -> Result<Completion, ProviderError> {
     };
     Ok(Completion {
         text,
+        reasoning,
         tool_calls,
         usage,
     })
@@ -79,6 +85,8 @@ pub fn parse_response(v: &Value) -> Result<Completion, ProviderError> {
 #[derive(Default)]
 pub struct StreamAcc {
     pub text: String,
+    /// 思考累加(`reasoning_content` 增量),与 `text` 分道,收尾时进 `Completion.reasoning`。
+    pub reasoning: String,
     pub tool_calls: Vec<ToolCallAcc>,
     pub usage: Usage,
 }
@@ -92,12 +100,23 @@ pub struct ToolCallAcc {
 }
 
 /// 把一帧 SSE delta 叠进累加器;文本增量顺带回调 `on_token`(供逐字显示)。
-/// `on_token` 收 owned `String`(避 async_trait+HRTB 坑);`?Sized` 便于传 `&dyn Fn`。
-pub fn accumulate_stream<F: Fn(String) + ?Sized>(acc: &mut StreamAcc, v: &Value, on_token: &F) {
+/// `on_token` 收 [`StreamChunk`](思考/回答分道),`?Sized` 便于传 `&dyn Fn`。
+/// 思考模型(GLM 等)先流 `reasoning_content`、后流 `content` —— 两路都回调,回答恒显、思考灰显。
+pub fn accumulate_stream<F: Fn(StreamChunk) + ?Sized>(
+    acc: &mut StreamAcc,
+    v: &Value,
+    on_token: &F,
+) {
     let delta = &v["choices"][0]["delta"];
+    if let Some(reasoning) = delta["reasoning_content"].as_str() {
+        if !reasoning.is_empty() {
+            on_token(StreamChunk::Reasoning(reasoning.to_string()));
+            acc.reasoning.push_str(reasoning);
+        }
+    }
     if let Some(content) = delta["content"].as_str() {
         if !content.is_empty() {
-            on_token(content.to_string());
+            on_token(StreamChunk::Answer(content.to_string()));
             acc.text.push_str(content);
         }
     }
@@ -133,7 +152,7 @@ pub fn accumulate_stream<F: Fn(String) + ?Sized>(acc: &mut StreamAcc, v: &Value,
 }
 
 impl StreamAcc {
-    /// 收尾:组装成最终 [`Completion`](剥思考标签、把工具调用 arguments 片段解析回对象)。
+    /// 收尾:组装成最终 [`Completion`](分出回答/思考、把工具调用 arguments 片段解析回对象)。
     pub fn into_completion(self) -> Completion {
         let tool_calls = self
             .tool_calls
@@ -146,8 +165,11 @@ impl StreamAcc {
                     .unwrap_or_else(|_| Value::Object(Default::default())),
             })
             .collect();
+        // content 里若仍漏进 inline `<think>`(流式未走 reasoning_content 的端点),此处剥净并并入思考。
+        let (text, reasoning) = split_thinking(&self.text, &self.reasoning);
         Completion {
-            text: strip_thinking(&self.text),
+            text,
+            reasoning,
             tool_calls,
             usage: self.usage,
         }

@@ -119,7 +119,7 @@ pub(super) async fn run(
     )?);
     let (event_tx, mut event_rx) =
         tokio::sync::mpsc::unbounded_channel::<StreamEvent<AgentState>>();
-    let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<provider::StreamChunk>();
     let (done_tx, mut done_rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<AgentState, String>>();
     let (_guard, mut terminal) = TerminalGuard::enter()?;
@@ -182,7 +182,7 @@ pub(super) async fn run(
         tokio::spawn(async move {
             *bus.lock().unwrap() = Some(tokens);
             let result = app
-                .invoke_with(state, &RunConfig::default(), None, Some(&tx))
+                .invoke_with(state, &agent_run_config(), None, Some(&tx))
                 .await
                 .map_err(|e| e.to_string());
             *bus.lock().unwrap() = None;
@@ -223,7 +223,7 @@ pub(super) async fn run(
                     retry_count = 0; // 新任务:重试计数清零
                     ui.busy = true;
                     ui.phase = "reasoning".into();
-                    ui.stream.clear();
+                    ui.clear_streams();
                     ui.stream_tokens = 0;
                     task_started = Some(Instant::now());
                     printed = 0;
@@ -368,7 +368,7 @@ pub(super) async fn run(
                             handle.abort();
                             *bus.lock().unwrap() = None;
                             ui.busy = false;
-                            ui.stream.clear();
+                            ui.clear_streams();
                             task_started = None;
                             retry_count = 0; // 中断即取消重试链
                             // 中止即取消全部待跑(iter-33):不让排队项在中断后意外接跑。
@@ -446,14 +446,12 @@ pub(super) async fn run(
                     InputAction::Ignore => {}
                 }
             }
-            Some(token) = token_rx.recv() => {
+            Some(chunk) = token_rx.recv() => {
                 ui.busy = true;
-                ui.stream_tokens += est_tokens(&token);
-                ui.stream.push_str(&token);
+                ui.push_chunk(chunk); // 分道:回答→白尾巴,思考→灰尾巴
                 // 批量排空积压 token,免逐 token 一帧。
-                while let Ok(t) = token_rx.try_recv() {
-                    ui.stream_tokens += est_tokens(&t);
-                    ui.stream.push_str(&t);
+                while let Ok(c) = token_rx.try_recv() {
+                    ui.push_chunk(c);
                 }
                 dirty = true;
             }
@@ -479,7 +477,7 @@ pub(super) async fn run(
                         }
                         ui.todos = state.todos;
                         // 流式已完段落随 Superstep 消息历史化,Live 只留尾巴。
-                        ui.stream.clear();
+                        ui.clear_streams();
                         ui.busy = false;
                     }
                 }
@@ -494,7 +492,7 @@ pub(super) async fn run(
             Some(result) = done_rx.recv() => {
                 task = None;
                 ui.busy = false;
-                ui.stream.clear();
+                ui.clear_streams();
                 task_started = None;
                 printed = 0;
                 match result {
@@ -505,16 +503,16 @@ pub(super) async fn run(
                         session_tokens += out.total_tokens;
                         session_turns += 1;
                         ui.todos = out.todos.clone();
+                        // 显停机原因:未通过时把 halt_reason 一并播报(为何停一眼可见),配合「收束回合」的模型陈述。
+                        let status = if out.approved {
+                            "✓ approved".to_string()
+                        } else {
+                            format!("✗ not approved ({})", halt_reason(&out).as_str())
+                        };
                         ui.note(
                             format!(
-                                "{} · steps={} · tokens={}",
-                                if out.approved {
-                                    "✓ approved"
-                                } else {
-                                    "✗ not approved"
-                                },
-                                out.steps,
-                                out.total_tokens
+                                "{status} · steps={} · tokens={}",
+                                out.steps, out.total_tokens
                             ),
                             if out.approved {
                                 Color::Green
@@ -574,7 +572,7 @@ pub(super) async fn run(
                     if ui.splash == SPLASH_TICKS {
                         // 落定 banner:居中 + 不折行(splash_block 逐行 ≤ width)+ tagline。
                         ui.note(splash_block(width).join("\n"), role_color(Role::Primary));
-                        ui.stream.clear();
+                        ui.clear_streams();
                     } else {
                         // 动画帧与落定 banner 同一居中偏移,消除「揭示→落定」的横跳。
                         ui.stream = indent(&splash_frame(ui.splash, SPLASH_TICKS), splash_pad(width));

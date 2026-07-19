@@ -25,7 +25,10 @@ pub(crate) struct Ui {
     /// 待静态提交队列(iter-26):`note` 只入队,主环 drain 经 `insert_before` 写进终端原生历史。
     /// 队列是瞬态的(每圈清空),无需环形上限 —— 有界性由「提交即出队」保证。
     pub(crate) commits: Vec<(String, Color)>,
+    /// 逐字流式的**回答**尾巴(白显)。
     pub(crate) stream: String,
+    /// 逐字流式的**思考**尾巴(`reasoning_content`,灰显)。与 `stream` 分道,免把回答当思考。
+    pub(crate) reasoning: String,
     pub(crate) todos: Vec<Todo>,
     pub(crate) scroll: u16,
     pub(crate) busy: bool,
@@ -48,6 +51,24 @@ impl Ui {
     }
     pub(crate) fn drain_commits(&mut self) -> Vec<(String, Color)> {
         std::mem::take(&mut self.commits)
+    }
+    /// 清空逐字流式两路尾巴(回答 + 思考)—— 超步收尾/新任务/中断时用。
+    pub(crate) fn clear_streams(&mut self) {
+        self.stream.clear();
+        self.reasoning.clear();
+    }
+    /// 一段流式增量按类别入对应尾巴(回答→白,思考→灰),并计入本任务 token 估算。
+    pub(crate) fn push_chunk(&mut self, chunk: provider::StreamChunk) {
+        match chunk {
+            provider::StreamChunk::Answer(t) => {
+                self.stream_tokens += est_tokens(&t);
+                self.stream.push_str(&t);
+            }
+            provider::StreamChunk::Reasoning(t) => {
+                self.stream_tokens += est_tokens(&t);
+                self.reasoning.push_str(&t);
+            }
+        }
     }
 }
 

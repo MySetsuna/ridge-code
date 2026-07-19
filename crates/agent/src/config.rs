@@ -36,6 +36,10 @@ pub struct Config {
     /// 模板,`{cwd}` 占位当前工作目录;user_cmd 作最后单个 arg 追加(免二次 shell 引号)。
     /// 例:`"docker run --rm -v {cwd}:/w -w /w alpine sh -c"`。留空 = 宿主直跑(现状)。
     pub sandbox_cmd: Option<String>,
+    /// 网络代理(可选):形如 `http://127.0.0.1:7890`。配了则启动时注入 `HTTP_PROXY`/`HTTPS_PROXY`
+    /// 环境变量 —— provider 补全、登录连通校验、联网抓取等出站 HTTP 全走它(reqwest 默认认这俩 env)。
+    /// 进程已显式设了同名 env 则尊重之(shell 临时覆盖优先)。留空 = 直连。
+    pub proxy: Option<String>,
 }
 
 /// 一个 Hook(iter-40):某事件发生时跑一条 shell 命令,可选拦截。像 git hooks —— 命令是**用户自己**
@@ -173,6 +177,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "skip_danger",
     "status_bar",
     "allow_jailbreak",
+    "proxy",
 ];
 
 /// 把一个标量键写进 JSON 配置文本,**保留其余键**(如 `mcp`),返回美化后的新文本。
@@ -404,6 +409,20 @@ mod tests {
     }
 
     // ───────────────────── iter-37:preset 表 + auth 密钥库 + login 纯核 ─────────────────────
+
+    /// 代理:`proxy` 是可持久化字符串配置键;`/config set proxy <url>` 往返可被再解析回 `cfg.proxy`。
+    #[test]
+    fn config_set_persists_proxy_string() {
+        assert!(CONFIG_KEYS.contains(&"proxy"));
+        let out = config_set("{}", "proxy", "http://127.0.0.1:51081").unwrap();
+        let cfg = Config::parse(&out);
+        assert_eq!(cfg.proxy.as_deref(), Some("http://127.0.0.1:51081"));
+        // 与其余键并存、互不擦除。
+        let out = config_set(&out, "model", "glm-4.6").unwrap();
+        let cfg = Config::parse(&out);
+        assert_eq!(cfg.proxy.as_deref(), Some("http://127.0.0.1:51081"));
+        assert_eq!(cfg.model.as_deref(), Some("glm-4.6"));
+    }
 
     /// iter-34:`allow_jailbreak` 是可持久化 bool 配置键。
     #[test]

@@ -180,7 +180,7 @@ pub(crate) async fn run_streamed(
 ) -> anyhow::Result<AgentState> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent<AgentState>>();
     // 逐字流式:注册一个 token sender 到总线;reason 节点边收边发,printer 边收边显。
-    let (ttx, mut trx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (ttx, mut trx) = tokio::sync::mpsc::unbounded_channel::<provider::StreamChunk>();
     *token_bus.lock().unwrap() = Some(ttx);
     let tty = std::io::stderr().is_terminal();
     let printer = tokio::spawn(async move {
@@ -188,10 +188,12 @@ pub(crate) async fn run_streamed(
         let spin = RichOutput::new().with_color(Color::BrightBlue);
         let dim = RichOutput::new().with_color(Color::Cyan);
         let answer = RichOutput::new().with_color(Color::BrightWhite).bold();
+        let think = RichOutput::new().with_color(Color::BrightBlack); // 思考:灰显,不抢眼
         let mut frame = 0usize;
         let mut printed = 0usize; // 已打印到第几条 message
         let mut status = String::from("reasoning");
         let mut streaming = false; // 本超步是否正在逐字流式(流式期间不转 spinner、末尾不重复打)
+        let mut stream_mode: Option<bool> = None; // Some(true)=回答段, Some(false)=思考段
         let mut last_todos: Vec<Todo> = Vec::new(); // 任务清单变了才重渲染
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(90));
         loop {
@@ -201,29 +203,42 @@ pub(crate) async fn run_streamed(
                     eprint!("\r\x1b[K{} {}", spin.format(FRAMES[frame]), dim.format(&status));
                     std::io::stderr().flush().ok();
                 }
-                Some(tok) = trx.recv() => {
-                    if !streaming {
-                        if tty { eprint!("\r\x1b[K"); } // 清 spinner,起头
-                        eprint!("{}", answer.format("🤖 "));
-                        streaming = true;
+                Some(chunk) = trx.recv() => {
+                    // 分道:回答(🤖 白)恒显,思考(💭 灰)灰显;两段切换时换行 + 换标记。
+                    let (is_answer, text) = match &chunk {
+                        provider::StreamChunk::Answer(t) => (true, t),
+                        provider::StreamChunk::Reasoning(t) => (false, t),
+                    };
+                    if stream_mode != Some(is_answer) {
+                        if stream_mode.is_none() {
+                            if tty { eprint!("\r\x1b[K"); } // 清 spinner,起头
+                        } else {
+                            eprintln!(); // 思考↔回答切换 → 换行分隔
+                        }
+                        eprint!("{}", if is_answer { answer.format("🤖 ") } else { think.format("💭 ") });
+                        stream_mode = Some(is_answer);
                     }
-                    eprint!("{}", answer.format(&tok)); // 逐字追加(加粗白)
+                    eprint!("{}", if is_answer { answer.format(text) } else { think.format(text) });
                     std::io::stderr().flush().ok();
+                    streaming = true;
                 }
                 ev = rx.recv() => match ev {
                     Some(StreamEvent::NodeFinished { node, .. }) => status = node_label(&node),
                     Some(StreamEvent::Superstep { state, .. }) => {
+                        if streaming {
+                            eprintln!(); // 闭合逐字流式行
+                        }
                         for m in state.messages.iter().skip(printed) {
-                            // 若本超步已逐字流式打过最终答案,则不再重复整段打,只补个换行收尾。
+                            // 已逐字流过的最终答案不再整段重打(思考是瞬态,不入 message、天然不重打)。
                             if streaming && m.contains("(final) ") {
-                                eprintln!();
-                            } else {
-                                if tty { eprint!("\r\x1b[K"); }
-                                eprintln!("{}", format_event(m));
+                                continue;
                             }
+                            if tty { eprint!("\r\x1b[K"); }
+                            eprintln!("{}", format_event(m));
                         }
                         printed = state.messages.len();
                         streaming = false; // 超步收尾 → 下个超步 spinner 恢复
+                        stream_mode = None;
                         // 任务清单有变化 → 渲染 [x]/[~]/[ ] 给用户看进度。
                         if state.todos != last_todos {
                             if !state.todos.is_empty() {
@@ -243,7 +258,7 @@ pub(crate) async fn run_streamed(
     });
 
     let out = app
-        .invoke_with(state, &RunConfig::default(), None, Some(&tx))
+        .invoke_with(state, &agent_run_config(), None, Some(&tx))
         .await?;
     drop(tx);
     *token_bus.lock().unwrap() = None; // 关闭 token 通道 → printer 收尾
@@ -257,6 +272,7 @@ pub(crate) fn node_label(node: &str) -> String {
         "reason" => "reasoning",
         "act" => "running tools",
         "verify" => "verifying",
+        "wrapup" => "wrapping up",
         other => other,
     }
     .to_string()
@@ -318,10 +334,11 @@ pub(crate) fn print_report(out: &AgentState) {
             .bold()
             .format("✓ approved")
     } else {
+        // 显停机原因:让「为何停」一眼可见(budget_exceeded/step_cap/no_progress/…),不再只见「✗」。
         RichOutput::new()
             .with_color(Color::Red)
             .bold()
-            .format("✗ not approved")
+            .format(&format!("✗ not approved ({})", halt_reason(out).as_str()))
     };
     let stats = RichOutput::new()
         .with_color(Color::Cyan)

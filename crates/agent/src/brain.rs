@@ -27,7 +27,9 @@ pub(crate) fn host_env_block() -> String {
     let shells = tools::available_shells().join(", ");
     let default = tools::default_shell();
     let hint = if cfg!(windows) {
-        "路径用 C:\\ 原生形式,勿用 /c/ 式 MSYS 路径;默认非 bash —— 发命令用 PowerShell 语法,或显式传 shell 字段。"
+        "默认 shell 是 PowerShell(非 bash):`ls -la`/`grep`/`cat`/`head`/`tail`/`&&`/`~/` 等 bash 语法会失败。\
+         要么用 PowerShell 写法(`ls`、`Select-String`、`Get-Content`;多命令用 `;` 串联),\
+         要么给 run_shell 传 shell:\"bash\"(若上面 available 列了 bash)。路径用 C:\\ 原生形式,勿用 /c/ 式 MSYS 路径。"
     } else {
         "用 POSIX sh 语法;要 bash 特性显式传 shell:\"bash\"。"
     };
@@ -115,10 +117,24 @@ pub(crate) fn reason_route(s: &AgentState) -> Vec<String> {
     }
 }
 
-/// verify 之后的路由(共用):通过或需停机 → END,否则回 reason。
+/// verify 之后的路由(**scripted 路径**):通过或需停机 → END,否则回 reason。
+/// (scripted 图无 `wrapup` 节点、大脑也不会写自然语言总结,故直接 END。)
 pub(crate) fn verify_route(s: &AgentState) -> Vec<String> {
     if s.approved || must_stop(s) {
         vec![END.to_string()]
+    } else {
+        vec!["reason".to_string()]
+    }
+}
+
+/// verify 之后的路由(**LLM 路径**):通过 → END;护栏熔断(超预算/回合上限/无进展/连错)且未通过
+/// → 先走 `wrapup` 让模型产一段**面向用户的收束陈述**(为何停 / 已成 / 待办 / 阻塞)再 END;
+/// 其余(未过但可继续)→ 回 reason。这样「停机不再哑然」——机器原因(#1)+ 模型自述(#2)双管齐下。
+pub(crate) fn verify_route_llm(s: &AgentState) -> Vec<String> {
+    if s.approved {
+        vec![END.to_string()]
+    } else if must_stop(s) {
+        vec!["wrapup".to_string()]
     } else {
         vec!["reason".to_string()]
     }

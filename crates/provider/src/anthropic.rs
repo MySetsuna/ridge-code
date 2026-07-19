@@ -79,6 +79,9 @@ pub fn parse_response(v: &Value) -> Result<Completion, ProviderError> {
     };
     Ok(Completion {
         text: strip_thinking(&text),
+        // ponytail: Anthropic 原生 thinking 块解析未做(此路径用户暂不走 thinking);置空即可,
+        // 要接时在上面的 block 循环里把 `type=="thinking"` 收进 reasoning。
+        reasoning: String::new(),
         tool_calls,
         usage,
     })

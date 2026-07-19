@@ -68,7 +68,7 @@ $exampleJson = @'
   "model": "glm-4.6",
   "base_url": "https://open.bigmodel.cn/api/paas/v4",
   "api_key": "把你的 API Key 明文填这里即可直接启动;不想明文就删掉此行,改为设 RIDGE_API_KEY 环境变量",
-  "budget_tokens": 200000,
+  "budget_tokens": 0,
   "skip_danger": false,
   "notify": false,
   "providers": [
@@ -103,7 +103,7 @@ if (-not (Test-Path $cfgPath)) {
   "model": "glm-4.6",
   "base_url": "https://open.bigmodel.cn/api/paas/v4",
   "api_key": "",
-  "budget_tokens": 200000,
+  "budget_tokens": 0,
   "skip_danger": false,
   "providers": [],
   "mcp": []
