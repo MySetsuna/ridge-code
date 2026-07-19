@@ -279,6 +279,7 @@ pub(crate) const SLASH_COMMANDS: &[&str] = &[
     "/provider",
     "/quit",
     "/reset",
+    "/skills",
     "/tools",
 ];
 

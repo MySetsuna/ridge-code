@@ -112,7 +112,7 @@ pub(super) async fn run(
         swap.clone(),
         mcp,
         approver,
-        skills,
+        skills.clone(), // 留 skills 供 /skills 列出本会话已载技能
         bus.clone(),
         agents.clone(),
         read_only,
@@ -203,6 +203,7 @@ pub(super) async fn run(
                     &swap,
                     &agents,
                     &commands,
+                    &skills,
                     session_tokens,
                     session_turns,
                 )
