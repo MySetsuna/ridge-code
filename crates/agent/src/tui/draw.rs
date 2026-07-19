@@ -82,7 +82,9 @@ pub(crate) fn draw_panel(frame: &mut ratatui::Frame, area: Rect, panel: &Panel) 
                 "↑↓ select · Enter switch · type to filter · Esc close"
             }
             PanelKind::Login => "↑↓ pick provider · Enter enter key · type to filter · Esc close",
-            PanelKind::Tools | PanelKind::Agent => "↑↓ scroll · type to filter · Esc close",
+            PanelKind::Tools | PanelKind::Agent | PanelKind::Mcp | PanelKind::Skills => {
+                "↑↓ scroll · type to filter · Esc close"
+            }
         }
     };
     frame.render_widget(

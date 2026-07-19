@@ -215,7 +215,10 @@ pub(crate) fn panel_enter(ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvi
         }
         (PanelKind::Login, Some(_)) => {}
         // 只读页:Enter 关页。
-        (PanelKind::Tools, _) | (PanelKind::Agent, _) => ui.panel = None,
+        (PanelKind::Tools, _)
+        | (PanelKind::Agent, _)
+        | (PanelKind::Mcp, _)
+        | (PanelKind::Skills, _) => ui.panel = None,
     }
 }
 
@@ -234,7 +237,7 @@ pub(crate) async fn run_command(
 ) -> anyhow::Result<bool> {
     match input {
         "/exit" | "/quit" => return Ok(true),
-        "/help" => ui.note("/exit /reset /compact /cost /tools /login [list|<id> <key>] /model [<name>] (no arg = live model picker) /provider [list|use <name>|add ...] /agent /skills /commands (custom /name from ~/.ridge/commands/*.md + skills; $ARGS) /config [set key value] /jailbreak [on|off]; @path to reference a file; Ctrl-C to interrupt; scroll/select history with the terminal's native keys; approval prompt: y/Enter approve, n/Esc reject, ↑↓ scroll details.", Color::Gray),
+        "/help" => ui.note("/exit /reset /compact /cost /tools /login [list|<id> <key>] /model [<name>] (no arg = live model picker) /provider [list|use <name>|add ...] /agent /mcp /skills /commands (custom /name from ~/.ridge/commands/*.md + skills; $ARGS) /config [set key value] /jailbreak [on|off]; @path to reference a file; Ctrl-C to interrupt; scroll/select history with the terminal's native keys; approval prompt: y/Enter approve, n/Esc reject, ↑↓ scroll details.", Color::Gray),
         "/tools" => ui.panel = Some(tools_panel(&meta.tools)),
         "/reset" => { history.clear(); save_session(&session_path(), history); ui.note("context cleared", Color::Yellow); }
         "/compact" => { let n = history.len(); *history = compact_history(std::mem::take(history), 4); ui.note(format!("context compacted: {n} → {} messages", history.len()), Color::Yellow); }
@@ -313,13 +316,14 @@ pub(crate) async fn run_command(
             if agents.defs.is_empty() { ui.note("no sub-agents available", Color::Gray); }
             else { ui.panel = Some(agent_panel(&agents.defs)); }
         }
+        _ if input == "/mcp" => {
+            let cfg = Config::load(config_path());
+            if cfg.mcp.is_empty() { ui.note("no MCP servers configured. Add them under \"mcp\": [ ... ] in ~/.ridge/config.json (each: name + cmd [+ args]).", Color::Gray); }
+            else { ui.panel = Some(mcp_panel()); }
+        }
         _ if input == "/skills" => {
-            if skills.is_empty() {
-                ui.note("no skills loaded. Add ~/.ridge/skills/<name>/SKILL.md (frontmatter name/description + body); loaded skills are injected into the system prompt.", Color::Gray);
-            } else {
-                let lines: Vec<String> = skills.iter().map(|s| if s.description.is_empty() { format!("· {}", s.name) } else { format!("· {}  —— {}", s.name, s.description) }).collect();
-                ui.note(format!("skills ({}):\n{}", skills.len(), lines.join("\n")), Color::Gray);
-            }
+            if skills.is_empty() { ui.note("no skills loaded. Add ~/.ridge/skills/<name>/SKILL.md (frontmatter name/description + body); loaded skills are injected into the system prompt.", Color::Gray); }
+            else { ui.panel = Some(skills_panel(skills)); }
         }
         _ if input == "/commands" => {
             if commands.is_empty() { ui.note("no custom commands. Add ~/.ridge/commands/<name>.md (body = prompt, $ARGS = args); skills also appear here.", Color::Gray); }

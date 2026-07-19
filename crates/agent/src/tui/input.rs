@@ -275,6 +275,7 @@ pub(crate) const SLASH_COMMANDS: &[&str] = &[
     "/help",
     "/jailbreak",
     "/login",
+    "/mcp",
     "/model",
     "/provider",
     "/quit",

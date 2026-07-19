@@ -15,6 +15,10 @@ pub(crate) enum PanelKind {
     Agent,
     /// 登录页(iter-38):↑↓ 选内置供应商 → Enter 就地输入 key(掩码)→ Enter 校验并接入。
     Login,
+    /// MCP 页(iter-40):↑↓ 选 MCP → Enter 查看详情/管理。
+    Mcp,
+    /// Skills 页(iter-40):↑↓ 选技能 → Enter 查看详情/管理。
+    Skills,
 }
 
 /// 一行:动作键(config 键 / provider 名 / 模型 id / 工具名 / agent 名)+ 右列值 + (模型)上下文窗口。
@@ -211,6 +215,47 @@ pub(crate) fn login_panel() -> Panel {
     Panel::new(
         PanelKind::Login,
         "Login · ↑↓ pick provider · Enter enter key · type to filter · Esc close".into(),
+        rows,
+    )
+}
+
+/// MCP 页(只读):列 config 里已配置的 MCP 服务器(名 · 命令[+参数])。直读真实 `Config.mcp`。
+/// 本架构 MCP 由 `resolve_mcp` 每会话临起,无常驻进程可 start/stop —— 故只读展示,不做进程管理。
+pub(crate) fn mcp_panel() -> Panel {
+    let cfg = Config::load(config_path());
+    let rows = cfg
+        .mcp
+        .iter()
+        .map(|m| PanelRow {
+            key: m.name.clone(),
+            value: if m.args.is_empty() {
+                m.cmd.clone()
+            } else {
+                format!("{} {}", m.cmd, m.args.join(" "))
+            },
+            ctx: None,
+        })
+        .collect();
+    Panel::new(
+        PanelKind::Mcp,
+        "MCP servers (read-only) · type to filter · Esc close".into(),
+        rows,
+    )
+}
+
+/// Skills 页(只读):列本会话已加载的技能(名 · 描述)。
+pub(crate) fn skills_panel(skills: &[agent::Skill]) -> Panel {
+    let rows = skills
+        .iter()
+        .map(|s| PanelRow {
+            key: s.name.clone(),
+            value: s.description.clone(),
+            ctx: None,
+        })
+        .collect();
+    Panel::new(
+        PanelKind::Skills,
+        "Skills (read-only) · type to filter · Esc close".into(),
         rows,
     )
 }
