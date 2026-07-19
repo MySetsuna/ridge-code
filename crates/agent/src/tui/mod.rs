@@ -198,6 +198,10 @@ pub(super) async fn run(
         })
     };
 
+    // 诊断开关(RIDGE_KEYLOG=1):把每个原始终端事件落盘 `ridge-keylog.txt`(cwd),
+    // 供排查「某键(如空格)按了没反应」—— 看它被投递成什么 KeyCode/kind/modifiers,还是根本没到。
+    let keylog = std::env::var_os("RIDGE_KEYLOG").is_some();
+
     'main: loop {
         // 统一提交点(iter-33):非 busy 时消费 pending_submit —— 键入的新提交,或上一任务毕后接跑的队首。
         // 起任务/跑命令的逻辑**只此一处**(键 Submit 臂与 done 队列接跑共用),消除重复。
@@ -269,6 +273,17 @@ pub(super) async fn run(
             biased;
             Some(ev) = key_rx.recv() => {
                 dirty = true; // 键盘/粘贴/resize 皆需重绘
+                if keylog {
+                    // Press 过滤之前记录,连 Release/Repeat 都留痕(诊断空格丢失的关键证据)。
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("ridge-keylog.txt")
+                    {
+                        let _ = writeln!(f, "{ev:?}");
+                    }
+                }
                 if let Event::Paste(s) = &ev {
                     // BPM(iter-24):整块原子注入(iter-27 起并入 InputState 光标处事务)。
                     ui.popup = None;
