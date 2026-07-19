@@ -53,7 +53,7 @@ fn message_to_wire(m: &Message) -> Value {
 pub fn parse_response(v: &Value) -> Result<Completion, ProviderError> {
     let msg = &v["choices"][0]["message"];
     // 两路分流:content 的 inline `<think>` 剥出,并与独立 `reasoning_content` 字段(GLM 等)合并。
-    let (text, reasoning) = split_thinking(
+    let (mut text, reasoning) = split_thinking(
         msg["content"].as_str().unwrap_or(""),
         msg["reasoning_content"].as_str().unwrap_or(""),
     );
@@ -69,6 +69,14 @@ pub fn parse_response(v: &Value) -> Result<Completion, ProviderError> {
             });
         }
     }
+    // 弱模型兜底:结构化 tool_calls 空 → 从文本捞 `<tool_call>` 块救回(见 salvage_text_tool_calls)。
+    if tool_calls.is_empty() {
+        let (salvaged, cleaned) = salvage_text_tool_calls(&text);
+        if !salvaged.is_empty() {
+            tool_calls = salvaged;
+            text = cleaned;
+        }
+    }
     let usage = Usage {
         prompt_tokens: v["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
         completion_tokens: v["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
@@ -79,6 +87,94 @@ pub fn parse_response(v: &Value) -> Result<Completion, ProviderError> {
         tool_calls,
         usage,
     })
+}
+
+/// 弱模型(如 GLM-4.5-air)常把工具调用当**纯文本**吐进 `content`,而非结构化 `tool_calls`
+/// 数组 —— 引擎遂当终答、回合空转即停(实测病灶)。此处兜底:**仅当结构化 tool_calls 为空**时,
+/// 从文本捞 `<tool_call>…</tool_call>` 块救回,并返回**剥掉这些块后**的纯文本(散文原样保留)。
+/// 认两种内体:①整块 JSON `{"name":…,"arguments":{…}|"…"}`;②GLM 文本
+/// `名字<arg_key>k</arg_key><arg_value>v</arg_value>…`。纯函数,离线可测。
+/// ponytail: 只覆盖这两种最常见文本格式;冒出别的再扩,勿预造万能解析器。
+pub fn salvage_text_tool_calls(text: &str) -> (Vec<ToolCall>, String) {
+    const OPEN: &str = "<tool_call>";
+    const CLOSE: &str = "</tool_call>";
+    let mut calls = Vec::new();
+    let mut cleaned = String::new();
+    let mut rest = text;
+    loop {
+        let Some(start) = rest.find(OPEN) else {
+            cleaned.push_str(rest);
+            break;
+        };
+        cleaned.push_str(&rest[..start]);
+        let after = &rest[start + OPEN.len()..];
+        let Some(end) = after.find(CLOSE) else {
+            // 无闭合标签 → 不是完整调用,原样留着,停。
+            cleaned.push_str(&rest[start..]);
+            break;
+        };
+        match parse_one_text_tool_call(after[..end].trim(), calls.len()) {
+            Some(call) => calls.push(call),
+            // 认不出 → 原样保留整块,不吞用户文本。
+            None => cleaned.push_str(&rest[start..start + OPEN.len() + end + CLOSE.len()]),
+        }
+        rest = &after[end + CLOSE.len()..];
+    }
+    (calls, cleaned.trim().to_string())
+}
+
+/// 解析单个 `<tool_call>` 块的内体成一次 [`ToolCall`]。认不出 → None。
+fn parse_one_text_tool_call(inner: &str, idx: usize) -> Option<ToolCall> {
+    let id = format!("salvaged-{idx}");
+    // ① 整块 JSON:{"name": "...", "arguments": {…}|"…"}
+    if let Ok(v) = serde_json::from_str::<Value>(inner) {
+        if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
+            let arguments = match v.get("arguments") {
+                Some(Value::String(s)) => {
+                    serde_json::from_str(s).unwrap_or_else(|_| Value::Object(Default::default()))
+                }
+                Some(other) => other.clone(),
+                None => Value::Object(Default::default()),
+            };
+            return Some(ToolCall {
+                id,
+                name: name.to_string(),
+                arguments,
+            });
+        }
+    }
+    // ② GLM 文本格式:工具名在首个 `<` 之前;其后成对 <arg_key>k</arg_key> <arg_value>v</arg_value>。
+    let name_end = inner.find('<').unwrap_or(inner.len());
+    let name = inner[..name_end].trim();
+    if name.is_empty() || name.starts_with('{') {
+        return None;
+    }
+    let mut args = serde_json::Map::new();
+    let mut cursor = &inner[name_end..];
+    while let Some(k) = extract_between(&mut cursor, "<arg_key>", "</arg_key>") {
+        let v = extract_between(&mut cursor, "<arg_value>", "</arg_value>").unwrap_or("");
+        args.insert(k.trim().to_string(), parse_scalar(v.trim()));
+    }
+    Some(ToolCall {
+        id,
+        name: name.to_string(),
+        arguments: Value::Object(args),
+    })
+}
+
+/// `<arg_value>` 文本 → JSON:先试当 JSON 解析(数字/布尔/对象/数组),失败则原样作字符串。
+/// 路径/正则(含 `\`、`.*` 等)不是合法 JSON,自然落回字符串,符合大多数工具 schema。
+fn parse_scalar(s: &str) -> Value {
+    serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.to_string()))
+}
+
+/// 从 `*hay` 取 `open`…`close` 之间首个片段,并把游标推进到 `close` 之后。
+fn extract_between<'a>(hay: &mut &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let start = hay.find(open)? + open.len();
+    let end_rel = hay[start..].find(close)?;
+    let val = &hay[start..start + end_rel];
+    *hay = &hay[start + end_rel + close.len()..];
+    Some(val)
 }
 
 /// 流式增量的累加器:SSE 每帧的 `delta` 往里叠(文本直接拼,工具调用按 index 拼片段)。
@@ -154,7 +250,7 @@ pub fn accumulate_stream<F: Fn(StreamChunk) + ?Sized>(
 impl StreamAcc {
     /// 收尾:组装成最终 [`Completion`](分出回答/思考、把工具调用 arguments 片段解析回对象)。
     pub fn into_completion(self) -> Completion {
-        let tool_calls = self
+        let mut tool_calls: Vec<ToolCall> = self
             .tool_calls
             .into_iter()
             .filter(|t| !t.name.is_empty())
@@ -166,12 +262,84 @@ impl StreamAcc {
             })
             .collect();
         // content 里若仍漏进 inline `<think>`(流式未走 reasoning_content 的端点),此处剥净并并入思考。
-        let (text, reasoning) = split_thinking(&self.text, &self.reasoning);
+        let (mut text, reasoning) = split_thinking(&self.text, &self.reasoning);
+        // 弱模型兜底:结构化 tool_calls 空 → 从文本捞 `<tool_call>` 块救回(见 salvage_text_tool_calls)。
+        if tool_calls.is_empty() {
+            let (salvaged, cleaned) = salvage_text_tool_calls(&text);
+            if !salvaged.is_empty() {
+                tool_calls = salvaged;
+                text = cleaned;
+            }
+        }
         Completion {
             text,
             reasoning,
             tool_calls,
             usage: self.usage,
         }
+    }
+}
+
+#[cfg(test)]
+mod salvage_tests {
+    use super::*;
+
+    /// 实测病灶格式:GLM 把调用当纯文本吐(`<arg_key>`/`<arg_value>`),散文在前。
+    #[test]
+    fn glm_text_tool_call_is_salvaged_and_prose_kept() {
+        let text = "我来梳理下。\n<tool_call>search\n\
+            <arg_key>path</arg_key>\n<arg_value>C:\\code\\ridge-code\\crates\\agent\\src\\tui</arg_value>\n\
+            <arg_key>pattern</arg_key>\n<arg_value>Ui.*struct</arg_value>\n</tool_call>";
+        let (calls, cleaned) = salvage_text_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "search");
+        assert_eq!(
+            calls[0].arguments["path"],
+            "C:\\code\\ridge-code\\crates\\agent\\src\\tui"
+        );
+        assert_eq!(calls[0].arguments["pattern"], "Ui.*struct");
+        assert_eq!(cleaned, "我来梳理下。"); // `<tool_call>` 块剥除,散文保留
+    }
+
+    /// 另一常见文本格式:整块 JSON。
+    #[test]
+    fn json_inside_tool_call_is_salvaged() {
+        let text = r#"<tool_call>{"name": "read_file", "arguments": {"path": "a.rs"}}</tool_call>"#;
+        let (calls, _) = salvage_text_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].arguments["path"], "a.rs");
+    }
+
+    /// 无工具调用的普通回答:原样返回,不误伤。
+    #[test]
+    fn plain_text_without_tool_call_untouched() {
+        let (calls, cleaned) = salvage_text_tool_calls("普通回答,无工具调用");
+        assert!(calls.is_empty());
+        assert_eq!(cleaned, "普通回答,无工具调用");
+    }
+
+    /// 结构化 tool_calls 在场时,parse_response 用它,不触发文本兜底。
+    #[test]
+    fn structured_tool_calls_bypass_salvage() {
+        let v = json!({"choices":[{"message":{
+            "content": "<tool_call>search\n<arg_key>path</arg_key>\n<arg_value>x</arg_value>\n</tool_call>",
+            "tool_calls": [{"id":"c1","function":{"name":"read_file","arguments":"{\"path\":\"real.rs\"}"}}]
+        }}]});
+        let c = parse_response(&v).unwrap();
+        assert_eq!(c.tool_calls.len(), 1);
+        assert_eq!(c.tool_calls[0].name, "read_file"); // 用结构化,非文本里的 search
+    }
+
+    /// 结构化为空时,parse_response 从文本救回。
+    #[test]
+    fn parse_response_salvages_when_structured_empty() {
+        let v = json!({"choices":[{"message":{
+            "content": "<tool_call>search\n<arg_key>path</arg_key>\n<arg_value>x</arg_value>\n</tool_call>"
+        }}]});
+        let c = parse_response(&v).unwrap();
+        assert_eq!(c.tool_calls.len(), 1);
+        assert_eq!(c.tool_calls[0].name, "search");
+        assert_eq!(c.tool_calls[0].arguments["path"], "x");
     }
 }
