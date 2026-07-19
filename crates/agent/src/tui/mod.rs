@@ -198,9 +198,17 @@ pub(super) async fn run(
         })
     };
 
-    // 诊断开关(RIDGE_KEYLOG=1):把每个原始终端事件落盘 `ridge-keylog.txt`(cwd),
-    // 供排查「某键(如空格)按了没反应」—— 看它被投递成什么 KeyCode/kind/modifiers,还是根本没到。
-    let keylog = std::env::var_os("RIDGE_KEYLOG").is_some();
+    // 诊断开关:env `RIDGE_KEYLOG` **或** 标记文件 `~/.ridge/keylog.on` 任一存在即开(标记文件防呆:
+    // 免 env 未被子进程继承之坑)。日志写**绝对路径** `~/.ridge/keylog.txt`(不依赖 cwd,便于定位)。
+    // 供排查「某键(如空格)按了没反应」—— 看它被投递成什么 KeyCode/kind/modifiers,还是根本没到进程。
+    let keylog_path: Option<std::path::PathBuf> = {
+        let dir = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(|h| std::path::PathBuf::from(h).join(".ridge"))
+            .unwrap_or_else(std::env::temp_dir);
+        let on = std::env::var_os("RIDGE_KEYLOG").is_some() || dir.join("keylog.on").exists();
+        on.then(|| dir.join("keylog.txt"))
+    };
 
     'main: loop {
         // 统一提交点(iter-33):非 busy 时消费 pending_submit —— 键入的新提交,或上一任务毕后接跑的队首。
@@ -273,14 +281,10 @@ pub(super) async fn run(
             biased;
             Some(ev) = key_rx.recv() => {
                 dirty = true; // 键盘/粘贴/resize 皆需重绘
-                if keylog {
+                if let Some(p) = &keylog_path {
                     // Press 过滤之前记录,连 Release/Repeat 都留痕(诊断空格丢失的关键证据)。
                     use std::io::Write;
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("ridge-keylog.txt")
-                    {
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
                         let _ = writeln!(f, "{ev:?}");
                     }
                 }
