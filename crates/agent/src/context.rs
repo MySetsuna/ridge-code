@@ -105,8 +105,11 @@ pub(crate) fn durable_state_block(s: &AgentState) -> Option<String> {
     Some(b)
 }
 
-/// 上下文压缩(`/compact`,DoD②):历史太长时,保留**首条(原始任务)**+ 一条摘要标记 + **最近 `keep` 条**,
-/// 其余压掉。防长会话「上下文腐烂」(Ralph 式,但用确定性截断,不烧一次 LLM)。
+/// 上下文压缩(`/compact` + 自动,DoD②):历史太长时,**保全早期区的每一条 user 消息**(= 用户历次
+/// 指令/意图)+ 一条摘要标记 + **最近 `keep` 条**,其余早期 assistant/tool 噪声压掉。
+/// 防长会话「上下文腐烂」,更防「**意图漂失**」—— 多轮下用户中段的澄清/纠偏(如「不要 MD 要真页面」)
+/// 若被当噪声压掉,模型就只剩最初那条模糊任务,照旧理解乱做。用户消息**少而关键**,是意图的唯一载体,
+/// 一律保留;体量噪声(工具输出/助手 tool_call)才是压缩对象。确定性截断,不烧一次 LLM。
 pub fn compact_history(history: Vec<Message>, keep: usize) -> Vec<Message> {
     if history.len() <= keep + 1 {
         return history;
@@ -117,11 +120,16 @@ pub fn compact_history(history: Vec<Message>, keep: usize) -> Vec<Message> {
     while recent.first().is_some_and(|m| m.role == Role::Tool) {
         recent = &recent[1..];
     }
-    let dropped = history.len() - 1 - recent.len();
-    let mut out = Vec::with_capacity(recent.len() + 2);
-    out.push(history[0].clone()); // 原始任务
+    let split = history.len() - recent.len(); // 早期区 = [0, split)
+                                              // 早期区里**所有 user 意图消息**全保(含首个原始任务与中段每次澄清),其余压成一条标记。
+    let mut out: Vec<Message> = history[..split]
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .cloned()
+        .collect();
+    let dropped = split - out.len();
     out.push(Message::user(format!(
-        "[上下文已压缩:省略 {dropped} 条早期消息]"
+        "[上下文已压缩:省略 {dropped} 条早期工具/助手消息;上方 user 指令为完整意图,须据此推进]"
     )));
     out.extend(recent.iter().cloned());
     out
@@ -214,17 +222,40 @@ mod tests {
         );
     }
 
-    /// DoD②:/compact 压缩历史 —— 长度显著减少,保留首条(任务)+ 最近 keep 条。
+    /// DoD②:/compact 压缩历史 —— 显著收缩、含摘要标记、保留最近 keep 条,且**所有 user 意图消息全保**
+    /// (尤其多轮下**中段的澄清/纠偏**不得被当噪声压掉 —— 那正是「模型丢意图、照旧乱做」的根因)。
     #[test]
-    fn compact_history_shrinks_but_keeps_task_and_recent() {
-        let hist: Vec<Message> = (0..10).map(|i| Message::user(format!("m{i}"))).collect();
-        let compacted = compact_history(hist, 4);
-        // 1(首)+ 1(摘要)+ 4(最近) = 6 < 10
-        assert_eq!(compacted.len(), 6);
-        assert_eq!(compacted[0].content, "m0"); // 原始任务保留
-        assert!(compacted[1].content.contains("压缩")); // 摘要标记
-        assert_eq!(compacted.last().unwrap().content, "m9"); // 最近保留
-                                                             // 短历史不动。
+    fn compact_history_keeps_all_user_intent_and_recent() {
+        // 真实混合:3 条 user 任务散布在大量 assistant 噪声中(仿实录:507 消息仅 3 条 user)。
+        let mut hist = vec![Message::user("任务A")];
+        for i in 0..6 {
+            hist.push(Message::assistant(format!("a{i}")));
+        }
+        hist.push(Message::user("任务B:不要MD要真页面")); // 中段澄清 —— 旧实现(只保 history[0])会压掉它
+        for i in 0..6 {
+            hist.push(Message::assistant(format!("b{i}")));
+        }
+        hist.push(Message::user("继续"));
+        for i in 0..6 {
+            hist.push(Message::assistant(format!("c{i}")));
+        }
+        let n = hist.len(); // 21
+        let out = compact_history(hist, 4);
+        let users: Vec<&str> = out
+            .iter()
+            .filter(|m| m.role == Role::User && !m.content.contains("压缩"))
+            .map(|m| m.content.as_str())
+            .collect();
+        assert!(users.contains(&"任务A"), "首个任务须保");
+        assert!(
+            users.contains(&"任务B:不要MD要真页面"),
+            "中段澄清意图绝不能被压掉(意图漂失根因)"
+        );
+        assert!(users.contains(&"继续"), "最新指令须保");
+        assert!(out.len() < n, "仍应显著收缩:{} !< {n}", out.len());
+        assert!(out.iter().any(|m| m.content.contains("压缩")), "含摘要标记");
+        assert_eq!(out.last().unwrap().content, "c5", "最近一条须保");
+        // 短历史不动。
         let short: Vec<Message> = (0..3).map(|i| Message::user(format!("s{i}"))).collect();
         assert_eq!(compact_history(short.clone(), 4).len(), short.len());
     }
