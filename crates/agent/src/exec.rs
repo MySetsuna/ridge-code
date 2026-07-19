@@ -9,7 +9,7 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "run_shell".to_string(),
             description: "运行一条 shell 命令,返回退出码与输出".to_string(),
-            schema: serde_json::json!({"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}),
+            schema: serde_json::json!({"type":"object","properties":{"cmd":{"type":"string"},"shell":{"type":"string","enum":["cmd","powershell","pwsh","bash","sh"],"description":"可选:执行用的 shell;省=宿主默认(见 host_env)"}},"required":["cmd"]}),
         },
         ToolSpec {
             name: "write_file".to_string(),
@@ -81,10 +81,14 @@ pub(crate) fn parse_edits(call: &ToolCall) -> Vec<tools::Edit> {
 /// 写类工具成功(write_file/edit_file/apply_edits)→ 记入 `modified_files` 并清 `last_error`;
 /// 其余工具不动 durable 状态。这样长任务只凭「当前事实」推理,不必靠全量历史。
 /// 工具观察是否为**错误**(` error:` / `BLOCKED` / `permission denied` / **非零 `exit N`**)。单一真相:
-/// 工具观察是否为**错误**(错误前缀 / BLOCKED / permission denied)。单一真相:
-/// Durable State 回填与熔断计数(`err_streak`)共用,免两处判据漂移。
+/// Durable State 回填与熔断计数(`err_streak`)共用,免两处判据漂移。**非零 exit 必判错**(iter-51):
+/// 此前漏判 —— 本地化(如中文 GBK)shell 报错正文无 ASCII " error:",致 `exit 1` 逃熔断计数、
+/// `last_error` 亦不回填。与 verify 侧 [`tool_output_failed`] 对齐,免判据分叉。
 pub(crate) fn is_error_observation(obs: &str) -> bool {
-    obs.contains(" error:") || obs.starts_with("BLOCKED") || obs.starts_with("permission denied")
+    obs.contains(" error:")
+        || obs.starts_with("BLOCKED")
+        || obs.starts_with("permission denied")
+        || (obs.starts_with("exit ") && !obs.starts_with("exit 0"))
 }
 
 pub(crate) fn durable_updates(call: &ToolCall, observation: &str) -> Vec<Patch> {
@@ -170,7 +174,11 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
                     tracing::debug!(sandbox = %sb, "run_shell via sandbox");
                     tools::run_argv(&sandbox_argv(&sb, cmd, &cwd))
                 }
-                None => tools::run_shell(cmd),
+                None => {
+                    // 模型自主择 shell(iter-51):`shell` 字段选执行器,省则宿主默认(host_env 块已告知可用项)。
+                    let shell = arg("shell");
+                    tools::run_shell_in((!shell.is_empty()).then_some(shell), cmd)
+                }
             };
             match result {
                 Ok(r) => format!("exit {}: {}{}", r.code, r.stdout.trim(), r.stderr.trim()),
@@ -485,6 +493,21 @@ mod tests {
             "未知工具应被判为 error(喂熔断/失败信号)"
         );
         assert!(tool_output_failed(&obs), "未知工具应算失败信号");
+    }
+
+    /// 熔断漏判修复(iter-51):非零 `exit N` 必判错(即便正文无 ASCII " error:",如中文 GBK 报错),
+    /// 与 verify 侧 tool_output_failed 对齐;`exit 0` 不误判。
+    #[test]
+    fn nonzero_exit_is_error_observation() {
+        assert!(is_error_observation(
+            "exit 1: 文件名、目录名或卷标语法不正确。"
+        ));
+        assert!(is_error_observation("exit 127: 'ls' 不是内部或外部命令"));
+        assert!(!is_error_observation("exit 0: 一切正常"), "exit 0 不该误判");
+        assert_eq!(
+            is_error_observation("exit 1: 文件名、目录名或卷标语法不正确。"),
+            tool_output_failed("exit 1: 文件名、目录名或卷标语法不正确。")
+        );
     }
 
     /// Durable State 回填:写类工具成功 → 记 modified_files 清 last_error;工具错误 → 置 last_error。

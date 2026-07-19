@@ -270,19 +270,89 @@ pub fn jail_path(root: &Path, target: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// 跨平台执行一条 shell 命令:Windows 走 `cmd /C`,其余走 `sh -c`。
-pub fn run_shell(cmd: &str) -> io::Result<ShellResult> {
-    let output = if cfg!(windows) {
-        Command::new("cmd").args(["/C", cmd]).output()?
+/// 宿主**默认** shell 标识(`run_shell` 未指定 shell 时用之,也作 host_env 事实块的默认项)。
+/// Windows 默认 **powershell**(而非 cmd):模型惯发的 `ls`/`cat`/`rm` 等在 PS 有别名,远比 cmd 契合;
+/// 且 PS 可强制 UTF-8 输出治乱码。Unix → `sh`。
+pub fn default_shell() -> &'static str {
+    if cfg!(windows) {
+        "powershell"
     } else {
-        Command::new("sh").arg("-c").arg(cmd).output()?
-    };
+        "sh"
+    }
+}
 
+/// 探测宿主**实际可用**的 shell —— 注入 system prompt 的 `host_env` 块,供模型**自主择** shell。
+/// 必装项按 OS 直列(Windows: powershell/cmd;Unix: sh);可选项(pwsh/bash,如 PS7/Git-Bash/WSL)
+/// 靠 `spawn` 探测(程序不存在 → `output()` Err)。一次性调用(装配期),不进热路径。
+pub fn available_shells() -> Vec<String> {
+    let mut v: Vec<String> = if cfg!(windows) {
+        vec!["powershell".into(), "cmd".into()]
+    } else {
+        vec!["sh".into()]
+    };
+    for (prog, probe) in [
+        ("pwsh", ["-NoProfile", "-Command", "$null"].as_slice()),
+        ("bash", ["-c", ":"].as_slice()),
+    ] {
+        if !v.iter().any(|s| s == prog) && Command::new(prog).args(probe).output().is_ok() {
+            v.push(prog.to_string());
+        }
+    }
+    v
+}
+
+/// 支持的 shell 标识列表(schema/校验用):`cmd|powershell|pwsh|bash|sh`。
+pub const SHELLS: [&str; 5] = ["cmd", "powershell", "pwsh", "bash", "sh"];
+
+/// 按选定 shell 构造 `Command`(纯映射,不执行)。未知/空 → 宿主默认。
+/// PowerShell 分支强制 `OutputEncoding=UTF8`:令 `from_utf8_lossy` 见到 UTF-8、不再产 `�` 乱码
+/// (Windows 中文机 cmd 输出为 GBK/936,是先前报错乱码之根)。
+fn shell_command(shell: Option<&str>, cmd: &str) -> Command {
+    let lowered = shell.map(|s| s.trim().to_lowercase());
+    let sel = lowered.as_deref().filter(|s| !s.is_empty());
+    let sel = match sel {
+        Some(s) if SHELLS.contains(&s) => s,
+        _ => default_shell(),
+    };
+    match sel {
+        "powershell" | "pwsh" => {
+            let mut c = Command::new(sel);
+            let wrapped =
+                format!("$OutputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8; {cmd}");
+            c.args(["-NoProfile", "-Command", &wrapped]);
+            c
+        }
+        "cmd" => {
+            let mut c = Command::new("cmd");
+            c.args(["/C", cmd]);
+            c
+        }
+        "bash" => {
+            let mut c = Command::new("bash");
+            c.arg("-c").arg(cmd);
+            c
+        }
+        _ => {
+            let mut c = Command::new("sh");
+            c.arg("-c").arg(cmd);
+            c
+        }
+    }
+}
+
+/// 在**选定 shell**里执行一条命令(模型经 run_shell 的 `shell` 字段自主择;`None` = 宿主默认)。
+pub fn run_shell_in(shell: Option<&str>, cmd: &str) -> io::Result<ShellResult> {
+    let output = shell_command(shell, cmd).output()?;
     Ok(ShellResult {
         code: output.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     })
+}
+
+/// 跨平台执行一条 shell 命令(宿主默认 shell)。见 [`run_shell_in`] 可指定 shell。
+pub fn run_shell(cmd: &str) -> io::Result<ShellResult> {
+    run_shell_in(None, cmd)
 }
 
 /// 直接按 argv 执行(iter-46 外置沙箱用):`argv[0]` 是程序,其余是**逐个原样**参数,
@@ -333,6 +403,34 @@ mod tests {
         let out = run_shell("echo ridge").unwrap();
         assert_eq!(out.code, 0);
         assert!(out.stdout.contains("ridge"));
+    }
+
+    /// 模型自主择 shell:显式指定的 shell 生效(退出码如实带回);未知/空 → 宿主默认,不报程序找不到。
+    #[test]
+    fn run_shell_in_dispatches_selected_shell() {
+        // 宿主默认(None):退出码带回。
+        assert_eq!(run_shell_in(None, "exit 5").unwrap().code, 5);
+        // 显式指定宿主默认 shell 名:等价。
+        assert_eq!(
+            run_shell_in(Some(default_shell()), "exit 0").unwrap().code,
+            0
+        );
+        // 未知 shell 名 → 回落宿主默认(不 panic、不 Err「程序找不到」)。
+        assert_eq!(run_shell_in(Some("nonesuch"), "exit 0").unwrap().code, 0);
+        // 空串 → 宿主默认。
+        assert_eq!(run_shell_in(Some("  "), "exit 2").unwrap().code, 2);
+    }
+
+    /// host_env 事实块之源:探测出的可用 shell 非空,且含宿主默认。
+    #[test]
+    fn available_shells_includes_default() {
+        let shells = available_shells();
+        assert!(!shells.is_empty(), "至少应有宿主默认 shell");
+        assert!(
+            shells.iter().any(|s| s == default_shell()),
+            "可用列表应含默认 shell {}: {shells:?}",
+            default_shell()
+        );
     }
 
     #[test]

@@ -484,8 +484,10 @@ mod tests {
         assert!(prompt.contains("cooking"));
         assert!(prompt.contains("Boil water")); // 领域知识进了 system prompt
 
-        // 空目录 → 无技能,用基础 prompt。
-        assert_eq!(build_system_prompt(&[]), BASE_SYSTEM);
+        // 空目录 → 无技能:基础 prompt(冻结首部)+ host_env 事实块,无技能段。
+        let base = build_system_prompt(&[]);
+        assert!(base.starts_with(BASE_SYSTEM));
+        assert!(!base.contains("# Skills"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

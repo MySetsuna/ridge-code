@@ -1551,12 +1551,15 @@ pub(super) async fn run(
                         );
                     }
                     Err(e) => {
-                        // 失败自动重试(给 10 次):瞬时失败(端点抖动/超时)自动重跑同一任务,不打断用户。
+                        // 自动重试只管**瞬时**失败(端点抖动/超时/5xx/限流),不打断用户;
+                        // **永久**失败(余额不足/鉴权失败/400 坏请求)不进重试链 —— 重试同样输入只白烧,
+                        // 立刻把 provider 原文摊给用户,让「余额/key 失效」一眼可辨(iter-51)。
+                        let retryable = is_retryable_error(&e);
                         match last_task.clone() {
-                            Some(ti) if retry_count < MAX_RETRIES => {
+                            Some(ti) if retryable && retry_count < MAX_RETRIES => {
                                 retry_count += 1;
                                 ui.note(
-                                    format!("↻ 失败,自动重试 {retry_count}/{MAX_RETRIES}(上次: {e})"),
+                                    format!("↻ 瞬时失败,自动重试 {retry_count}/{MAX_RETRIES}(上次: {e})"),
                                     Color::Yellow,
                                 );
                                 ui.busy = true;
@@ -1565,7 +1568,9 @@ pub(super) async fn run(
                                 task = Some(start_task(&ti, &history));
                             }
                             _ => {
-                                let tail = if retry_count >= MAX_RETRIES {
+                                let tail = if !retryable {
+                                    format!("error(不可重试,已停): {e}")
+                                } else if retry_count >= MAX_RETRIES {
                                     format!("error(已重试 {MAX_RETRIES} 次仍失败): {e}")
                                 } else {
                                     format!("error: {e}")
@@ -2385,6 +2390,30 @@ fn clip(s: &str, n: usize) -> String {
 /// 把一条 agent 消息转成**总览化**显示行(可多行,各带色)。核心:给总览、减细节 ——
 /// 读文件只显路径(不倒内容)、写文件显首几行预览、改文件显 ± 着色 diff(形如 git diff)。
 /// **全文/全量在 run trace**;inline 已提交行不可回改,故预览截断并标注(替代「展开」)。
+/// provider/运行错误是否**值得重试**(瞬时 vs 永久)。TUI 自动重试只该管瞬时失败;永久性失败
+/// (余额/鉴权/坏请求)重试同样输入只白烧 —— 命中永久标记 → 不重试,余(含未知)默认可重试(不回退既有瞬时容错)。
+fn is_retryable_error(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    // 永久:HTTP 4xx 中重试无益者(坏请求/鉴权/权限/找不到)。5xx / 429 不在此(可能瞬时)。
+    const PERMANENT_HTTP: [&str; 4] = ["http 400", "http 401", "http 403", "http 404"];
+    // 永久:余额/配额/欠费/鉴权关键词 —— 兜住「429 实为余额耗尽」(本 provider 用 429 表余额不足)。
+    const PERMANENT_KW: [&str; 12] = [
+        "余额不足",
+        "无可用资源",
+        "欠费",
+        "充值",
+        "quota",
+        "insufficient",
+        "payment",
+        "billing",
+        "invalid api key",
+        "unauthorized",
+        "authentication",
+        "api key",
+    ];
+    !(PERMANENT_HTTP.iter().any(|p| m.contains(p)) || PERMANENT_KW.iter().any(|k| m.contains(k)))
+}
+
 fn summarize_event(m: &str) -> Vec<(String, Color)> {
     let info = role_color(Role::Info);
     // tool_call:`reason#N: tool_call {name} {json}`
@@ -2423,6 +2452,22 @@ fn summarize_event(m: &str) -> Vec<(String, Color)> {
     // 观察:`act: {name} -> {obs}`。读文件的内容已在 tool_call 行体现 → act 只回执一行(丢内容噪声)。
     if let Some(rest) = m.strip_prefix("act: ") {
         if let Some((name, obs)) = rest.split_once(" -> ") {
+            // 失败观察(非零退出 / error / BLOCKED / permission)→ 红 ✗ + 多行错误正文,别伪装成绿 ✓、
+            // 别只留首行把真报错藏掉(用户诉求:报错要看得见)。判据复用 verify 的 tool_output_failed
+            // —— 单一真相:显红 ⇔ 确定性验证判失败。错误全文另存 trace,模型经 history 亦收到。
+            if tool_output_failed(obs) {
+                let err = role_color(Role::Error);
+                let lines: Vec<&str> = obs.lines().collect();
+                let first = lines.first().copied().unwrap_or("");
+                let mut out = vec![(format!("  ✗ {name}: {}", clip(first, 200)), err)];
+                for l in lines.iter().skip(1).take(8) {
+                    out.push((format!("  │ {}", clip(l, 200)), err));
+                }
+                if lines.len() > 9 {
+                    out.push((format!("  │ … (+{} 行,全文见 trace)", lines.len() - 9), err));
+                }
+                return out;
+            }
             let ok = role_color(Role::Success);
             if name == "read_file" {
                 return vec![(format!("  ✓ 读完 ({} 字)", obs.chars().count()), ok)];
@@ -2527,6 +2572,23 @@ mod tests {
         );
         assert!(w[0].0.contains("写 b.rs"), "{}", w[0].0);
         assert!(w.iter().any(|(l, _)| l.contains("line1")));
+        // 失败观察:显红 ✗(非绿 ✓)+ 多行错误正文(非只首行),别把报错藏掉。
+        let f = summarize_event(
+            "act: run_shell -> exit 1: compiling\nerror: cannot find `foo`\n  --> src/x.rs:3",
+        );
+        assert!(f[0].0.starts_with("  ✗ run_shell"), "失败应显 ✗:{}", f[0].0);
+        assert_eq!(f[0].1, role_color(Role::Error), "失败头行应红");
+        assert!(
+            f.iter().any(|(l, _)| l.contains("cannot find `foo`")),
+            "报错正文续行须显示,不能只留首行:{f:?}"
+        );
+        // 被拦截 / 拒绝也算失败,显红 ✗。
+        let b = summarize_event("act: run_shell -> BLOCKED (dangerous: rm -rf /) —— 拒绝执行");
+        assert!(
+            b[0].0.starts_with("  ✗ run_shell"),
+            "BLOCKED 应显 ✗:{}",
+            b[0].0
+        );
     }
 
     /// iter-29:上下文窗口人读化。

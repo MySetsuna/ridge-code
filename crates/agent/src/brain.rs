@@ -19,18 +19,37 @@ pub(crate) const BASE_SYSTEM: &str =
      Reply concisely: no filler or restating the task; when changing code, emit only the minimal \
      edit (unique-match replace / diff), not a full-file rewrite. When done, stop.";
 
-/// 把技能注入 system prompt(知识层 → 大脑偏好)。
+/// 宿主环境事实块(iter-51):把 OS + **实际可用** shell + 默认 shell 告知模型,令其**自主择**
+/// run_shell 的 shell、用对路径/命令语法(修根因:此前 Windows 硬走 cmd,模型发 bash 语法条条失败)。
+/// 静态(每机固定)→ 进冻结的 system prompt 首部,利 Claude 缓存。
+pub(crate) fn host_env_block() -> String {
+    let os = std::env::consts::OS;
+    let shells = tools::available_shells().join(", ");
+    let default = tools::default_shell();
+    let hint = if cfg!(windows) {
+        "路径用 C:\\ 原生形式,勿用 /c/ 式 MSYS 路径;默认非 bash —— 发命令用 PowerShell 语法,或显式传 shell 字段。"
+    } else {
+        "用 POSIX sh 语法;要 bash 特性显式传 shell:\"bash\"。"
+    };
+    format!(
+        "\n\n<host_env>\nos: {os}\nrun_shell 默认 shell: {default};可用: {shells}。\n\
+         可给 run_shell 传 shell 字段(cmd|powershell|pwsh|bash|sh)显式选择。\n{hint}\n</host_env>"
+    )
+}
+
+/// 把宿主环境 + 技能注入 system prompt(知识层 → 大脑偏好)。host_env 恒注入(令模型自主择 shell);
+/// 技能有则续附。
 pub(crate) fn build_system_prompt(skills: &[Skill]) -> String {
-    if skills.is_empty() {
-        return BASE_SYSTEM.to_string();
-    }
     let mut s = String::from(BASE_SYSTEM);
-    s.push_str("\n\n# Skills — domain knowledge to apply\n");
-    for sk in skills {
-        s.push_str(&format!(
-            "\n## {} — {}\n{}\n",
-            sk.name, sk.description, sk.body
-        ));
+    s.push_str(&host_env_block());
+    if !skills.is_empty() {
+        s.push_str("\n\n# Skills — domain knowledge to apply\n");
+        for sk in skills {
+            s.push_str(&format!(
+                "\n## {} — {}\n{}\n",
+                sk.name, sk.description, sk.body
+            ));
+        }
     }
     s
 }
@@ -58,8 +77,9 @@ pub(crate) fn tool_output_ok(o: &str) -> bool {
     o.starts_with("exit 0:") || (o.contains("passed") && !o.contains("failed"))
 }
 
-/// 确定性**失败**信号(编译/测试出错、非 0 退出、被拦截/拒绝)。
-pub(crate) fn tool_output_failed(o: &str) -> bool {
+/// 确定性**失败**信号(编译/测试出错、非 0 退出、被拦截/拒绝)。`pub`:除 verify 判据外,
+/// TUI `summarize_event` 也复用它把失败观察显红(**单一真相**:显红 ⇔ verify 判失败)。
+pub fn tool_output_failed(o: &str) -> bool {
     o.contains("failed")
         || o.contains("error")
         || o.contains("BLOCKED")
@@ -225,8 +245,26 @@ mod tests {
     fn base_system_has_lean_output_directive() {
         assert!(BASE_SYSTEM.contains("concisely"));
         assert!(BASE_SYSTEM.contains("minimal edit"));
-        // 无技能时系统提示词仍等于 BASE_SYSTEM(不引入额外底噪)。
-        assert_eq!(build_system_prompt(&[]), BASE_SYSTEM);
+        // 无技能时系统提示词 = BASE_SYSTEM + host_env 事实块(令模型自主择 shell),不含技能噪声。
+        let sys = build_system_prompt(&[]);
+        assert!(
+            sys.starts_with(BASE_SYSTEM),
+            "首部须冻结 BASE_SYSTEM 利缓存"
+        );
+        assert!(!sys.contains("# Skills"), "无技能不该有技能段");
+    }
+
+    /// 模型自主择 shell:host_env 事实块恒注入(OS + 可用/默认 shell),给模型自选的依据。
+    #[test]
+    fn system_prompt_injects_host_env() {
+        let sys = build_system_prompt(&[]);
+        assert!(sys.contains("<host_env>"), "应注入 host_env 块");
+        assert!(sys.contains(std::env::consts::OS), "应告知 OS");
+        assert!(sys.contains("run_shell 默认 shell"), "应告知默认 shell");
+        assert!(
+            sys.contains(tools::default_shell()),
+            "应含宿主默认 shell 名"
+        );
     }
 
     /// harness-aware 系统提示词:把 iter-17/19/20 后新成的**物理契约**讲给模型 ——

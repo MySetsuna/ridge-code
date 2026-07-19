@@ -6,8 +6,8 @@ use agent::{
     builtin_tool_specs, compact_history, default_tool, est_tokens, expand_mentions,
     extract_signals_from_run, halt_reason, load_commands, load_signal_block, load_skills,
     null_token_bus, preset_by_id, render_todos, resolve_mcp, resolve_top_level_key, scripted,
-    signal_extract_enabled, write_run, AgentState, Approver, AutoApprove, Color, Config, McpTools,
-    RichOutput, Skill, SlashCommand, Todo, TokenBus, PROVIDER_PRESETS,
+    signal_extract_enabled, tool_output_failed, write_run, AgentState, Approver, AutoApprove,
+    Color, Config, McpTools, RichOutput, Skill, SlashCommand, Todo, TokenBus, PROVIDER_PRESETS,
 };
 use langgraph::{CompiledGraph, RunConfig, StreamEvent};
 use mcp::{McpClient, StdioTransport};
