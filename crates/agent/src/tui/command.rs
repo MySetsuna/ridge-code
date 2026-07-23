@@ -82,13 +82,30 @@ pub(crate) fn begin_oauth(ui: &mut Ui, ocfg: &provider::oauth::OAuthConfig) {
     } else {
         "2. Paste the returned code#state here and press Enter."
     };
+    // 页面即触发:best-effort 自动开系统浏览器(失败仍显 URL 手动打开)。
+    let opened = open_in_browser(&url);
+    let lead = if opened {
+        "1. Browser opened — authorize there (URL below as fallback):"
+    } else {
+        "1. Open this URL in your browser:"
+    };
     ui.note(
-        format!(
-            "{} OAuth:\n1. Open this URL in your browser:\n{url}\n{hint}",
-            ocfg.provider
-        ),
+        format!("{} OAuth:\n{lead}\n{url}\n{hint}", ocfg.provider),
         Color::Cyan,
     );
+}
+
+/// 用系统默认浏览器开 URL(best-effort;detach 不等待)。授权 URL 无空格/引号,直接传参安全。
+fn open_in_browser(url: &str) -> bool {
+    #[cfg(windows)]
+    let r = std::process::Command::new("cmd")
+        .args(["/c", "start", "", url])
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open").arg(url).spawn();
+    r.is_ok()
 }
 
 pub(crate) async fn apply_oauth_code(
