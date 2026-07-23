@@ -60,10 +60,12 @@ pub(crate) fn draw_panel(frame: &mut ratatui::Frame, area: Rect, panel: &Panel) 
                 ))));
                 last_group = group;
             }
+            // 行内剥 "provider · " 前缀:provider 已由分栏标题承载,行只显模型名。
+            let name = r.key.split_once(" · ").map(|(_, m)| m).unwrap_or(&r.key);
             let line = if r.value.is_empty() {
-                format!("  {}", r.key)
+                format!("  {name}")
             } else {
-                format!("  {:<18} {}", r.key, r.value)
+                format!("  {name:<18} {}", r.value)
             };
             items.push(ListItem::new(line));
         }
