@@ -373,18 +373,25 @@ pub(super) async fn run(
                             // 登录页 key 输入态提交 → 异步校验 + 接入(唯一异步 Enter 分支);余走同步 panel_enter。
                             let login_submit = matches!(ui.panel.as_ref(), Some(p) if p.kind == PanelKind::Login && p.editing.is_some());
                             if login_submit {
-                                let (id, key, oauth) = {
+                                let (id, key) = {
                                     let p = ui.panel.as_ref().unwrap();
                                     (
                                         p.selected().map(|r| r.key.clone()),
                                         p.editing.clone().unwrap_or_default(),
-                                        p.selected()
-                                            .map(|r| r.key == CLAUDE_OAUTH_ROW)
-                                            .unwrap_or(false),
                                     )
                                 };
-                                if oauth {
-                                    apply_claude_oauth_code(key.trim(), &mut meta, &swap, &mut ui)
+                                // 订阅 OAuth 行(iter-43 claude / iter-48 codex)→ 泛化交换分支。
+                                let ocfg = match id.as_deref() {
+                                    Some(k) if k == CLAUDE_OAUTH_ROW => {
+                                        Some(&provider::oauth::ANTHROPIC)
+                                    }
+                                    Some(k) if k == CODEX_OAUTH_ROW => {
+                                        Some(&provider::oauth::OPENAI)
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(ocfg) = ocfg {
+                                    apply_oauth_code(ocfg, key.trim(), &mut meta, &swap, &mut ui)
                                         .await;
                                 } else {
                                     match id.as_deref().and_then(preset_by_id) {

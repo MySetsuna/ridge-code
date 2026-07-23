@@ -198,11 +198,16 @@ fn config_panel_lists_all_config_keys() {
 fn login_panel_lists_all_presets() {
     let p = login_panel();
     assert_eq!(p.kind, PanelKind::Login);
-    assert_eq!(p.rows.len(), PROVIDER_PRESETS.len() + 1);
+    assert_eq!(p.rows.len(), PROVIDER_PRESETS.len() + 2);
     let keys: Vec<&str> = p.rows.iter().map(|r| r.key.as_str()).collect();
     assert!(keys.contains(&CLAUDE_OAUTH_ROW));
+    assert!(keys.contains(&CODEX_OAUTH_ROW));
     assert!(keys.contains(&"openai"));
-    for r in p.rows.iter().filter(|r| r.key != CLAUDE_OAUTH_ROW) {
+    for r in p
+        .rows
+        .iter()
+        .filter(|r| r.key != CLAUDE_OAUTH_ROW && r.key != CODEX_OAUTH_ROW)
+    {
         assert!(
             preset_by_id(&r.key).is_some(),
             "登录页行 key 非 preset id: {}",

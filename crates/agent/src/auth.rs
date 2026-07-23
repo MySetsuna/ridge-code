@@ -159,6 +159,7 @@ pub fn preset_to_profile(
         base_url: preset.base_url.to_string(),
         key_env: preset.key_env.to_string(),
         api_key: None,
+        use_oauth: None,
     }
 }
 
@@ -328,6 +329,7 @@ mod tests {
             base_url: "u".into(),
             key_env: "RIDGE_ITER37_UNSET".into(),
             api_key: Some(" sk-inline ".into()),
+            use_oauth: None,
         };
         let mut auth = BTreeMap::new();
         auth.insert("RIDGE_ITER37_UNSET".to_string(), "sk-auth".to_string());

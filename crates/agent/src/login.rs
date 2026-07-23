@@ -63,6 +63,7 @@ pub(crate) async fn run_login(args: &[String]) -> anyhow::Result<()> {
     let mut list = false;
     let mut no_verify = false;
     let mut oauth_claude = false;
+    let mut oauth_codex = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -71,14 +72,18 @@ pub(crate) async fn run_login(args: &[String]) -> anyhow::Result<()> {
             "--default" => make_default = true,
             "--no-verify" => no_verify = true,
             "--claude" => oauth_claude = true, // iter-43:OAuth 订阅登录(接 Claude Pro/Max)
+            "--codex" => oauth_codex = true,   // iter-48:OAuth 订阅登录(接 ChatGPT Plus/Pro)
             "--model" => model = it.next().cloned(),
             "--name" => name = it.next().cloned(),
             _ => positional.push(a),
         }
     }
-    // iter-43:`ridgecode login --claude` → OAuth(PKCE)订阅登录,与 api-key 登录分道。
+    // OAuth(PKCE)订阅登录,与 api-key 登录分道(iter-43 claude / iter-48 codex)。
     if oauth_claude {
-        return run_login_claude_oauth(no_verify).await;
+        return run_login_oauth(&provider::oauth::ANTHROPIC, no_verify).await;
+    }
+    if oauth_codex {
+        return run_login_oauth(&provider::oauth::OPENAI, no_verify).await;
     }
     if list || positional.is_empty() {
         print_presets();
@@ -188,35 +193,80 @@ pub(crate) fn save_oauth_token(
     Ok(path)
 }
 
-/// iter-43:`ridgecode login --claude` —— OAuth(PKCE)订阅登录接 Claude Pro/Max。
-/// **Claude 不碰凭据**:生成授权 URL,用户本人在浏览器授权,回贴回调页给的 `code#state`;
+/// 订阅 OAuth 各家默认 (model, base_url)(env RIDGE_MODEL/RIDGE_BASE_URL 或 config 可覆盖)。
+pub(crate) fn oauth_defaults(provider_id: &str) -> (&'static str, &'static str) {
+    match provider_id {
+        "openai" => ("gpt-5", "https://api.openai.com/v1"),
+        _ => ("claude-sonnet-4-6", "https://api.anthropic.com/v1"),
+    }
+}
+
+/// 据订阅凭据构造 bearer-mode provider(anthropic 走专用 OAuth wire,其余走 OpenAI bearer)。
+fn oauth_provider(
+    provider_id: &str,
+    base: String,
+    model: String,
+    access: String,
+) -> Arc<dyn LlmProvider> {
+    if provider_id == "anthropic" {
+        Arc::new(AnthropicProvider::new_oauth(base, model, access))
+    } else {
+        Arc::new(OpenAiProvider::new(base, model, access))
+    }
+}
+
+/// OAuth(PKCE)订阅登录(iter-43 claude 贴码流 / iter-48 codex 本地回调流,共用纯核)。
+/// **本程序不碰账号密码**:生成授权 URL,用户本人在浏览器授权;
 /// 换到的 access+refresh token 落 oauth.json(0600),补全侧走 `Authorization: Bearer`。
-pub(crate) async fn run_login_claude_oauth(no_verify: bool) -> anyhow::Result<()> {
+pub(crate) async fn run_login_oauth(
+    ocfg: &provider::oauth::OAuthConfig,
+    no_verify: bool,
+) -> anyhow::Result<()> {
     use provider::oauth;
     let pkce = oauth::Pkce::generate();
     let state = oauth::random_token();
-    let url = oauth::authorize_url(&pkce.challenge, &state);
-    println!("\n== ridgecode login --claude (OAuth 订阅登录) ==\n");
+    let url = oauth::authorize_url(ocfg, &pkce.challenge, &state);
+    let flag = if ocfg.provider == "openai" {
+        "--codex"
+    } else {
+        "--claude"
+    };
+    println!("\n== ridgecode login {flag} (OAuth 订阅登录) ==\n");
     println!(
-        "注:claude.ai 有地域限制。所在区域若无法直连,浏览器需走代理打开下方 URL;\n   \
+        "注:授权站点可能有地域限制。所在区域若无法直连,浏览器需走代理打开下方 URL;\n   \
          并给本进程设 HTTP_PROXY/HTTPS_PROXY 环境变量 —— token 交换/刷新会自动走它。\n"
     );
-    println!("1) 在浏览器打开以下 URL,用你的 Claude 订阅账号授权:\n\n{url}\n");
-    println!("2) 授权后页面会显示形如 `code#state` 的码。粘贴到此处并回车:");
-    eprint!("code: ");
-    std::io::stderr().flush().ok();
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    let code = line.trim();
+    println!("1) 在浏览器打开以下 URL,用你的订阅账号授权:\n\n{url}\n");
+    // 取 code:openai 重定向到本地回调端口,起临时 listener 接;anthropic 回调页显码,用户回贴。
+    let code = if ocfg.token_wire == oauth::TokenWire::Form {
+        println!("2) 等待浏览器授权回调(监听 localhost:1455;Ctrl-C 取消)…");
+        let expect = state.clone();
+        tokio::task::spawn_blocking(move || read_local_callback("127.0.0.1:1455", &expect))
+            .await??
+    } else {
+        println!("2) 授权后页面会显示形如 `code#state` 的码。粘贴到此处并回车:");
+        eprint!("code: ");
+        std::io::stderr().flush().ok();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        line.trim().to_string()
+    };
     if code.is_empty() {
         anyhow::bail!("no authorization code provided; aborted (nothing written).");
     }
     let http = provider::http::ReqwestClient::new();
-    let token = oauth::exchange_code(&http, code, &pkce.verifier, now_epoch())
+    let token = oauth::exchange_code(&http, ocfg, &code, &pkce.verifier, now_epoch())
         .await
         .map_err(|e| anyhow::anyhow!("token exchange failed: {e}"))?;
-    let path = save_oauth_token("anthropic", &token)?;
-    println!("\n[OK] Claude 订阅已接入。");
+    let path = save_oauth_token(ocfg.provider, &token)?;
+    // iter-48 G3:顺手登记 use_oauth 命名档 —— /provider 页可列可切,订阅成一等公民。
+    if let Some(name) = register_oauth_profile(ocfg.provider) {
+        println!(
+            "     profile    -> {}  (name \"{name}\", oauth)",
+            config_path()
+        );
+    }
+    println!("\n[OK] 订阅已接入({})。", ocfg.provider);
     println!("     credential saved -> {path}  (access+refresh, chmod 600 where supported)");
     println!("     just run: ridgecode   (启动自动用订阅凭据,过期自动刷新)");
     // best-effort 校验(默认;--no-verify 跳过):bearer 打一次最小调用证明能到模型。
@@ -224,11 +274,10 @@ pub(crate) async fn run_login_claude_oauth(no_verify: bool) -> anyhow::Result<()
     if !no_verify {
         eprint!("verifying subscription reaches the model … ");
         std::io::stderr().flush().ok();
-        let model =
-            std::env::var("RIDGE_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
-        let base = std::env::var("RIDGE_BASE_URL")
-            .unwrap_or_else(|_| "https://api.anthropic.com/v1".to_string());
-        let p = AnthropicProvider::new_oauth(base, model, token.access_token.clone());
+        let (dm, db) = oauth_defaults(ocfg.provider);
+        let model = std::env::var("RIDGE_MODEL").unwrap_or_else(|_| dm.to_string());
+        let base = std::env::var("RIDGE_BASE_URL").unwrap_or_else(|_| db.to_string());
+        let p = oauth_provider(ocfg.provider, base, model, token.access_token.clone());
         let req = provider::CompletionRequest {
             messages: vec![Message::user("ping")],
             tools: vec![],
@@ -243,36 +292,103 @@ pub(crate) async fn run_login_claude_oauth(no_verify: bool) -> anyhow::Result<()
     Ok(())
 }
 
-/// iter-43:key 全无时的回退 —— oauth.json 有 Anthropic 订阅 token 则构造 bearer-mode provider。
-/// 过期(含 60s 余量)先刷新并落盘;刷新失败退回旧 token 让 API 定夺。
+/// iter-48 G3:把订阅登记为 `use_oauth` 命名档(同名覆盖,best-effort)。
+/// 成功返回档名;失败静默 None(凭据已落 oauth.json,档只是列切便利)。
+pub(crate) fn register_oauth_profile(provider_id: &str) -> Option<String> {
+    let (dm, db) = oauth_defaults(provider_id);
+    let prof = agent::ProviderProfile {
+        name: if provider_id == "anthropic" {
+            "claude-max".to_string()
+        } else {
+            "chatgpt-plus".to_string()
+        },
+        kind: provider_id.to_string(),
+        model: dm.to_string(),
+        base_url: db.to_string(),
+        key_env: String::new(),
+        api_key: None,
+        use_oauth: Some(true),
+    };
+    let cfg_path = config_path();
+    let cfg_text = std::fs::read_to_string(&cfg_path).unwrap_or_default();
+    let updated = agent::config_add_provider(&cfg_text, &prof).ok()?;
+    if let Some(dir) = std::path::Path::new(&cfg_path).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(&cfg_path, updated).ok()?;
+    Some(prof.name)
+}
+
+/// 起临时本地 TCP listener 接 OAuth 回调(阻塞;spawn_blocking 里跑)。
+/// 循环 accept 直到某请求首行含 code(浏览器杂请求如 favicon 跳过);校验 state 防 CSRF。
+fn read_local_callback(addr: &str, expected_state: &str) -> anyhow::Result<String> {
+    use std::io::{BufRead, BufReader, Write as _};
+    let listener = std::net::TcpListener::bind(addr)
+        .map_err(|e| anyhow::anyhow!("cannot listen on {addr}: {e} (port in use?)"))?;
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else { continue };
+        let mut first = String::new();
+        if BufReader::new(&stream).read_line(&mut first).is_err() {
+            continue;
+        }
+        let Some((code, state)) = provider::oauth::parse_callback_path(first.trim()) else {
+            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n");
+            continue;
+        };
+        if state != expected_state {
+            let _ =
+                stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\nstate mismatch; restart login");
+            anyhow::bail!("OAuth state mismatch (possible CSRF); aborted.");
+        }
+        let _ = stream.write_all(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n\r\n<h2>Login successful. You can close this window.</h2>",
+        );
+        return Ok(code);
+    }
+    anyhow::bail!("listener closed before callback arrived")
+}
+
+/// key 全无时的回退(iter-43;iter-48 泛化) —— oauth.json 依次找 anthropic → openai
+/// 订阅 token,命中则构造 bearer-mode provider。过期(含 60s 余量)先刷新并落盘;
+/// 刷新失败退回旧 token 让 API 定夺。
 pub(crate) async fn resolve_claude_oauth_provider(cfg: &Config) -> Option<Arc<dyn LlmProvider>> {
     let text = std::fs::read_to_string(oauth_path()).ok()?;
-    let mut token = agent::oauth_get(&text, "anthropic")?;
-    let now = now_epoch();
-    if token.needs_refresh(now) {
-        let http = provider::http::ReqwestClient::new();
-        match provider::oauth::refresh(&http, &token.refresh_token, now).await {
-            Ok(fresh) => {
-                let _ = save_oauth_token("anthropic", &fresh);
-                token = fresh;
+    for ocfg in [&provider::oauth::ANTHROPIC, &provider::oauth::OPENAI] {
+        let Some(mut token) = agent::oauth_get(&text, ocfg.provider) else {
+            continue;
+        };
+        let now = now_epoch();
+        if token.needs_refresh(now) {
+            let http = provider::http::ReqwestClient::new();
+            match provider::oauth::refresh(&http, ocfg, &token.refresh_token, now).await {
+                Ok(fresh) => {
+                    let _ = save_oauth_token(ocfg.provider, &fresh);
+                    token = fresh;
+                }
+                Err(e) => eprintln!("[ridgecode] OAuth refresh failed: {e}; using existing token"),
             }
-            Err(e) => eprintln!("[ridgecode] OAuth refresh failed: {e}; using existing token"),
         }
+        let (dm, db) = oauth_defaults(ocfg.provider);
+        let model = std::env::var("RIDGE_MODEL")
+            .ok()
+            .or_else(|| cfg.model.clone())
+            .unwrap_or_else(|| dm.to_string());
+        let base = std::env::var("RIDGE_BASE_URL")
+            .ok()
+            .or_else(|| cfg.base_url.clone())
+            .unwrap_or_else(|| db.to_string());
+        eprintln!(
+            "[ridgecode] starting with {} subscription (OAuth) · {model}",
+            ocfg.provider
+        );
+        return Some(oauth_provider(
+            ocfg.provider,
+            base,
+            model,
+            token.access_token,
+        ));
     }
-    let model = std::env::var("RIDGE_MODEL")
-        .ok()
-        .or_else(|| cfg.model.clone())
-        .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
-    let base = std::env::var("RIDGE_BASE_URL")
-        .ok()
-        .or_else(|| cfg.base_url.clone())
-        .unwrap_or_else(|| "https://api.anthropic.com/v1".to_string());
-    eprintln!("[ridgecode] starting with Claude subscription (OAuth) · {model}");
-    Some(Arc::new(AnthropicProvider::new_oauth(
-        base,
-        model,
-        token.access_token,
-    )))
+    None
 }
 
 #[cfg(test)]

@@ -84,6 +84,10 @@ pub struct ProviderProfile {
     /// `skip_serializing` —— 任何回写 config 的路径(如 `/provider add`)都**不会**把它写出去。
     #[serde(default, skip_serializing)]
     pub api_key: Option<String>,
+    /// iter-48 G3(订阅档一等公民化):true = 凭据走 `~/.ridge/oauth.json`(按 `kind` 索引),
+    /// 不走 key。serde-default → 旧 config 零破坏。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_oauth: Option<bool>,
 }
 
 fn default_key_env() -> String {
@@ -261,6 +265,7 @@ pub fn parse_provider_add(args: &str) -> Result<ProviderProfile, String> {
             .map(|s| s.to_string())
             .unwrap_or_else(default_key_env),
         api_key: None,
+        use_oauth: None,
     })
 }
 
@@ -339,6 +344,7 @@ mod tests {
             base_url: "https://x/v1".into(),
             key_env: "ZHIPU_KEY".into(),
             api_key: None,
+            use_oauth: None,
         };
         let start = r#"{ "model": "old", "mcp": [ { "name": "nlm", "cmd": "x.exe" } ] }"#;
         // 追加第一个 → mcp 保留、providers 出现。
@@ -433,5 +439,29 @@ mod tests {
             config_set("{}", "allow_jailbreak", "yes").is_err(),
             "非 bool 应报错"
         );
+    }
+
+    /// iter-48 G3:`use_oauth` serde-default(旧 config 零破坏)+ 订阅档往返保留。
+    #[test]
+    fn provider_profile_use_oauth_default_none_and_roundtrip() {
+        // 旧 config(无 use_oauth)→ None。
+        let cfg = Config::parse(
+            r#"{"providers":[{"name":"a","kind":"openai","model":"m","base_url":"u"}]}"#,
+        );
+        assert_eq!(cfg.providers[0].use_oauth, None);
+        // 订阅档解析 + config_add_provider 往返保留 use_oauth。
+        let prof = ProviderProfile {
+            name: "chatgpt-plus".into(),
+            kind: "openai".into(),
+            model: "gpt-5".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            key_env: String::new(),
+            api_key: None,
+            use_oauth: Some(true),
+        };
+        let out = config_add_provider("{}", &prof).unwrap();
+        let cfg = Config::parse(&out);
+        assert_eq!(cfg.providers[0].use_oauth, Some(true));
+        assert_eq!(cfg.providers[0].name, "chatgpt-plus");
     }
 }

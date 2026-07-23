@@ -135,7 +135,12 @@ pub(crate) fn provider_panel() -> Panel {
         .iter()
         .map(|p| PanelRow {
             key: p.name.clone(),
-            value: format!("{} · {}", p.kind, p.model),
+            // 订阅档标 oauth 徽标(iter-48 G6),与 key 档一眼可辨。
+            value: if p.use_oauth == Some(true) {
+                format!("{} · {} · oauth", p.kind, p.model)
+            } else {
+                format!("{} · {}", p.kind, p.model)
+            },
             ctx: None,
         })
         .collect();
@@ -212,15 +217,23 @@ pub(crate) fn agent_panel(defs: &[agent::Agent]) -> Panel {
 }
 
 pub(crate) const CLAUDE_OAUTH_ROW: &str = "claude-oauth";
+pub(crate) const CODEX_OAUTH_ROW: &str = "codex-oauth";
 
 /// 登录页(iter-38):列内置供应商 preset(id · label · model),Enter 选中后就地输入 key;
-/// 另含 Claude OAuth 入口,用于订阅账号授权码登录。
+/// 另含订阅 OAuth 入口(iter-43 Claude / iter-48 ChatGPT Codex),授权码登录。
 pub(crate) fn login_panel() -> Panel {
-    let mut rows = vec![PanelRow {
-        key: CLAUDE_OAUTH_ROW.to_string(),
-        value: "Claude OAuth subscription · browser auth code".to_string(),
-        ctx: None,
-    }];
+    let mut rows = vec![
+        PanelRow {
+            key: CLAUDE_OAUTH_ROW.to_string(),
+            value: "Claude OAuth subscription · browser auth code".to_string(),
+            ctx: None,
+        },
+        PanelRow {
+            key: CODEX_OAUTH_ROW.to_string(),
+            value: "ChatGPT Plus/Pro OAuth (Codex) · browser auth".to_string(),
+            ctx: None,
+        },
+    ];
     rows.extend(PROVIDER_PRESETS.iter().map(|p| PanelRow {
         key: p.id.to_string(),
         value: format!("{} · {}", p.label, p.default_model),
@@ -228,7 +241,7 @@ pub(crate) fn login_panel() -> Panel {
     }));
     Panel::new(
         PanelKind::Login,
-        "Login · Enter key login or Claude OAuth · type to filter · Esc close".into(),
+        "Login · Enter key login or subscription OAuth · type to filter · Esc close".into(),
         rows,
     )
 }

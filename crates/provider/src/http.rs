@@ -33,6 +33,11 @@ pub trait HttpClient: Send + Sync {
     ) -> Result<Value, ProviderError> {
         Err("this HttpClient does not support GET".into())
     }
+
+    /// 「POST form-urlencoded 拿 JSON」(标准 OAuth token 端点用,iter-48)。默认不支持。
+    async fn post_form(&self, _url: &str, _form: &[(&str, &str)]) -> Result<Value, ProviderError> {
+        Err("this HttpClient does not support form POST".into())
+    }
 }
 
 /// 生产用的真实客户端(reqwest)。
@@ -105,6 +110,21 @@ impl HttpClient for ReqwestClient {
         for (k, v) in headers {
             rb = rb.header(k.as_str(), v.as_str());
         }
+        let resp = rb.send().await?;
+        let status = resp.status();
+        let val: Value = resp.json().await?;
+        if !status.is_success() {
+            return Err(format!("http {status}: {val}").into());
+        }
+        Ok(val)
+    }
+
+    async fn post_form(&self, url: &str, form: &[(&str, &str)]) -> Result<Value, ProviderError> {
+        let rb = self
+            .client
+            .post(url)
+            .form(form)
+            .timeout(std::time::Duration::from_secs(timeout_secs()));
         let resp = rb.send().await?;
         let status = resp.status();
         let val: Value = resp.json().await?;

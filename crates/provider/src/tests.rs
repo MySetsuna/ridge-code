@@ -491,12 +491,46 @@ fn pkce_challenge_is_s256_base64url_of_verifier() {
 
 #[test]
 fn authorize_url_carries_challenge_scopes_state() {
-    let url = oauth::authorize_url("CHAL123", "STATE789");
+    // 回归(iter-48 G1):anthropic URL 与泛化前逐字节等价的关键要素。
+    let url = oauth::authorize_url(&oauth::ANTHROPIC, "CHAL123", "STATE789");
+    assert!(url.starts_with("https://claude.ai/oauth/authorize?code=true&client_id="));
     assert!(url.contains("code_challenge=CHAL123"));
     assert!(url.contains("code_challenge_method=S256"));
     assert!(url.contains("state=STATE789"));
-    assert!(url.contains("client_id="));
     assert!(url.contains("scope=org"));
+}
+
+#[test]
+fn authorize_url_openai_uses_codex_endpoint_and_scopes() {
+    // iter-48 G2:openai 授权 URL 打 auth.openai.com,标准 PKCE 参数,无 anthropic 特有 code=true。
+    let url = oauth::authorize_url(&oauth::OPENAI, "CH", "ST");
+    assert!(url.starts_with("https://auth.openai.com/oauth/authorize?client_id="));
+    assert!(!url.contains("code=true"));
+    assert!(url.contains("scope=openid%20profile%20email%20offline_access"));
+    assert!(url.contains("code_challenge=CH"));
+    assert!(url.contains("code_challenge_method=S256"));
+    assert!(url.contains("state=ST"));
+}
+
+#[test]
+fn parse_callback_path_extracts_code_state() {
+    // 整个请求首行 / 裸 path / 整 URL 皆可;无 code → None。
+    assert_eq!(
+        oauth::parse_callback_path("GET /auth/callback?code=abc&state=xyz HTTP/1.1"),
+        Some(("abc".into(), "xyz".into()))
+    );
+    assert_eq!(
+        oauth::parse_callback_path("http://localhost:1455/auth/callback?state=s&code=c"),
+        Some(("c".into(), "s".into()))
+    );
+    assert_eq!(
+        oauth::parse_callback_path("GET /favicon.ico HTTP/1.1"),
+        None
+    );
+    assert_eq!(
+        oauth::parse_callback_path("/auth/callback?state=only"),
+        None
+    );
 }
 
 #[test]
@@ -562,9 +596,15 @@ async fn exchange_code_and_refresh_parse_via_fake_http() {
     let cap = Arc::new(CapturingHttp::new(
         json!({"access_token":"A","refresh_token":"R","expires_in":3600}),
     ));
-    let t = oauth::exchange_code(cap.as_ref(), "the-code#the-state", "verifier-x", 10)
-        .await
-        .unwrap();
+    let t = oauth::exchange_code(
+        cap.as_ref(),
+        &oauth::ANTHROPIC,
+        "the-code#the-state",
+        "verifier-x",
+        10,
+    )
+    .await
+    .unwrap();
     assert_eq!(t.access_token, "A");
     assert_eq!(t.expires_at_epoch, 3610);
     // 交换请求体带 grant_type / code / code_verifier。
@@ -573,7 +613,20 @@ async fn exchange_code_and_refresh_parse_via_fake_http() {
     assert_eq!(seen.body["code"], "the-code");
     assert_eq!(seen.body["code_verifier"], "verifier-x");
 
-    let r = oauth::refresh(cap.as_ref(), "R", 20).await.unwrap();
+    let r = oauth::refresh(cap.as_ref(), &oauth::ANTHROPIC, "R", 20)
+        .await
+        .unwrap();
     assert_eq!(r.access_token, "A");
     assert_eq!(r.expires_at_epoch, 3620);
+}
+
+#[tokio::test]
+async fn openai_token_wire_goes_form_not_json() {
+    // iter-48 G2:openai token 端点走 form-urlencoded(RFC 6749),不走 JSON body;
+    // CapturingHttp 未实现 post_form → 默认 Err,即证 Json 路径未被走。
+    let cap = Arc::new(CapturingHttp::new(
+        json!({"access_token":"A","refresh_token":"R","expires_in":1}),
+    ));
+    let e = oauth::exchange_code(cap.as_ref(), &oauth::OPENAI, "c", "v", 0).await;
+    assert!(e.unwrap_err().to_string().contains("form"));
 }

@@ -17,6 +17,51 @@ pub mod anthropic_oauth {
     pub const SYSTEM_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 }
 
+/// token 端点 body 格式:Anthropic 用 JSON,标准 OAuth(RFC 6749,OpenAI)用 form-urlencoded。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenWire {
+    Json,
+    Form,
+}
+
+/// per-provider OAuth 常量集(iter-48 G1:泛化自 anthropic 硬绑)。活端点由用户实跑验证。
+pub struct OAuthConfig {
+    /// oauth.json 键名("anthropic"/"openai")。
+    pub provider: &'static str,
+    pub client_id: &'static str,
+    pub authorize_url: &'static str,
+    pub token_url: &'static str,
+    pub redirect_uri: &'static str,
+    pub scopes: &'static str,
+    /// authorize URL 前置额外 query(anthropic 特有 `code=true&`;无则空串)。
+    pub extra_query: &'static str,
+    pub token_wire: TokenWire,
+}
+
+pub const ANTHROPIC: OAuthConfig = OAuthConfig {
+    provider: "anthropic",
+    client_id: anthropic_oauth::CLIENT_ID,
+    authorize_url: anthropic_oauth::AUTHORIZE_URL,
+    token_url: anthropic_oauth::TOKEN_URL,
+    redirect_uri: anthropic_oauth::REDIRECT_URI,
+    scopes: anthropic_oauth::SCOPES,
+    extra_query: "code=true&",
+    token_wire: TokenWire::Json,
+};
+
+/// ChatGPT Plus/Pro(Codex)订阅(iter-48 G2)。client_id 为 Codex CLI 公开值;
+/// redirect 是本地回调(见 [`parse_callback_path`]),端点/参数属活验证边界。
+pub const OPENAI: OAuthConfig = OAuthConfig {
+    provider: "openai",
+    client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
+    authorize_url: "https://auth.openai.com/oauth/authorize",
+    token_url: "https://auth.openai.com/oauth/token",
+    redirect_uri: "http://localhost:1455/auth/callback",
+    scopes: "openid profile email offline_access",
+    extra_query: "",
+    token_wire: TokenWire::Form,
+};
+
 /// 无填充 base64url 编码(RFC 4648 §5;非 crypto,纯编码,手写 + 测,省一依赖)。
 pub fn base64url_nopad(bytes: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -87,15 +132,16 @@ impl OAuthToken {
     }
 }
 
-/// 构造 Anthropic 订阅授权 URL(纯)。用户浏览器打开它授权,回调页给出 `code#state`。
-pub fn authorize_url(challenge: &str, state: &str) -> String {
-    use anthropic_oauth::*;
-    let scope_enc = SCOPES.replace(' ', "%20");
-    let redirect_enc = REDIRECT_URI.replace(':', "%3A").replace('/', "%2F");
+/// 构造订阅授权 URL(纯;per-provider 经 [`OAuthConfig`])。用户浏览器打开授权,
+/// 回调页给出 `code#state`(anthropic)或重定向到本地回调(openai)。
+pub fn authorize_url(cfg: &OAuthConfig, challenge: &str, state: &str) -> String {
+    let scope_enc = cfg.scopes.replace(' ', "%20");
+    let redirect_enc = cfg.redirect_uri.replace(':', "%3A").replace('/', "%2F");
     format!(
-        "{AUTHORIZE_URL}?code=true&client_id={CLIENT_ID}&response_type=code\
+        "{}?{}client_id={}&response_type=code\
              &redirect_uri={redirect_enc}&scope={scope_enc}\
-             &code_challenge={challenge}&code_challenge_method=S256&state={state}"
+             &code_challenge={challenge}&code_challenge_method=S256&state={state}",
+        cfg.authorize_url, cfg.extra_query, cfg.client_id
     )
 }
 
@@ -123,45 +169,95 @@ pub fn parse_token_response(
     })
 }
 
-/// 授权码换 token(HTTP 走接缝)。`code_and_state` 为回调页给的 `code#state`,拆开回填。
+/// 授权码换 token(HTTP 走接缝)。`code_and_state` 为回调给的 `code#state`,拆开回填。
+/// body 格式按 `cfg.token_wire` 分流:Json(anthropic,带 state)/ Form(标准 OAuth,无 state)。
 pub async fn exchange_code(
     http: &dyn HttpClient,
+    cfg: &OAuthConfig,
     code_and_state: &str,
     verifier: &str,
     now_epoch: u64,
 ) -> Result<OAuthToken, ProviderError> {
-    use anthropic_oauth::*;
     let (code, state) = split_code_state(code_and_state);
-    let body = json!({
-        "grant_type": "authorization_code",
-        "code": code,
-        "state": state,
-        "client_id": CLIENT_ID,
-        "redirect_uri": REDIRECT_URI,
-        "code_verifier": verifier,
-    });
-    let v = http.post_json(TOKEN_URL, &json_headers(), &body).await?;
+    let v = match cfg.token_wire {
+        TokenWire::Json => {
+            let body = json!({
+                "grant_type": "authorization_code",
+                "code": code,
+                "state": state,
+                "client_id": cfg.client_id,
+                "redirect_uri": cfg.redirect_uri,
+                "code_verifier": verifier,
+            });
+            http.post_json(cfg.token_url, &json_headers(), &body)
+                .await?
+        }
+        TokenWire::Form => {
+            let form = [
+                ("grant_type", "authorization_code"),
+                ("code", code.as_str()),
+                ("client_id", cfg.client_id),
+                ("redirect_uri", cfg.redirect_uri),
+                ("code_verifier", verifier),
+            ];
+            http.post_form(cfg.token_url, &form).await?
+        }
+    };
     parse_token_response(&v, now_epoch, None)
 }
 
-/// refresh_token 换新 token(HTTP 走接缝)。
+/// refresh_token 换新 token(HTTP 走接缝;body 格式同 exchange 按 wire 分流)。
 pub async fn refresh(
     http: &dyn HttpClient,
+    cfg: &OAuthConfig,
     refresh_token: &str,
     now_epoch: u64,
 ) -> Result<OAuthToken, ProviderError> {
-    use anthropic_oauth::*;
-    let body = json!({
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": CLIENT_ID,
-    });
-    let v = http.post_json(TOKEN_URL, &json_headers(), &body).await?;
+    let v = match cfg.token_wire {
+        TokenWire::Json => {
+            let body = json!({
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": cfg.client_id,
+            });
+            http.post_json(cfg.token_url, &json_headers(), &body)
+                .await?
+        }
+        TokenWire::Form => {
+            let form = [
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh_token),
+                ("client_id", cfg.client_id),
+            ];
+            http.post_form(cfg.token_url, &form).await?
+        }
+    };
     parse_token_response(&v, now_epoch, Some(refresh_token))
 }
 
 fn json_headers() -> Vec<(String, String)> {
     vec![("Content-Type".to_string(), "application/json".to_string())]
+}
+
+/// 解析本地回调请求行/路径,提取 `(code, state)`(纯;G2 openai 本地回调用)。
+/// 收整个 HTTP 请求首行(`GET /auth/callback?code=X&state=Y HTTP/1.1`)或裸 path 皆可。
+/// code/state 为 URL-safe 令牌,不做 percent-decode。无 code → None。
+pub fn parse_callback_path(line: &str) -> Option<(String, String)> {
+    let path = line
+        .strip_prefix("GET ")
+        .map(|r| r.split(' ').next().unwrap_or(r))
+        .unwrap_or(line);
+    let query = path.split_once('?')?.1;
+    let mut code = None;
+    let mut state = String::new();
+    for kv in query.split('&') {
+        match kv.split_once('=') {
+            Some(("code", v)) if !v.is_empty() => code = Some(v.to_string()),
+            Some(("state", v)) => state = v.to_string(),
+            _ => {}
+        }
+    }
+    code.map(|c| (c, state))
 }
 
 /// 回调页返回 `code#state`;拆成 (code, state)。无 `#` 则 state 空。

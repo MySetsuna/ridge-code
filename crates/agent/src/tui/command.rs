@@ -62,24 +62,37 @@ pub(crate) async fn login_apply_verified(
     }
 }
 
-pub(crate) fn begin_claude_oauth(ui: &mut Ui) {
+/// 订阅 OAuth 起步(iter-48 泛化):生成授权 URL,面板转就地输入态等码。
+/// anthropic 回调页显 `code#state` 回贴;openai 重定向 localhost:1455(TUI 不起 listener)——
+/// 授权后从浏览器地址栏拷整个回调 URL 贴回,`parse_callback_path` 提取 code。
+pub(crate) fn begin_oauth(ui: &mut Ui, ocfg: &provider::oauth::OAuthConfig) {
     let pkce = provider::oauth::Pkce::generate();
     let state = provider::oauth::random_token();
-    let url = provider::oauth::authorize_url(&pkce.challenge, &state);
+    let url = provider::oauth::authorize_url(ocfg, &pkce.challenge, &state);
     if let Some(panel) = ui.panel.as_mut() {
         panel.oauth_verifier = Some(pkce.verifier);
         panel.editing = Some(String::new());
-        panel.title = "Claude OAuth · paste code#state · Enter connect · Esc cancel".into();
+        panel.title = format!(
+            "{} OAuth · paste code · Enter connect · Esc cancel",
+            ocfg.provider
+        );
     }
+    let hint = if ocfg.token_wire == provider::oauth::TokenWire::Form {
+        "2. After authorizing, the browser redirects to localhost:1455 (page may fail to load).\n   Copy the FULL URL from the address bar and paste it here, then press Enter."
+    } else {
+        "2. Paste the returned code#state here and press Enter."
+    };
     ui.note(
         format!(
-            "Claude OAuth:\n1. Open this URL in your browser:\n{url}\n2. Paste the returned code#state here and press Enter."
+            "{} OAuth:\n1. Open this URL in your browser:\n{url}\n{hint}",
+            ocfg.provider
         ),
         Color::Cyan,
     );
 }
 
-pub(crate) async fn apply_claude_oauth_code(
+pub(crate) async fn apply_oauth_code(
+    ocfg: &provider::oauth::OAuthConfig,
     code: &str,
     meta: &mut ReplMeta,
     swap: &Arc<SwapProvider>,
@@ -92,40 +105,55 @@ pub(crate) async fn apply_claude_oauth_code(
         .unwrap_or_default();
     if verifier.is_empty() {
         ui.note(
-            "Claude OAuth session expired; select claude-oauth again",
+            "OAuth session expired; select the oauth row again",
             Color::Yellow,
         );
         return;
     }
-    let code = code.trim();
-    if code.is_empty() {
-        ui.note("paste a non-empty code#state", Color::Yellow);
+    let input = code.trim();
+    if input.is_empty() {
+        ui.note("paste a non-empty code", Color::Yellow);
         return;
     }
-    ui.note("exchanging Claude OAuth code...", Color::Gray);
+    // 贴的是整个回调 URL(openai 流)→ 纯核提取 code;否则按 code / code#state 原样交换。
+    let code = match provider::oauth::parse_callback_path(input) {
+        Some((c, _)) if input.contains("code=") => c,
+        _ => input.to_string(),
+    };
+    ui.note(
+        format!("exchanging {} OAuth code...", ocfg.provider),
+        Color::Gray,
+    );
     let http = provider::http::ReqwestClient::new();
-    match provider::oauth::exchange_code(&http, code, &verifier, now_epoch()).await {
-        Ok(token) => match save_oauth_token("anthropic", &token) {
+    match provider::oauth::exchange_code(&http, ocfg, &code, &verifier, now_epoch()).await {
+        Ok(token) => match save_oauth_token(ocfg.provider, &token) {
             Ok(path) => {
+                let (dm, db) = oauth_defaults(ocfg.provider);
                 let model = std::env::var("RIDGE_MODEL")
                     .ok()
                     .or_else(|| Config::load(config_path()).model)
-                    .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+                    .unwrap_or_else(|| dm.to_string());
                 let base_url = std::env::var("RIDGE_BASE_URL")
                     .ok()
                     .or_else(|| Config::load(config_path()).base_url)
-                    .unwrap_or_else(|| "https://api.anthropic.com/v1".to_string());
-                swap.swap(Arc::new(AnthropicProvider::new_oauth(
+                    .unwrap_or_else(|| db.to_string());
+                swap.swap(oauth_swap_provider(
+                    ocfg.provider,
                     base_url.clone(),
                     model.clone(),
                     token.access_token,
-                )));
-                meta.provider = "anthropic".to_string();
+                ));
+                meta.provider = ocfg.provider.to_string();
                 meta.model = model;
                 meta.base_url = base_url;
                 ui.panel = None;
+                // iter-48 G3:顺手登记 use_oauth 命名档,/provider 页可列可切。
+                register_oauth_profile(ocfg.provider);
                 ui.note(
-                    format!("✓ Claude OAuth connected · credential saved to {path}"),
+                    format!(
+                        "✓ {} OAuth connected · credential saved to {path}",
+                        ocfg.provider
+                    ),
                     Color::Green,
                 );
             }
@@ -134,7 +162,24 @@ pub(crate) async fn apply_claude_oauth_code(
                 Color::Red,
             ),
         },
-        Err(e) => ui.note(format!("Claude OAuth exchange failed: {e}"), Color::Red),
+        Err(e) => ui.note(
+            format!("{} OAuth exchange failed: {e}", ocfg.provider),
+            Color::Red,
+        ),
+    }
+}
+
+/// 据订阅 provider 构造 bearer provider(TUI 热切用;与 login.rs `oauth_provider` 同逻辑)。
+fn oauth_swap_provider(
+    provider_id: &str,
+    base: String,
+    model: String,
+    access: String,
+) -> Arc<dyn provider::LlmProvider> {
+    if provider_id == "anthropic" {
+        Arc::new(AnthropicProvider::new_oauth(base, model, access))
+    } else {
+        Arc::new(provider::OpenAiProvider::new(base, model, access))
     }
 }
 
@@ -167,6 +212,40 @@ pub(crate) fn switch_provider(
         .into_iter()
         .find(|p| p.name == name)
     {
+        // iter-48 G6:订阅档(use_oauth)→ 凭据走 oauth.json,bearer 热切。
+        // ponytail:此处不刷新 token(同步路径);过期由 API 报错提示,启动路径有自动刷新。
+        Some(p) if p.use_oauth == Some(true) => {
+            let token = std::fs::read_to_string(oauth_path())
+                .ok()
+                .and_then(|t| agent::oauth_get(&t, &p.kind));
+            match token {
+                Some(token) => {
+                    if token.needs_refresh(now_epoch()) {
+                        ui.note(
+                            "subscription token near expiry; restart ridgecode to auto-refresh if calls fail",
+                            Color::Yellow,
+                        );
+                    }
+                    swap.swap(oauth_swap_provider(
+                        &p.kind,
+                        p.base_url.clone(),
+                        p.model.clone(),
+                        token.access_token,
+                    ));
+                    meta.provider = p.kind;
+                    meta.model = p.model;
+                    meta.base_url = p.base_url;
+                    ui.note(format!("switched provider {name} (oauth)"), Color::Green);
+                }
+                None => ui.note(
+                    format!(
+                        "no oauth credential for {} ({}); run: ridgecode login --claude / --codex",
+                        p.name, p.kind
+                    ),
+                    Color::Red,
+                ),
+            }
+        }
         Some(p) => match p.resolve_key_with(&load_auth()) {
             Some(key) => {
                 swap.swap(make_provider(&p.kind, &p.model, &p.base_url, key));
@@ -312,7 +391,9 @@ pub(crate) fn panel_enter(ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvi
         (PanelKind::Login, None) => {
             if let (Some(p), Some(id)) = (ui.panel.as_mut(), sel_key) {
                 if id == CLAUDE_OAUTH_ROW {
-                    begin_claude_oauth(ui);
+                    begin_oauth(ui, &provider::oauth::ANTHROPIC);
+                } else if id == CODEX_OAUTH_ROW {
+                    begin_oauth(ui, &provider::oauth::OPENAI);
                 } else {
                     p.editing = Some(String::new());
                     p.title = format!(
@@ -456,7 +537,7 @@ pub(crate) async fn run_command(
         _ if input == "/login" => ui.panel = Some(login_panel()),
         _ if input == "/login list" => {
             let ids: Vec<&str> = PROVIDER_PRESETS.iter().map(|p| p.id).collect();
-            ui.note(format!("built-in providers: {}\nOAuth: claude-oauth (/login --claude)\ninteractive: /login  ·  quick: /login <id> <API_KEY> (verified; key → ~/.ridge/auth.json, not config)", ids.join(", ")), Color::Gray);
+            ui.note(format!("built-in providers: {}\nOAuth: claude-oauth (/login --claude) · codex-oauth (/login --codex)\ninteractive: /login  ·  quick: /login <id> <API_KEY> (verified; key → ~/.ridge/auth.json, not config)", ids.join(", ")), Color::Gray);
         }
         _ if input == "/login --claude" || input == "/login claude-oauth" => {
             ui.panel = Some(login_panel());
@@ -465,7 +546,16 @@ pub(crate) async fn run_command(
                     panel.sel = pos;
                 }
             }
-            begin_claude_oauth(ui);
+            begin_oauth(ui, &provider::oauth::ANTHROPIC);
+        }
+        _ if input == "/login --codex" || input == "/login codex-oauth" => {
+            ui.panel = Some(login_panel());
+            if let Some(panel) = ui.panel.as_mut() {
+                if let Some(pos) = panel.view.iter().position(|&i| panel.rows[i].key == CODEX_OAUTH_ROW) {
+                    panel.sel = pos;
+                }
+            }
+            begin_oauth(ui, &provider::oauth::OPENAI);
         }
         _ if input.starts_with("/login ") => {
             let rest = input["/login ".len()..].trim();
