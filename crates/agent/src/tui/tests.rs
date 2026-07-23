@@ -620,6 +620,24 @@ fn sanitize_paste_normalizes_and_strips() {
 }
 
 /// iter-24:动态输入高度 —— 空=min、折行、多行、封顶 max、width=0 不 panic。
+/// iter-48 G5(修「光标卡首行」):首逻辑行折多视觉行且非行首 → Up 先跳行首,不召回;
+/// 行首 / 短行 → 照常召回历史。
+#[test]
+fn up_fallback_home_only_when_wrapped_and_not_at_start() {
+    // 短行(单视觉行):任意位置 Up 都召回。
+    assert!(!up_fallback_is_home("hi", 1, 80));
+    assert!(!up_fallback_is_home("hi", 0, 80));
+    // 长行折行:非行首 → 先跳行首;行首 → 召回。
+    let long = "x".repeat(200);
+    assert!(up_fallback_is_home(&long, 100, 80));
+    assert!(!up_fallback_is_home(&long, 0, 80));
+    // 多逻辑行不达此路径(move_up 会成功),但首行折行判定仍只看首行。
+    let multi = format!("{}\nshort", "y".repeat(200));
+    assert!(up_fallback_is_home(&multi, 5, 80));
+    // 宽度 0 防御:max(1) 不崩。
+    assert!(up_fallback_is_home(&long, 5, 0));
+}
+
 #[test]
 fn input_height_grows_and_clamps() {
     assert_eq!(input_height("", 80, 3, 8), 3);

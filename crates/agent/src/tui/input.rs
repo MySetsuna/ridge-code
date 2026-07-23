@@ -146,6 +146,14 @@ pub(crate) fn input_action(key: &KeyEvent, busy: bool, popup_open: bool) -> Inpu
     }
 }
 
+/// 首逻辑行内 Up 的回退决策(iter-48 G5,修「光标卡首行」):`move_up` 失败(已在首逻辑行)时,
+/// 若首行折成**多视觉行**且光标不在行首 → 先跳行首(true),免历史召回突变替换长草稿;
+/// 行首 / 单视觉行 → 照常召回(false)。纯函数。
+pub(crate) fn up_fallback_is_home(buffer: &str, cursor: usize, width: u16) -> bool {
+    let first = buffer.split('\n').next().unwrap_or("");
+    cursor > 0 && super::render::line_visual_rows(first, width.max(1) as usize) > 1
+}
+
 // ───────────────────────── 输入状态机(iter-27)─────────────────────────
 
 /// 多行输入编辑器:单 String 缓冲 + 字符光标 + 会话内历史召回。全纯方法、离线可测。

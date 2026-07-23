@@ -133,7 +133,7 @@ pub(super) async fn run(
     let (_guard, mut terminal) = TerminalGuard::enter()?;
     let mut ui = Ui::default();
     ui.note(
-        "RidgeCode  ·  inline mode: output lands in terminal history (native scroll/select) · Enter to send · Ctrl-C to interrupt · /help",
+        "RidgeCode  ·  inline mode: output lands in terminal history (native scroll/select) · Enter to send · Ctrl+J newline (Shift+Enter where supported) · Ctrl-C to interrupt · /help",
         Color::Cyan,
     );
     if skip_danger {
@@ -460,8 +460,18 @@ pub(super) async fn run(
                     InputAction::NewLine => ui.input.insert('\n'),
                     InputAction::CursorUpOrHistory => {
                         // 转换函数惯例(iter-27):非首行 = 光标上移;首行 = 历史召回。
+                        // iter-48 G5:首行折多视觉行且非行首 → 先跳行首,再 Up 才召回
+                        // (修长草稿被历史突变替换=「光标卡首行」)。
                         if !ui.input.move_up() {
-                            ui.input.recall_prev();
+                            let w = crossterm::terminal::size()
+                                .map(|(c, _)| c)
+                                .unwrap_or(80)
+                                .saturating_sub(2);
+                            if up_fallback_is_home(&ui.input.buffer, ui.input.cursor, w) {
+                                ui.input.home();
+                            } else {
+                                ui.input.recall_prev();
+                            }
                         }
                     }
                     InputAction::CursorDownOrHistory => {
