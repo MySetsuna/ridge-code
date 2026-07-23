@@ -20,20 +20,12 @@ pub(crate) const DEFAULT_STATUS_BAR: &str = " {provider} · {model} · ctx {ctx}
 
 /// 实时 token 速率(tok/s,纯函数):elapsed 为 0 → 0,防除零。
 pub(crate) fn token_rate(tokens: usize, elapsed_ms: u128) -> u64 {
-    if elapsed_ms == 0 {
-        0
-    } else {
-        (tokens as u128 * 1000 / elapsed_ms) as u64
-    }
+    (tokens as u128 * 1000).checked_div(elapsed_ms).unwrap_or(0) as u64
 }
 
 /// 上下文占用百分比(纯函数):window 为 0 → 0;上限 100(压缩前估算,超窗即封顶)。
 pub(crate) fn ctx_percent(used: usize, window: usize) -> u16 {
-    if window == 0 {
-        0
-    } else {
-        (used * 100 / window).min(100) as u16
-    }
+    (used * 100).checked_div(window).unwrap_or(0).min(100) as u16
 }
 
 /// 忙碌粘条文案(需求 6,纯函数):运行态 · 读秒 · token 消耗 · 速率 · 任务进度 · 待跑队列。
