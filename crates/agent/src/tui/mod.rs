@@ -373,20 +373,40 @@ pub(super) async fn run(
                             // 登录页 key 输入态提交 → 异步校验 + 接入(唯一异步 Enter 分支);余走同步 panel_enter。
                             let login_submit = matches!(ui.panel.as_ref(), Some(p) if p.kind == PanelKind::Login && p.editing.is_some());
                             if login_submit {
-                                let (id, key) = {
+                                let (id, key, oauth) = {
                                     let p = ui.panel.as_ref().unwrap();
                                     (
                                         p.selected().map(|r| r.key.clone()),
                                         p.editing.clone().unwrap_or_default(),
+                                        p.selected()
+                                            .map(|r| r.key == CLAUDE_OAUTH_ROW)
+                                            .unwrap_or(false),
                                     )
                                 };
-                                match id.as_deref().and_then(preset_by_id) {
-                                    Some(preset) if !key.trim().is_empty() => {
-                                        ui.note(format!("verifying {}…", preset.id), Color::Gray);
-                                        login_apply_verified(preset, key.trim(), &mut meta, &swap, &mut ui).await;
+                                if oauth {
+                                    apply_claude_oauth_code(key.trim(), &mut meta, &swap, &mut ui)
+                                        .await;
+                                } else {
+                                    match id.as_deref().and_then(preset_by_id) {
+                                        Some(preset) if !key.trim().is_empty() => {
+                                            ui.note(
+                                                format!("verifying {}…", preset.id),
+                                                Color::Gray,
+                                            );
+                                            login_apply_verified(
+                                                preset,
+                                                key.trim(),
+                                                &mut meta,
+                                                &swap,
+                                                &mut ui,
+                                            )
+                                            .await;
+                                        }
+                                        Some(_) => {
+                                            ui.note("enter a non-empty API key", Color::Yellow)
+                                        }
+                                        None => ui.note("no provider selected", Color::Red),
                                     }
-                                    Some(_) => ui.note("enter a non-empty API key", Color::Yellow),
-                                    None => ui.note("no provider selected", Color::Red),
                                 }
                             } else {
                                 panel_enter(&mut ui, &mut meta, &swap);

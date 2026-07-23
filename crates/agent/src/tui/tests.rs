@@ -193,13 +193,16 @@ fn config_panel_lists_all_config_keys() {
     assert_eq!(p.rows.len(), agent::CONFIG_KEYS.len());
 }
 
-/// 登录页(iter-38):列全部内置 preset,每行 key 是合法 preset id,kind 为 Login。
+/// 登录页(iter-38):列 Claude OAuth 入口 + 全部内置 preset,kind 为 Login。
 #[test]
 fn login_panel_lists_all_presets() {
     let p = login_panel();
     assert_eq!(p.kind, PanelKind::Login);
-    assert_eq!(p.rows.len(), PROVIDER_PRESETS.len());
-    for r in &p.rows {
+    assert_eq!(p.rows.len(), PROVIDER_PRESETS.len() + 1);
+    let keys: Vec<&str> = p.rows.iter().map(|r| r.key.as_str()).collect();
+    assert!(keys.contains(&CLAUDE_OAUTH_ROW));
+    assert!(keys.contains(&"openai"));
+    for r in p.rows.iter().filter(|r| r.key != CLAUDE_OAUTH_ROW) {
         assert!(
             preset_by_id(&r.key).is_some(),
             "登录页行 key 非 preset id: {}",
@@ -210,14 +213,18 @@ fn login_panel_lists_all_presets() {
 
 #[test]
 fn models_panel_selects_current() {
-    let list = [
-        mi("a", Some(128_000)),
-        mi("b", Some(200_000)),
-        mi("c", None),
-    ];
-    let p = models_panel(&list, "b");
+    let grouped: Vec<(String, Vec<provider::models::ModelInfo>)> = vec![(
+        "test".into(),
+        vec![
+            mi("a", Some(128_000)),
+            mi("b", Some(200_000)),
+            mi("c", None),
+        ],
+    )];
+    let p = models_panel(&grouped, "test", "b");
     assert_eq!(p.kind, PanelKind::Models);
-    assert_eq!(p.selected().map(|r| r.key.as_str()), Some("b")); // 当前模型高亮
+    // key 格式: "provider · model_id"
+    assert_eq!(p.selected().map(|r| r.key.as_str()), Some("test · b"));
     assert_eq!(p.rows[0].ctx, Some(128_000)); // 携真实窗口供选中缓存
     assert!(p.rows[2].value.contains('?')); // 缺 ctx 显 ?
 }
@@ -735,7 +742,7 @@ fn panel_titles_are_english() {
         config_panel().title,
         provider_panel().title,
         tools_panel(&[]).title,
-        models_panel(&[], "").title,
+        models_panel(&[], "", "").title,
         agent_panel(&[]).title,
     ];
     for t in &titles {

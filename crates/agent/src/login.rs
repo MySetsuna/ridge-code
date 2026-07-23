@@ -88,6 +88,7 @@ pub(crate) async fn run_login(args: &[String]) -> anyhow::Result<()> {
     let Some(preset) = preset_by_id(id) else {
         anyhow::bail!("unknown provider \"{id}\". Run `ridgecode login --list` to see built-ins.");
     };
+
     // key:参数给了用参数;否则从 stdin 读一行(不回显保证不了,但不落 argv/历史)。
     let key = match positional.get(1) {
         Some(k) => k.to_string(),
@@ -104,7 +105,7 @@ pub(crate) async fn run_login(args: &[String]) -> anyhow::Result<()> {
     }
     // 0) 连接校验(默认;--no-verify 跳过):打端点验 key 真连通,失败则不落盘。
     if !no_verify {
-        eprint!("verifying {} …", preset.id);
+        eprint!("  verifying {} …", preset.id);
         std::io::stderr().flush().ok();
         match verify_provider_key(preset.kind, preset.base_url, &key).await {
             Ok(n) => eprintln!(" ✓ connected ({n} models)"),

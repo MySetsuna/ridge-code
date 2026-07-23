@@ -62,6 +62,82 @@ pub(crate) async fn login_apply_verified(
     }
 }
 
+pub(crate) fn begin_claude_oauth(ui: &mut Ui) {
+    let pkce = provider::oauth::Pkce::generate();
+    let state = provider::oauth::random_token();
+    let url = provider::oauth::authorize_url(&pkce.challenge, &state);
+    if let Some(panel) = ui.panel.as_mut() {
+        panel.oauth_verifier = Some(pkce.verifier);
+        panel.editing = Some(String::new());
+        panel.title = "Claude OAuth · paste code#state · Enter connect · Esc cancel".into();
+    }
+    ui.note(
+        format!(
+            "Claude OAuth:\n1. Open this URL in your browser:\n{url}\n2. Paste the returned code#state here and press Enter."
+        ),
+        Color::Cyan,
+    );
+}
+
+pub(crate) async fn apply_claude_oauth_code(
+    code: &str,
+    meta: &mut ReplMeta,
+    swap: &Arc<SwapProvider>,
+    ui: &mut Ui,
+) {
+    let verifier = ui
+        .panel
+        .as_ref()
+        .and_then(|p| p.oauth_verifier.clone())
+        .unwrap_or_default();
+    if verifier.is_empty() {
+        ui.note(
+            "Claude OAuth session expired; select claude-oauth again",
+            Color::Yellow,
+        );
+        return;
+    }
+    let code = code.trim();
+    if code.is_empty() {
+        ui.note("paste a non-empty code#state", Color::Yellow);
+        return;
+    }
+    ui.note("exchanging Claude OAuth code...", Color::Gray);
+    let http = provider::http::ReqwestClient::new();
+    match provider::oauth::exchange_code(&http, code, &verifier, now_epoch()).await {
+        Ok(token) => match save_oauth_token("anthropic", &token) {
+            Ok(path) => {
+                let model = std::env::var("RIDGE_MODEL")
+                    .ok()
+                    .or_else(|| Config::load(config_path()).model)
+                    .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+                let base_url = std::env::var("RIDGE_BASE_URL")
+                    .ok()
+                    .or_else(|| Config::load(config_path()).base_url)
+                    .unwrap_or_else(|| "https://api.anthropic.com/v1".to_string());
+                swap.swap(Arc::new(AnthropicProvider::new_oauth(
+                    base_url.clone(),
+                    model.clone(),
+                    token.access_token,
+                )));
+                meta.provider = "anthropic".to_string();
+                meta.model = model;
+                meta.base_url = base_url;
+                ui.panel = None;
+                ui.note(
+                    format!("✓ Claude OAuth connected · credential saved to {path}"),
+                    Color::Green,
+                );
+            }
+            Err(e) => ui.note(
+                format!("OAuth token received but save failed: {e}"),
+                Color::Red,
+            ),
+        },
+        Err(e) => ui.note(format!("Claude OAuth exchange failed: {e}"), Color::Red),
+    }
+}
+
 /// 热切换模型(iter-32 共用路径):密钥经 `current_api_key`(env 优先,回落 config 内联)——
 /// `/model <name>` 文本命令与模型选择器浮窗同走此路,顺带修「内联 key 无法切模型」根因。
 pub(crate) fn swap_model(swap: &Arc<SwapProvider>, meta: &mut ReplMeta, model: &str, ui: &mut Ui) {
@@ -187,13 +263,40 @@ pub(crate) fn panel_enter(ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvi
                 p.editing = Some(cur);
             }
         }
-        // 模型页:切到选中模型 + 缓存其真实上下文窗口。
+        // 模型页:切到选中模型(跨 provider 时先切 provider 再切模型)。
         (PanelKind::Models, _) => {
-            if let Some(id) = sel_key {
-                if let Some(w) = sel_ctx {
-                    meta.ctx_window = w;
+            if let Some(key) = sel_key {
+                // key 格式: "provider · model_id"
+                let (provider_name, model) = key.split_once(" · ").unwrap_or(("", &key));
+                if !provider_name.is_empty() && provider_name != meta.provider {
+                    // 跨 provider:查档案,全量切换
+                    let cfg = Config::load(config_path());
+                    let auth = load_auth();
+                    if let Some(p) = cfg.providers.into_iter().find(|p| p.name == provider_name) {
+                        if let Some(k) = p.resolve_key_with(&auth) {
+                            swap.swap(make_provider(&p.kind, model, &p.base_url, k));
+                            meta.provider = p.kind;
+                            meta.model = model.to_string();
+                            meta.base_url = p.base_url;
+                            if let Some(w) = sel_ctx {
+                                meta.ctx_window = w;
+                            }
+                            ui.note(
+                                format!("switched to {} / {model}", provider_name),
+                                Color::Green,
+                            );
+                            ui.panel = None;
+                            return;
+                        }
+                    }
+                    ui.note(format!("no key for provider {provider_name}"), Color::Red);
+                } else {
+                    // 同 provider:只切模型
+                    if let Some(w) = sel_ctx {
+                        meta.ctx_window = w;
+                    }
+                    swap_model(swap, meta, if model.is_empty() { &key } else { model }, ui);
                 }
-                swap_model(swap, meta, &id, ui);
                 ui.panel = None;
             }
         }
@@ -208,9 +311,14 @@ pub(crate) fn panel_enter(ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvi
         // 异步处理(校验联网),不达此。
         (PanelKind::Login, None) => {
             if let (Some(p), Some(id)) = (ui.panel.as_mut(), sel_key) {
-                p.editing = Some(String::new());
-                p.title =
-                    format!("Login · enter API key for {id} · Enter verify & connect · Esc cancel");
+                if id == CLAUDE_OAUTH_ROW {
+                    begin_claude_oauth(ui);
+                } else {
+                    p.editing = Some(String::new());
+                    p.title = format!(
+                        "Login · enter API key for {id} · Enter verify & connect · Esc cancel"
+                    );
+                }
             }
         }
         (PanelKind::Login, Some(_)) => {}
@@ -237,32 +345,81 @@ pub(crate) async fn run_command(
 ) -> anyhow::Result<bool> {
     match input {
         "/exit" | "/quit" => return Ok(true),
-        "/help" => ui.note("/exit /reset /compact /cost /tools /login [list|<id> <key>] /model [<name>] (no arg = live model picker) /provider [list|use <name>|add ...] /agent /mcp /init (generate AGENTS.md) /skills /commands (custom /name from ~/.ridge/commands/*.md + skills; $ARGS) /config [set key value] /jailbreak [on|off]; @path to reference a file; Ctrl-C to interrupt; scroll/select history with the terminal's native keys; approval prompt: y/Enter approve, n/Esc reject, ↑↓ scroll details.", Color::Gray),
+        "/help" => ui.note("/exit /reset /compact /cost /tools /login [list|--claude|<id> <key>] /model [<name>] (no arg = live model picker) /provider [list|use <name>|add ...] /agent /mcp /init (generate AGENTS.md) /skills /commands (custom /name from ~/.ridge/commands/*.md + skills; $ARGS) /config [set key value] /jailbreak [on|off]; @path to reference a file; Ctrl-C to interrupt; scroll/select history with the terminal's native keys; approval prompt: y/Enter approve, n/Esc reject, ↑↓ scroll details.", Color::Gray),
         "/tools" => ui.panel = Some(tools_panel(&meta.tools)),
         "/reset" => { history.clear(); save_session(&session_path(), history); ui.note("context cleared", Color::Yellow); }
         "/compact" => { let n = history.len(); *history = compact_history(std::mem::take(history), 4); ui.note(format!("context compacted: {n} → {} messages", history.len()), Color::Yellow); }
         "/cost" => ui.note(format!("session total: {tokens} tokens · {turns} tasks"), Color::Gray),
-        // /model 单命令(iter-37 合并):无参 → 实时模型页(↑↓ 选、Enter 切);`/model <name>` → 直接热切。
+        // /model 单命令:无参 → 跨 provider 模型页(↑↓ 选、Enter 切);`/model <name>` → 直接热切。
         // `/models` `/model pick` 保留为别名(旧肌肉记忆),补全表只呈现 `/model`。
         _ if input == "/model" || input == "/models" || input == "/model pick" => {
-            match current_api_key() {
-                Some(key) => {
-                    let http = provider::http::ReqwestClient::new();
-                    let fut = provider::models::fetch_models(&http, &meta.provider, &meta.base_url, &key);
-                    match tokio::time::timeout(Duration::from_secs(15), fut).await {
-                        Ok(Ok(list)) if !list.is_empty() => {
-                            // 命中当前模型即缓存其真实上下文窗口 → 顶/底栏 ctx% 分母转真值(iter-31)。
-                            if let Some(n) = list.iter().find(|m| m.id == meta.model).and_then(|m| m.context) {
-                                meta.ctx_window = n;
-                            }
-                            ui.panel = Some(models_panel(&list, &meta.model));
-                        }
-                        Ok(Ok(_)) => ui.note("endpoint returned an empty model list", Color::Yellow),
-                        Ok(Err(e)) => ui.note(format!("failed to fetch models: {e}"), Color::Red),
-                        Err(_) => ui.note("fetching models timed out (15s)", Color::Red),
+            let cfg = Config::load(config_path());
+            let auth = load_auth();
+            let http = provider::http::ReqwestClient::new();
+            // 收集所有可查询的 provider (当前活跃 + 命名档案)
+            struct Target {
+                name: String,
+                kind: String,
+                base_url: String,
+                _key: String,
+            }
+            let mut targets: Vec<Target> = Vec::new();
+            if let Some(key) = current_api_key() {
+                targets.push(Target {
+                    name: meta.provider.clone(),
+                    kind: meta.provider.clone(),
+                    base_url: meta.base_url.clone(),
+                    _key: key,
+                });
+            }
+            for p in &cfg.providers {
+                if let Some(key) = p.resolve_key_with(&auth) {
+                    if !targets.iter().any(|t| t.name == p.name) {
+                        targets.push(Target {
+                            name: p.name.clone(),
+                            kind: p.kind.clone(),
+                            base_url: p.base_url.clone(),
+                            _key: key,
+                        });
                     }
                 }
-                None => ui.note("no API key resolved (set RIDGE_API_KEY or api_key at config.json top level)", Color::Red),
+            }
+            if targets.is_empty() {
+                ui.note("no API key resolved (set RIDGE_API_KEY or api_key at config.json top level)", Color::Red);
+            } else {
+                let mut grouped: Vec<(String, Vec<provider::models::ModelInfo>)> = Vec::new();
+                let mut has_current = false;
+                let mut fail_count = 0u32;
+                for t in &targets {
+                    let fut = provider::models::fetch_models(&http, &t.kind, &t.base_url, &t._key);
+                    match tokio::time::timeout(Duration::from_secs(10), fut).await {
+                        Ok(Ok(list)) if !list.is_empty() => {
+                            // 缓存当前模型的真实上下文窗口
+                            if t.name == meta.provider {
+                                if let Some(n) = list.iter().find(|m| m.id == meta.model).and_then(|m| m.context) {
+                                    meta.ctx_window = n;
+                                }
+                                has_current = true;
+                            }
+                            grouped.push((t.name.clone(), list));
+                        }
+                        Ok(Ok(_)) => fail_count += 1, // 空列表
+                        Ok(Err(_)) => fail_count += 1, // 认证失败等
+                        Err(_) => fail_count += 1,      // 超时
+                    }
+                }
+                if grouped.is_empty() {
+                    ui.note(
+                        format!("no models returned ({fail_count} provider(s) unreachable or auth failed)"),
+                        Color::Yellow,
+                    );
+                } else {
+                    // 未在当前 provider 的列表中找到当前模型 → ctx_window 维持默认
+                    if !has_current {
+                        meta.ctx_window = tui::DEFAULT_CTX_WINDOW;
+                    }
+                    ui.panel = Some(models_panel(&grouped, &meta.provider, &meta.model));
+                }
             }
         }
         _ if input.starts_with("/model ") => swap_model(swap, meta, input[7..].trim(), ui),
@@ -299,7 +456,16 @@ pub(crate) async fn run_command(
         _ if input == "/login" => ui.panel = Some(login_panel()),
         _ if input == "/login list" => {
             let ids: Vec<&str> = PROVIDER_PRESETS.iter().map(|p| p.id).collect();
-            ui.note(format!("built-in providers: {}\ninteractive: /login  ·  quick: /login <id> <API_KEY> (verified; key → ~/.ridge/auth.json, not config)", ids.join(", ")), Color::Gray);
+            ui.note(format!("built-in providers: {}\nOAuth: claude-oauth (/login --claude)\ninteractive: /login  ·  quick: /login <id> <API_KEY> (verified; key → ~/.ridge/auth.json, not config)", ids.join(", ")), Color::Gray);
+        }
+        _ if input == "/login --claude" || input == "/login claude-oauth" => {
+            ui.panel = Some(login_panel());
+            if let Some(panel) = ui.panel.as_mut() {
+                if let Some(pos) = panel.view.iter().position(|&i| panel.rows[i].key == CLAUDE_OAUTH_ROW) {
+                    panel.sel = pos;
+                }
+            }
+            begin_claude_oauth(ui);
         }
         _ if input.starts_with("/login ") => {
             let rest = input["/login ".len()..].trim();

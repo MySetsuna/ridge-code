@@ -23,6 +23,9 @@
 # 各 crate 的构建产物(不入库;根 Cargo.lock 仍跟踪)
 **/target/
 
+# AI coding tool 产物(本地计划/上下文,不入库)
+/.mimocode/
+
 # 沙箱测试临时产物(写 jail 后测试落在 cwd 子树,自清理;防 panic 残留污染)
 *.tmp
 ridge_agent_batch_tmp/

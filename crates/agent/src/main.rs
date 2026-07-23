@@ -12,7 +12,10 @@ use agent::{
 };
 use langgraph::{CompiledGraph, StreamEvent};
 use mcp::{McpClient, StdioTransport};
-use provider::{AnthropicProvider, LlmProvider, Message, OpenAiProvider, SwapProvider};
+use provider::{
+    AnthropicProvider, Completion, LlmProvider, Message, OpenAiProvider, ScriptedProvider,
+    SwapProvider,
+};
 
 mod tui;
 use login::*;
@@ -38,7 +41,7 @@ struct ReplMeta {
 ///   ridgecode --cwd /path/to/project "..."    # 在目标项目里跑
 ///   ridgecode --yolo "..."                    # skip-danger:工具自动放行不问 [y/N]
 ///
-/// 配置(环境变量):RIDGE_API_KEY / RIDGE_PROVIDER(anthropic|openai)/ RIDGE_MODEL / RIDGE_BASE_URL
+/// 配置(环境变量):RIDGE_API_KEY / RIDGE_PROVIDER(anthropic|openai)/ RIDGE_MODEL / RIDGE_BASE_URL / RIDGE_PROXY
 /// `--help` / `--version` 帮助与版本(1.0 级 CLI 该有的),命中就打印并返回 true(不进主流程)。
 fn handle_meta_flags() -> bool {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -50,7 +53,7 @@ fn handle_meta_flags() -> bool {
         println!(
             "RidgeCode —— modular general-purpose agent CLI (binary: ridgecode)\n\n\
              Usage:\n  \
-             ridgecode                      interactive TUI (needs a key: RIDGE_API_KEY or api_key/key_env in config; non-TTY falls back to headless)\n  \
+             ridgecode                      interactive TUI (no key required to open; use /login inside; non-TTY falls back to headless)\n  \
              ridgecode \"task\"               one-shot task\n  \
              ridgecode --resume             resume the last session (continue after kill-9 / reopen)\n\n\
              Options:\n  \
@@ -173,6 +176,56 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         None => {
+            if task.is_none() && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                let mcp = resolve_configured_mcp(&cfg).await;
+                let skills = load_configured_skills(&cfg);
+                let budget = cfg.budget_tokens.unwrap_or(0);
+                let skip_danger = cli_skip_danger || cfg.skip_danger.unwrap_or(false);
+                agent::set_allow_jailbreak(cfg.allow_jailbreak.unwrap_or(false));
+                agent::set_hooks(cfg.hooks.clone());
+                agent::set_notify(cfg.notify.unwrap_or(false));
+                agent::set_sandbox_cmd(cfg.sandbox_cmd.clone());
+                agent::fire_session_hooks("session_start", "");
+                let agents = Arc::new(build_agents(&cfg, &auth));
+                let initial = if resume {
+                    load_session(&session_path())
+                } else {
+                    Vec::new()
+                };
+                let (provider_kind, model, base_url) = resolve_model_info(&cfg);
+                let mut tools: Vec<String> = builtin_tool_specs()
+                    .iter()
+                    .map(|s| s.name.clone())
+                    .collect();
+                tools.extend(mcp.tool_names());
+                let meta = ReplMeta {
+                    tools,
+                    provider: provider_kind,
+                    model,
+                    base_url,
+                    status_bar: cfg
+                        .status_bar
+                        .clone()
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or_else(|| tui::DEFAULT_STATUS_BAR.to_string()),
+                    ctx_window: tui::DEFAULT_CTX_WINDOW,
+                };
+                let swap = Arc::new(SwapProvider::new(missing_key_provider()));
+                let commands = load_configured_commands(&cfg, &skills);
+                return tui::run(
+                    swap,
+                    mcp,
+                    skills,
+                    skip_danger,
+                    budget,
+                    initial,
+                    meta,
+                    agents,
+                    read_only,
+                    commands,
+                )
+                .await;
+            }
             eprintln!(
                 "[ridgecode] no key found, running the offline scripted demo. Provide a key to use a real LLM / TUI, pick one:\n  \
                  · set the RIDGE_API_KEY env var; or\n  \
@@ -182,6 +235,13 @@ async fn main() -> anyhow::Result<()> {
             run_demo().await
         }
     }
+}
+
+fn missing_key_provider() -> Arc<dyn LlmProvider> {
+    Arc::new(ScriptedProvider::new(vec![Completion {
+        text: "No API key is configured yet. Use /login to choose a provider and save a key, then send your task again.".to_string(),
+        ..Default::default()
+    }]))
 }
 
 /// 配置文件路径:`RIDGE_CONFIG` env > `~/.ridge/config.json`。加载与 `/config` 回写共用。
@@ -212,25 +272,37 @@ pub(crate) fn apply_proxy_env(proxy: &str) {
     }
 }
 
-/// 启动时据 config 落代理:配了 `proxy` 且进程**未**显式设 HTTP(S)_PROXY 才注入 —— 让 shell 的
-/// 临时 env 覆盖优先(与其余 env-覆盖-config 的约定一致)。见 [`apply_proxy_env`]。
+/// 启动时据 config 落代理:env(`RIDGE_PROXY`) > config(`proxy`) > 直连。
+/// 进程已显式设了 `HTTP(S)_PROXY` 则尊重之(shell 临时覆盖优先)。
+/// 见 [`apply_proxy_env`]。
 fn apply_config_proxy(cfg: &Config) {
-    let Some(p) = cfg
-        .proxy
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
-        return;
-    };
     let env_set = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]
         .iter()
         .any(|v| std::env::var_os(v).map(|x| !x.is_empty()).unwrap_or(false));
     if env_set {
-        return; // 尊重进程已有的显式代理
+        if let Some(p) = std::env::var("HTTP_PROXY").ok().filter(|s| !s.is_empty()) {
+            eprintln!("[ridgecode] proxy ← env(HTTP_PROXY): {p}");
+        } else if let Some(p) = std::env::var("HTTPS_PROXY").ok().filter(|s| !s.is_empty()) {
+            eprintln!("[ridgecode] proxy ← env(HTTPS_PROXY): {p}");
+        }
+        return;
     }
-    apply_proxy_env(p);
-    eprintln!("[ridgecode] proxy ← config: {p}");
+    if let Some(v) = std::env::var("RIDGE_PROXY").ok().filter(|s| !s.is_empty()) {
+        eprintln!("[ridgecode] proxy ← env RIDGE_PROXY: {v}");
+        apply_proxy_env(&v);
+        return;
+    }
+    if let Some(v) = cfg
+        .proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        eprintln!("[ridgecode] proxy ← config: {v}");
+        apply_proxy_env(v);
+        return;
+    }
+    eprintln!("[ridgecode] proxy: (直连)");
 }
 
 /// 把一个标量键持久化进 config.json(保留其余键;目录/文件不存在则新建)。
@@ -392,7 +464,7 @@ fn parse_args() -> ParsedArgs {
         match a.as_str() {
             "--cwd" => cwd = args.next(),
             "--every" => every = args.next().as_deref().and_then(parse_duration),
-            "--yolo" | "--skip-permissions" | "--dangerously-skip-permissions" => {
+            "-yolo" | "--yolo" | "--skip-permissions" | "--dangerously-skip-permissions" => {
                 skip_danger = true
             }
             "--read-only" | "--readonly" => read_only = true,

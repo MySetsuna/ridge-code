@@ -38,6 +38,7 @@ pub(crate) struct Panel {
     pub(crate) view: Vec<usize>,
     pub(crate) sel: usize,
     pub(crate) editing: Option<String>,
+    pub(crate) oauth_verifier: Option<String>,
 }
 
 /// 过滤:key/value 不分大小写子串命中;空 query = 全含。有序稳态(保 rows 原序)。纯函数。
@@ -63,6 +64,7 @@ impl Panel {
             view,
             sel: 0,
             editing: None,
+            oauth_verifier: None,
         }
     }
     /// query 变更后重算 view 并把 sel 钳回范围内。
@@ -161,25 +163,32 @@ pub(crate) fn tools_panel(tools: &[String]) -> Panel {
     )
 }
 
-/// 模型页:列实时模型(id · ctx),`sel` 落当前模型;`ctx` 携真实窗口供选中缓存。
-pub(crate) fn models_panel(list: &[provider::models::ModelInfo], current: &str) -> Panel {
-    let rows = list
+/// 模型页:跨 provider 列实时模型(`provider · id` → ctx),`sel` 落当前 provider+模型。
+pub(crate) fn models_panel(
+    grouped: &[(String, Vec<provider::models::ModelInfo>)],
+    current_provider: &str,
+    current_model: &str,
+) -> Panel {
+    let rows: Vec<PanelRow> = grouped
         .iter()
-        .map(|m| PanelRow {
-            key: m.id.clone(),
-            value: format!(
-                "ctx {}",
-                m.context.map(fmt_ctx).unwrap_or_else(|| "?".into())
-            ),
-            ctx: m.context,
+        .flat_map(|(provider, models)| {
+            models.iter().map(move |m| PanelRow {
+                key: format!("{} · {}", provider, m.id),
+                value: format!(
+                    "ctx {}",
+                    m.context.map(fmt_ctx).unwrap_or_else(|| "?".into())
+                ),
+                ctx: m.context,
+            })
         })
         .collect();
+    let target = format!("{} · {}", current_provider, current_model);
     let mut p = Panel::new(
         PanelKind::Models,
         "Models · ↑↓ select · Enter switch · type to filter · Esc close".into(),
         rows,
     );
-    if let Some(pos) = p.view.iter().position(|&i| p.rows[i].key == current) {
+    if let Some(pos) = p.view.iter().position(|&i| p.rows[i].key == target) {
         p.sel = pos;
     }
     p
@@ -202,19 +211,24 @@ pub(crate) fn agent_panel(defs: &[agent::Agent]) -> Panel {
     )
 }
 
-/// 登录页(iter-38):列 14 家内置供应商 preset(id · label · model),Enter 选中后就地输入 key。
+pub(crate) const CLAUDE_OAUTH_ROW: &str = "claude-oauth";
+
+/// 登录页(iter-38):列内置供应商 preset(id · label · model),Enter 选中后就地输入 key;
+/// 另含 Claude OAuth 入口,用于订阅账号授权码登录。
 pub(crate) fn login_panel() -> Panel {
-    let rows = PROVIDER_PRESETS
-        .iter()
-        .map(|p| PanelRow {
-            key: p.id.to_string(),
-            value: format!("{} · {}", p.label, p.default_model),
-            ctx: None,
-        })
-        .collect();
+    let mut rows = vec![PanelRow {
+        key: CLAUDE_OAUTH_ROW.to_string(),
+        value: "Claude OAuth subscription · browser auth code".to_string(),
+        ctx: None,
+    }];
+    rows.extend(PROVIDER_PRESETS.iter().map(|p| PanelRow {
+        key: p.id.to_string(),
+        value: format!("{} · {}", p.label, p.default_model),
+        ctx: None,
+    }));
     Panel::new(
         PanelKind::Login,
-        "Login · ↑↓ pick provider · Enter enter key · type to filter · Esc close".into(),
+        "Login · Enter key login or Claude OAuth · type to filter · Esc close".into(),
         rows,
     )
 }

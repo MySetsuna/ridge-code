@@ -43,22 +43,68 @@ pub(crate) fn draw_panel(frame: &mut ratatui::Frame, area: Rect, panel: &Panel) 
         ))),
         rows[0],
     );
-    // 过滤列表:key 左对齐 + 右列值。
-    let items: Vec<ListItem> = panel
-        .view
-        .iter()
-        .map(|&i| {
+    // 过滤列表:key 左对齐 + 右列值。Models 页加 provider 分栏标题。
+    let items: Vec<ListItem> = if panel.kind == PanelKind::Models {
+        let mut items: Vec<ListItem> = Vec::new();
+        let mut last_group: Option<&str> = None;
+        for &i in &panel.view {
             let r = &panel.rows[i];
+            let group = r.key.split_once(" · ").map(|(g, _)| g);
+            if group != last_group {
+                let hdr = format!(" ── {} ──", group.unwrap_or(""));
+                items.push(ListItem::new(Line::from(Span::styled(
+                    hdr,
+                    Style::default()
+                        .fg(role_color(Role::Muted))
+                        .add_modifier(Modifier::BOLD),
+                ))));
+                last_group = group;
+            }
             let line = if r.value.is_empty() {
-                r.key.clone()
+                format!("  {}", r.key)
             } else {
-                format!("{:<18} {}", r.key, r.value)
+                format!("  {:<18} {}", r.key, r.value)
             };
-            ListItem::new(line)
-        })
-        .collect();
+            items.push(ListItem::new(line));
+        }
+        items
+    } else {
+        panel
+            .view
+            .iter()
+            .map(|&i| {
+                let r = &panel.rows[i];
+                let line = if r.value.is_empty() {
+                    r.key.clone()
+                } else {
+                    format!("{:<18} {}", r.key, r.value)
+                };
+                ListItem::new(line)
+            })
+            .collect()
+    };
     let mut state = ListState::default();
-    state.select((!panel.view.is_empty()).then_some(panel.sel));
+    // Models 页:sel 需跨过分栏标题行
+    let sel_in_items = if panel.kind == PanelKind::Models {
+        let mut idx = 0;
+        let mut last_group: Option<&str> = None;
+        for (vi, &i) in panel.view.iter().enumerate() {
+            let r = &panel.rows[i];
+            let group = r.key.split_once(" · ").map(|(g, _)| g);
+            if group != last_group {
+                idx += 1;
+                last_group = group;
+            }
+            if vi == panel.sel {
+                break;
+            }
+            idx += 1;
+        }
+        (!panel.view.is_empty()).then_some(idx)
+    } else {
+        (!panel.view.is_empty()).then_some(panel.sel)
+    };
+    state.select(sel_in_items);
     frame.render_stateful_widget(
         List::new(items).highlight_style(
             Style::default()
