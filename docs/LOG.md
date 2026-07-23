@@ -1,5 +1,12 @@
 # RidgeCode 工作日志(append-only,新条目在顶)
 
+## 2026-07-23 · iter-48 完成:pi-agent 式多订阅接入
+
+- 六目标全落(24765be + 9e75b2b):OAuth 纯核泛化(OAuthConfig/TokenWire)、login --codex(本地回调+state 防 CSRF)、use_oauth 一等公民档、TUI codex-oauth 行、/provider oauth 热切、TUI 4 bug 勘察(2 已修于 af88070,Shift+Enter 平台约束,光标卡首行根因修复)。
+- 门禁:217 tests + fmt + clippy 全绿。诚实边界:codex wire 待用户实跑 login --codex 活验证。
+- 插入需求:Models 页 provider 分栏(af88070 已有,1011c86 剥前缀)。
+- 下一步:iter-49 候选 = codex wire 回填 / Gemini 订阅 / token 刷新收敛;NLM 待答 PROJECT-STATE D 节四问。
+
 ## 2026-07-23 · 笔记本初始化 + iter-48 合同落定(nlm 迭代工作流启动)
 
 - **遗留清理**:未提交 8 文件(无 key 可开 TUI + TUI 内 Claude OAuth + RIDGE_PROXY)验绿提交(af88070,212 tests)。
