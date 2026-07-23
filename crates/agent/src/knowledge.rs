@@ -136,6 +136,12 @@ pub fn load_commands(dir: impl AsRef<std::path::Path>, skills: &[Skill]) -> Vec<
             });
         }
     }
+    // 内置命令(如 /init)垫底:用户文件命令与 skill 同名可覆盖。
+    for (name, text) in BUILTIN_COMMANDS {
+        if !out.iter().any(|c| c.name == *name) {
+            out.push(parse_command_md(text, name));
+        }
+    }
     out
 }
 
@@ -231,6 +237,9 @@ const BUILTIN_SKILLS: &[&str] = &[
     include_str!("builtin/skills/skill-creator.md"),
 ];
 
+/// 内置斜杠命令(name, md 文本)。与 skill 不同:**只进命令表,不常驻 system prompt**(一次性动作,常驻是浪费)。
+const BUILTIN_COMMANDS: &[(&str, &str)] = &[("init", include_str!("builtin/commands/init.md"))];
+
 /// 内置 agent 定义(fastcontext / explorer / reviewer)。
 pub fn builtin_agents() -> Vec<Agent> {
     BUILTIN_AGENTS
@@ -247,20 +256,27 @@ pub fn builtin_skills() -> Vec<Skill> {
         .collect()
 }
 
-/// 读 cwd 的项目规则文件(CLAUDE.md / AGENTS.md),拼成一个"技能"注入 system prompt。都不存在 → None。
-/// 不向上递归(YAGNI):只看当前工作目录。
-pub fn load_project_rules() -> Option<Skill> {
+/// 读全局规则(`global`,如 `~/.ridge/AGENTS.md`)与 cwd 的项目规则文件(CLAUDE.md / AGENTS.md),
+/// 拼成一个"技能"注入 system prompt。全局先、项目后(项目更具体,可覆盖全局)。都不存在 → None。
+/// 不向上递归(YAGNI):cwd 只看当前工作目录。
+pub fn load_project_rules(global: Option<&std::path::Path>) -> Option<Skill> {
     let mut body = String::new();
+    let mut push = |label: &str, t: &str| {
+        if !t.trim().is_empty() {
+            body.push_str(&format!("\n<!-- {label} -->\n{}\n", t.trim()));
+        }
+    };
+    if let Some(t) = global.and_then(|g| std::fs::read_to_string(g).ok()) {
+        push("全局规则", &t);
+    }
     for f in ["CLAUDE.md", "AGENTS.md"] {
         if let Ok(t) = std::fs::read_to_string(f) {
-            if !t.trim().is_empty() {
-                body.push_str(&format!("\n<!-- {f} -->\n{}\n", t.trim()));
-            }
+            push(f, &t);
         }
     }
     (!body.is_empty()).then(|| Skill {
         name: "项目规则".to_string(),
-        description: "本仓库的 CLAUDE.md / AGENTS.md 约定,须遵守".to_string(),
+        description: "全局(~/.ridge)与本仓库(CLAUDE.md / AGENTS.md)的规则约定,须遵守".to_string(),
         body,
     })
 }
@@ -488,6 +504,40 @@ mod tests {
         let base = build_system_prompt(&[]);
         assert!(base.starts_with(BASE_SYSTEM));
         assert!(!base.contains("# Skills"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 全局规则(~/.ridge/AGENTS.md 类)注入:有 → 标「全局规则」进 body;无且 cwd 无规则文件 → None。
+    #[test]
+    fn load_project_rules_reads_global_file() {
+        let mut f = std::env::temp_dir();
+        f.push(format!("ridge_global_rules_{}.md", std::process::id()));
+        std::fs::write(&f, "# 全局约定\n答复求简。\n").unwrap();
+        let rules = load_project_rules(Some(&f)).expect("全局文件在,应有规则");
+        assert!(rules.body.contains("全局规则") && rules.body.contains("答复求简"));
+        let _ = std::fs::remove_file(&f);
+        // 测试 cwd(crates/agent)无 CLAUDE.md/AGENTS.md,全局也无 → None。
+        assert!(load_project_rules(Some(&f)).is_none());
+        assert!(load_project_rules(None).is_none());
+    }
+
+    /// 内置 /init:恒在命令表(垫底)、不入 skills(不常驻 system prompt);用户同名文件命令可覆盖。
+    #[test]
+    fn builtin_init_command_present_and_overridable() {
+        let cmds = load_commands("/nonexistent", &[]);
+        let init = resolve_command("init", &cmds).expect("内置 /init 应恒在");
+        assert!(!init.description.is_empty() && init.body.contains("AGENTS.md"));
+        // 用户 ~/.ridge/commands/init.md 优先于内置。
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("ridge_cmds_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("init.md"), "my custom init").unwrap();
+        let cmds = load_commands(&dir, &[]);
+        assert_eq!(
+            resolve_command("init", &cmds).unwrap().body,
+            "my custom init"
+        );
+        assert_eq!(cmds.iter().filter(|c| c.name == "init").count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

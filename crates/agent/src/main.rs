@@ -339,8 +339,9 @@ fn load_configured_skills(cfg: &Config) -> Vec<Skill> {
         .unwrap_or_else(|| format!("{}/skills", ridge_home()));
     let mut skills = load_skills(&dir);
     skills.extend(agent::builtin_skills()); // 内置 skill:agent-creator / skill-creator
-    if let Some(rules) = agent::load_project_rules() {
-        skills.push(rules); // cwd 的 CLAUDE.md / AGENTS.md 作为项目规则注入
+    let global_rules = std::path::PathBuf::from(format!("{}/AGENTS.md", ridge_home()));
+    if let Some(rules) = agent::load_project_rules(Some(&global_rules)) {
+        skills.push(rules); // ~/.ridge/AGENTS.md 全局规则 + cwd 的 CLAUDE.md / AGENTS.md 注入
     }
     if !skills.is_empty() {
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
