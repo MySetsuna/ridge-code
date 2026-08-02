@@ -782,3 +782,8 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 ## 隔离 Release TUI 启动取证（2026-08-02）
 - 在独立 Ridge pane 启动 `target/release/ridgecode.exe`，实际捕获 `RidgeCode ready`、inline 输入框、`Zai · glm-4.6 · ctx 0% · 0 tok` 状态栏；启动日志确认 NotebookLM MCP 连接，已知 `codegraph-mcp` 缺失警告仍存在。
 - 该次桥接输入未形成可靠的 `/help` 提交事件，故不把它算作命令交互、原生搜索或复制证据；测试进程已按已核验路径精确停止。真实终端原生 scrollback 仍待人工验收。
+
+## 静态 Answer 代码语义色一致性（2026-08-02）
+- `md_line_spans` 现复用既有无依赖 `code_line_spans`：Live 可见 fenced code 与已落入 inline 原生历史的 Answer 均对关键字、类型、字符串、数字、字面量、注释做 bounded ANSI16 语义色；未知 token 与跨行语法仍保持 Muted/不猜测。
+- 文本、围栏状态、折叠、工具协议、键位与 `insert_before` scrollback 语义不变；新增静态历史颜色回归，agent 99、TUI 121 及 workspace 测试、clippy、fmt、diff 检查通过。
+- `c01d526` 已推送 `origin/main`；v0.5.0 ReRelease 已覆盖，ZIP 大小 `3011947`，SHA-256 为 `b8bbb398e6e6bcf1f22b276c6b7862c17b7ff39c02584ac3bbdf761a2107eaed`，归档含 `ridgecode.exe`、`README.md`、`install.ps1`。
