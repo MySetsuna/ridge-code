@@ -714,7 +714,9 @@ pub(super) async fn run(
                             Some(ti) if retryable && retry_count < MAX_RETRIES => {
                                 retry_count += 1;
                                 ui.note(
-                                    format!("↻ 瞬时失败,自动重试 {retry_count}/{MAX_RETRIES}(上次: {e})"),
+                                    format!(
+                                        "↻ Transient failure, retrying {retry_count}/{MAX_RETRIES} (last: {e})"
+                                    ),
                                     Color::Yellow,
                                 );
                                 ui.busy = true;
@@ -726,9 +728,9 @@ pub(super) async fn run(
                             }
                             _ => {
                                 let tail = if !retryable {
-                                    format!("error(不可重试,已停): {e}")
+                                    format!("error (not retryable, stopped): {e}")
                                 } else if retry_count >= MAX_RETRIES {
-                                    format!("error(已重试 {MAX_RETRIES} 次仍失败): {e}")
+                                    format!("error (failed after {MAX_RETRIES} retries): {e}")
                                 } else {
                                     format!("error: {e}")
                                 };

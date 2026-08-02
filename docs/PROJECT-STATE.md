@@ -754,3 +754,8 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - CodeGraph 回核发现 `detail_match_scroll` 只按逻辑行定位；详情长行在窄面板换行后，命中词可能仍落在不可见的后半段。
 - `detail_match_scroll` 现按既有 `char_cells`/`wrapped_rows` 口径计算命中所在物理行，再居中滚动；仅改 Tool History 呈现定位，不改搜索、折叠状态、键位、工具数据或静态 scrollback。
 - 回归覆盖长 ASCII 行与 CJK 双宽字符；workspace tests（99/118 等套件）、`clippy -D warnings`、`cargo fmt --check`、`cargo build` 均通过。
+
+## TUI 重试提示显示语言收口（2026-08-02）
+- 重试中的 transient failure、不可重试停止与达到上限提示改为英文，统一 TUI 用户可见语义。
+- 仅改提示文本；重试分类、`MAX_RETRIES`、错误传播与 provider 行为均未改变。事件分类所用的错误关键词仍保留原逻辑。
+- `cargo test --workspace --locked --offline`、`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`、`cargo build --workspace --locked --offline`、fmt 与 `git diff --check` 均通过。
