@@ -759,3 +759,8 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - 重试中的 transient failure、不可重试停止与达到上限提示改为英文，统一 TUI 用户可见语义。
 - 仅改提示文本；重试分类、`MAX_RETRIES`、错误传播与 provider 行为均未改变。事件分类所用的错误关键词仍保留原逻辑。
 - `cargo test --workspace --locked --offline`、`cargo clippy --workspace --all-targets --locked --offline -- -D warnings`、`cargo build --workspace --locked --offline`、fmt 与 `git diff --check` 均通过。
+
+## v0.5.0 ReRelease 当前资产（2026-08-02）
+- `3213a09` 已推送 `origin/main`；Windows 包按该提交重建并覆盖 GitHub Release `v0.5.0`。
+- `ridgecode-x86_64-pc-windows-msvc.zip` SHA-256 为 `ee1f12dc30237d100c3d175a558f54309a86b2b86f12f252d14fb1f61ed38db5`，远端 digest、大小 `3009866` 与本地一致；`.zip.sha256` 旁车文件亦已同步。
+- 归档含 `ridgecode.exe`、`README.md`、`install.ps1`；README 随包发布，覆盖安装、配置、TUI、命令与故障排查用法。
