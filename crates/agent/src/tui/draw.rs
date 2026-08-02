@@ -109,13 +109,36 @@ pub(crate) fn detail_match_scroll(text: &str, query: &str, width: u16, visible_r
     }
     let mut offset = 0usize;
     for line in text.lines() {
-        if line.to_lowercase().contains(&query) {
-            let centered = offset.saturating_sub(visible_rows as usize / 2);
+        if let Some(match_row) = detail_match_row(line, &query, width as usize) {
+            let centered = offset
+                .saturating_add(match_row)
+                .saturating_sub(visible_rows as usize / 2);
             return centered.min(u16::MAX as usize) as u16;
         }
         offset = offset.saturating_add(wrapped_rows(line, width));
     }
     0
+}
+
+fn detail_match_row(line: &str, query: &str, width: usize) -> Option<usize> {
+    let start = line.to_lowercase().find(query)?;
+    let mut row = 0;
+    let mut cells = 0;
+    for (byte, c) in line.char_indices() {
+        let char_width = char_cells(c);
+        if byte >= start {
+            if cells + char_width > width && cells > 0 {
+                row += 1;
+            }
+            return Some(row);
+        }
+        if cells + char_width > width && cells > 0 {
+            row += 1;
+            cells = 0;
+        }
+        cells += char_width;
+    }
+    Some(row)
 }
 
 /// 交互页模态绘制(iter-35):居中框(≤80 宽)= 搜索/编辑行 + 过滤列表(选中高亮)+ 提示行。

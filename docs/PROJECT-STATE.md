@@ -749,3 +749,8 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - `summarize_event_overviews_tools` 及 workspace 全量质量闸通过：测试 99/118 等套件全绿，`clippy -D warnings`、`cargo build`、`git diff --check` 均通过。
 - 发布链路一并修正：`scripts/dist.ps1` 现在捕获 Cargo 正常 stderr，仅按真实退出码判定失败；最新归档含 `ridgecode.exe`、`README.md`、`install.ps1`，SHA-256 为 `9a2846cba8aef66b453f36e88443b711134a6f4dc54c3b6111612a44fafd56fa`。
 - NLM 已用隔离 Chrome/CDP 写入 `default` profile；`nlm login --check` 通过（20 notebooks）。既有会话查询已由 `UNAUTHENTICATED` 变为 `RESOURCE_EXHAUSTED`，判定为配额/限流；未查询研究状态，未修改远端 note，下一步仍以手动导入源 `8862d715-ffad-4288-b7eb-173260e2dcff` 为理论依据。
+
+## Tool History 长行命中定位（2026-08-02）
+- CodeGraph 回核发现 `detail_match_scroll` 只按逻辑行定位；详情长行在窄面板换行后，命中词可能仍落在不可见的后半段。
+- `detail_match_scroll` 现按既有 `char_cells`/`wrapped_rows` 口径计算命中所在物理行，再居中滚动；仅改 Tool History 呈现定位，不改搜索、折叠状态、键位、工具数据或静态 scrollback。
+- 回归覆盖长 ASCII 行与 CJK 双宽字符；workspace tests（99/118 等套件）、`clippy -D warnings`、`cargo fmt --check`、`cargo build` 均通过。

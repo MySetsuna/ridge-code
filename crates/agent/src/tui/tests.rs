@@ -761,6 +761,16 @@ fn tool_history_search_opens_and_positions_detail() {
         detail_match_scroll("zero\none\nneedle\nlast", "needle", 40, 2),
         1
     );
+    assert_eq!(
+        detail_match_scroll("01234567890123456789 needle", "needle", 10, 2),
+        1,
+        "long wrapped line should position the matching segment"
+    );
+    assert_eq!(
+        detail_match_scroll("你好你好你好needle", "needle", 4, 2),
+        2,
+        "CJK cell width must affect matching-row positioning"
+    );
 
     let mut terminal =
         Terminal::new(ratatui::backend::TestBackend::new(40, 12)).expect("history search terminal");
