@@ -112,7 +112,7 @@ ridgecode login --codex
 
 - Answer 展示模型实际回答；收到的 reasoning_content 单独作为 Reasoning 展示，不生成或伪造隐藏思考。
 - Answer 支持有界行级 Markdown 展示：标题、粗体、行内 code、代码围栏与 ANSI 16 色语义角色。
-- fenced code 的可见行按有限词法规则区分关键字、类型、字符串、数字、字面量和注释；未知文本保持普通 Muted 色，不猜测跨行语法。
+- fenced code 的 Live 可见行与落入终端历史的 Answer 都按有限词法规则区分关键字、类型、字符串、数字、字面量和注释；未知文本保持普通 Muted 色，不猜测跨行语法。
 - 工具调用默认显示摘要；Ctrl+O 展开当前工具详情。Alt+↑/↓ 选择旧工具并锁定焦点；详情展开且可滚动时，Alt+PageUp/PageDown 查看旧/新详情位置。
 - Ctrl+R 展开或收起实际 Reasoning；Answer 到达时默认回到 Answer 优先视图。
 - Live Answer/Reasoning 默认跟随最新尾部；`Alt+PageUp/PageDown` 暂停并检视较早/较新内容，`Alt+End` 回到最新尾部。检视状态会在顶栏显示。

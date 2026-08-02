@@ -1806,7 +1806,7 @@ fn role_colors_are_ansi16() {
     assert_eq!(role_color(Role::Command), Color::LightGreen);
 }
 
-/// iter-28:md 轻渲染 —— 围栏切态、块内 Muted、标题粗、行内 code、未闭合按字面。
+/// iter-28:md 轻渲染 —— 围栏切态、bounded code roles、标题粗、行内 code、未闭合按字面。
 #[test]
 fn md_line_rendering() {
     let (spans, state) = md_line_spans("```rust", false);
@@ -1816,7 +1816,14 @@ fn md_line_rendering() {
     assert!(!state2);
     let (s, st) = md_line_spans("let x = 1;", true);
     assert!(st);
-    assert_eq!(s[0].style.fg, Some(role_color(Role::Muted)));
+    assert_eq!(
+        s.iter()
+            .find(|span| span.content.as_ref() == "let")
+            .expect("keyword span")
+            .style
+            .fg,
+        Some(role_color(Role::Primary))
+    );
     let (h, _) = md_line_spans("# Title", false);
     assert!(h[0].style.add_modifier.contains(Modifier::BOLD));
     let (i, _) = md_line_spans("use `foo` now", false);
@@ -1888,7 +1895,7 @@ fn markdown_answer_block_preserves_semantic_spans() {
         .style
         .add_modifier
         .contains(Modifier::BOLD));
-    assert_eq!(lines[2].spans[0].style.fg, Some(role_color(Role::Muted)));
+    assert_eq!(lines[2].spans[0].style.fg, Some(role_color(Role::Primary)));
     assert_eq!(lines[3].spans[0].style.fg, Some(role_color(Role::Border)));
     let visible = lines
         .iter()
@@ -2680,6 +2687,24 @@ fn markdown_commit_renders_through_inline_scrollback() {
         .collect::<String>();
     assert!(symbols.contains("Answer") || symbols.contains("stable"));
     assert!(!symbols.contains('\x1b'));
+}
+
+#[test]
+fn static_fenced_code_reuses_bounded_token_roles() {
+    let lines = markdown_lines("🤖 ```rust\nlet value: usize = 42; \"ok\" // note\n```");
+    let code = &lines[1];
+    let span = |text: &str| {
+        code.spans
+            .iter()
+            .find(|span| span.content.as_ref() == text)
+            .unwrap_or_else(|| panic!("missing code span: {text}"))
+    };
+
+    assert_eq!(span("let").style.fg, Some(role_color(Role::Primary)));
+    assert_eq!(span("usize").style.fg, Some(role_color(Role::Info)));
+    assert_eq!(span("42").style.fg, Some(role_color(Role::Warn)));
+    assert_eq!(span("\"ok\"").style.fg, Some(role_color(Role::Success)));
+    assert_eq!(span("// note").style.fg, Some(role_color(Role::Muted)));
 }
 
 #[test]

@@ -604,7 +604,7 @@ fn code_line_spans(text: &str) -> Vec<Span<'static>> {
 }
 
 /// 行级 md 轻渲染(iter-28):静态提交与 Live Answer 共用；样式仅存在呈现层。
-/// ``` 围栏切态(围栏行 Border 色)、块内 Muted、`#` 标题加粗 Primary、引用/列表有结构侧栏、余走行内扫描。
+/// ``` 围栏切态(围栏行 Border 色)、块内 bounded code roles、`#` 标题加粗 Primary、引用/列表有结构侧栏、余走行内扫描。
 pub(crate) fn md_line_spans(line: &str, in_code: bool) -> (Vec<Span<'static>>, bool) {
     let trimmed = line.trim_start();
     if trimmed.starts_with("```") {
@@ -617,13 +617,7 @@ pub(crate) fn md_line_spans(line: &str, in_code: bool) -> (Vec<Span<'static>>, b
         );
     }
     if in_code {
-        return (
-            vec![Span::styled(
-                line.to_owned(),
-                Style::default().fg(role_color(Role::Muted)),
-            )],
-            true,
-        );
+        return (code_line_spans(line), true);
     }
     if trimmed.starts_with('#') {
         return (
