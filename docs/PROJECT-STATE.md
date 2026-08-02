@@ -730,6 +730,12 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - `input_chrome` 现于 14–17 列保留紧凑 `^O`，18 列同时保留 `^O` 与真实 Reasoning 的 `^R`；idle 的 live 工具与 Tool History 同样保留入口。仅改变提示文本，不改变键路、工具摘要/详情上限、状态或布局槽位。
 - `input_chrome_exposes_submit_or_queue_mode` 增加 15/18 列工具、Reasoning、History 组合回归；workspace tests（agent 99、TUI 118 及其余套件）、fmt、clippy `-D warnings`、workspace build 均通过。
 
+## ReRelease 与 NLM 边界复核（2026-08-02）
+
+- 当前主分支为 `022f421`，已推送 `origin/main`；v0.5.0 tag 未重写。Windows Release 资产已按当前包替换，远端 ZIP 摘要与本地一致：`sha256:8782dfd833e86b827a09803364c86a3c93070e955d2c9a94743a8fb84479629a`。
+- 当前归档 `ridgecode-x86_64-pc-windows-msvc.zip` 含 `ridgecode.exe`、`README.md`、`install.ps1`；README 与仓库版本一致。该包供用户实际验证本轮窄宽快捷键。
+- 本轮向既有 NLM 对话、限定手动导入源的计划查询返回 `UNAUTHENTICATED`；未查询用户禁用的深研状态，未删除或修改远端 note，理论依据仍唯一为手动源 `8862d715-ffad-4288-b7eb-173260e2dcff`。
+
 ## ConPTY 与真实 Windows 控制台验收边界（2026-08-02）
 
 - 初版探针曾过早关闭 `CreatePseudoConsole` 句柄、并错误传递 HPCON 指针，导致 `0xC0000142`；按 Microsoft ConPTY 生命周期/属性契约修正后，`ridgecode` 进程退出码为 `0`，`ResizePseudoConsole(18×8)` 成功，故早期错误不归因于生产代码。
