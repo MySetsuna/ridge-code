@@ -724,6 +724,12 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - `flush_commits` 现仅在展示层为静态 Reasoning 加 `┊`、为 Tool summary 加 `◈`、详情加 `┆`；原始文本、Markdown、折叠状态、`insert_before` 原生 scrollback 与 Tool History 均不变。
 - `reasoning_commit_renders_in_inline_scrollback`、静态工具折叠/展开回归与 workspace 质量闸覆盖这些 rail；未宣称真实 Windows PTY 搜索/复制或帧延迟证据。
 
+## 窄宽工具快捷键可发现性（2026-08-02）
+
+- 审计发现：15 列以下 live 工具态只显示队列深度，`Ctrl+O` 折叠/展开入口被裁掉；这使“工具默认折叠、按需展开”在窄终端不可发现。
+- `input_chrome` 现于 14–17 列保留紧凑 `^O`，18 列同时保留 `^O` 与真实 Reasoning 的 `^R`；idle 的 live 工具与 Tool History 同样保留入口。仅改变提示文本，不改变键路、工具摘要/详情上限、状态或布局槽位。
+- `input_chrome_exposes_submit_or_queue_mode` 增加 15/18 列工具、Reasoning、History 组合回归；workspace tests（agent 99、TUI 118 及其余套件）、fmt、clippy `-D warnings`、workspace build 均通过。
+
 ## ConPTY 与真实 Windows 控制台验收边界（2026-08-02）
 
 - 初版探针曾过早关闭 `CreatePseudoConsole` 句柄、并错误传递 HPCON 指针，导致 `0xC0000142`；按 Microsoft ConPTY 生命周期/属性契约修正后，`ridgecode` 进程退出码为 `0`，`ResizePseudoConsole(18×8)` 成功，故早期错误不归因于生产代码。

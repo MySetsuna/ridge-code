@@ -228,8 +228,15 @@ pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
         (true, width) if width >= 56 => {
             format!(" Queue [{queued}] · Enter enqueue · Ctrl+C cancel{reasoning_suffix} ")
         }
+        (true, width) if width >= 18 && (has_tools || has_history) => {
+            let reasoning = if has_reasoning { " ^R" } else { "" };
+            format!(" Q:[{queued}] ^O{reasoning} ")
+        }
         (true, width) if width >= 18 && has_reasoning => {
             format!(" Q:[{queued}] · {} ", reasoning_hint.unwrap_or("Ctrl+R reasoning"))
+        }
+        (true, width) if width >= 14 && (has_tools || has_history) => {
+            format!(" Q:[{queued}] ^O ")
         }
         (true, width) if width >= 14 && has_reasoning => format!(" Q:[{queued}] · ^R "),
         (true, _) => format!(" Q:[{queued}] "),
@@ -239,9 +246,14 @@ pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
         (false, width) if width >= 56 => {
             format!(" Input{reasoning_suffix}{focus_hint}{toggle_separator}{toggle_hint}{scroll_hint} ")
         }
+        (false, width) if width >= 18 && (has_tools || has_history) => {
+            let reasoning = if has_reasoning { " ^R" } else { "" };
+            format!(" Input ^O{reasoning} ")
+        }
         (false, width) if width >= 18 && has_reasoning => {
             format!(" Input · {} ", reasoning_hint.unwrap_or("Ctrl+R reasoning"))
         }
+        (false, width) if width >= 14 && (has_tools || has_history) => " In ^O ".to_owned(),
         (false, width) if width >= 14 && has_reasoning => " In · ^R ".to_owned(),
         (false, _) => " Input ".to_owned(),
     };

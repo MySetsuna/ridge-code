@@ -609,9 +609,28 @@ fn input_chrome_exposes_submit_or_queue_mode() {
     assert!(medium_with_tools_expanded.contains("Ctrl+R collapse"));
 
     let (narrow, narrow_role) = chrome(true, 10, 15, false, false, true, false);
-    assert_eq!(narrow, " Q:[10] ");
+    assert_eq!(narrow, " Q:[10] ^O ");
     assert_eq!(narrow_role, Role::Warn);
     assert!(str_cells(&narrow) <= 13);
+
+    let (narrow_idle_tools, _) = chrome(false, 0, 15, false, true, true, false);
+    assert!(narrow_idle_tools.contains("^O"), "{narrow_idle_tools}");
+    assert!(str_cells(&narrow_idle_tools) <= 13);
+
+    let (compact_tools_and_reasoning, _) = chrome(false, 0, 18, false, true, true, false);
+    assert!(
+        compact_tools_and_reasoning.contains("^O"),
+        "{compact_tools_and_reasoning}"
+    );
+    assert!(
+        compact_tools_and_reasoning.contains("^R"),
+        "{compact_tools_and_reasoning}"
+    );
+    assert!(str_cells(&compact_tools_and_reasoning) <= 16);
+
+    let (narrow_history, _) = chrome(false, 0, 15, false, false, false, true);
+    assert!(narrow_history.contains("^O"), "{narrow_history}");
+    assert!(str_cells(&narrow_history) <= 13);
 }
 
 #[test]
