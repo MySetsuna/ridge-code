@@ -145,7 +145,13 @@ fn skip_csi<I>(chars: &mut std::iter::Peekable<I>)
 where
     I: Iterator<Item = char>,
 {
-    for c in chars {
+    while let Some(&c) = chars.peek() {
+        // A malformed sequence must not consume the next visible line. Leave
+        // the newline for the outer sanitizer so Answer/Reasoning rows survive.
+        if matches!(c, '\n' | '\r') {
+            break;
+        }
+        chars.next();
         if ('@'..='~').contains(&c) {
             break;
         }
@@ -156,7 +162,13 @@ fn skip_osc<I>(chars: &mut std::iter::Peekable<I>)
 where
     I: Iterator<Item = char>,
 {
-    while let Some(c) = chars.next() {
+    while let Some(&c) = chars.peek() {
+        // Recover at a line boundary when BEL/ST is missing; otherwise an
+        // accidental OSC opener can hide the rest of a streamed answer.
+        if matches!(c, '\n' | '\r') {
+            break;
+        }
+        chars.next();
         if c == '\u{7}' {
             break;
         }

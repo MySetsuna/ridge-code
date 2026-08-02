@@ -314,6 +314,18 @@ fn display_text_strips_terminal_escape_sequences() {
 }
 
 #[test]
+fn malformed_escape_sequences_recover_at_line_boundaries() {
+    for text in [
+        "prefix\x1b[31\nsuffix",
+        "prefix\x1b]8;;url\nsuffix",
+        "prefix\u{9b}31\nsuffix",
+        "prefix\u{9d}url\nsuffix",
+    ] {
+        assert_eq!(sanitize_display_text(text), "prefix\nsuffix", "{text:?}");
+    }
+}
+
+#[test]
 fn summarize_event_overviews_tools() {
     // 读:只显路径,不倒内容。
     let r = summarize_event(r#"reason#1: tool_call read_file {"path":"src/x.rs"}"#);

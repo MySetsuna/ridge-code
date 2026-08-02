@@ -707,3 +707,7 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - 依据 CodeGraph/只读审计，落地最小可逆性能实验：`LiveBlock::Answer` 改为维护有界文本与 fenced-code 起点缓存；`LiveTranscript::visible_lines` 仅反向取得视口 `max_rows`，并按缓存奇偶恢复 `fence_before`。正常追加只处理末行与新增片段，超过 32K 上限才重建缓存；Answer/Reasoning、工具折叠、键义、ANSI、输入、审批、取消与 native scrollback 不变。
 - 新增 `answer_fence_cache_handles_split_markers_and_closing_fence`、`answer_tail_ranges_only_keep_requested_viewport_rows`；fmt、workspace tests（agent 99、TUI 115 及其余套件）、clippy `-D warnings`、workspace build、`git diff --check` 均通过。
 - 当前仍缺真实 Windows PTY/native scrollback 的物理证据；本实验不宣称 wall-clock 或行业性能数字，下一闸为实际终端验证。
+## 异常 ANSI 行边界恢复切片（2026-08-02）
+- 既有 NotebookLM 对话查询与当前 notebook note 列表均因实际凭据过期失败（`UNAUTHENTICATED`）；未调用用户禁用的 `research_status`，理论依据仍唯一为手动源 `8862d715-ffad-4288-b7eb-173260e2dcff`。
+- `sanitize_display_text` 的 CSI/OSC 跳过器现于缺失终止符时在换行恢复，把换行交还外层净化器，避免异常模型输出吞掉后续 Answer/Reasoning 行；完整 ANSI 序列语义不变。
+- 新增 `malformed_escape_sequences_recover_at_line_boundaries`，workspace tests（agent 99、TUI 116 及其余套件）、fmt、clippy `-D warnings`、workspace build、`git diff --check` 均通过。
