@@ -14,8 +14,15 @@ $root = Split-Path -Parent $PSScriptRoot
 $target = (& rustc -vV | Select-String '^host:').ToString().Split(' ')[1]
 $name = "ridgecode-$target"
 Write-Host "构建 release（$target）…" -ForegroundColor Cyan
-& cargo build --release --locked --bin ridgecode -p agent
-if ($LASTEXITCODE -ne 0) { throw "cargo build 失败" }
+$build_error_action = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$build_output = @(& cargo build --release --locked --bin ridgecode -p agent 2>&1)
+$build_exit_code = $LASTEXITCODE
+$ErrorActionPreference = $build_error_action
+if ($build_exit_code -ne 0) {
+  $build_output | ForEach-Object { Write-Host $_ -ForegroundColor Red }
+  throw "cargo build 失败"
+}
 
 $stage = Join-Path $env:TEMP $name
 Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue

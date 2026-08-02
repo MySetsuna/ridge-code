@@ -747,4 +747,5 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - CodeGraph 审计发现 `tui::eventfmt::summarize_event` 的工具投影仍混用中文标签，与 iter-36「用户可见串全英文」契约不一致。
 - 本轮仅翻译显示层标签：`Read`、`Write`、`Edit`、`Search`、`Batch edit`、完成/截断/trace 提示；工具名、参数、详情数据、颜色、折叠边界与错误判定均未改。
 - `summarize_event_overviews_tools` 及 workspace 全量质量闸通过：测试 99/118 等套件全绿，`clippy -D warnings`、`cargo build`、`git diff --check` 均通过。
+- 发布链路一并修正：`scripts/dist.ps1` 现在捕获 Cargo 正常 stderr，仅按真实退出码判定失败；最新归档含 `ridgecode.exe`、`README.md`、`install.ps1`，SHA-256 为 `9a2846cba8aef66b453f36e88443b711134a6f4dc54c3b6111612a44fafd56fa`。
 - NLM 已用隔离 Chrome/CDP 写入 `default` profile；`nlm login --check` 通过（20 notebooks）。既有会话查询已由 `UNAUTHENTICATED` 变为 `RESOURCE_EXHAUSTED`，判定为配额/限流；未查询研究状态，未修改远端 note，下一步仍以手动导入源 `8862d715-ffad-4288-b7eb-173260e2dcff` 为理论依据。
