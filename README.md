@@ -140,6 +140,17 @@ ridgecode login --codex
 
 面板通用操作：输入字符即时过滤 key/value，Backspace 删除过滤词，Home/End 跳到首尾，PageUp/PageDown 翻页，Enter 执行动作或展开详情，Esc 关闭。Tool History 展开详情后，Alt+PageUp/PageDown 在搜索命中位置附近滚动；配置面板的 Enter 进入编辑，再按 Enter 写回；Esc 取消编辑。
 
+### Windows Terminal 实机验收
+
+发布包使用 inline TUI，不进入备用屏；已提交的 Answer、Reasoning 与工具记录应进入终端原生历史。可按以下顺序验收：
+
+1. 在 Windows Terminal 或 PowerShell 解压发布包并运行 `ridgecode.exe`，输入 `/help` 后按 Enter，确认帮助文本进入历史。
+2. 用终端自身的滚轮或历史查看、选择并复制一段 Answer 与一段工具摘要；再用当前终端绑定的原生搜索快捷键搜索其中的英文、CJK 与 emoji 文本。复制内容不应包含 ANSI 转义片段。
+3. 任务进行时验证 `Alt+PageUp/PageDown` 能检视 Live Answer/Reasoning，`Alt+End` 能回到最新尾部；展开工具详情后，同组快捷键应优先滚动工具详情。
+4. 将窗口缩至约 `48×12`，确认 Answer、输入框、状态提示与退出命令仍可见且无越界；恢复窗口后输入 `/exit` 退出。
+
+不同终端可自定义搜索、复制和鼠标选择快捷键；记录终端名称、版本、窗口尺寸及失败文本，勿将终端原生绑定差异误判为模型或工具协议错误。
+
 ### 斜杠命令
 
 | 命令 | 用法 |
