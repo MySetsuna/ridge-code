@@ -702,3 +702,8 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - 版本锁定后重新通过 `cargo fmt --all -- --check`、`cargo test --workspace --locked --offline --quiet -- --test-threads=1`（agent 99、TUI 113 及其余 workspace 套件）、`cargo clippy --workspace --all-targets --locked --offline --quiet -- -D warnings` 与 `cargo build --workspace --locked --offline --quiet`。
 - `scripts/dist.ps1` 生成 `dist/ridgecode-x86_64-pc-windows-msvc.zip`；归档字节核验包含 `ridgecode.exe`、`README.md`、`install.ps1`，且归档 README 与仓库 README 字节一致。SHA-256：`63e6bb0d9dffefbaf162513677bb5d78d7fa03ee259c6c94e03c402b0f867b1d`。
 - 发布二进制 `--version` 输出 `ridgecode 0.5.0`，`--help` 与无密钥离线 demo 均 exit 0。GitHub main/tag/Release 尚待提交、推送与 Actions 归档核验。
+## Answer 尾部增量围栏缓存实验（2026-08-02）
+- NLM 既有对话重试仍返回 `UNAUTHENTICATED`；`refresh_auth` 判定磁盘凭据 `stale`，`nlm login --check` 亦因 `network_error` 失败。故本轮不采纳未取得的 NLM 计划，不查询用户禁用的研究状态；理论依据仍唯一为手动源 `8862d715-ffad-4288-b7eb-173260e2dcff`。
+- 依据 CodeGraph/只读审计，落地最小可逆性能实验：`LiveBlock::Answer` 改为维护有界文本与 fenced-code 起点缓存；`LiveTranscript::visible_lines` 仅反向取得视口 `max_rows`，并按缓存奇偶恢复 `fence_before`。正常追加只处理末行与新增片段，超过 32K 上限才重建缓存；Answer/Reasoning、工具折叠、键义、ANSI、输入、审批、取消与 native scrollback 不变。
+- 新增 `answer_fence_cache_handles_split_markers_and_closing_fence`、`answer_tail_ranges_only_keep_requested_viewport_rows`；fmt、workspace tests（agent 99、TUI 115 及其余套件）、clippy `-D warnings`、workspace build、`git diff --check` 均通过。
+- 当前仍缺真实 Windows PTY/native scrollback 的物理证据；本实验不宣称 wall-clock 或行业性能数字，下一闸为实际终端验证。

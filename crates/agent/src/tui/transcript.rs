@@ -228,8 +228,17 @@ impl ToolBlock {
 }
 
 #[derive(Clone, Debug)]
+struct AnswerBlock {
+    text: String,
+    /// Byte offsets of lines whose trimmed content starts a fenced code block.
+    /// Keeping these offsets moves fence scanning out of every live redraw.
+    fence_starts: Vec<usize>,
+    last_line_start: usize,
+}
+
+#[derive(Clone, Debug)]
 enum LiveBlock {
-    Answer(String),
+    Answer(AnswerBlock),
     Reasoning(String),
     Tool(ToolBlock),
 }
@@ -256,15 +265,19 @@ impl LiveTranscript {
         }
         match self.blocks.back_mut() {
             Some(LiveBlock::Answer(current)) => {
-                append_bounded(current, &mut self.answer_chars, &text)
+                append_answer_bounded(current, &mut self.answer_chars, &text)
             }
             _ => {
                 // A newly opened Answer phase restores the default readable
                 // projection; Ctrl+R remains the explicit inspection escape.
                 self.reasoning_expanded = false;
                 self.answer_chars = 0;
-                let mut current = String::new();
-                append_bounded(&mut current, &mut self.answer_chars, &text);
+                let mut current = AnswerBlock {
+                    text: String::new(),
+                    fence_starts: Vec::new(),
+                    last_line_start: 0,
+                };
+                append_answer_bounded(&mut current, &mut self.answer_chars, &text);
                 self.blocks.push_back(LiveBlock::Answer(current));
             }
         }
@@ -499,13 +512,13 @@ impl LiveTranscript {
         let mut answer_fence = false;
         for (block_index, block) in self.blocks.iter().enumerate() {
             match block {
-                LiveBlock::Answer(text) => {
+                LiveBlock::Answer(answer) => {
                     if Some(block_index) == last_answer_index {
-                        last_answer_text = Some(text.as_str());
+                        last_answer_text = Some(answer.text.as_str());
                     }
                     answer_fence = append_answer_tail(
                         &mut answers,
-                        text,
+                        answer,
                         Color::White,
                         Some("🤖 "),
                         answer_fence,
@@ -657,6 +670,73 @@ fn append_bounded(target: &mut String, char_count: &mut usize, text: &str) {
     }
 }
 
+fn append_answer_bounded(target: &mut AnswerBlock, char_count: &mut usize, text: &str) {
+    let old_len = target.text.len();
+    let old_last_line_start = target.last_line_start;
+    target.text.push_str(text);
+    *char_count += text.chars().count();
+
+    if *char_count > MAX_LIVE_TEXT_CHARS {
+        let skip = *char_count - MAX_LIVE_TEXT_CHARS;
+        let start = target
+            .text
+            .char_indices()
+            .nth(skip)
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        target.text.drain(..start);
+        target.fence_starts.clear();
+        *char_count = MAX_LIVE_TEXT_CHARS;
+        rebuild_fence_starts(target);
+    } else {
+        target
+            .fence_starts
+            .retain(|&start| start < old_last_line_start);
+        append_fence_starts(target, old_last_line_start, old_len);
+        target.last_line_start = target.text[old_len..]
+            .rfind('\n')
+            .map_or(old_last_line_start, |index| old_len + index + 1);
+    }
+}
+
+fn append_fence_starts(target: &mut AnswerBlock, line_start: usize, appended_start: usize) {
+    let appended = &target.text[appended_start..];
+    let Some(first_newline) = appended.find('\n') else {
+        if is_fence_line(&target.text[line_start..]) {
+            target.fence_starts.push(line_start);
+        }
+        return;
+    };
+
+    let first_line_end = appended_start + first_newline;
+    if is_fence_line(&target.text[line_start..first_line_end]) {
+        target.fence_starts.push(line_start);
+    }
+
+    let mut line_start = first_line_end + 1;
+    for line in target.text[line_start..].split('\n') {
+        if is_fence_line(line) {
+            target.fence_starts.push(line_start);
+        }
+        line_start += line.len() + 1;
+    }
+}
+
+fn rebuild_fence_starts(target: &mut AnswerBlock) {
+    target.last_line_start = target.text.rfind('\n').map_or(0, |index| index + 1);
+    let mut line_start = 0;
+    for line in target.text.split('\n') {
+        if is_fence_line(line) {
+            target.fence_starts.push(line_start);
+        }
+        line_start += line.len() + 1;
+    }
+}
+
+fn is_fence_line(line: &str) -> bool {
+    line.trim_start().starts_with("```")
+}
+
 fn text_lines<'a>(text: &'a str, color: Color, kind: LiveLineKind) -> Vec<LiveLine<'a>> {
     text.split('\n')
         .map(|line| LiveLine::new(line, color, kind))
@@ -688,32 +768,54 @@ fn append_text_tail<'a>(
 /// 不物化完整 Markdown 文档，也不把解析状态写入模型内容。
 fn append_answer_tail<'a>(
     target: &mut VecDeque<LiveLine<'a>>,
-    text: &'a str,
+    answer: &'a AnswerBlock,
     color: Color,
     marker: Option<&'static str>,
-    mut fence_before: bool,
+    fence_before: bool,
     max_rows: usize,
 ) -> bool {
     if max_rows == 0 {
         return fence_before;
     }
     let mut tail = VecDeque::with_capacity(max_rows);
-    for line in text.split('\n') {
+    for (start, end) in tail_ranges(&answer.text, max_rows) {
+        let line = &answer.text[start..end];
+        let fence_count = answer
+            .fence_starts
+            .partition_point(|&fence_start| fence_start < start);
         let mut rendered = LiveLine::new(line, color, LiveLineKind::Answer);
-        rendered.fence_before = fence_before;
+        rendered.fence_before = fence_before ^ (fence_count % 2 != 0);
         if tail.len() == max_rows {
             tail.pop_front();
         }
         tail.push_back(rendered);
-        if line.trim_start().starts_with("```") {
-            fence_before = !fence_before;
-        }
     }
     if let (Some(marker), Some(first)) = (marker, tail.front_mut()) {
         first.marker = Some(marker);
     }
     append_tail(target, tail, max_rows);
-    fence_before
+    fence_before ^ !answer.fence_starts.len().is_multiple_of(2)
+}
+
+fn tail_ranges(text: &str, max_rows: usize) -> Vec<(usize, usize)> {
+    if max_rows == 0 {
+        return Vec::new();
+    }
+    let mut ranges = VecDeque::with_capacity(max_rows);
+    let mut end = text.len();
+    for (index, character) in text.char_indices().rev() {
+        if character == '\n' {
+            ranges.push_front((index + 1, end));
+            end = index;
+            if ranges.len() == max_rows {
+                break;
+            }
+        }
+    }
+    if ranges.len() < max_rows {
+        ranges.push_front((0, end));
+    }
+    ranges.into_iter().collect()
 }
 
 fn pin_answer_header<'a>(
@@ -1060,6 +1162,47 @@ mod tests {
     }
 
     #[test]
+    fn answer_fence_cache_handles_split_markers_and_closing_fence() {
+        let mut transcript = LiveTranscript::default();
+        transcript.push_answer("``");
+        transcript.push_answer("`rust\nhidden 0\nhidden 1");
+        transcript.push_answer("\n```");
+
+        let answer = match transcript.blocks.back().expect("answer block") {
+            LiveBlock::Answer(answer) => answer,
+            _ => panic!("expected answer block"),
+        };
+        assert_eq!(answer.fence_starts.len(), 2);
+        let lines = transcript.visible_lines(2);
+        assert_eq!(lines[0].text, "hidden 1");
+        assert_eq!(lines[1].text, "```");
+        assert!(lines.iter().all(|line| line.fence_before));
+
+        transcript.push_answer("\nafter");
+        let lines = transcript.visible_lines(1);
+        assert_eq!(lines[0].text, "after");
+        assert!(!lines[0].fence_before);
+    }
+
+    #[test]
+    fn answer_tail_ranges_only_keep_requested_viewport_rows() {
+        let text = (0..128)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let ranges = tail_ranges(&text, 3);
+        assert_eq!(ranges.len(), 3);
+        assert!(ranges[0].0 > 0);
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|&(start, end)| &text[start..end])
+                .collect::<Vec<_>>(),
+            vec!["line 125", "line 126", "line 127"]
+        );
+    }
+
+    #[test]
     fn tool_focus_moves_and_ctrl_o_targets_focused_block() {
         let mut transcript = LiveTranscript::default();
         transcript.push_tool(
@@ -1217,7 +1360,7 @@ mod tests {
         transcript.push_answer("xyz");
 
         let text = match transcript.blocks.back().expect("answer block") {
-            LiveBlock::Answer(text) => text,
+            LiveBlock::Answer(answer) => &answer.text,
             _ => panic!("expected answer block"),
         };
         assert_eq!(text.chars().count(), MAX_LIVE_TEXT_CHARS);
