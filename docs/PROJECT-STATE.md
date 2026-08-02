@@ -723,3 +723,10 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - CodeGraph 回核发现：Live Answer/Reasoning/Tool 已有 rail 与 marker，但 `Viewport::Inline` 静态历史仅保留颜色和文本，工具摘要/详情缺少可视类型连续性。
 - `flush_commits` 现仅在展示层为静态 Reasoning 加 `┊`、为 Tool summary 加 `◈`、详情加 `┆`；原始文本、Markdown、折叠状态、`insert_before` 原生 scrollback 与 Tool History 均不变。
 - `reasoning_commit_renders_in_inline_scrollback`、静态工具折叠/展开回归与 workspace 质量闸覆盖这些 rail；未宣称真实 Windows PTY 搜索/复制或帧延迟证据。
+
+## ConPTY 实验性验收失败记录（2026-08-02）
+
+- 在 Windows 11 build `26200` 以 Win32 `CreatePseudoConsole` 启动 `target/debug/ridgecode.exe`，初始尺寸 `48×12`，随后调用 `ResizePseudoConsole(18×8)` 并发送 bracketed paste `/help` 与 `/exit`。
+- Resize 调用返回成功，但子进程立即以 `0xC0000142`（`-1073741502`）退出，捕获原始输出 `0` 字节，故没有形成真实 TUI、ANSI、输入或 native scrollback 证据；不把该探针结果归因于生产代码，也不发布新 ReRelease。
+- 同一探针对照启动 `cmd.exe /c echo PTY_OK` 与 `ridgecode --version` 均得到相同退出码和 `0` 字节，故失败归属于当前 ConPTY 探针/宿主边界，而非 RidgeCode TUI 特有回归。
+- 当前有效依据仍为 TestBackend/纯逻辑回归与人工终端验收待办；后续若需自动 ConPTY，须先修复探针自身的进程启动/运行库边界并独立验证探针能捕获已知控制台程序。
