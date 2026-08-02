@@ -724,8 +724,9 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - `flush_commits` 现仅在展示层为静态 Reasoning 加 `┊`、为 Tool summary 加 `◈`、详情加 `┆`；原始文本、Markdown、折叠状态、`insert_before` 原生 scrollback 与 Tool History 均不变。
 - `reasoning_commit_renders_in_inline_scrollback`、静态工具折叠/展开回归与 workspace 质量闸覆盖这些 rail；未宣称真实 Windows PTY 搜索/复制或帧延迟证据。
 
-## ConPTY 实验性验收边界（2026-08-02）
+## ConPTY 与真实 Windows 控制台验收边界（2026-08-02）
 
 - 初版探针曾过早关闭 `CreatePseudoConsole` 句柄、并错误传递 HPCON 指针，导致 `0xC0000142`；按 Microsoft ConPTY 生命周期/属性契约修正后，`ridgecode` 进程退出码为 `0`，`ResizePseudoConsole(18×8)` 成功，故早期错误不归因于生产代码。
-- 修正版在 `48×12` 启动并发送 bracketed paste `/help`、Resize、`/exit`；可捕获 ConPTY 控制帧，但 `cmd.exe /c echo PTY_OK` 与 `ridgecode --version` 文本仍落到宿主输出，RidgeCode 隔离配置下记录 `is_terminal()` 走非 TTY/headless，未形成 TUI 文本、输入或 native scrollback 证据。
-- 已打开真实 Windows Terminal 交互页供人工观察；自动探针仍缺标准句柄映射/可验证屏幕文本。当前有效依据仍为 TestBackend/纯逻辑回归；不发布新 ReRelease，须先取得真实 TUI 帧与搜索/复制证据。
+- 修正版 ConPTY 探针仍把 `cmd.exe /c echo PTY_OK` 与 `ridgecode --version` 文本落到宿主输出，故不把它当作 TUI 证据；原因是探针标准句柄映射未闭合，生产代码未改。
+- 另以独立可见 Windows PowerShell 控制台启动真实 `ridgecode`：屏幕读取确认 `inline mode`、启动 banner、`RidgeCode ready`、输入框与状态栏；注入 `/help` 并按 Enter 后，帮助命令完整呈现；窗口由 `120×50` 缩至 `48×12` 后进程仍存活、内容有界且无越界；恢复尺寸后以 `/exit` 退出。故真实终端帧、输入、窄窗重绘、退出已取证。
+- 尚未以人工鼠标/键盘完成终端原生搜索/复制验收，也未证明 `native scrollback` 的跨终端行为；因此不宣称该项已闭环。其余证据为 TestBackend/纯逻辑回归；若发布新 ReRelease，应把搜索/复制作为用户实际验证项并保留回滚路径。
