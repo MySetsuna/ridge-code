@@ -218,7 +218,7 @@ pub(crate) fn flush_commits<B: Backend>(terminal: &mut Terminal<B>, ui: &mut Ui)
             } => {
                 insert_commit(
                     terminal,
-                    format!("{}{text}", fmt_reasoning_meta(step, elapsed_s, tokens)),
+                    format!("┊ {}{text}", fmt_reasoning_meta(step, elapsed_s, tokens)),
                     role_color(Role::Muted),
                     false,
                     Modifier::DIM | Modifier::ITALIC,
@@ -226,11 +226,22 @@ pub(crate) fn flush_commits<B: Backend>(terminal: &mut Terminal<B>, ui: &mut Ui)
                 )?;
             }
             CommitBlock::Tool(tool) => {
-                insert_colored_commit(terminal, tool.commit_lines(), width)?;
+                insert_colored_commit(terminal, static_tool_lines(&tool), width)?;
             }
         }
     }
     Ok(())
+}
+
+fn static_tool_lines(tool: &ToolBlock) -> Vec<(String, Color)> {
+    tool.commit_lines()
+        .into_iter()
+        .enumerate()
+        .map(|(index, (text, color))| {
+            let prefix = if index == 0 { "◈ " } else { "  ┆ " };
+            (format!("{prefix}{text}"), color)
+        })
+        .collect()
 }
 
 fn insert_commit<B: Backend>(

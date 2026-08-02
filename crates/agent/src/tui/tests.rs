@@ -2625,6 +2625,8 @@ fn tool_commit_keeps_summary_and_details_together() {
     assert!(symbols.contains("tool summary"));
     assert!(symbols.contains("detail one"));
     assert!(symbols.contains("detail two"));
+    assert!(symbols.contains("◈"));
+    assert!(symbols.contains("┆"));
 }
 
 #[test]
@@ -2657,6 +2659,7 @@ fn tool_history_is_collapsed_and_expandable_after_static_commit() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(static_symbols.contains("tool summary"));
+    assert!(static_symbols.contains("◈"));
     assert!(!static_symbols.contains("detail one"));
     assert!(ui.toggle_details_or_history());
 
@@ -2816,6 +2819,7 @@ fn reasoning_commit_renders_in_inline_scrollback() {
     assert!(symbols.contains("actual plan"));
     assert!(symbols.contains("t+12s"));
     assert!(symbols.contains("task tok"));
+    assert!(symbols.contains("┊"));
     let reasoning_cell = terminal
         .backend()
         .buffer()

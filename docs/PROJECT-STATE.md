@@ -717,3 +717,9 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - 终端事件现先经 `terminal_event_action` 分流：粘贴独立净化并原子插入，Key 才进入去重/输入状态机，Resize、Focus、Mouse 等事件仅触发重绘，不会误落入输入编辑。
 - `LiveLine` 增加纯渲染元数据 `continuation_before`；Reasoning 尾部因视口或预算裁剪时，首条可见行复用一格 `┊` rail 表明前方仍有内容，不新增占位行，不改变 Answer/Tool 顺序与 Ctrl+R 语义。
 - `terminal_event_router_separates_paste_and_resize`、`reasoning_tail_marks_hidden_prefix_without_extra_row` 与长 Reasoning 窄预算回归通过；当前 TUI 二进制测试 118 项通过。NLM 状态查询仍按用户要求停止，理论依据仍唯一为手动导入源 `8862d715-ffad-4288-b7eb-173260e2dcff`；真实 Windows PTY/native scrollback 仍待物理验收。
+
+## 静态历史语义 rail（2026-08-02）
+
+- CodeGraph 回核发现：Live Answer/Reasoning/Tool 已有 rail 与 marker，但 `Viewport::Inline` 静态历史仅保留颜色和文本，工具摘要/详情缺少可视类型连续性。
+- `flush_commits` 现仅在展示层为静态 Reasoning 加 `┊`、为 Tool summary 加 `◈`、详情加 `┆`；原始文本、Markdown、折叠状态、`insert_before` 原生 scrollback 与 Tool History 均不变。
+- `reasoning_commit_renders_in_inline_scrollback`、静态工具折叠/展开回归与 workspace 质量闸覆盖这些 rail；未宣称真实 Windows PTY 搜索/复制或帧延迟证据。
