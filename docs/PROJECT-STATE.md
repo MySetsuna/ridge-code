@@ -773,3 +773,8 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - `4aa40f8` 已推送 `origin/main`；agent 99、TUI 120 及 workspace 测试、`clippy -D warnings`、fmt、diff 检查均通过。
 - ReRelease `v0.5.0` 已覆盖：`ridgecode-x86_64-pc-windows-msvc.zip` 大小 `3011518`，SHA-256 为 `f14ab5c378f70f342103367e84dd13032066ef554677ada0aa5b8085260dbb6b`；归档含 `ridgecode.exe`、`README.md`、`install.ps1`，旁车 SHA 文件已同步。
 - 本轮不查询用户指定停止查询的 NLM 深研状态；理论依据仍唯一为手动导入源 `8862d715-ffad-4288-b7eb-173260e2dcff`。真实 Windows 原生 scrollback 搜索/复制仍待用户实机验收。
+
+## Windows Terminal 实机验收清单（2026-08-02）
+- README 新增发布包验收步骤：inline 历史、Answer/工具的原生选择复制、英文/CJK/emoji 搜索、Live 检视快捷键、`48×12` 窄窗与 `/exit`。
+- `8fb4223` 已推送 `origin/main`；README 本地与远端 blob 一致。ReRelease `v0.5.0` 已重新覆盖，ZIP 大小 `3012000`，SHA-256 为 `0e41668b08b670b809444e18035165102410da645ea08cb5788119197a32e877`，归档仍含 `ridgecode.exe`、`README.md`、`install.ps1`。
+- 清单是可复现实验步骤，不冒充已取得的物理证据；原生 scrollback 搜索/复制仍须用户在实际终端执行并记录终端版本、尺寸与失败文本。
