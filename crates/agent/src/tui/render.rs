@@ -1,8 +1,8 @@
 use super::*;
 
-/// 要不要画这一帧:有状态变更(dirty)或 busy(spinner 需动)才画;空闲零重绘(iter-23)。
-pub(crate) fn should_draw(dirty: bool, busy: bool) -> bool {
-    dirty || busy
+/// 要不要画这一帧:有状态变更(dirty)或显式动画需求才画;业务 busy 不直接拥有渲染决策。
+pub(crate) fn should_draw(dirty: bool, animation_due: bool) -> bool {
+    dirty || animation_due
 }
 
 /// 单字符终端单元格宽度(wcwidth 口径):CJK/emoji=2、控制/零宽=0、常规=1(iter-30)。
@@ -13,6 +13,37 @@ pub(crate) fn char_cells(c: char) -> usize {
 /// 字符串显示单元格宽度(iter-30):替代 `.chars().count()`,CJK/emoji 按实占计。
 pub(crate) fn str_cells(s: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(s)
+}
+
+/// 将实时单行裁到终端 cell 宽度，保留省略号；静态 scrollback 仍走完整折行。
+/// Live 区每帧只处理可见尾部，避免宽度溢出触发不可控的 Paragraph 换行。
+pub(crate) fn clip_display_cells(text: &str, width: u16) -> String {
+    let width = width as usize;
+    if width == 0 {
+        return String::new();
+    }
+    if str_cells(text) <= width {
+        return text.to_owned();
+    }
+    if width == 1 {
+        return "…".to_owned();
+    }
+    let limit = width - 1;
+    let mut out = String::new();
+    let mut cells = 0;
+    for c in text.chars() {
+        if matches!(c, '\n' | '\r') {
+            break;
+        }
+        let used = char_cells(c);
+        if cells + used > limit {
+            break;
+        }
+        out.push(c);
+        cells += used;
+    }
+    out.push('…');
+    out
 }
 
 /// 折行行数(iter-26 抽取,`input_height`/`commit_height` 共用):按**显示单元格宽**折行
@@ -88,6 +119,54 @@ pub(crate) fn sanitize_paste(s: &str) -> String {
         .collect()
 }
 
+/// Display sanitization: strip ANSI CSI/OSC and other control characters so
+/// model/tool text cannot contaminate the TUI buffer or native scrollback.
+pub(crate) fn sanitize_display_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => match chars.next() {
+                Some('[') => skip_csi(&mut chars),
+                Some(']') => skip_osc(&mut chars),
+                Some(_) | None => {}
+            },
+            '\u{9b}' => skip_csi(&mut chars),
+            '\u{9d}' => skip_osc(&mut chars),
+            '\n' | '\t' => out.push(c),
+            c if !c.is_control() && c != '\u{7f}' => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn skip_csi<I>(chars: &mut std::iter::Peekable<I>)
+where
+    I: Iterator<Item = char>,
+{
+    for c in chars {
+        if ('@'..='~').contains(&c) {
+            break;
+        }
+    }
+}
+
+fn skip_osc<I>(chars: &mut std::iter::Peekable<I>)
+where
+    I: Iterator<Item = char>,
+{
+    while let Some(c) = chars.next() {
+        if c == '\u{7}' {
+            break;
+        }
+        if c == '\u{1b}' && chars.peek() == Some(&'\\') {
+            chars.next();
+            break;
+        }
+    }
+}
+
 /// 动态输入框高度(iter-24):按内容折行数伸缩,clamp 在 [min,max](计入上下边框 2 行)。
 pub(crate) fn input_height(content: &str, width: u16, min: u16, max: u16) -> u16 {
     (wrapped_rows(content, width).min(u16::MAX as usize) as u16)
@@ -96,6 +175,7 @@ pub(crate) fn input_height(content: &str, width: u16, min: u16, max: u16) -> u16
 }
 
 /// 流式尾巴:Live 视口只显示正在生成文本的最后 `k` 行(前面的行等 Superstep 后整段历史化)。
+#[cfg(test)]
 pub(crate) fn stream_tail(stream: &str, k: usize) -> Vec<&str> {
     let lines: Vec<&str> = stream.lines().collect();
     let start = lines.len().saturating_sub(k);
@@ -221,8 +301,298 @@ pub(crate) fn inline_md_spans(text: &str) -> Vec<Span<'static>> {
     spans
 }
 
-/// 行级 md 轻渲染(iter-28,**只在静态提交时染** —— 样式定型才历史化):
-/// ``` 围栏切态(围栏行 Border 色)、块内 Muted、`#` 标题加粗 Primary、余走行内扫描。
+fn markdown_quote_prefix(line: &str) -> Option<(String, &str)> {
+    let bytes = line.as_bytes();
+    let mut start = 0;
+    while matches!(bytes.get(start), Some(b' ' | b'\t')) {
+        start += 1;
+    }
+    if bytes.get(start) != Some(&b'>') {
+        return None;
+    }
+
+    let mut end = start;
+    loop {
+        if bytes.get(end) != Some(&b'>') {
+            break;
+        }
+        end += 1;
+        while matches!(bytes.get(end), Some(b' ' | b'\t')) {
+            end += 1;
+        }
+        if bytes.get(end) != Some(&b'>') {
+            break;
+        }
+    }
+
+    let rail = line[..end]
+        .chars()
+        .map(|c| if c == '>' { '│' } else { c })
+        .collect();
+    Some((rail, &line[end..]))
+}
+
+fn markdown_list_prefix(line: &str) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut end = 0;
+    while matches!(bytes.get(end), Some(b' ' | b'\t')) {
+        end += 1;
+    }
+    let marker = end;
+    match bytes.get(end) {
+        Some(b'-' | b'+' | b'*') => {
+            end += 1;
+        }
+        Some(b'0'..=b'9') => {
+            while matches!(bytes.get(end), Some(b'0'..=b'9')) {
+                end += 1;
+            }
+            if !matches!(bytes.get(end), Some(b'.' | b')')) {
+                return None;
+            }
+            end += 1;
+        }
+        _ => return None,
+    }
+    if end == marker || !matches!(bytes.get(end), Some(b' ' | b'\t')) {
+        return None;
+    }
+    while matches!(bytes.get(end), Some(b' ' | b'\t')) {
+        end += 1;
+    }
+    Some(end)
+}
+
+/// 结构化 Markdown 前缀：引用走信息色侧栏，列表保留缩进与标记；正文仍走行内扫描。
+/// 纯呈现层投影，不改变 Answer 文本或围栏状态。
+fn markdown_structure_spans(line: &str) -> Option<Vec<Span<'static>>> {
+    let (quote, mut body) = markdown_quote_prefix(line)
+        .map(|(prefix, rest)| (Some(prefix), rest))
+        .unwrap_or((None, line));
+    let list_end = markdown_list_prefix(body);
+    if quote.is_none() && list_end.is_none() {
+        return None;
+    }
+
+    let mut spans = Vec::with_capacity(3);
+    if let Some(prefix) = quote {
+        spans.push(Span::styled(
+            prefix,
+            Style::default().fg(role_color(Role::Info)),
+        ));
+    }
+    if let Some(end) = list_end {
+        spans.push(Span::styled(
+            body[..end].to_owned(),
+            Style::default().fg(role_color(Role::Info)),
+        ));
+        body = &body[end..];
+    }
+    spans.extend(inline_md_spans(body));
+    Some(spans)
+}
+
+fn code_identifier_start(c: char) -> bool {
+    c.is_ascii_alphabetic() || matches!(c, '_' | '$')
+}
+
+fn code_identifier_continue(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '$')
+}
+
+fn code_token_role(token: &str) -> Option<Role> {
+    if matches!(
+        token,
+        "as" | "async"
+            | "await"
+            | "break"
+            | "catch"
+            | "class"
+            | "const"
+            | "continue"
+            | "crate"
+            | "def"
+            | "else"
+            | "enum"
+            | "extends"
+            | "fn"
+            | "for"
+            | "from"
+            | "function"
+            | "if"
+            | "impl"
+            | "import"
+            | "in"
+            | "interface"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "new"
+            | "or"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "try"
+            | "type"
+            | "unsafe"
+            | "use"
+            | "var"
+            | "while"
+            | "with"
+            | "yield"
+    ) {
+        Some(Role::Primary)
+    } else if matches!(
+        token,
+        "Err"
+            | "False"
+            | "None"
+            | "Ok"
+            | "Some"
+            | "True"
+            | "Undefined"
+            | "false"
+            | "null"
+            | "true"
+            | "undefined"
+    ) {
+        Some(Role::Warn)
+    } else if matches!(
+        token,
+        "String"
+            | "Vec"
+            | "bool"
+            | "f32"
+            | "f64"
+            | "i32"
+            | "i64"
+            | "isize"
+            | "str"
+            | "u32"
+            | "u64"
+            | "usize"
+    ) {
+        Some(Role::Info)
+    } else {
+        None
+    }
+}
+
+fn code_quote_end(text: &str, start: usize, quote: char) -> usize {
+    let content_start = start + quote.len_utf8();
+    let mut escaped = false;
+    for (offset, c) in text[content_start..].char_indices() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == quote {
+            return content_start + offset + c.len_utf8();
+        }
+    }
+    text.len()
+}
+
+fn push_code_span(spans: &mut Vec<Span<'static>>, text: &str, role: Role) {
+    if !text.is_empty() {
+        spans.push(Span::styled(
+            text.to_owned(),
+            Style::default().fg(role_color(role)),
+        ));
+    }
+}
+
+fn flush_code_plain(spans: &mut Vec<Span<'static>>, plain: &mut String) {
+    if !plain.is_empty() {
+        push_code_span(spans, plain, Role::Muted);
+        plain.clear();
+    }
+}
+
+fn code_line_spans(text: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::with_capacity(8);
+    let mut plain = String::new();
+    let mut index = 0;
+    while index < text.len() {
+        let rest = &text[index..];
+        let c = rest
+            .chars()
+            .next()
+            .expect("code index is on a char boundary");
+        let previous_is_space = text[..index]
+            .chars()
+            .next_back()
+            .is_none_or(char::is_whitespace);
+
+        if rest.starts_with("//") || (c == '#' && !rest.starts_with("#[") && previous_is_space) {
+            flush_code_plain(&mut spans, &mut plain);
+            push_code_span(&mut spans, rest, Role::Muted);
+            break;
+        }
+
+        if matches!(c, '\'' | '"' | '`') {
+            flush_code_plain(&mut spans, &mut plain);
+            let end = code_quote_end(text, index, c);
+            push_code_span(&mut spans, &text[index..end], Role::Success);
+            index = end;
+            continue;
+        }
+
+        if c.is_ascii_digit()
+            && text[..index]
+                .chars()
+                .next_back()
+                .is_none_or(|previous| !code_identifier_continue(previous))
+        {
+            flush_code_plain(&mut spans, &mut plain);
+            let end = text[index..]
+                .char_indices()
+                .take_while(|(_, value)| {
+                    value.is_ascii_alphanumeric() || matches!(*value, '_' | '.')
+                })
+                .last()
+                .map(|(offset, value)| index + offset + value.len_utf8())
+                .unwrap_or(index + c.len_utf8());
+            push_code_span(&mut spans, &text[index..end], Role::Warn);
+            index = end;
+            continue;
+        }
+
+        if code_identifier_start(c) {
+            let end = text[index..]
+                .char_indices()
+                .take_while(|(_, value)| code_identifier_continue(*value))
+                .last()
+                .map(|(offset, value)| index + offset + value.len_utf8())
+                .unwrap_or(index + c.len_utf8());
+            let token = &text[index..end];
+            if let Some(role) = code_token_role(token) {
+                flush_code_plain(&mut spans, &mut plain);
+                push_code_span(&mut spans, token, role);
+            } else {
+                plain.push_str(token);
+            }
+            index = end;
+            continue;
+        }
+
+        plain.push(c);
+        index += c.len_utf8();
+    }
+    flush_code_plain(&mut spans, &mut plain);
+    spans
+}
+
+/// 行级 md 轻渲染(iter-28):静态提交与 Live Answer 共用；样式仅存在呈现层。
+/// ``` 围栏切态(围栏行 Border 色)、块内 Muted、`#` 标题加粗 Primary、引用/列表有结构侧栏、余走行内扫描。
 pub(crate) fn md_line_spans(line: &str, in_code: bool) -> (Vec<Span<'static>>, bool) {
     let trimmed = line.trim_start();
     if trimmed.starts_with("```") {
@@ -231,7 +601,7 @@ pub(crate) fn md_line_spans(line: &str, in_code: bool) -> (Vec<Span<'static>>, b
                 line.to_owned(),
                 Style::default().fg(role_color(Role::Border)),
             )],
-            !in_code,
+            next_fence_state(trimmed, in_code),
         );
     }
     if in_code {
@@ -254,7 +624,99 @@ pub(crate) fn md_line_spans(line: &str, in_code: bool) -> (Vec<Span<'static>>, b
             false,
         );
     }
+    if let Some(spans) = markdown_structure_spans(line) {
+        return (spans, false);
+    }
     (inline_md_spans(line), false)
+}
+
+fn next_fence_state(trimmed: &str, in_code: bool) -> bool {
+    if trimmed.starts_with("```") {
+        !in_code
+    } else {
+        in_code
+    }
+}
+
+/// Live Answer 的有界 Markdown 投影：先按完整行推进围栏状态，再按 cell 宽裁切可见文本。
+/// 未闭合标记保持字面；每帧只处理已进入视口的行，不把解析状态写回 transcript。
+pub(crate) fn live_markdown_line(
+    text: &str,
+    width: u16,
+    in_code: &mut bool,
+    base_color: Color,
+    modifier: Modifier,
+) -> Vec<Span<'static>> {
+    let start_code = *in_code;
+    let next_code = next_fence_state(text.trim_start(), start_code);
+    let clipped = clip_display_cells(text, width);
+    let (mut spans, _) = if start_code && !clipped.trim_start().starts_with("```") {
+        (code_line_spans(&clipped), true)
+    } else {
+        md_line_spans(&clipped, start_code)
+    };
+    *in_code = next_code;
+
+    for span in &mut spans {
+        let color = span.style.fg.unwrap_or(base_color);
+        span.style = Style::default()
+            .fg(color)
+            .add_modifier(modifier)
+            .add_modifier(span.style.add_modifier);
+    }
+    spans
+}
+
+const MAX_FENCE_LANGUAGE_CELLS: usize = 10;
+
+/// 提取受限的 fenced-code language token；仅作 Live 视觉 badge，不改变 Markdown 语义。
+pub(crate) fn fence_language(text: &str) -> Option<&str> {
+    let trimmed = text.trim_start();
+    let language = trimmed.strip_prefix("```")?.split_whitespace().next()?;
+    if language.is_empty()
+        || str_cells(language) > MAX_FENCE_LANGUAGE_CELLS
+        || !language
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '-' | '.' | '#'))
+    {
+        return None;
+    }
+    Some(language)
+}
+
+/// 将已识别语言的围栏正文归一为裸围栏；语言由旁侧 badge 承载。
+pub(crate) fn fence_without_language(text: &str) -> String {
+    let trimmed = text.trim_start();
+    let leading = text.len() - trimmed.len();
+    format!("{}{}", &text[..leading], "```")
+}
+
+/// 最终回答静态提交的行级渲染：首行徽标走 Primary，其余内容沿用 Markdown 语义角色。
+/// 代码围栏状态跨行传递，故不会因中间换行把代码块误当普通回答。
+pub(crate) fn markdown_lines(text: &str) -> Vec<Line<'static>> {
+    let mut in_code = false;
+    text.lines()
+        .map(|line| {
+            let (spans, next) = answer_line_spans(line, in_code);
+            in_code = next;
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn answer_line_spans(line: &str, in_code: bool) -> (Vec<Span<'static>>, bool) {
+    let Some(body) = line.strip_prefix("🤖 ") else {
+        return md_line_spans(line, in_code);
+    };
+    let mut spans = vec![Span::styled(
+        "🤖 ".to_owned(),
+        Style::default()
+            .fg(role_color(Role::Primary))
+            .add_modifier(Modifier::BOLD),
+    )];
+    let (mut body_spans, next) = md_line_spans(body, in_code);
+    spans.append(&mut body_spans);
+    (spans, next)
 }
 
 /// 呈现层折叠上限(iter-28):静态提交前超限留头 + 尾标,历史不刷屏。

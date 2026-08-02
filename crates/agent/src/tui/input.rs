@@ -54,6 +54,8 @@ pub(crate) enum InputAction {
     /// busy 时提交 → 入队(iter-33),当前任务毕自动接跑。
     Queue,
     Interrupt,
+    ToggleDetails,
+    ToggleReasoning,
     CursorUpOrHistory,
     CursorDownOrHistory,
     PopupOpen,
@@ -112,6 +114,9 @@ pub(crate) fn input_action(key: &KeyEvent, busy: bool, popup_open: bool) -> Inpu
         return InputAction::Interrupt;
     }
     if popup_open {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o') {
+            return InputAction::Ignore;
+        }
         // 浮窗态:↑↓/Tab 选、Enter 应用、Esc 关;字符/退格穿透继续编辑(主环先关浮窗)。
         return match key.code {
             KeyCode::Tab | KeyCode::Down => InputAction::PopupNext,
@@ -121,6 +126,12 @@ pub(crate) fn input_action(key: &KeyEvent, busy: bool, popup_open: bool) -> Inpu
             KeyCode::Backspace => InputAction::Backspace,
             _ => InputAction::PopupClose,
         };
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o') {
+        return InputAction::ToggleDetails;
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
+        return InputAction::ToggleReasoning;
     }
     match key.code {
         KeyCode::Enter
@@ -143,6 +154,42 @@ pub(crate) fn input_action(key: &KeyEvent, busy: bool, popup_open: bool) -> Inpu
         KeyCode::Up => InputAction::CursorUpOrHistory,
         KeyCode::Down => InputAction::CursorDownOrHistory,
         _ => InputAction::Ignore,
+    }
+}
+
+/// Live 工具焦点快捷键:仅在无浮窗且确有工具块时拦截 Alt+↑/↓,避免破坏输入编辑回退。
+pub(crate) fn tool_focus_action(key: &KeyEvent, popup_open: bool, has_tools: bool) -> Option<i8> {
+    if key.kind != KeyEventKind::Press
+        || popup_open
+        || !has_tools
+        || !key.modifiers.contains(KeyModifiers::ALT)
+    {
+        return None;
+    }
+    match key.code {
+        KeyCode::Up => Some(-1),
+        KeyCode::Down => Some(1),
+        _ => None,
+    }
+}
+
+/// 展开工具详情的局部滚动:Alt+PageUp/Alt+PageDown,仅单焦点详情可滚时拦截。
+pub(crate) fn tool_detail_scroll_action(
+    key: &KeyEvent,
+    popup_open: bool,
+    has_scrollable_details: bool,
+) -> Option<i8> {
+    if key.kind != KeyEventKind::Press
+        || popup_open
+        || !has_scrollable_details
+        || !key.modifiers.contains(KeyModifiers::ALT)
+    {
+        return None;
+    }
+    match key.code {
+        KeyCode::PageUp => Some(1),
+        KeyCode::PageDown => Some(-1),
+        _ => None,
     }
 }
 
@@ -205,12 +252,16 @@ impl InputState {
         self.cursor -= col;
     }
     pub(crate) fn end(&mut self) {
-        let chars: Vec<char> = self.buffer.chars().collect();
-        let mut i = self.cursor;
-        while i < chars.len() && chars[i] != '\n' {
-            i += 1;
+        // End is a hot interactive path; scan from the logical cursor without
+        // materializing the whole UTF-8 buffer as `Vec<char>`.
+        let mut cursor = self.cursor;
+        for ch in self.buffer.chars().skip(self.cursor) {
+            if ch == '\n' {
+                break;
+            }
+            cursor += 1;
         }
-        self.cursor = i;
+        self.cursor = cursor;
     }
     /// 光标所在 (逻辑行, 字符列)。
     pub(crate) fn row_col(&self) -> (usize, usize) {
@@ -321,6 +372,7 @@ pub(crate) const SLASH_COMMANDS: &[&str] = &[
     "/cost",
     "/exit",
     "/help",
+    "/history",
     "/jailbreak",
     "/login",
     "/mcp",

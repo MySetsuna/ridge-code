@@ -36,6 +36,24 @@ fn openai_and_anthropic_normalize_to_same_tool_call() {
     assert_eq!(a.tool_calls[0].arguments, b.tool_calls[0].arguments);
 }
 
+#[test]
+fn anthropic_preserves_native_and_inline_thinking() {
+    let wire = json!({
+        "content": [
+            {"type": "thinking", "thinking": "native plan"},
+            {"type": "text", "text": "<think>inline detail</think>done"}
+        ],
+        "usage": {"input_tokens": 3, "output_tokens": 5}
+    });
+
+    let c = anthropic::parse_response(&wire).unwrap();
+
+    assert_eq!(c.text, "done");
+    assert_eq!(c.reasoning, "native plan\ninline detail");
+    assert_eq!(c.usage.prompt_tokens, 3);
+    assert_eq!(c.usage.completion_tokens, 5);
+}
+
 #[tokio::test]
 async fn swap_provider_hot_switches_inner() {
     let comp = |t: &str| Completion {
@@ -74,7 +92,7 @@ fn splits_thinking_from_answer() {
     let (a, t) = extract_inline_think("ans<think>tail thinking");
     assert_eq!((a.as_str(), t.as_str()), ("ans", "tail thinking"));
     // 无标签原样(去首尾空白),全为回答。
-    assert_eq!(strip_thinking("  clean  "), "clean");
+    assert_eq!(extract_inline_think("  clean  ").0, "clean");
 
     // 非流式:独立 `reasoning_content` 字段 → 进 reasoning,`content` 进 text(GLM 主路径)。
     let wire =

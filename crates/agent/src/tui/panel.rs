@@ -9,6 +9,8 @@ pub(crate) enum PanelKind {
     Provider,
     /// 工具页:只读浏览 + 搜索。
     Tools,
+    /// 已提交工具历史:摘要默认收起,Enter 在预览窗展开详情。
+    ToolHistory,
     /// 模型页:Enter 热切换到选中模型 + 缓存 ctx_window。
     Models,
     /// Sub-agent 页:只读浏览 + 搜索。
@@ -39,6 +41,7 @@ pub(crate) struct Panel {
     pub(crate) sel: usize,
     pub(crate) editing: Option<String>,
     pub(crate) oauth_verifier: Option<String>,
+    pub(crate) detail_open: bool,
 }
 
 /// 过滤:key/value 不分大小写子串命中;空 query = 全含。有序稳态(保 rows 原序)。纯函数。
@@ -65,6 +68,7 @@ impl Panel {
             sel: 0,
             editing: None,
             oauth_verifier: None,
+            detail_open: false,
         }
     }
     /// query 变更后重算 view 并把 sel 钳回范围内。
@@ -72,6 +76,19 @@ impl Panel {
         self.view = panel_filter(&self.rows, &self.query);
         if self.sel >= self.view.len() {
             self.sel = self.view.len().saturating_sub(1);
+        }
+        if self.kind == PanelKind::ToolHistory && !self.query.is_empty() {
+            let query = self.query.to_lowercase();
+            if let Some(detail_sel) = self
+                .view
+                .iter()
+                .position(|&index| self.rows[index].value.to_lowercase().contains(&query))
+            {
+                self.sel = detail_sel;
+                self.detail_open = true;
+            } else {
+                self.detail_open = false;
+            }
         }
     }
     pub(crate) fn move_up(&mut self) {
@@ -81,6 +98,20 @@ impl Panel {
         if self.sel + 1 < self.view.len() {
             self.sel += 1;
         }
+    }
+    pub(crate) fn page_up(&mut self) {
+        self.sel = self.sel.saturating_sub(8);
+    }
+    pub(crate) fn page_down(&mut self) {
+        if !self.view.is_empty() {
+            self.sel = (self.sel + 8).min(self.view.len() - 1);
+        }
+    }
+    pub(crate) fn first(&mut self) {
+        self.sel = 0;
+    }
+    pub(crate) fn last(&mut self) {
+        self.sel = self.view.len().saturating_sub(1);
     }
     pub(crate) fn selected(&self) -> Option<&PanelRow> {
         self.view.get(self.sel).map(|&i| &self.rows[i])
@@ -164,6 +195,25 @@ pub(crate) fn tools_panel(tools: &[String]) -> Panel {
     Panel::new(
         PanelKind::Tools,
         "Tools (read-only) · type to filter · Esc close".into(),
+        rows,
+    )
+}
+
+/// 已提交工具历史:保留原生 scrollback 不变,在模态预览窗按需展开有界详情。
+pub(crate) fn tool_history_panel(history: &std::collections::VecDeque<ToolBlock>) -> Panel {
+    let rows = history
+        .iter()
+        .rev()
+        .enumerate()
+        .map(|(index, tool)| PanelRow {
+            key: format!("#{} {}", index + 1, tool.summary()),
+            value: tool.details_text(),
+            ctx: None,
+        })
+        .collect();
+    Panel::new(
+        PanelKind::ToolHistory,
+        "Tool history · ↑↓/PgUp/PgDn select · Enter expand · type to filter · Esc close".into(),
         rows,
     )
 }
@@ -292,6 +342,10 @@ pub(crate) fn skills_panel(skills: &[agent::Skill]) -> Panel {
 pub(crate) enum PanelAction {
     Up,
     Down,
+    PageUp,
+    PageDown,
+    First,
+    Last,
     Enter,
     Esc,
     Char(char),
@@ -306,6 +360,10 @@ pub(crate) fn panel_action(key: &KeyEvent) -> PanelAction {
     match key.code {
         KeyCode::Up => PanelAction::Up,
         KeyCode::Down => PanelAction::Down,
+        KeyCode::PageUp => PanelAction::PageUp,
+        KeyCode::PageDown => PanelAction::PageDown,
+        KeyCode::Home => PanelAction::First,
+        KeyCode::End => PanelAction::Last,
         KeyCode::Enter => PanelAction::Enter,
         KeyCode::Esc => PanelAction::Esc,
         KeyCode::Backspace => PanelAction::Backspace,

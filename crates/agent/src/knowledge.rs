@@ -529,7 +529,7 @@ mod tests {
         assert!(!init.description.is_empty() && init.body.contains("AGENTS.md"));
         // 用户 ~/.ridge/commands/init.md 优先于内置。
         let mut dir = std::env::temp_dir();
-        dir.push(format!("ridge_cmds_{}", std::process::id()));
+        dir.push(format!("ridge_cmds_{}_init_override", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("init.md"), "my custom init").unwrap();
         let cmds = load_commands(&dir, &[]);
@@ -572,7 +572,7 @@ mod tests {
     #[test]
     fn load_commands_merges_files_and_skills() {
         let mut dir = std::env::temp_dir();
-        dir.push(format!("ridge_cmds_{}", std::process::id()));
+        dir.push(format!("ridge_cmds_{}_merge_skills", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("deploy.md"),

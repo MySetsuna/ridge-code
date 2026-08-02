@@ -1,4 +1,4 @@
-use super::{strip_thinking, Completion, CompletionRequest, ProviderError, Role, ToolCall, Usage};
+use super::{split_thinking, Completion, CompletionRequest, ProviderError, Role, ToolCall, Usage};
 use serde_json::{json, Value};
 
 /// 把统一历史铺成 Anthropic `/messages` 请求体(纯函数,离线可测)。
@@ -59,11 +59,13 @@ pub fn build_request(model: &str, max_tokens: u32, req: &CompletionRequest) -> V
 /// Anthropic 的 `content` 是块数组:`text` 块拼成文本,`tool_use` 块变 ToolCall(`input` 已是对象)。
 pub fn parse_response(v: &Value) -> Result<Completion, ProviderError> {
     let mut text = String::new();
+    let mut reasoning = String::new();
     let mut tool_calls = Vec::new();
     if let Some(arr) = v["content"].as_array() {
         for block in arr {
             match block["type"].as_str() {
                 Some("text") => text.push_str(block["text"].as_str().unwrap_or("")),
+                Some("thinking") => reasoning.push_str(block["thinking"].as_str().unwrap_or("")),
                 Some("tool_use") => tool_calls.push(ToolCall {
                     id: block["id"].as_str().unwrap_or("").to_string(),
                     name: block["name"].as_str().unwrap_or("").to_string(),
@@ -77,11 +79,10 @@ pub fn parse_response(v: &Value) -> Result<Completion, ProviderError> {
         prompt_tokens: v["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32,
         completion_tokens: v["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32,
     };
+    let (text, reasoning) = split_thinking(&text, &reasoning);
     Ok(Completion {
-        text: strip_thinking(&text),
-        // ponytail: Anthropic 原生 thinking 块解析未做(此路径用户暂不走 thinking);置空即可,
-        // 要接时在上面的 block 循环里把 `type=="thinking"` 收进 reasoning。
-        reasoning: String::new(),
+        text,
+        reasoning,
         tool_calls,
         usage,
     })

@@ -182,11 +182,6 @@ pub(crate) fn split_thinking(content: &str, reasoning_field: &str) -> (String, S
     (answer, reasoning)
 }
 
-/// 只要回答、丢思考的便捷包装(保留旧调用点/测试)。
-pub(crate) fn strip_thinking(text: &str) -> String {
-    extract_inline_think(text).0
-}
-
 /// LLM provider 抽象。真实实现(Anthropic/OpenAI HTTP)与离线 [`ScriptedProvider`] 都藏在这后面。
 #[async_trait::async_trait]
 pub trait LlmProvider: Send + Sync {

@@ -17,7 +17,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
-    backend::CrosstermBackend,
+    backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
@@ -32,6 +32,24 @@ type Term = Terminal<CrosstermBackend<io::Stdout>>;
 /// Live 视口总高:状态行 1 + 流式尾巴 ≥5 + 输入框 3..=8。内联模式下 ratatui 只管这块,
 /// 高度恒小于终端 —— 从根上杜绝「动态高度超视口触发全屏清屏」的闪烁根因。
 const LIVE_HEIGHT: u16 = 14;
+/// 单次 token 唤醒最多合并的 chunk；留出下一轮 select 处理键盘，保证 Ctrl-C 可抢占。
+const MAX_STREAM_CHUNKS_PER_WAKE: usize = 256;
+
+fn inline_height_cap() -> u16 {
+    // Keep the viewport cap stable; ratatui clamps it to current terminal height
+    // and can grow back to the cap after a small terminal is enlarged.
+    LIVE_HEIGHT
+}
+
+/// Superstep 后仍有 frontier 即任务仍运行；空 frontier 才允许输入启动下一任务。
+fn superstep_is_busy(active: &[String]) -> bool {
+    !active.is_empty()
+}
+
+/// 仅在 UI 空闲且旧 task 已由 done 分支收走时启动新任务。
+fn can_start_task(busy: bool, task_running: bool) -> bool {
+    !busy && !task_running
+}
 
 struct TerminalGuard;
 impl TerminalGuard {
@@ -56,7 +74,7 @@ impl TerminalGuard {
         let term = Terminal::with_options(
             CrosstermBackend::new(stdout),
             TerminalOptions {
-                viewport: Viewport::Inline(LIVE_HEIGHT),
+                viewport: Viewport::Inline(inline_height_cap()),
             },
         )?;
         Ok((Self, term))
@@ -84,6 +102,7 @@ mod render;
 mod status;
 #[cfg(test)]
 mod tests;
+mod transcript;
 
 pub(crate) use app::*;
 pub(crate) use command::*;
@@ -93,6 +112,7 @@ pub(crate) use input::*;
 pub(crate) use panel::*;
 pub(crate) use render::*;
 pub(crate) use status::*;
+pub(crate) use transcript::*;
 
 /// TUI 是交互入口；只有非 TTY 的自动化管道才会回落到 headless。
 #[allow(clippy::too_many_arguments)]
@@ -168,9 +188,10 @@ pub(super) async fn run(
             }
         }
     });
-    // tick 只为 busy 时的 spinner 重绘;空闲时 should_draw=false,tick 醒来即再入睡,零重绘。
+    // tick 只登记 busy 时的动画帧需求;业务 busy 不再直接触发 draw。
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     let mut dirty = true;
+    let mut animation_due = false;
 
     // 失败自动重试(用户需求:给 10 次机会)—— 端点抖动/超时等瞬时失败自动重跑,不打断用户;
     // 成功/中断/新任务清零。`start_task` 据任务串 + 当前 history 装配 state 并 spawn(初次与重试共用)。
@@ -216,7 +237,7 @@ pub(super) async fn run(
     'main: loop {
         // 统一提交点(iter-33):非 busy 时消费 pending_submit —— 键入的新提交,或上一任务毕后接跑的队首。
         // 起任务/跑命令的逻辑**只此一处**(键 Submit 臂与 done 队列接跑共用),消除重复。
-        if !ui.busy {
+        if can_start_task(ui.busy, task.is_some()) {
             if let Some(input) = pending_submit.take() {
                 if run_command(
                     &input,
@@ -249,6 +270,8 @@ pub(super) async fn run(
                     ui.phase = "reasoning".into();
                     ui.clear_streams();
                     ui.stream_tokens = 0;
+                    ui.superstep = 0;
+                    ui.pending_call = None;
                     task_started = Some(Instant::now());
                     printed = 0;
                     task = Some(start_task(&ti, &history));
@@ -261,7 +284,7 @@ pub(super) async fn run(
             flush_commits(&mut terminal, &mut ui)?;
             dirty = true;
         }
-        if should_draw(dirty, ui.busy) {
+        if should_draw(dirty, animation_due) {
             ui.frame = ui.frame.wrapping_add(1);
             let elapsed_ms = task_started.map(|t| t.elapsed().as_millis()).unwrap_or(0);
             let ctx_used = history
@@ -269,6 +292,7 @@ pub(super) async fn run(
                 .map(|m| est_tokens(&m.content))
                 .sum::<usize>();
             let vitals = Vitals {
+                step: ui.superstep,
                 elapsed_s: (elapsed_ms / 1000) as u64,
                 task_tokens: ui.stream_tokens,
                 rate: token_rate(ui.stream_tokens, elapsed_ms),
@@ -278,6 +302,7 @@ pub(super) async fn run(
             terminal
                 .draw(|frame| draw(frame, &ui, &meta, session_tokens, &vitals, pending.as_ref()))?;
             dirty = false;
+            animation_due = false;
         }
         // 事件驱动多路复用替代固定轮询(iter-23):无事时阻塞挂起,不烧 CPU。
         tokio::select! {
@@ -309,13 +334,17 @@ pub(super) async fn run(
                     match approval_action(key.code) {
                         ApprovalAction::Approve => {
                             if let Some(r) = pending.take() {
-                                let _ = r.reply.send(true);
+                                if r.reply.send(true).is_ok() {
+                                    ui.resume_after_approval();
+                                }
                             }
                             ui.note("✓ approved", Color::Green);
                         }
                         ApprovalAction::Reject => {
                             if let Some(r) = pending.take() {
-                                let _ = r.reply.send(false);
+                                if r.reply.send(false).is_ok() {
+                                    ui.resume_after_approval();
+                                }
                             }
                             ui.note("✗ rejected", Color::Red);
                         }
@@ -345,6 +374,30 @@ pub(super) async fn run(
                             let p = ui.panel.as_mut().unwrap();
                             if p.editing.is_none() {
                                 p.move_down();
+                            }
+                        }
+                        PanelAction::PageUp => {
+                            let p = ui.panel.as_mut().unwrap();
+                            if p.editing.is_none() {
+                                p.page_up();
+                            }
+                        }
+                        PanelAction::PageDown => {
+                            let p = ui.panel.as_mut().unwrap();
+                            if p.editing.is_none() {
+                                p.page_down();
+                            }
+                        }
+                        PanelAction::First => {
+                            let p = ui.panel.as_mut().unwrap();
+                            if p.editing.is_none() {
+                                p.first();
+                            }
+                        }
+                        PanelAction::Last => {
+                            let p = ui.panel.as_mut().unwrap();
+                            if p.editing.is_none() {
+                                p.last();
                             }
                         }
                         PanelAction::Backspace => {
@@ -423,13 +476,32 @@ pub(super) async fn run(
                     }
                     continue;
                 }
+                if let Some(delta) = tool_focus_action(&key, ui.popup.is_some(), ui.has_live_tools()) {
+                    let _ = ui.move_tool_focus(delta);
+                    continue;
+                }
+                if let Some(delta) = tool_detail_scroll_action(
+                    &key,
+                    ui.popup.is_some(),
+                    ui.has_scrollable_live_tool(),
+                ) {
+                    let _ = ui.scroll_tool_details(delta);
+                    continue;
+                }
                 match input_action(&key, ui.busy, ui.popup.is_some()) {
                     InputAction::Interrupt => {
                         if let Some(handle) = task.take() {
                             handle.abort();
                             *bus.lock().unwrap() = None;
                             ui.busy = false;
+                            ui.commit_live_reasoning(
+                                ui.superstep,
+                                task_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                            );
                             ui.clear_streams();
+                            ui.commit_live_tools();
+                            ui.superstep = 0;
+                            ui.pending_call = None;
                             task_started = None;
                             retry_count = 0; // 中断即取消重试链
                             // 中止即取消全部待跑(iter-33):不让排队项在中断后意外接跑。
@@ -496,6 +568,12 @@ pub(super) async fn run(
                         }
                     }
                     InputAction::PopupClose => ui.popup = None,
+                    InputAction::ToggleDetails => {
+                        let _ = ui.toggle_details_or_history();
+                    }
+                    InputAction::ToggleReasoning => {
+                        let _ = ui.toggle_reasoning();
+                    }
                     InputAction::Submit => {
                         // 空闲提交:交主环顶统一提交点起任务/跑命令(iter-33)。
                         let input = ui.input.take().trim().to_owned();
@@ -521,8 +599,11 @@ pub(super) async fn run(
                 ui.busy = true;
                 ui.push_chunk(chunk); // 分道:回答→白尾巴,思考→灰尾巴
                 // 批量排空积压 token,免逐 token 一帧。
-                while let Ok(c) = token_rx.try_recv() {
-                    ui.push_chunk(c);
+                for _ in 0..MAX_STREAM_CHUNKS_PER_WAKE {
+                    match token_rx.try_recv() {
+                        Ok(c) => ui.push_chunk(c),
+                        Err(_) => break,
+                    }
                 }
                 dirty = true;
             }
@@ -532,11 +613,26 @@ pub(super) async fn run(
                         ui.phase = node_label(&node);
                         ui.busy = true;
                     }
-                    StreamEvent::Superstep { state, .. } => {
+                    StreamEvent::Superstep {
+                        step,
+                        active,
+                        state,
+                    } => {
+                        ui.superstep = step;
+                        ui.pending_call = state.pending_call.clone();
                         for m in state.messages.iter().skip(printed) {
                             // 总览化(用户需求):读只显路径、写显预览、改显 ± diff;减噪。
-                            for (line, color) in summarize_event(m) {
-                                ui.note(line, color);
+                            if let Some(tool) = tool_preview(m) {
+                                ui.push_tool(tool);
+                            } else {
+                                let is_final = is_final_event(m);
+                                for (line, color) in summarize_event(m) {
+                                    if is_final {
+                                        ui.note_markdown(line);
+                                    } else {
+                                        ui.note(line, color);
+                                    }
+                                }
                             }
                         }
                         printed = state.messages.len();
@@ -548,8 +644,12 @@ pub(super) async fn run(
                         }
                         ui.todos = state.todos;
                         // 流式已完段落随 Superstep 消息历史化,Live 只留尾巴。
+                        ui.commit_live_reasoning(
+                            ui.superstep,
+                            task_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                        );
                         ui.clear_streams();
-                        ui.busy = false;
+                        ui.busy = superstep_is_busy(&active);
                     }
                 }
                 dirty = true;
@@ -563,7 +663,14 @@ pub(super) async fn run(
             Some(result) = done_rx.recv() => {
                 task = None;
                 ui.busy = false;
+                ui.commit_live_reasoning(
+                    ui.superstep,
+                    task_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                );
                 ui.clear_streams();
+                ui.commit_live_tools();
+                ui.superstep = 0;
+                ui.pending_call = None;
                 task_started = None;
                 printed = 0;
                 match result {
@@ -611,6 +718,8 @@ pub(super) async fn run(
                                 );
                                 ui.busy = true;
                                 ui.phase = "reasoning".into();
+                                ui.superstep = 0;
+                                ui.pending_call = None;
                                 task_started = Some(Instant::now());
                                 task = Some(start_task(&ti, &history));
                             }
@@ -636,6 +745,7 @@ pub(super) async fn run(
                 dirty = true;
             }
             _ = tick.tick() => {
+                animation_due = ui.busy && pending.is_none() && ui.panel.is_none();
                 // 启动帧序列(iter-28;iter-36 居中+防折行):空闲时借 tick 渐显 banner,末帧整幅入历史。
                 if ui.splash < SPLASH_TICKS && !ui.busy && pending.is_none() {
                     ui.splash += 1;
@@ -646,7 +756,8 @@ pub(super) async fn run(
                         ui.clear_streams();
                     } else {
                         // 动画帧与落定 banner 同一居中偏移,消除「揭示→落定」的横跳。
-                        ui.stream = indent(&splash_frame(ui.splash, SPLASH_TICKS), splash_pad(width));
+                        ui.transcript
+                            .set_splash(indent(&splash_frame(ui.splash, SPLASH_TICKS), splash_pad(width)));
                     }
                     dirty = true;
                 }

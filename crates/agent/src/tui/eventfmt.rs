@@ -1,7 +1,18 @@
 use super::*;
 
+pub(crate) fn final_answer_text(m: &str) -> Option<&str> {
+    m.strip_prefix("(final) ").or_else(|| {
+        m.strip_prefix("reason#")
+            .and_then(|rest| rest.split_once(": (final) ").map(|(_, text)| text))
+    })
+}
+
+pub(crate) fn is_final_event(m: &str) -> bool {
+    final_answer_text(m).is_some()
+}
+
 pub(crate) fn format_event_plain(m: &str) -> String {
-    m.strip_prefix("(final) ")
+    final_answer_text(m)
         .map(|x| format!("🤖 {x}"))
         .unwrap_or_else(|| m.to_owned())
 }
@@ -63,7 +74,7 @@ pub(crate) fn summarize_event(m: &str) -> Vec<(String, Color)> {
                         out.extend(diff_lines(arg("old_string"), arg("new_string")));
                         out
                     }
-                    "apply_edits" => vec![(format!("  ⋯ 批量改 {}", arg("path")), info)],
+                    "apply_edits" => apply_edits_summary(&args, info),
                     "run_shell" => vec![(
                         format!(
                             "  ⋯ $ {}",
@@ -105,6 +116,107 @@ pub(crate) fn summarize_event(m: &str) -> Vec<(String, Color)> {
         }
     }
     vec![(format_event_plain(m), event_color(m))]
+}
+
+/// 将结构化工具事件转换为可折叠块；详情仅在 live 视口中按需显示。
+pub(crate) fn tool_preview(m: &str) -> Option<ToolBlock> {
+    let tool_call = m
+        .strip_prefix("reason#")
+        .map(|rest| rest.contains(": tool_call "))
+        .unwrap_or(false);
+    let observation = m
+        .strip_prefix("act: ")
+        .map(|rest| rest.contains(" -> "))
+        .unwrap_or(false);
+    if tool_call || observation {
+        ToolBlock::from_lines(summarize_event(m))
+    } else {
+        None
+    }
+}
+
+const MAX_BATCH_EDIT_SUMMARY_PATHS: usize = 3;
+const MAX_BATCH_EDIT_DETAIL_EDITS: usize = 4;
+const MAX_BATCH_EDIT_DETAIL_LINES: usize = 18;
+
+/// 批量编辑的有界投影：折叠态显文件范围，展开态显前几处 ± 预览。
+/// 只读 tool-call 参数，不访问磁盘；成功/失败仍由对应 `act:` 观察行裁决。
+pub(crate) fn apply_edits_summary(args: &serde_json::Value, info: Color) -> Vec<(String, Color)> {
+    let Some(edits) = args.get("edits").and_then(|value| value.as_array()) else {
+        return vec![("  ⋯ 批量改 (缺少 edits)".to_owned(), info)];
+    };
+
+    let parsed: Vec<(&str, &str, &str)> = edits
+        .iter()
+        .filter_map(|edit| {
+            let path = edit.get("path").and_then(|value| value.as_str())?;
+            let old = edit
+                .get("old_string")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let new = edit
+                .get("new_string")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            (!path.is_empty()).then_some((path, old, new))
+        })
+        .collect();
+    if parsed.is_empty() {
+        return vec![("  ⋯ 批量改 (无有效 edits)".to_owned(), info)];
+    }
+
+    let mut paths = Vec::new();
+    for (path, _, _) in &parsed {
+        if !paths.contains(path) {
+            paths.push(*path);
+        }
+    }
+    let mut visible_paths: Vec<String> = paths
+        .iter()
+        .take(MAX_BATCH_EDIT_SUMMARY_PATHS)
+        .map(|path| clip(path, 96))
+        .collect();
+    if paths.len() > MAX_BATCH_EDIT_SUMMARY_PATHS {
+        visible_paths.push(format!(
+            "… +{} 个",
+            paths.len() - MAX_BATCH_EDIT_SUMMARY_PATHS
+        ));
+    }
+    let mut out = vec![(
+        format!(
+            "  ⋯ 批量改 {} 文件 / {} 处: {}",
+            paths.len(),
+            parsed.len(),
+            visible_paths.join(", ")
+        ),
+        info,
+    )];
+
+    let mut detail_lines = 0;
+    let mut truncated = false;
+    for (index, (path, old, new)) in parsed.iter().enumerate() {
+        if index >= MAX_BATCH_EDIT_DETAIL_EDITS || detail_lines >= MAX_BATCH_EDIT_DETAIL_LINES {
+            truncated = true;
+            break;
+        }
+        out.push((format!("  ── {}", clip(path, 96)), info));
+        detail_lines += 1;
+        let diff = diff_lines(old, new);
+        let remaining = MAX_BATCH_EDIT_DETAIL_LINES.saturating_sub(detail_lines);
+        if diff.len() > remaining {
+            truncated = true;
+        }
+        let take = diff.len().min(remaining);
+        out.extend(diff.into_iter().take(take));
+        detail_lines += take;
+    }
+    if truncated {
+        out.push((
+            "  … (详情已限量，全文见 trace)".to_owned(),
+            role_color(Role::Muted),
+        ));
+    }
+    out
 }
 
 /// 写文件内容预览:首 `max` 行(每行截断),超出标注剩余行数(全文见 trace)。
@@ -152,7 +264,7 @@ pub(crate) fn event_color(m: &str) -> Color {
         role_color(Role::Error)
     } else if m.starts_with("act:") {
         role_color(Role::Warn)
-    } else if m.contains("(final)") {
+    } else if is_final_event(m) {
         Color::White
     } else {
         role_color(Role::Info)
