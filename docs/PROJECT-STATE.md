@@ -778,3 +778,7 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - README 新增发布包验收步骤：inline 历史、Answer/工具的原生选择复制、英文/CJK/emoji 搜索、Live 检视快捷键、`48×12` 窄窗与 `/exit`。
 - `8fb4223` 已推送 `origin/main`；README 本地与远端 blob 一致。ReRelease `v0.5.0` 已重新覆盖，ZIP 大小 `3012000`，SHA-256 为 `0e41668b08b670b809444e18035165102410da645ea08cb5788119197a32e877`，归档仍含 `ridgecode.exe`、`README.md`、`install.ps1`。
 - 清单是可复现实验步骤，不冒充已取得的物理证据；原生 scrollback 搜索/复制仍须用户在实际终端执行并记录终端版本、尺寸与失败文本。
+
+## 隔离 Release TUI 启动取证（2026-08-02）
+- 在独立 Ridge pane 启动 `target/release/ridgecode.exe`，实际捕获 `RidgeCode ready`、inline 输入框、`Zai · glm-4.6 · ctx 0% · 0 tok` 状态栏；启动日志确认 NotebookLM MCP 连接，已知 `codegraph-mcp` 缺失警告仍存在。
+- 该次桥接输入未形成可靠的 `/help` 提交事件，故不把它算作命令交互、原生搜索或复制证据；测试进程已按已核验路径精确停止。真实终端原生 scrollback 仍待人工验收。
