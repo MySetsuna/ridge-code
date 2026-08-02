@@ -63,14 +63,14 @@ pub(crate) fn summarize_event(m: &str) -> Vec<(String, Color)> {
                 let args: serde_json::Value = serde_json::from_str(args_str).unwrap_or_default();
                 let arg = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
                 return match name {
-                    "read_file" => vec![(format!("  ⋯ 读 {}", arg("path")), info)],
+                    "read_file" => vec![(format!("  ⋯ Read {}", arg("path")), info)],
                     "write_file" => {
-                        let mut out = vec![(format!("  ⋯ 写 {}", arg("path")), info)];
+                        let mut out = vec![(format!("  ⋯ Write {}", arg("path")), info)];
                         out.extend(preview_lines(arg("contents"), 8));
                         out
                     }
                     "edit_file" => {
-                        let mut out = vec![(format!("  ⋯ 改 {}", arg("path")), info)];
+                        let mut out = vec![(format!("  ⋯ Edit {}", arg("path")), info)];
                         out.extend(diff_lines(arg("old_string"), arg("new_string")));
                         out
                     }
@@ -82,7 +82,7 @@ pub(crate) fn summarize_event(m: &str) -> Vec<(String, Color)> {
                         ),
                         info,
                     )],
-                    "search" => vec![(format!("  ⋯ 搜 {}", arg("pattern")), info)],
+                    "search" => vec![(format!("  ⋯ Search {}", arg("pattern")), info)],
                     other => vec![(format!("  ⋯ {other}"), info)],
                 };
             }
@@ -103,13 +103,19 @@ pub(crate) fn summarize_event(m: &str) -> Vec<(String, Color)> {
                     out.push((format!("  │ {}", clip(l, 200)), err));
                 }
                 if lines.len() > 9 {
-                    out.push((format!("  │ … (+{} 行,全文见 trace)", lines.len() - 9), err));
+                    out.push((
+                        format!("  │ … (+{} lines, full text in trace)", lines.len() - 9),
+                        err,
+                    ));
                 }
                 return out;
             }
             let ok = role_color(Role::Success);
             if name == "read_file" {
-                return vec![(format!("  ✓ 读完 ({} 字)", obs.chars().count()), ok)];
+                return vec![(
+                    format!("  ✓ Read complete ({} chars)", obs.chars().count()),
+                    ok,
+                )];
             }
             let head = clip(obs.lines().next().unwrap_or(""), 200);
             return vec![(format!("  ✓ {name}: {head}"), ok)];
@@ -143,7 +149,7 @@ const MAX_BATCH_EDIT_DETAIL_LINES: usize = 18;
 /// 只读 tool-call 参数，不访问磁盘；成功/失败仍由对应 `act:` 观察行裁决。
 pub(crate) fn apply_edits_summary(args: &serde_json::Value, info: Color) -> Vec<(String, Color)> {
     let Some(edits) = args.get("edits").and_then(|value| value.as_array()) else {
-        return vec![("  ⋯ 批量改 (缺少 edits)".to_owned(), info)];
+        return vec![("  ⋯ Batch edit (missing edits)".to_owned(), info)];
     };
 
     let parsed: Vec<(&str, &str, &str)> = edits
@@ -162,7 +168,7 @@ pub(crate) fn apply_edits_summary(args: &serde_json::Value, info: Color) -> Vec<
         })
         .collect();
     if parsed.is_empty() {
-        return vec![("  ⋯ 批量改 (无有效 edits)".to_owned(), info)];
+        return vec![("  ⋯ Batch edit (no valid edits)".to_owned(), info)];
     }
 
     let mut paths = Vec::new();
@@ -178,13 +184,13 @@ pub(crate) fn apply_edits_summary(args: &serde_json::Value, info: Color) -> Vec<
         .collect();
     if paths.len() > MAX_BATCH_EDIT_SUMMARY_PATHS {
         visible_paths.push(format!(
-            "… +{} 个",
+            "… +{} more",
             paths.len() - MAX_BATCH_EDIT_SUMMARY_PATHS
         ));
     }
     let mut out = vec![(
         format!(
-            "  ⋯ 批量改 {} 文件 / {} 处: {}",
+            "  ⋯ Batch edit {} files / {} edits: {}",
             paths.len(),
             parsed.len(),
             visible_paths.join(", ")
@@ -212,7 +218,7 @@ pub(crate) fn apply_edits_summary(args: &serde_json::Value, info: Color) -> Vec<
     }
     if truncated {
         out.push((
-            "  … (详情已限量，全文见 trace)".to_owned(),
+            "  … (details limited, full text in trace)".to_owned(),
             role_color(Role::Muted),
         ));
     }
@@ -230,7 +236,7 @@ pub(crate) fn preview_lines(content: &str, max: usize) -> Vec<(String, Color)> {
         .collect();
     if lines.len() > max {
         out.push((
-            format!("  │ … (+{} 行,全文见 trace)", lines.len() - max),
+            format!("  │ … (+{} lines, full text in trace)", lines.len() - max),
             muted,
         ));
     }

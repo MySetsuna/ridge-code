@@ -742,3 +742,9 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - 修正版 ConPTY 探针仍把 `cmd.exe /c echo PTY_OK` 与 `ridgecode --version` 文本落到宿主输出，故不把它当作 TUI 证据；原因是探针标准句柄映射未闭合，生产代码未改。
 - 另以独立可见 Windows PowerShell 控制台启动真实 `ridgecode`：屏幕读取确认 `inline mode`、启动 banner、`RidgeCode ready`、输入框与状态栏；注入 `/help` 并按 Enter 后，帮助命令完整呈现；窗口由 `120×50` 缩至 `48×12` 后进程仍存活、内容有界且无越界；恢复尺寸后以 `/exit` 退出。故真实终端帧、输入、窄窗重绘、退出已取证。
 - 尚未以人工鼠标/键盘完成终端原生搜索/复制验收，也未证明 `native scrollback` 的跨终端行为；因此不宣称该项已闭环。其余证据为 TestBackend/纯逻辑回归；若发布新 ReRelease，应把搜索/复制作为用户实际验证项并保留回滚路径。
+
+## 工具摘要显示语言收口（2026-08-02）
+- CodeGraph 审计发现 `tui::eventfmt::summarize_event` 的工具投影仍混用中文标签，与 iter-36「用户可见串全英文」契约不一致。
+- 本轮仅翻译显示层标签：`Read`、`Write`、`Edit`、`Search`、`Batch edit`、完成/截断/trace 提示；工具名、参数、详情数据、颜色、折叠边界与错误判定均未改。
+- `summarize_event_overviews_tools` 及 workspace 全量质量闸通过：测试 99/118 等套件全绿，`clippy -D warnings`、`cargo build`、`git diff --check` 均通过。
+- NLM 已用隔离 Chrome/CDP 写入 `default` profile；`nlm login --check` 通过（20 notebooks）。既有会话查询已由 `UNAUTHENTICATED` 变为 `RESOURCE_EXHAUSTED`，判定为配额/限流；未查询研究状态，未修改远端 note，下一步仍以手动导入源 `8862d715-ffad-4288-b7eb-173260e2dcff` 为理论依据。

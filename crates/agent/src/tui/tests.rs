@@ -348,16 +348,16 @@ fn summarize_event_overviews_tools() {
     // 读:只显路径,不倒内容。
     let r = summarize_event(r#"reason#1: tool_call read_file {"path":"src/x.rs"}"#);
     assert_eq!(r.len(), 1);
-    assert!(r[0].0.contains("读 src/x.rs"), "{}", r[0].0);
+    assert!(r[0].0.contains("Read src/x.rs"), "{}", r[0].0);
     // 读回执:丢内容,只回执字数。
     let a = summarize_event("act: read_file -> 一二三四五");
-    assert!(a[0].0.contains("读完"), "{}", a[0].0);
+    assert!(a[0].0.contains("Read complete"), "{}", a[0].0);
     assert!(!a[0].0.contains("一二三"), "内容不应回显");
     // 改:git-diff 式 ± 行,红减绿增。
     let e = summarize_event(
         r#"reason#2: tool_call edit_file {"path":"a.rs","old_string":"let n=1;","new_string":"let n=2;"}"#,
     );
-    assert!(e[0].0.contains("改 a.rs"), "{}", e[0].0);
+    assert!(e[0].0.contains("Edit a.rs"), "{}", e[0].0);
     assert!(e
         .iter()
         .any(|(l, c)| l.starts_with("  - ") && l.contains("n=1") && *c == role_color(Role::Error)));
@@ -368,7 +368,7 @@ fn summarize_event_overviews_tools() {
     let w = summarize_event(
         r#"reason#3: tool_call write_file {"path":"b.rs","contents":"line1\nline2"}"#,
     );
-    assert!(w[0].0.contains("写 b.rs"), "{}", w[0].0);
+    assert!(w[0].0.contains("Write b.rs"), "{}", w[0].0);
     assert!(w.iter().any(|(l, _)| l.contains("line1")));
     // 失败观察:显红 ✗(非绿 ✓)+ 多行错误正文(非只首行),别把报错藏掉。
     let f = summarize_event(
@@ -392,10 +392,10 @@ fn summarize_event_overviews_tools() {
     let batch = summarize_event(
         r#"reason#4: tool_call apply_edits {"edits":[{"path":"src/a.rs","old_string":"a","new_string":"A"},{"path":"src/b.rs","old_string":"b","new_string":"B"},{"path":"src/c.rs","old_string":"c","new_string":"C"},{"path":"src/d.rs","old_string":"d","new_string":"D"}]}"#,
     );
-    assert!(batch[0].0.contains("4 文件 / 4 处"), "{batch:?}");
+    assert!(batch[0].0.contains("4 files / 4 edits"), "{batch:?}");
     assert!(batch[0].0.contains("src/a.rs"), "{batch:?}");
     assert!(batch[0].0.contains("src/c.rs"), "{batch:?}");
-    assert!(batch[0].0.contains("… +1 个"), "摘要路径须有界:{batch:?}");
+    assert!(batch[0].0.contains("… +1 more"), "摘要路径须有界:{batch:?}");
     assert!(!batch[0].0.contains("src/d.rs"), "摘要不应溢出:{batch:?}");
     assert!(batch
         .iter()
