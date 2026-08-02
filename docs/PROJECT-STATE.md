@@ -764,3 +764,4 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - `3213a09` 已推送 `origin/main`；Windows 包按该提交重建并覆盖 GitHub Release `v0.5.0`。
 - `ridgecode-x86_64-pc-windows-msvc.zip` SHA-256 为 `ee1f12dc30237d100c3d175a558f54309a86b2b86f12f252d14fb1f61ed38db5`，远端 digest、大小 `3009866` 与本地一致；`.zip.sha256` 旁车文件亦已同步。
 - 归档含 `ridgecode.exe`、`README.md`、`install.ps1`；README 随包发布，覆盖安装、配置、TUI、命令与故障排查用法。
+- Release 二进制 `--version`、`--help` 与无参数离线 smoke 均 exit 0；smoke 仅报告本机未安装 `codegraph-mcp`，NotebookLM MCP 仍成功连接。
