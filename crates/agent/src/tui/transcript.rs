@@ -36,6 +36,9 @@ pub(crate) struct LiveLine<'a> {
     /// Markdown fenced-code state immediately before this Answer line.
     /// Render-only metadata keeps a clipped tail faithful to the actual stream.
     pub(crate) fence_before: bool,
+    /// A hidden prefix exists before this visible Reasoning tail.
+    /// Render-only metadata keeps truncation visible without consuming a row.
+    pub(crate) continuation_before: bool,
 }
 
 impl<'a> LiveLine<'a> {
@@ -46,6 +49,7 @@ impl<'a> LiveLine<'a> {
             kind,
             marker: None,
             fence_before: false,
+            continuation_before: false,
         }
     }
 }
@@ -510,6 +514,7 @@ impl LiveTranscript {
         });
         let mut last_answer_text = None;
         let mut answer_fence = false;
+        let mut reasoning_truncated = false;
         for (block_index, block) in self.blocks.iter().enumerate() {
             match block {
                 LiveBlock::Answer(answer) => {
@@ -534,7 +539,7 @@ impl LiveTranscript {
                     } else {
                         &mut other
                     };
-                    append_text_tail(
+                    reasoning_truncated |= append_text_tail(
                         target,
                         text,
                         Color::DarkGray,
@@ -603,6 +608,7 @@ impl LiveTranscript {
         }
         let focus_rows = focused.len();
         let remaining = max_rows.saturating_sub(answers.len() + focus_rows);
+        let reasoning_rows = reasoning.len();
         let mut visible = if self.reasoning_expanded && !reasoning.is_empty() {
             into_tail(reasoning, remaining)
         } else if reserve_reasoning {
@@ -619,6 +625,12 @@ impl LiveTranscript {
         };
         visible.extend(focused);
         visible.extend(answers);
+        reasoning_truncated |= visible
+            .iter()
+            .filter(|line| line.kind == LiveLineKind::Reasoning)
+            .count()
+            < reasoning_rows;
+        mark_reasoning_continuation(&mut visible, reasoning_truncated);
         ensure_marker(&mut visible, LiveLineKind::Reasoning, "💭 ");
         ensure_marker(&mut visible, LiveLineKind::Answer, "🤖 ");
         visible
@@ -750,18 +762,22 @@ fn append_text_tail<'a>(
     kind: LiveLineKind,
     marker: Option<&'static str>,
     max_rows: usize,
-) {
+) -> bool {
     if max_rows == 0 {
-        return;
+        return false;
     }
     let mut tail = VecDeque::with_capacity(max_rows);
-    for line in text.split('\n').rev().take(max_rows) {
+    let mut lines = text.split('\n').rev();
+    for line in lines.by_ref().take(max_rows) {
         tail.push_front(LiveLine::new(line, color, kind));
     }
+    let text_truncated = lines.next().is_some();
+    let target_truncated = target.len() + tail.len() > max_rows;
     if let (Some(marker), Some(first)) = (marker, tail.front_mut()) {
         first.marker = Some(marker);
     }
     append_tail(target, tail, max_rows);
+    text_truncated || target_truncated
 }
 
 /// Answer 尾部渲染需知道被裁掉的围栏上下文；单次有界扫描只生成最多 `max_rows` 行，
@@ -901,6 +917,18 @@ fn ensure_marker(lines: &mut [LiveLine<'_>], kind: LiveLineKind, marker: &'stati
         if let Some(line) = lines.iter_mut().find(|line| line.kind == kind) {
             line.marker = Some(marker);
         }
+    }
+}
+
+fn mark_reasoning_continuation(lines: &mut [LiveLine<'_>], truncated: bool) {
+    if !truncated {
+        return;
+    }
+    if let Some(line) = lines
+        .iter_mut()
+        .find(|line| line.kind == LiveLineKind::Reasoning)
+    {
+        line.continuation_before = true;
     }
 }
 

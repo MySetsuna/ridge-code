@@ -106,6 +106,23 @@ pub(crate) fn decide_key(
     Some(KeyEvent::new(code, ev.modifiers))
 }
 
+#[derive(Debug)]
+pub(crate) enum TerminalEventAction {
+    Key(KeyEvent),
+    Paste(String),
+    Redraw,
+}
+
+/// Classify terminal events before the main loop applies UI state changes.
+/// Resize/focus/mouse events redraw but never fall through to input editing.
+pub(crate) fn terminal_event_action(event: Event) -> TerminalEventAction {
+    match event {
+        Event::Key(key) => TerminalEventAction::Key(key),
+        Event::Paste(text) => TerminalEventAction::Paste(sanitize_paste(&text)),
+        _ => TerminalEventAction::Redraw,
+    }
+}
+
 pub(crate) fn input_action(key: &KeyEvent, busy: bool, popup_open: bool) -> InputAction {
     if key.kind != KeyEventKind::Press {
         return InputAction::Ignore;

@@ -261,6 +261,24 @@ fn answer_header_anchor_preserves_budget_and_fence_boundary() {
 }
 
 #[test]
+fn reasoning_tail_marks_hidden_prefix_without_extra_row() {
+    let mut transcript = LiveTranscript::default();
+    transcript.push_reasoning("r0\nr1\nr2");
+    let lines = transcript.visible_lines(2);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0].text, "r1");
+    assert!(lines[0].continuation_before);
+    assert!(!lines[1].continuation_before);
+
+    let mut complete = LiveTranscript::default();
+    complete.push_reasoning("r0\nr1");
+    assert!(complete
+        .visible_lines(2)
+        .iter()
+        .all(|line| !line.continuation_before));
+}
+
+#[test]
 fn active_reasoning_tail_focus_is_render_only() {
     assert_eq!(
         active_reasoning_tail_role(LiveLineKind::Reasoning, true, true),
@@ -968,6 +986,36 @@ fn decide_key_dedups_and_recovers_ime_space() {
 }
 
 /// 根因回归:审批态下滚动键**不再误拒**,而是滚动;仅 y/Enter 批准、n/Esc 拒绝,余键忽略。
+#[test]
+fn terminal_event_router_separates_paste_and_resize() {
+    let paste = terminal_event_action(Event::Paste("a\r\nb".into()));
+    let TerminalEventAction::Paste(text) = paste else {
+        panic!("paste must stay outside key routing");
+    };
+    let mut ui = Ui {
+        popup: Some(Popup {
+            items: vec!["/help".into()],
+            selected: 0,
+            anchor: 0,
+        }),
+        ..Ui::default()
+    };
+    apply_paste(&mut ui, &text);
+    assert_eq!(ui.input.buffer, "a\nb");
+    assert!(ui.popup.is_none());
+    assert!(matches!(
+        terminal_event_action(Event::Resize(80, 24)),
+        TerminalEventAction::Redraw
+    ));
+    assert!(matches!(
+        terminal_event_action(Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE
+        ))),
+        TerminalEventAction::Key(_)
+    ));
+}
+
 #[test]
 fn approval_scroll_keys_do_not_reject() {
     assert_eq!(approval_action(KeyCode::Up), ApprovalAction::Scroll(1));
@@ -2444,6 +2492,10 @@ fn long_reasoning_clamp_preserves_answer_and_input_slots() {
     assert!(
         symbols.contains('┌') && symbols.contains('╰'),
         "semantic rails: {symbols}"
+    );
+    assert!(
+        symbols.contains('┊'),
+        "reasoning truncation rail: {symbols}"
     );
     assert!(
         symbols.contains("Input") || symbols.contains("Queue"),

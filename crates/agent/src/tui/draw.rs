@@ -426,7 +426,10 @@ fn render_live_line<'a>(
     let fence_label = (!code_before && fence_line)
         .then(|| fence_language(line.text))
         .flatten();
-    let rail = live_code_rail(code_before, fence_line)
+    let continuation_rail = (line.kind == LiveLineKind::Reasoning && line.continuation_before)
+        .then_some(("┊", reasoning_role.unwrap_or(Role::Muted)));
+    let rail = continuation_rail
+        .or_else(|| live_code_rail(code_before, fence_line))
         .or_else(|| live_rail(line.kind, focused_tool, state.previous_kind))
         .map(|(rail, role)| {
             let role = reasoning_role.unwrap_or(role);

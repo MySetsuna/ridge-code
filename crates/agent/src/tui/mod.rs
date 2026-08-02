@@ -316,13 +316,14 @@ pub(super) async fn run(
                         let _ = writeln!(f, "{ev:?}");
                     }
                 }
-                if let Event::Paste(s) = &ev {
-                    // BPM(iter-24):整块原子注入(iter-27 起并入 InputState 光标处事务)。
-                    ui.popup = None;
-                    ui.input.insert_str(&sanitize_paste(s));
-                    continue;
-                }
-                let Event::Key(key) = ev else { continue };
+                let key = match terminal_event_action(ev) {
+                    TerminalEventAction::Paste(text) => {
+                        apply_paste(&mut ui, &text);
+                        continue;
+                    }
+                    TerminalEventAction::Redraw => continue,
+                    TerminalEventAction::Key(key) => key,
+                };
                 // 去重 Windows 的 Press+Release 双触发,并**兜住输入法「仅 Release」的字符注入**
                 //(实测:某些中文/国际输入法把空格键作为 Char('\u{a0}') 且只发 Release,旧「只收 Press」
                 // 逻辑整个丢弃 → 打不出空格)。顺带把 no-break/全角空格归一为普通空格。见 `decide_key`。

@@ -711,3 +711,9 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - 既有 NotebookLM 对话查询与当前 notebook note 列表均因实际凭据过期失败（`UNAUTHENTICATED`）；未调用用户禁用的 `research_status`，理论依据仍唯一为手动源 `8862d715-ffad-4288-b7eb-173260e2dcff`。
 - `sanitize_display_text` 的 CSI/OSC 跳过器现于缺失终止符时在换行恢复，把换行交还外层净化器，避免异常模型输出吞掉后续 Answer/Reasoning 行；完整 ANSI 序列语义不变。
 - 新增 `malformed_escape_sequences_recover_at_line_boundaries`，workspace tests（agent 99、TUI 116 及其余套件）、fmt、clippy `-D warnings`、workspace build、`git diff --check` 均通过。
+
+## TUI 事件分流与 Reasoning 截断提示（2026-08-02）
+
+- 终端事件现先经 `terminal_event_action` 分流：粘贴独立净化并原子插入，Key 才进入去重/输入状态机，Resize、Focus、Mouse 等事件仅触发重绘，不会误落入输入编辑。
+- `LiveLine` 增加纯渲染元数据 `continuation_before`；Reasoning 尾部因视口或预算裁剪时，首条可见行复用一格 `┊` rail 表明前方仍有内容，不新增占位行，不改变 Answer/Tool 顺序与 Ctrl+R 语义。
+- `terminal_event_router_separates_paste_and_resize`、`reasoning_tail_marks_hidden_prefix_without_extra_row` 与长 Reasoning 窄预算回归通过；当前 TUI 二进制测试 118 项通过。NLM 状态查询仍按用户要求停止，理论依据仍唯一为手动导入源 `8862d715-ffad-4288-b7eb-173260e2dcff`；真实 Windows PTY/native scrollback 仍待物理验收。

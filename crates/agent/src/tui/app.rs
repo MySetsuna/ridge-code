@@ -195,6 +195,11 @@ impl Ui {
 
 /// 把积压的历史行静态提交进终端 scrollback(iter-26 核心):行一经 `insert_before`
 /// 即成原生历史,永不参与后续帧的差分重绘 —— Live 视口恒小,闪烁根因根除。
+pub(crate) fn apply_paste(ui: &mut Ui, text: &str) {
+    ui.popup = None;
+    ui.input.insert_str(text);
+}
+
 pub(crate) fn flush_commits<B: Backend>(terminal: &mut Terminal<B>, ui: &mut Ui) -> io::Result<()> {
     let width = terminal.size()?.width;
     for block in ui.drain_commit_blocks() {
