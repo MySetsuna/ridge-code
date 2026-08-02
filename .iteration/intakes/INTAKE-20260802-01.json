@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260802-01",
+  "classification": "active",
+  "summary": "本轮迭代目标完全落在已批准 REQ-20260801-01 的 TUI 展示、交互、性能与适配范围内。",
+  "requirement_ids": [
+    "REQ-20260801-01"
+  ],
+  "pending_ids": [],
+  "approval_reasons": [],
+  "open_questions": [],
+  "approval_evidence": "",
+  "request_sha256": "f5511a636096edb446113c1cedbf4c1704112fd8186b62b590e331cc0b0a0198",
+  "requirements_sha256": "feede1242f3a8527a5366f6fd63e5ddfedb478e87f9df4a20388368a92942334",
+  "pending_sha256": "0e8c5321d188976e2d1b3618a58e33d63ee080fa50e2bfe82d2de5944c1127b0",
+  "draft_sha256": "",
+  "previous_intake_sha256": "",
+  "executable": true,
+  "reasons": []
+}

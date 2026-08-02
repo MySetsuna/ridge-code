@@ -1,0 +1,69 @@
+{
+  "status": "PROCEED",
+  "confirmed_facts": [
+    {
+      "fact": "手动报告建议由状态机设置 dirty 标记，下一帧只在状态变化或动画需求存在时绘制。",
+      "evidence": "NLM source 8862d715-ffad-4288-b7eb-173260e2dcff, citation 1; references include tokio::select!, dirty flag and skipped render pass."
+    },
+    {
+      "fact": "当前 RidgeCode 已有 dirty 标记与 256 chunk 批量排空，但 should_draw 直接把 Ui.busy 当作渲染条件。",
+      "evidence": "CodeGraph crates/agent/src/tui/render.rs::should_draw; crates/agent/src/tui/mod.rs::run main loop/token_rx/tick; current source."
+    }
+  ],
+  "contradictions": [
+    "NLM 所称缺少 dirty flag 不完全成立；本地已有 dirty，真实缺口是渲染需求与业务 busy 的耦合。",
+    "报告的 CPU 近零与单核收益尚无本地基准，不作性能数字承诺。"
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "把 busy 动画改为显式 tick render demand 可降低无状态变化时的无谓绘制并改善职责边界。",
+      "support": ["当前 should_draw 直接接收 ui.busy", "手动报告建议 dirty/动画分离"],
+      "against": ["当前 100ms tick 已限制忙碌刷新频率", "尚无 CPU 基线"],
+      "experiment": "让 tick 显式设置 animation_due，draw 后清零；保持 token、key、event、approval、splash 触发 dirty，跑全套确定性回归。"
+    }
+  ],
+  "candidates": [
+    {
+      "core": "显式 Render Demand：dirty 与 animation tick 分离",
+      "constraints": ["不改 Answer/Reasoning、工具、输入、审批、安全或 scrollback", "spinner 仍按既有节奏刷新", "不宣称未测 CPU 收益"],
+      "risks": ["漏标 tick 会冻结 spinner", "modal 状态可能产生隐藏帧需求"],
+      "reversibility": "高；仅主循环渲染判定与纯函数命名/测试。",
+      "scope": ["render.rs::should_draw", "tui/mod.rs 主循环 tick/render demand", "确定性判定测试"],
+      "validation": ["workspace tests", "clippy/build/fmt", "smoke", "确认 dirty/animation 两类触发均保留"]
+    },
+    {
+      "core": "折叠块结构化搜索",
+      "constraints": ["不改变原生 scrollback 语义", "搜索命中必须可定位且不落到不可见行"],
+      "risks": ["需要搜索/展开定位契约", "当前无用户复现缺口"],
+      "reversibility": "高，但需先补交互验收。",
+      "scope": ["Tool History/结构化索引实验"],
+      "validation": ["TestBackend/面板搜索命中与展开定位"]
+    },
+    {
+      "core": "窄端非必要 telemetry 自适应隐藏",
+      "constraints": ["Answer/Reasoning 优先", "保留可发现的上下文压力信号", "不吞用户自定义状态语义"],
+      "risks": ["误隐藏用户关心的 provider/model/context 信息", "需更新现有低高布局合同"],
+      "reversibility": "高，纯布局/状态栏投影。",
+      "scope": ["status 行宽度分级", "窄端 TestBackend reflow"],
+      "validation": ["40→100 列布局帧", "Answer/Reasoning/Input 不丢", "状态信号仍可发现"]
+    }
+  ],
+  "recommendation": "先实现显式 Render Demand；它是低风险架构切片，校正 NLM 建议与当前事实的差异，并为后续 Answer/Reasoning 动画与高频流式性能测量留下清晰边界。",
+  "next_step": {
+    "type": "implementation",
+    "value": "将 busy spinner 的刷新需求改由 tick 显式登记，should_draw 只消费 dirty/animation demand；保持所有现有事件触发与测试语义。"
+  },
+  "stop_conditions": [
+    "任何回归显示 spinner、Answer/Reasoning 尾部、输入或审批不刷新，立即回退本切片。",
+    "不得把 NLM 的 CPU 数字写成 RidgeCode 测量事实。",
+    "不得查询或修改进行中的深度调研任务。"
+  ],
+  "metadata": {
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "source_id": "8862d715-ffad-4288-b7eb-173260e2dcff",
+    "sources_used": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "notes_listed": 1,
+    "deletable_completed_or_expired_notes": 0
+  }
+}

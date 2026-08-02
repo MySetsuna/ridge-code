@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260802-03",
+  "classification": "approved",
+  "summary": "用户已批准 ReRelease v0.5.0、README 发布与既定稳定源码提交范围。",
+  "requirement_ids": [
+    "REQ-20260801-01",
+    "REQ-20260802-02"
+  ],
+  "pending_ids": [
+    "PENDING-REQ-20260802-01"
+  ],
+  "approval_reasons": [],
+  "open_questions": [],
+  "approval_evidence": "执行",
+  "request_sha256": "2348a9221c68573fabb87ffa845ecfde1a59191181fded36c0e456c29fcf4584",
+  "requirements_sha256": "c7933ea98ebce160e8c08ac818ce1a6aedaf280bb397dbcb458d6d190b6e998b",
+  "pending_sha256": "3b2a1c2d01c1d0e6c33d8e5ec0365873066e4b3b541c2f63d703025b8f44425a",
+  "draft_sha256": "2b8a81f96d888f0864a4c57d790c4e1f65e99c8f792499766b30603800952755",
+  "previous_intake_sha256": "34da7b4fc1008ce39bdb5aa276476c313b52cd409979246eabc62afd07f299c1",
+  "executable": true,
+  "reasons": []
+}

@@ -271,6 +271,29 @@ fn parse_model_list_openai() {
 }
 
 #[test]
+fn parse_chatgpt_model_catalog_uses_slug_and_models_array() {
+    let v = json!({
+        "models": [
+            {"slug": "gpt-5.3-codex", "context_window": 200000},
+            {"slug": "gpt-5.4"}
+        ]
+    });
+    assert_eq!(
+        models::parse_model_list(&v),
+        vec![
+            models::ModelInfo {
+                id: "gpt-5.3-codex".into(),
+                context: Some(200000)
+            },
+            models::ModelInfo {
+                id: "gpt-5.4".into(),
+                context: None
+            }
+        ]
+    );
+}
+
+#[test]
 fn parse_model_list_openrouter_context() {
     let v = json!({"data":[
         {"id":"anthropic/claude-3.5","context_length":200000},
@@ -431,6 +454,54 @@ impl HttpClient for CapturingHttp {
     }
 }
 
+struct StreamingCapturingHttp {
+    seen: std::sync::Mutex<Option<SeenRequest>>,
+    frames: Vec<String>,
+}
+
+impl StreamingCapturingHttp {
+    fn new(frames: Vec<String>) -> Self {
+        Self {
+            seen: std::sync::Mutex::new(None),
+            frames,
+        }
+    }
+
+    fn seen(&self) -> SeenRequest {
+        self.seen.lock().unwrap().clone().unwrap()
+    }
+}
+
+#[async_trait::async_trait]
+impl HttpClient for StreamingCapturingHttp {
+    async fn post_json(
+        &self,
+        _url: &str,
+        _headers: &[(String, String)],
+        _body: &Value,
+    ) -> Result<Value, ProviderError> {
+        Err("only streaming".into())
+    }
+
+    async fn post_json_stream(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        body: &Value,
+        on_line: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<(), ProviderError> {
+        *self.seen.lock().unwrap() = Some(SeenRequest {
+            url: url.to_string(),
+            headers: headers.to_vec(),
+            body: body.clone(),
+        });
+        for frame in &self.frames {
+            on_line(frame.clone());
+        }
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn openai_provider_sends_bearer_auth_and_correct_url() {
     let cap = Arc::new(CapturingHttp::new(
@@ -454,6 +525,70 @@ async fn openai_provider_sends_bearer_auth_and_correct_url() {
         .iter()
         .any(|(k, v)| k == "Authorization" && v == "Bearer sk-test"));
     assert_eq!(seen.body["messages"][0]["role"], "user");
+}
+
+#[tokio::test]
+async fn chatgpt_provider_uses_codex_responses_wire() {
+    let cap = Arc::new(StreamingCapturingHttp::new(vec![
+        r#"{"type":"response.output_text.delta","delta":"ok"}"#.into(),
+        r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","call_id":"call_1","delta":"{\"cmd\":"}"#.into(),
+        r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","call_id":"call_1","delta":"\"pwd\"}"}"#.into(),
+        r#"{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"run_shell","arguments":"{\"cmd\":\"pwd\"}"}}"#.into(),
+        r#"{"type":"response.completed","response":{"usage":{"input_tokens":4,"output_tokens":2}}}"#.into(),
+    ]));
+    let p = ChatGptProvider::new(
+        "https://chatgpt.com/backend-api/codex/",
+        "gpt-5",
+        "oauth-access",
+        Some("acct-123".into()),
+    )
+    .with_http(cap.clone());
+    let c = p
+        .complete(&CompletionRequest {
+            messages: vec![
+                Message::system("be concise"),
+                Message::user("inspect it"),
+                Message::assistant("").with_tool_calls(vec![ToolCall {
+                    id: "call-previous".into(),
+                    name: "run_shell".into(),
+                    arguments: json!({"cmd": "ls"}),
+                }]),
+                Message::tool_result("call-previous", "files"),
+            ],
+            tools: vec![ToolSpec {
+                name: "run_shell".into(),
+                description: "run a command".into(),
+                schema: json!({"type": "object", "properties": {"cmd": {"type": "string"}}}),
+            }],
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(c.text, "ok");
+    assert_eq!(c.tool_calls.len(), 1);
+    assert_eq!(c.tool_calls[0].id, "call_1");
+    assert_eq!(c.tool_calls[0].arguments, json!({"cmd": "pwd"}));
+    assert_eq!(c.usage.total(), 6);
+
+    let seen = cap.seen();
+    assert_eq!(seen.url, "https://chatgpt.com/backend-api/codex/responses");
+    assert!(seen
+        .headers
+        .iter()
+        .any(|(k, v)| k == "Authorization" && v == "Bearer oauth-access"));
+    assert!(seen
+        .headers
+        .iter()
+        .any(|(k, v)| k == "ChatGPT-Account-Id" && v == "acct-123"));
+    assert_eq!(seen.body["model"], "gpt-5");
+    assert_eq!(seen.body["instructions"], "be concise");
+    assert!(seen.body.get("messages").is_none());
+    assert_eq!(seen.body["input"][0]["type"], "message");
+    assert_eq!(seen.body["input"][1]["type"], "function_call");
+    assert_eq!(seen.body["input"][2]["type"], "function_call_output");
+    assert_eq!(seen.body["tools"][0]["type"], "function");
+    assert_eq!(seen.body["stream"], true);
+    assert_eq!(seen.body["store"], false);
 }
 
 #[tokio::test]
@@ -520,11 +655,16 @@ fn authorize_url_carries_challenge_scopes_state() {
 
 #[test]
 fn authorize_url_openai_uses_codex_endpoint_and_scopes() {
-    // iter-48 G2:openai 授权 URL 打 auth.openai.com,标准 PKCE 参数,无 anthropic 特有 code=true。
+    // OpenAI Codex OAuth 需标准 PKCE + 连接器 scopes + Hydra 简化流标记。
     let url = oauth::authorize_url(&oauth::OPENAI, "CH", "ST");
-    assert!(url.starts_with("https://auth.openai.com/oauth/authorize?client_id="));
+    assert!(
+        url.starts_with("https://auth.openai.com/oauth/authorize?id_token_add_organizations=true")
+    );
     assert!(!url.contains("code=true"));
-    assert!(url.contains("scope=openid%20profile%20email%20offline_access"));
+    assert!(url.contains("scope=openid%20profile%20email%20offline_access%20api.connectors.read%20api.connectors.invoke"));
+    assert!(url.contains("id_token_add_organizations=true"));
+    assert!(url.contains("codex_cli_simplified_flow=true"));
+    assert!(url.contains("originator=codex_cli_rs"));
     assert!(url.contains("code_challenge=CH"));
     assert!(url.contains("code_challenge_method=S256"));
     assert!(url.contains("state=ST"));
@@ -552,12 +692,61 @@ fn parse_callback_path_extracts_code_state() {
 }
 
 #[test]
+fn parse_authorization_input_validates_state_for_url_and_code_pair() {
+    assert_eq!(
+        oauth::parse_authorization_input(
+            "GET /auth/callback?code=abc&state=expected HTTP/1.1",
+            "expected",
+        )
+        .unwrap(),
+        "abc#expected"
+    );
+    assert_eq!(
+        oauth::parse_authorization_input("abc#expected", "expected").unwrap(),
+        "abc#expected"
+    );
+    assert!(oauth::parse_authorization_input("abc#wrong", "expected")
+        .unwrap_err()
+        .to_string()
+        .contains("state mismatch"));
+}
+
+#[test]
 fn parse_token_response_sets_expiry_from_now() {
     let v = json!({"access_token":"acc","refresh_token":"ref","expires_in":3600});
     let t = oauth::parse_token_response(&v, 1000, None).unwrap();
     assert_eq!(t.access_token, "acc");
     assert_eq!(t.refresh_token, "ref");
     assert_eq!(t.expires_at_epoch, 4600);
+}
+
+#[test]
+fn chatgpt_account_id_is_extracted_from_oauth_claims() {
+    let payload = json!({
+        "https://api.openai.com/auth": {"chatgpt_account_id": "acct-xyz"}
+    });
+    let id_token = format!(
+        "e30.{}.sig",
+        oauth::base64url_nopad(payload.to_string().as_bytes())
+    );
+    assert_eq!(
+        oauth::chatgpt_account_id(Some(&id_token), "opaque-access"),
+        Some("acct-xyz".into())
+    );
+
+    let token = oauth::parse_token_response(
+        &json!({
+            "access_token": "opaque-access",
+            "refresh_token": "refresh",
+            "expires_in": 60,
+            "id_token": id_token,
+        }),
+        100,
+        None,
+    )
+    .unwrap();
+    assert_eq!(token.account_id.as_deref(), Some("acct-xyz"));
+    assert!(token.id_token.is_some());
 }
 
 #[test]
@@ -574,6 +763,8 @@ fn needs_refresh_true_past_expiry_false_when_fresh() {
         access_token: "a".into(),
         refresh_token: "r".into(),
         expires_at_epoch: 4600,
+        id_token: None,
+        account_id: None,
     };
     assert!(!t.needs_refresh(1000)); // 远未过期
     assert!(t.needs_refresh(5000)); // 已过期
@@ -647,4 +838,31 @@ async fn openai_token_wire_goes_form_not_json() {
     ));
     let e = oauth::exchange_code(cap.as_ref(), &oauth::OPENAI, "c", "v", 0).await;
     assert!(e.unwrap_err().to_string().contains("form"));
+}
+
+#[tokio::test]
+async fn openai_device_code_flow_parses_user_code_and_completion() {
+    let request = Arc::new(CapturingHttp::new(json!({
+        "device_auth_id": "device-1",
+        "user_code": "ABCD-EFGH",
+        "interval": "5"
+    })));
+    let device = oauth::request_device_code(request.as_ref(), oauth::OPENAI.client_id)
+        .await
+        .unwrap();
+    assert_eq!(device.device_auth_id, "device-1");
+    assert_eq!(device.user_code, "ABCD-EFGH");
+    assert_eq!(device.interval_secs, 5);
+
+    let completion = Arc::new(CapturingHttp::new(json!({
+        "authorization_code": "auth-code",
+        "code_challenge": "challenge",
+        "code_verifier": "verifier"
+    })));
+    let authorization = oauth::poll_device_code(completion.as_ref(), &device)
+        .await
+        .unwrap();
+    assert_eq!(authorization.authorization_code, "auth-code");
+    assert_eq!(authorization.code_challenge, "challenge");
+    assert_eq!(authorization.code_verifier, "verifier");
 }

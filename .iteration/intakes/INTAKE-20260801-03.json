@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260801-03",
+  "classification": "active",
+  "summary": "验证 NotebookLM 连接，上传获批状态与需求记录，并询问下一步规划。",
+  "requirement_ids": [
+    "REQ-20260801-01"
+  ],
+  "pending_ids": [],
+  "approval_reasons": [],
+  "open_questions": [],
+  "approval_evidence": "",
+  "request_sha256": "e3f191d15b3c4922463700121f8e1328dad541df382c350b71af99466c2c701f",
+  "requirements_sha256": "6f8ed389a8fcbc67bfa2ca5eac7b76176b5ef7e22a2952574e83beb741f4326a",
+  "pending_sha256": "666dfafa8fe6dfe40bcff8776ae500badd8113f18a0f96d9cdf13e40ba796a06",
+  "draft_sha256": "",
+  "previous_intake_sha256": "",
+  "executable": true,
+  "reasons": []
+}

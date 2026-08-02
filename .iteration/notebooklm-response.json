@@ -1,0 +1,783 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "query_id": "5217c5e163c7",
+  "latest_query_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+  "sources_used": [
+    "331fd708-cc49-43a2-b34f-73cc3e9fd1b3",
+    "509618ec-bda3-4c7c-a6ae-0b46b3aad4bf"
+  ],
+  "confirmed_facts": [
+    {
+      "fact": "Anthropic native content blocks with type==thinking are now normalized into Completion.reasoning and combined with inline <think> content.",
+      "evidence": "crates/provider/src/anthropic.rs::parse_response; crates/provider/src/tests.rs::anthropic_preserves_native_and_inline_thinking; cargo test -p provider exit 0"
+    },
+    {
+      "fact": "Ctrl+O is ignored while the completion popup is open, while Ctrl+C remains a global cancellation path.",
+      "evidence": "crates/agent/src/tui/input.rs::input_action; input_action_routes_keys regression; cargo test -p agent exit 0"
+    },
+    {
+      "fact": "The TUI drains at most 256 queued stream chunks per token wake, yielding back to select so cancellation keys can be serviced.",
+      "evidence": "crates/agent/src/tui/mod.rs::MAX_STREAM_CHUNKS_PER_WAKE; cargo clippy -p agent exit 0"
+    },
+    {
+      "fact": "The bounded live answer/reasoning tails now carry their character counts, so normal chunks do not rescan the full 32K buffer.",
+      "evidence": "crates/agent/src/tui/transcript.rs::append_bounded; stream_text_cap_is_preserved_across_chunks; cargo test -p agent exit 0"
+    },
+    {
+      "fact": "Committed tool summaries remain in native scrollback while a bounded Tool History modal provides collapsed summaries and Enter-expandable details after completion.",
+      "evidence": "crates/agent/src/tui/app.rs::tool_history; crates/agent/src/tui/panel.rs::tool_history_panel; TestBackend + Viewport::Inline regression; cargo test -p agent exit 0"
+    },
+    {
+      "fact": "当前 LiveTranscript.visible_lines 已按视口行数以 VecDeque 保留尾部，工具详情不再在每帧整段物化。",
+      "evidence": "CodeGraph: crates/agent/src/tui/transcript.rs::LiveTranscript::visible_lines; cargo test -p agent exit 0"
+    },
+    {
+      "fact": "回答与实际 reasoning_content 已由 StreamChunk 分道，并由固定布局为输出、状态条、输入框预留空间。",
+      "evidence": "CodeGraph: crates/agent/src/tui/app.rs::Ui::push_chunk; crates/agent/src/tui/draw.rs::draw"
+    },
+    {
+      "fact": "实时 Answer、reasoning 与工具行在渲染前按终端 cell 宽裁切，超宽行保留省略号；静态 scrollback 仍完整折行。",
+      "evidence": "crates/agent/src/tui/render.rs::clip_display_cells; crates/agent/src/tui/draw.rs::draw; wcwidth_display_columns test"
+    },
+    {
+      "fact": "工具详情由 Ctrl+O 切换当前焦点 live 工具块；Alt+Up/Down 可在 live 工具块间移动焦点，静态提交后不再可展开。",
+      "evidence": "CodeGraph: crates/agent/src/tui/transcript.rs::LiveTranscript::move_tool_focus/toggle_details; crates/agent/src/tui/input.rs::tool_focus_action; crates/agent/src/tui/mod.rs InputAction::ToggleDetails"
+    }
+  ],
+  "contradictions": [
+    {
+      "claim": "长 reasoning 必然挤出窄终端输入框。",
+      "evidence": "当前 draw 以 outer[0].height 作为 visible_lines 上限，输入框及两条状态栏由独立 Layout 槽位保留；仍需真实 PTY 验收，不直接采纳固定 5 行钳位。"
+    }
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "多块工具焦点与 Alt+Up/Down 导航能改善非末尾工具详情可达性。",
+      "support": ["NLM query 5217c5e163c7 的候选 2"],
+      "against": [],
+      "experiment": "实验已实现会话内稳定工具焦点、Ctrl+O 针对焦点切换，并以多工具纯逻辑测试及窄终端帧测试验收。"
+    },
+    {
+      "hypothesis": "按 50–100ms 合并 insert_before 可降低 Windows PTY 抖动。",
+      "support": ["NLM query 5217c5e163c7 的候选 3"],
+      "against": ["当前 flush_commits 已按 CommitBlock 合并工具行；尚无 Windows PTY 调用计数证据。"],
+      "experiment": "先增加可复现提交批次计数/完整性测试；无真实 Windows PTY 证据前不引入定时器。"
+    }
+  ],
+  "candidates": [
+    {
+      "core": "Reasoning 渐进式展示与高度钳位",
+      "constraints": [
+        "只显示实际 reasoning_content，不伪造思考。",
+        "Answer 优先且必须保留输入框、状态条与窄终端边界。"
+      ],
+      "risks": ["固定行数可能隐藏用户需要查看的真实思考内容；需显式展开或真实 PTY 证据。"],
+      "reversibility": "高；可限于 TUI 投影层。",
+      "scope": ["crates/agent/src/tui/transcript.rs", "crates/agent/src/tui/draw.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["50 行 reasoning 的窄终端帧测试", "断言输入框/状态栏边界不溢出", "不引入隐藏推理文本"]
+    },
+    {
+      "core": "多块工具焦点导航与精准折叠",
+      "constraints": [
+        "摘要始终可见，详情默认折叠且有界。",
+        "焦点仅存在于 TUI 会话状态，不进入 provider/langgraph。"
+      ],
+      "risks": ["新增键位可能与 Windows/输入编辑冲突；需只在无模态页时拦截 Alt+Up/Down。"],
+      "reversibility": "中高；保留 Ctrl+O 与最新块回退路径。",
+      "scope": ["crates/agent/src/tui/transcript.rs", "crates/agent/src/tui/input.rs", "crates/agent/src/tui/mod.rs", "crates/agent/src/tui/draw.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["三工具块焦点上下移动/边界测试", "Ctrl+O 只切换焦点块", "窄 CJK/emoji 帧与输入键位回归"]
+    },
+    {
+      "core": "静态提交批处理以降低 Windows PTY 抖动",
+      "constraints": [
+        "保留 Viewport::Inline 与 insert_before 原生 scrollback。",
+        "不把 tokio 定时器引入渲染纯函数；输出顺序与内容必须完整。"
+      ],
+      "risks": ["延迟与取消语义回归；目前缺真实 PTY 计数证据。"],
+      "reversibility": "中；需先有调用计数与完整性基线。",
+      "scope": ["crates/agent/src/tui/app.rs", "crates/agent/src/tui/mod.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["1000 字符/多 CommitBlock 可复现基线", "提交次数与内容完整性断言", "Windows PTY 实测后再决定是否批处理"]
+    }
+  ],
+  "recommendation": "NLM 候选 1 与当前布局事实部分冲突，未做固定 5 行钳位；候选 2 已实现并通过本地确定性回归，候选 3 仍保留为待证假设。",
+  "next_step": {
+    "type": "experiment",
+    "value": "取得深研 completed 报告后导入并回核；另以真实 Windows PTY 证据决定是否需要静态提交批处理。"
+  },
+  "implementation_result": {
+    "candidate": "多块工具焦点导航与精准折叠",
+    "status": "verified_locally",
+    "changes": [
+      "Anthropic native thinking blocks now reach the real reasoning display path.",
+      "Popup precedence blocks background Ctrl+O detail toggles; stream draining is capped per wake for input fairness.",
+      "Live stream tail cap tracks character counts and trims only on overflow.",
+      "Static tool history now has a separate collapsed/expandable modal, preserving immutable insert_before scrollback.",
+      "Actual StreamChunk::Reasoning content is committed as a separate bounded muted 💭 block before stream cleanup; final Answer remains Markdown.",
+      "Inline viewport uses a stable 14-row cap; ratatui clamps it to the current terminal height and restores the cap after growth.",
+      "Tool History supports page navigation and Home/End jumps while retaining query filtering and Enter expansion.",
+      "Final events now normalize both '(final) ...' and the engine's 'reason#N: (final) ...' form, preserving the 🤖 Markdown Answer path.",
+      "Added a discoverable /history slash command and completion entry that opens the existing bounded searchable Tool History without changing /tools configured-tool semantics.",
+      "Added a deterministic TestBackend static-scrollback fidelity regression for multi-block order, ANSI/control sanitization, and wide-character width invariants; no PTY batching was introduced.",
+      "Reasoning first-line metadata now projects only observed graph step, task token estimate, and elapsed task time; unobserved step is omitted, and static/live paths share the tested formatter.",
+      "Live reasoning projection now keeps one actual reasoning row beside a visible Answer tail; reasoning remains full-viewport while Answer is absent, and static scrollback remains unchanged.",
+      "Live rendering now adds a one-cell semantic rail for Answer, reasoning, tool summary/detail, and focused tool rows; it is a pure visual projection and never fabricates tool success/failure state.",
+      "NLM's auto-collapse recommendation is already covered by the default one-row reasoning projection; Ctrl+R now exposes an explicit Live inspection view that expands actual reasoning while retaining one Answer row and focused-tool summary.",
+      "Inline viewport now uses a stable 14-row cap; a deterministic TestBackend regression proves ratatui clamps to a small terminal and restores the cap after growth, preserving the adaptive layout contract.",
+      "Live Answer now reuses the bounded line-level Markdown parser for inline code, bold, headers, and fenced-code state; full lines advance fence state before cell-width clipping, while static Markdown and scrollback remain unchanged.",
+      "Input chrome now exposes submit versus queue mode: idle uses an ANSI16 Primary Input title/border, busy uses ANSI16 Warn Queue [N] title/border, and narrow terminals use a bounded Q:[N] title; input behavior and key semantics are unchanged.",
+      "Context pressure now colors the existing status bar from the observed ctx% only: below 80 muted, 80–94 Warn, and 95–100 Error; no budget inference, stop logic, token counter, or timer was added.",
+      "Long-answer frame regression now streams 100 reasoning lines and 100 Answer lines and verifies the latest Answer tail, semantic rails, and Input/Queue slot remain visible; no eager insert_before or extra Live window state was added.",
+      "ToolBlock 获会话稳定 id；LiveTranscript 维护 focused_tool。",
+      "无模态页时 Alt+Up/Down 移动焦点，Ctrl+O 切换焦点块；无工具或浮窗不抢输入键。",
+      "焦点摘要显示 ▸ 标记；长详情裁尾时仍保留焦点摘要，详情最多 20 行。",
+      "apply_edits tool-call projection now parses edits[{path,old_string,new_string}], shows bounded file/edit counts and up to three paths in the collapsed summary, and keeps bounded per-edit ± detail rows for Ctrl+O.",
+      "The apply_edits projection is parameter-only: it adds no disk I/O, protocol fields, status inference, key change, or safety-gate change; act observations remain the success/error source of truth.",
+      "Busy-bar tool intent projection now carries the current pending_call through Ui only for rendering; Superstep syncs it, while submit, abort, done, and retry paths clear stale state.",
+      "The projection is conservative and bounded: file/search tools expose only a sensitive-marker-redacted, clipped sanitized path, apply_edits/todo_write expose counts, and shell commands, contents, old/new text, URLs, and credential-like values stay hidden.",
+      "Live reasoning-to-Answer transition now uses a one-cell visual branch rail: a reasoning segment starts with `┌`, an adjacent Answer starts with `╰`, and ordinary continuation rows retain their semantic rails; the projection uses rendered line-kind adjacency only and does not claim hidden block causality.",
+      "Active visible reasoning tail now gets a Primary rail and real reasoning metadata only when the UI is busy and that rendered reasoning row is the last visible row; idle or non-tail reasoning remains Muted. No LiveBlock step field or new state was added.",
+      "Live Answer code-fence scope rail now uses only visible-line state: fence rows use one cell, confirmed body rows use one cell, and a tail-clipped opener retains the ordinary rail; no parser state is persisted. The narrow TestBackend regression also asserts clipped opener rows contain neither code rail.",
+      "The visible Reasoning-to-focused-Tool-to-Answer connector now uses adjacent rendered line kinds only: focused ToolSummary after Reasoning gets ├ and Answer after ToolSummary/ToolDetail gets ╰; no causal block or step state is inferred.",
+      "Existing deterministic Tool failure colors now project to ToolSummary/ToolDetail rails through live_tool_rail_role; no new status field or failure string matching was added.",
+      "Latest Answer context is now anchored within the existing answer_budget: only an overlong latest Answer gets a header, one UI ellipsis, and its tail; short answers, reasoning/tool/input budgets, Markdown parser ownership, and key semantics remain unchanged.",
+      "Focused tool detail rows now inherit the focused block's one-cell Primary rail through visible adjacent-row state; no focus_index, LiveBlock field, key, outcome inference, or data-model change was added.",
+      "Live Answer opening fences now show a bounded ‹language› badge when a valid token fits; the one-cell rail, Markdown parser semantics, and static scrollback remain unchanged."
+    ],
+    "evidence": [
+      "crates/agent/src/tui/transcript.rs transcript tests",
+      "crates/agent/src/tui/tests.rs input_action_routes_keys",
+      "crates/agent/src/tui/tests.rs actual_reasoning_is_committed_separately_from_answer",
+      "crates/agent/src/tui/tests.rs prefixed_final_event_uses_markdown_answer_path",
+      "crates/agent/src/tui/tests.rs inline_viewport_height_adapts_to_terminal_rows",
+      "crates/agent/src/tui/tests.rs history_command_opens_bounded_tool_history",
+      "crates/agent/src/tui/tests.rs static_scrollback_preserves_order_and_sanitizes_controls",
+      "crates/agent/src/tui/tests.rs reasoning_meta_omits_unobserved_step_and_keeps_real_measurements",
+      "crates/agent/src/tui/tests.rs full_tui_frame_survives_narrow_cjk_and_escape_text",
+      "crates/agent/src/tui/transcript.rs answer_keeps_one_actual_reasoning_row_visible",
+      "crates/agent/src/tui/tests.rs long_reasoning_clamp_preserves_answer_and_input_slots",
+      "crates/agent/src/tui/tests.rs live_rail_uses_semantic_kind_and_focus_only",
+      "crates/agent/src/tui/transcript.rs expanded_reasoning_keeps_answer_visible",
+      "crates/agent/src/tui/tests.rs input_action_routes_keys Ctrl+R regression",
+      "crates/agent/src/tui/tests.rs inline_viewport_tracks_terminal_resize",
+      "crates/agent/src/tui/render.rs live_markdown_line and tests.rs live_answer_uses_bounded_markdown_roles_and_fence_state",
+      "crates/agent/src/tui/status.rs input_chrome and tests.rs input_chrome_exposes_submit_or_queue_mode",
+      "crates/agent/src/tui/status.rs context_pressure_role and tests.rs context_pressure_role_has_deterministic_boundaries",
+      "crates/agent/src/tui/eventfmt.rs::apply_edits_summary and crates/agent/src/exec.rs::parse_edits schema facts",
+      "crates/agent/src/tui/tests.rs::summarize_event_overviews_tools apply_edits bounded-summary and diff-role assertions",
+      "cargo test -p agent --offline --quiet -- --test-threads=1 exit 0: 99 agent + 81 TUI",
+      "crates/agent/src/tui/tests.rs::busy_bar_projects_bounded_safe_tool_intent covers tool-name visibility, path clipping, control stripping, and content secrecy",
+      "crates/agent/src/tui/tests.rs::reasoning_answer_transition_rail_is_bounded covers transition symbols and one-cell width",
+      "crates/agent/src/tui/draw.rs::live_rail uses previous rendered LiveLineKind without changing scrollback or key semantics",
+      "crates/agent/src/tui/draw.rs::active_reasoning_tail_role and tests.rs::active_reasoning_tail_focus_is_render_only",
+      "crates/agent/src/tui/tests.rs::full_tui_frame_survives_narrow_cjk_and_escape_text checks active Primary and idle Muted reasoning rails",
+      "crates/agent/src/tui/draw.rs::live_code_rail and visible-tail loop",
+      "crates/agent/src/tui/tests.rs::live_code_fence_rail_is_bounded",
+      "crates/agent/src/tui/tests.rs::full_tui_frame_survives_narrow_cjk_and_escape_text checks fence/body rails and ANSI16 roles",
+      "crates/agent/src/tui/tests.rs::full_tui_frame_survives_narrow_cjk_and_escape_text checks clipped opener keeps ordinary rail",
+      "crates/agent/src/tui/draw.rs::live_rail and tests.rs::reasoning_tool_answer_connector_rail_is_bounded",
+      "crates/agent/src/tui/tests.rs::full_tui_frame_survives_narrow_cjk_and_escape_text checks Reasoning→Tool→Answer rails",
+      "crates/agent/src/tui/draw.rs::live_tool_rail_role derives only existing Tool line.color",
+      "crates/agent/src/tui/tests.rs::tool_failure_rail_uses_existing_error_role and summarize_event_overviews_tools",
+      "CodeGraph: crates/agent/src/tui/transcript.rs::ToolBlock::append_live_tail marks only the focused summary; contiguous visible ToolDetail rows are render-adjacent",
+      "crates/agent/src/tui/draw.rs::draw propagates focused-tool state across the visible detail tail and live_rail maps focused detail to Primary",
+      "crates/agent/src/tui/tests.rs::live_rail_uses_semantic_kind_and_focus_only and full_tui_frame_survives_narrow_cjk_and_escape_text focused detail frame",
+      "cargo test --workspace --offline -- --test-threads=1 exit 0",
+      "cargo clippy --workspace --all-targets --offline -- -D warnings exit 0",
+      "crates/agent/src/tui/transcript.rs::pin_answer_header and visible_lines answer_budget path",
+      "crates/agent/src/tui/tests.rs::answer_header_anchor_preserves_budget_and_fence_boundary",
+      "crates/agent/src/tui/tests.rs::full_tui_frame_survives_narrow_cjk_and_escape_text clipped-fence and full-frame coverage",
+      "cargo test -p agent --offline --quiet -- --test-threads=1 exit 0: 99 agent + 85 TUI",
+      "CodeGraph: crates/agent/src/tui/render.rs::md_line_spans/live_markdown_line colors the complete fence line; draw.rs keeps the rail one cell",
+      "crates/agent/src/tui/render.rs::fence_language and fence_without_language enforce a valid ASCII token, <=10 display cells, and display-only normalization",
+      "crates/agent/src/tui/draw.rs::draw suppresses the badge when fewer than four content cells remain and preserves the original fence otherwise",
+      "crates/agent/src/tui/tests.rs::fence_language_badge_is_bounded_and_display_only and full_tui_frame_survives_narrow_cjk_and_escape_text wide rust badge coverage",
+      "cargo test -p agent --offline --quiet -- --test-threads=1 exit 0: 99 agent + 86 TUI"
+    ]
+  },
+  "next_plan": {
+    "source": "NotebookLM existing-source query 68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "status": "partially_verified",
+    "recommendations": [
+      {
+        "rank": 1,
+        "core": "提高工具轨迹可发现性：增强工具历史调阅入口",
+        "decision": "先以低风险方式新增 /history，复用既有有界 ToolHistory 面板；保留 /tools 的 MCP 工具列表语义。",
+        "acceptance": "slash completion/help 可发现；有已完成工具时打开可过滤、分页、Enter 展开面板；无历史时明确提示；详情仍最多 20 行、历史最多 64。"
+      },
+      {
+        "rank": 2,
+        "core": "真实 PTY/原生 scrollback 物理一致性",
+        "decision": "下一轮建立可复现 PTY/终端输出验收，先证明净化、CJK/emoji cell 宽、insert_before 首尾与复制/搜索语义，再决定是否批处理。",
+        "acceptance": "输出无 ANSI/清屏/光标控制残留，顺序与内容完整，窄终端与 Windows Terminal 风险有证据；无证据不引入定时合并。"
+      },
+      {
+        "rank": 3,
+        "core": "reasoning 元数据投影与硬核数据密度",
+        "decision": "已按本地代码核验：只投影真实 step/token/elapsed 数据，保持 Answer 优先与 reasoning 不伪造；纯函数与固定布局回归通过。",
+        "status": "verified_locally",
+        "acceptance": "metadata 纯函数有测试，长 reasoning 不挤掉输入/状态槽，静态提交顺序稳定，ANSI16 主题适配。"
+      }
+    ],
+    "local_evidence": [
+      "REQ-20260801-01 v0.2.0 active",
+      "cargo fmt --all -- --check exit 0",
+      "cargo test --workspace --offline exit 0",
+      "cargo clippy --workspace --all-targets --offline -- -D warnings exit 0",
+      "cargo build --workspace --offline exit 0",
+      "ridgecode smoke exit 0; NotebookLM MCP connected"
+    ],
+    "follow_up_query": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PROCEED",
+      "recommendation": "优先推理块动态钳位与呼吸感元数据头；要求 TestBackend 证明长 reasoning 不挤掉 Answer、输入框与状态槽，静态提交保持完整。",
+      "local_decision": "采纳其核心目标，但按当前架构落在 LiveTranscript::visible_lines：仅 Answer 可见时保留一行真实 reasoning；思考阶段不钳位；不新增 LiveBlock max_height，不引入 PTY 定时批处理。",
+      "anti_candidate": "允许 reasoning 随输出无限占用 Live 视口，导致 Answer/输入不可见。",
+      "evidence_requirement": "reasoning 与 Answer 行预算测试、TestBackend 长 reasoning 帧测试、静态 scrollback 完整性回归。"
+    },
+    "follow_up_query_2": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "sources_used": [
+        "331fd708-cc49-43a2-b34f-73cc3e9fd1b3",
+        "509618ec-bda3-4c7c-a6ae-0b46b3aad4bf"
+      ],
+      "status": "PROCEED",
+      "recommendation": "语义化焦点侧轨与逐块详情展开，强化 LiveTranscript 的工业感与焦点可见性。",
+      "local_decision": "焦点导航、Ctrl+O、/history 已存在，故不重复实现；采纳无语义副作用的 Live 语义侧轨。拒绝把 Enter 改为 toggle，避免破坏输入提交契约；不新增伪造 success/error 状态，不改静态 scrollback。",
+      "acceptance": "纯函数覆盖 Answer/reasoning/tool/detail/focused 映射；TestBackend 长 reasoning 帧证明侧轨与输入槽位共存；全 workspace 质量通过。",
+      "stop_conditions": [
+        "侧轨 cell 宽导致窄端裁切或输入槽位溢出",
+        "侧轨改变静态复制/搜索内容或引入 ANSI 残留",
+        "需要接管 Enter、Ctrl+O 或审批/取消键语义"
+      ]
+    },
+    "follow_up_query_3": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PROCEED",
+      "recommendation": "Answer 到达后 Live reasoning 自动收缩为元数据/一行；保留手动展开能力，不改变静态 scrollback、Enter、Ctrl+C、审批与 ANSI16 约束。",
+      "local_decision": "默认 visible_lines 已实现等价自动收缩，故不新增重复 collapsed 状态；采纳其可逆性要求，新增 Ctrl+R 仅切换 Live reasoning inspection view。展开时保留真实 reasoning 尾部、至少一行 Answer，焦点工具只保留摘要；不改工具焦点、Ctrl+O、静态提交。",
+      "acceptance": "默认 Answer+reasoning 仍仅一行真实 reasoning；Ctrl+R 后长 reasoning 占剩余 Live 行且 Answer 仍可见；输入/状态槽不溢出；静态 reasoning 全量提交；Ctrl+R 路由回归通过。",
+      "stop_conditions": [
+        "展开视图隐藏 Answer 或造成输入/状态槽溢出",
+        "新增状态改变 Enter、Ctrl+C、Ctrl+O、审批或工具焦点语义",
+        "静态 scrollback 内容或 insert_before 行为改变"
+      ]
+    },
+    "follow_up_query_4": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "REJECT_REDUNDANT_LOCAL_ALREADY_SATISFIED",
+      "recommendation": "Introduce an answer buffer and commit Answer paragraphs only at deterministic boundaries; preserve insert_before and avoid timed batching.",
+      "local_decision": "Do not add an answer_buffer. CodeGraph shows stream chunks stay in LiveTranscript; the final event is normalized once and committed through one Markdown CommitBlock. summarize_event returns one final-answer item, so the proposed atomic paragraph commit is already satisfied at the static boundary. Adding a buffer would duplicate state and risk changing streaming semantics.",
+      "evidence": [
+        "crates/agent/src/tui/app.rs::Ui::push_chunk keeps Answer in LiveTranscript and does not enqueue static Answer chunks",
+        "crates/agent/src/tui/mod.rs final-event path calls note_markdown for the normalized final event",
+        "crates/agent/src/tui/eventfmt.rs::summarize_event returns one final-answer item",
+        "crates/agent/src/tui/app.rs::flush_commits drains one Markdown CommitBlock through insert_before",
+        "crates/agent/src/tui/tests.rs::prefixed_final_event_uses_markdown_answer_path"
+      ],
+      "acceptance": "No speculative answer_buffer; final Answer remains one Markdown static commit, live chunks remain bounded, and existing input/tool/scrollback contracts remain unchanged."
+    },
+    "follow_up_query_5": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PROCEED_VERIFIED_LOCALLY",
+      "recommendation": "Add bounded Live Answer Markdown semantic coloring by reusing md_line_spans for inline code, bold, headers, and fenced-code state; preserve ANSI16 roles and do not alter static scrollback or input contracts.",
+      "local_decision": "Accepted after CodeGraph verification: current live Answer rendering was plain styled text, while md_line_spans was static-only. Added live_markdown_line in render.rs and routed only LiveLineKind::Answer through it. Full source lines advance fence state before cell-width clipping; displayed spans remain bounded and base modifiers/colors are preserved. No transcript state, new key, insert_before timing, tool folding, or provider contract changed.",
+      "evidence": [
+        "REQ-20260801-01 explicitly requires bounded line-level Markdown display",
+        "crates/agent/src/tui/draw.rs live Answer path now calls live_markdown_line",
+        "crates/agent/src/tui/render.rs::live_markdown_line reuses md_line_spans and clip_display_cells",
+        "crates/agent/src/tui/tests.rs::live_answer_uses_bounded_markdown_roles_and_fence_state",
+        "cargo test -p agent --offline --quiet -- --test-threads=1: 99 agent + 76 TUI passed",
+        "cargo clippy -p agent --all-targets --offline --quiet -- -D warnings passed"
+      ],
+      "acceptance": "Live Answer visibly preserves inline code, bold, header, and fenced-code semantic roles under bounded cell clipping; existing answer/reasoning/tool/input/scrollback contracts remain unchanged; stop if parser work causes flicker, overflow, or measurable frame regression."
+    },
+    "follow_up_query_6": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PROCEED_VERIFIED_LOCALLY",
+      "recommendation": "Add responsive input chrome that distinguishes immediate Submit mode from busy Queue mode using a dynamic title, queue depth, and ANSI16 semantic border/title color; keep the input state machine and Enter/Ctrl+C semantics unchanged.",
+      "local_decision": "Accepted after CodeGraph verification: Ui.busy and Ui.queued already determine queue semantics, busy_bar already exposes depth, but the input Block title/border was static. Added pure input_chrome(busy, queued, width), rendering Queue [N] with Warn chrome when busy, Input with Primary chrome when idle, and bounded Q:[N] on narrow terminals. No cursor escape, timer, input mutation, or scrollback change introduced.",
+      "evidence": [
+        "crates/agent/src/tui/status.rs::input_chrome",
+        "crates/agent/src/tui/draw.rs input Block title_style/border_style path",
+        "crates/agent/src/tui/tests.rs::input_chrome_exposes_submit_or_queue_mode",
+        "crates/agent/src/tui/tests.rs::long_reasoning_clamp_preserves_answer_and_input_slots",
+        "cargo test -p agent --offline --quiet -- --test-threads=1: 99 agent + 77 TUI passed"
+      ],
+      "acceptance": "Idle and busy input frames visibly communicate Submit versus Queue mode, queue depth stays bounded and narrow-safe, and existing Enter/Ctrl+C/InputState contracts remain unchanged. Stop if title changes cause layout overflow or terminal flicker."
+    },
+    "follow_up_query_7": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PARTIALLY_ACCEPTED_FACT_CORRECTED",
+      "recommendation": "Add resource-pressure semantic coloring for context/token budget gauges, using Warn/Danger thresholds while preserving stop and counting logic.",
+      "local_decision": "Do not implement the unverified budget_tokens/Danger portion: budget data is not in TUI Vitals and Role::Danger does not exist. Accept only the grounded ctx% sub-scope: context_pressure_role maps observed ctx% to Muted (<80), Warn (80–94), or existing Error (95–100), and draw applies it to the existing status bar. No token/budget inference, stop logic, counter, timer, or key contract changed.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/status.rs::ctx_percent and Vitals::ctx_used",
+        "CodeGraph: crates/agent/src/tui/draw.rs existing below status bar path",
+        "crates/agent/src/tui/status.rs::context_pressure_role",
+        "crates/agent/src/tui/tests.rs::context_pressure_role_has_deterministic_boundaries",
+        "cargo test -p agent --offline --quiet -- --test-threads=1: 99 agent + 78 TUI passed"
+      ],
+      "acceptance": "Only observed ctx% changes status-bar semantic color at deterministic thresholds; no fabricated budget pressure, stop behavior, RGB, timer, or layout contract. Stop if high-pressure coloring reduces readability on ANSI16 themes."
+    },
+    "follow_up_query_8": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "REJECT_STALE_HYPOTHESIS",
+      "recommendation": "Move tool-detail Diff styling into render.rs.",
+      "local_decision": "Rejected the stale premise after CodeGraph: edit_file already uses diff_lines with red/green roles, ToolBlock preserves per-line colors, and approval detail already colors +/- lines. Do not duplicate a renderer or recolor generic tool output.",
+      "evidence": [
+        "crates/agent/src/tui/eventfmt.rs::summarize_event -> diff_lines",
+        "crates/agent/src/tui/transcript.rs::ToolBlock::from_lines and append_live_tail preserve Color",
+        "crates/agent/src/tui/draw.rs approval +/- role mapping"
+      ]
+    },
+    "follow_up_query_9": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PROCEED_VERIFIED_LOCALLY",
+      "recommendation": "Expose apply_edits file scope and edit count in the collapsed tool projection; keep bounded detail expansion.",
+      "local_decision": "Accepted: current apply_edits schema is edits[{path,old_string,new_string}], while summarize_event incorrectly reads a top-level path and returns one opaque line. Added a parameter-only, ANSI16, bounded summary and per-edit +/- preview; no protocol, disk I/O, status inference, key, safety, or scrollback change.",
+      "acceptance": "A four-file call shows counts and at most three paths plus an omission marker; details remain bounded and preserve Error/Success diff roles; agent 99 and TUI 78 tests pass."
+    },
+    "follow_up_query_10": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "REJECT_CONTRACT_CONFLICT",
+      "recommendation": "Eagerly insert the oldest complete streaming Answer lines into native scrollback before the final event.",
+      "local_decision": "Rejected: push_chunk only owns LiveTranscript, while the complete final Answer later enters one CommitBlock::Markdown through note_markdown and insert_before. Partial insertion would require answer-head state and could duplicate or split Markdown fences; no safe API exists.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/app.rs::push_chunk",
+        "CodeGraph: crates/agent/src/tui/app.rs::note_markdown and flush_commits",
+        "CodeGraph: crates/agent/src/tui/transcript.rs::push_answer"
+      ]
+    },
+    "follow_up_query_11": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "REJECT_REDUNDANT_LOCAL_ALREADY_SATISFIED",
+      "recommendation": "Add Live Answer virtual tail windowing and an overflow marker without touching static scrollback.",
+      "local_decision": "No implementation added: LiveTranscript::visible_lines(max_rows) already tail-clips Answer rows per frame, draw reserves independent input/status slots, and long reasoning/Answer frame coverage now verifies latest Answer rows plus Input/Queue remain visible. A new tail state or marker would duplicate projection and consume scarce rows.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/transcript.rs::visible_lines and append_text_tail",
+        "CodeGraph: crates/agent/src/tui/draw.rs independent output/input/status Layout",
+        "crates/agent/src/tui/tests.rs::long_reasoning_clamp_preserves_answer_and_input_slots"
+      ]
+    },
+    "caveat": "NotebookLM 建议仅作待验证方案；不直接改变需求，不引入未经 PTY 证据的 insert_before 定时批处理。"
+  },
+  "latest_nlm_decisions": {
+    "follow_up_query_12": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "REJECT_REDUNDANT_LOCAL_ALREADY_SATISFIED",
+      "recommendation": "Add a separate reasoning intent_snippet field and explicit Superstep dividers to make progress more visible.",
+      "local_decision": "Do not add duplicate state or dividers: fmt_reasoning_meta already projects observed step/elapsed/tokens before the actual reasoning line, NodeFinished already updates the phase label, and Superstep already supplies the real vitals step. The long reasoning frame regression proves the actual snippet, Answer tail, rails, and Input/Queue slot remain visible.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/status.rs::fmt_reasoning_meta",
+        "CodeGraph: crates/agent/src/tui/draw.rs reasoning marker plus line.text path",
+        "CodeGraph: crates/agent/src/tui/mod.rs NodeFinished and Superstep handling",
+        "crates/agent/src/tui/tests.rs::long_reasoning_clamp_preserves_answer_and_input_slots"
+      ]
+    },
+    "follow_up_query_13": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PROCEED_VERIFIED_LOCALLY",
+      "recommendation": "Project pending_call into the busy bar with a bounded tool name and safe truncated argument summary; clear it from the next Superstep state after act.",
+      "local_decision": "Accepted after CodeGraph confirmed AgentState.pending_call is produced by reason and cleared by act. Ui now synchronizes the cloned call at Superstep boundaries; fmt_busy_bar uses a strict per-tool safe allowlist, ANSI/control sanitization, and fixed cell caps. Shell commands, content, old/new text, URLs, and credential-like values never render.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/state.rs::AgentState.pending_call and Patch::PendingCall",
+        "CodeGraph: crates/agent/src/graph.rs reason/act pending-call lifecycle",
+        "crates/agent/src/tui/status.rs::fmt_tool_intent and fmt_busy_bar",
+        "crates/agent/src/tui/mod.rs Superstep synchronization and stale-state clears",
+        "crates/agent/src/tui/tests.rs::busy_bar_projects_bounded_safe_tool_intent",
+        "cargo test -p agent --offline --quiet -- --test-threads=1: 99 agent + 79 TUI passed"
+      ],
+      "acceptance": "Busy act frames expose what tool is pending without displaying sensitive payloads; bounded one-line projection passes deterministic clipping/secrecy tests and leaves graph, approval, cancellation, keys, protocol, and scrollback unchanged."
+    },
+    "follow_up_query_14": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "NEEDS_MORE_EVIDENCE",
+      "recommendation": "Run an experimental Windows PTY audit of native insert_before scrollback search and copy fidelity before changing static commit batching or ANSI policy.",
+      "local_decision": "No production code change. Local source inspection confirms insert_before renders a temporary Cell buffer and CrosstermBackend emits style/control sequences at the backend boundary; committed model text is sanitized first. Existing TestBackend regressions cover order, control stripping, CJK/emoji cell widths, and narrow frames, but native Windows Terminal Ctrl+F across color boundaries and mouse-copy paste fidelity remain unverified. Keep Viewport::Inline and insert_before semantics unchanged until a reproducible PTY or manual terminal run supplies that evidence.",
+      "evidence": [
+        "ratatui 0.29 terminal::Terminal::insert_before_no_scrolling_regions renders a temporary Buffer and draws Cell chunks",
+        "ratatui 0.29 CrosstermBackend::draw emits ModifierDiff, SetColors, and Print from Cell styles",
+        "crates/agent/src/tui/app.rs::insert_commit sanitizes text before insert_before",
+        "crates/agent/src/tui/render.rs::sanitize_display_text and md_line_spans",
+        "crates/agent/src/tui/tests.rs::markdown_commit_renders_through_inline_scrollback",
+        "crates/agent/src/tui/tests.rs::static_scrollback_preserves_order_and_sanitizes_controls",
+        "crates/agent/src/tui/tests.rs::full_tui_frame_survives_narrow_cjk_and_escape_text"
+      ],
+      "acceptance": "A real Windows Terminal/PTY run must verify Ctrl+F across styled CJK/emoji text and mouse selection/copy yields complete plain text with no escape fragments; until then do not introduce timed batching, plain-text fallback, or claim native scrollback fidelity."
+    },
+    "follow_up_query_15": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "NEEDS_MORE_EVIDENCE",
+      "recommendation": "Do not modify code; run one reproducible PTY/manual acceptance with a cross-style word such as **Keyword**, mixed CJK/emoji, native Ctrl+F, mouse copy, and a resize. Treat sanitizer/reset/width changes as conditional hypotheses only if the experiment fails.",
+      "local_decision": "Accepted as an evidence gate, not as implementation advice. Existing static evidence remains passing; no Windows PTY harness is available in this workspace, so no production change is justified. If a user-run terminal test later fails, isolate the smallest failing contract before considering any sanitizer, reset, or width policy change.",
+      "evidence": [
+        "NLM response cites sources 509618ec-bda3-4c7c-a6ae-0b46b3aad4bf and 331fd708-cc49-43a2-b34f-73cc3e9fd1b3",
+        "ratatui 0.29 Cell-buffer and CrosstermBackend source audit",
+        "three local static scrollback/CJK/control-sanitization regressions passed",
+        "No portable-pty, ConPTY, winpty, or ConEmu harness found locally"
+      ],
+      "acceptance": "Search finds the cross-style word; copied text contains no ESC or `^[` fragments and preserves CJK/emoji visual width; resize leaves static history ordered and the Live/input slots stable. A failure is required before code changes.",
+      "stop_conditions": [
+        "search failure or copied escape fragments",
+        "resize reorders static history or visibly shifts the input slot",
+        "do not infer a root cause or alter sanitizer/reset/width policy from static tests alone"
+      ]
+    },
+    "follow_up_query_16": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PROCEED_VERIFIED_LOCALLY",
+      "recommendation": "Add a one-cell reasoning-to-Answer transition rail with `┌` for a reasoning segment and `╰` for an adjacent Answer, preserving all existing keys, live budgets, and static scrollback.",
+      "local_decision": "Accepted with a factual boundary: visible_lines currently aggregates reasoning, tools, and Answer into bounded rendered rows, so the rail uses only adjacent rendered LiveLineKind values; it does not infer or expose hidden reasoning causality. Implemented in draw.rs and covered by a pure width/transition test plus the long-frame TestBackend regression. No static commit, provider, key, or tool-folding semantics changed.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/transcript.rs::visible_lines orders bounded rendered rows and may aggregate block classes",
+        "CodeGraph: crates/agent/src/tui/draw.rs::live_rail and draw live transcript loop",
+        "crates/agent/src/tui/tests.rs::reasoning_answer_transition_rail_is_bounded",
+        "crates/agent/src/tui/tests.rs::long_reasoning_clamp_preserves_answer_and_input_slots",
+        "cargo test -p agent --offline --quiet -- --test-threads=1: 99 agent + 80 TUI passed",
+        "cargo clippy --workspace --all-targets --offline -- -D warnings passed",
+        "cargo build --workspace --offline --quiet passed"
+      ],
+      "acceptance": "Reasoning and adjacent Answer receive one-cell `┌`/`╰` transition rails; continuation/tool/focus rails remain semantic; narrow CJK/emoji frames, Answer Markdown, input/queue slots, Ctrl+R/Ctrl+O, and static insert_before behavior remain unchanged."
+    },
+    "follow_up_query_17": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "REJECT_CONTRACT_CONFLICT",
+      "recommendation": "Add step ownership to LiveBlock and color the current-step reasoning/Answer rail differently from historical blocks.",
+      "local_decision": "Rejected: CodeGraph shows LiveBlock has only Answer(String), Reasoning(String), and Tool(ToolBlock); push_chunk/push_reasoning do not receive a step, while vitals.step exists only at draw time. Adding step fields would alter stream block merge semantics and invent a causal association not present in the data contract.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/transcript.rs::LiveBlock",
+        "CodeGraph: crates/agent/src/tui/transcript.rs::LiveTranscript::push_answer and push_reasoning",
+        "CodeGraph: crates/agent/src/tui/draw.rs receives Vitals separately from LiveTranscript",
+        "No existing LiveBlock step field or step-aware push API"
+      ],
+      "acceptance": "No step field, inferred historical ownership, or data-model change is introduced from this hypothesis."
+    },
+    "follow_up_query_18": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PROCEED_VERIFIED_LOCALLY",
+      "recommendation": "Use only busy state plus the last rendered Live row to raise the active reasoning rail and its real metadata to Primary; keep all other reasoning Muted and do not add state.",
+      "local_decision": "Accepted with corrected scope: draw computes the bounded visible tail once, active_reasoning_tail_role returns Primary only for a busy last visible Reasoning row, and the renderer applies that role to the existing rail and actual metadata. Answer, tools, keys, scrollback, and hidden-reasoning boundaries remain unchanged.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/draw.rs live transcript loop and Vitals/busy inputs",
+        "CodeGraph: crates/agent/src/tui/transcript.rs::visible_lines bounded rendered tail",
+        "crates/agent/src/tui/draw.rs::active_reasoning_tail_role",
+        "crates/agent/src/tui/tests.rs::active_reasoning_tail_focus_is_render_only",
+        "crates/agent/src/tui/tests.rs::full_tui_frame_survives_narrow_cjk_and_escape_text",
+        "Targeted tests passed: active focus, narrow frame, long reasoning frame"
+      ],
+      "acceptance": "Busy last visible reasoning rail and real metadata use Primary; idle or non-tail reasoning uses Muted; no extra allocation beyond the existing visible-line vector and no new data field."
+    },
+    "follow_up_query_19": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PARTIALLY_ACCEPTED_FACT_CORRECTED",
+      "recommendation": "Keep the visual logic rail render-only; NLM additionally proposed a full-chain Tool rail and focus highlighting.",
+      "local_decision": "Accepted only the render-only boundary. Rejected the exact proposal because it names absent render_transcript, Ui.focus_index, and Role::Zinc; CodeGraph shows draw uses visible_lines, previous_kind, line.marker, and the existing Role enum. No new focus model or fabricated block causality was introduced.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/draw.rs::draw, live_rail, live_code_rail",
+        "CodeGraph: crates/agent/src/tui/transcript.rs::LiveTranscript::visible_lines",
+        "rg confirms no render_transcript, focus_index, or Role::Zinc in the TUI",
+        "Existing one-cell rail and narrow-frame regressions"
+      ],
+      "acceptance": "The code-fence rail remains bounded and factual; no absent symbol, focus field, state field, or hidden causal relation is added."
+    },
+    "follow_up_query_20": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "REJECT_REDUNDANT_LOCAL_ALREADY_SATISFIED",
+      "recommendation": "Dynamically cap expanded Tool detail by the visible viewport and highlight the active streaming rail.",
+      "local_decision": "Do not add a new detail cap or truncation marker: LiveTranscript::visible_lines(max_rows) already budgets focused and non-focused Tool rows against the requested frame height, while append_live_tail clips expanded details and preserves the focused summary. Active busy-tail reasoning Primary highlighting is already implemented. Keep this as a verified no-op unless a new failing frame demonstrates a gap.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/transcript.rs::LiveTranscript::visible_lines",
+        "CodeGraph: crates/agent/src/tui/transcript.rs::ToolBlock::append_live_tail",
+        "crates/agent/src/tui/transcript.rs::focused_tool_keeps_summary_when_expanded_tail_is_tall",
+        "crates/agent/src/tui/transcript.rs::live_blocks_and_tool_details_stay_bounded",
+        "crates/agent/src/tui/draw.rs::active_reasoning_tail_role"
+      ],
+      "acceptance": "No duplicate viewport state or truncation marker is added; existing max_rows/frame-slot and active-tail tests remain green."
+    },
+    "follow_up_query_21": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PROCEED_VERIFIED_LOCALLY",
+      "recommendation": "Connect visible Reasoning→focused Tool→Answer rows with one-cell ┌/├/╰ rails using O(1) adjacent-kind state.",
+      "local_decision": "Accepted with corrected semantics: draw uses only previous rendered LiveLineKind plus the existing focused-tool marker. ToolSummary after visible Reasoning gets ├ (Primary when focused, Info otherwise); Answer after ToolSummary/ToolDetail gets ╰. No LiveBlock/step/outcome causality is claimed.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/draw.rs::draw and live_rail",
+        "CodeGraph: crates/agent/src/tui/transcript.rs::visible_lines rendered ordering",
+        "crates/agent/src/tui/tests.rs::reasoning_tool_answer_connector_rail_is_bounded",
+        "full_tui_frame_survives_narrow_cjk_and_escape_text TestBackend chain frame"
+      ],
+      "acceptance": "Connector symbols remain one cell, existing focus/detail rails stay discoverable, and no key/provider/scrollback/data-model semantics change."
+    },
+    "follow_up_query_22": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PARTIALLY_ACCEPTED_FACT_CORRECTED",
+      "recommendation": "Project deterministic Tool failure semantics to the rail; consider an Answer header anchor separately.",
+      "local_decision": "Accepted only the failure projection after CodeGraph: summarize_event already uses the shared tool_output_failed predicate and emits Role::Error line colors, so draw now maps only existing Error-colored ToolSummary/ToolDetail lines to Role::Error rails. Answer header pinning is deferred to its own bounded experiment because it affects Answer budget and visible Markdown fence state.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/eventfmt.rs::summarize_event and brain.rs::tool_output_failed",
+        "CodeGraph: crates/agent/src/tui/transcript.rs::ToolBlock::from_lines preserves line colors",
+        "crates/agent/src/tui/tests.rs::summarize_event_overviews_tools",
+        "crates/agent/src/tui/tests.rs::tool_failure_rail_uses_existing_error_role",
+        "full_tui_frame_survives_narrow_cjk_and_escape_text TestBackend failure rail"
+      ],
+      "acceptance": "Failure rail uses existing Error color only; no string-matching status inference, new state, or Answer/Markdown budget change is introduced."
+    },
+    "follow_up_query_23": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PARTIALLY_ACCEPTED_FACT_CORRECTED",
+      "recommendation": "Run a physical PTY write-fidelity audit with optional raw ANSI instrumentation, then consider a viewport floor guard.",
+      "local_decision": "PTY instrumentation remains NEEDS_MORE_EVIDENCE: local CodeGraph confirms flush_commits/insert_commit retain native insert_before semantics, but no winpty/pywinpty/ptyprocess/pexpect/ConEmuC or repo PTY harness exists; do not add raw ANSI logs or alter batching without a bounded authorized experiment. Reject the viewport floor for now: draw already owns independent output/input/status Layout slots, input_height clamps to 3..=8, and LIVE_HEIGHT=14 is already clamped by ratatui; add no duplicate minimum-row state until a failing frame exists. The Answer anchor is locally verified separately.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/app.rs::flush_commits/insert_commit",
+        "CodeGraph: crates/agent/src/tui/draw.rs::draw and crates/agent/src/tui/render.rs::input_height",
+        "CodeGraph: crates/agent/src/tui/mod.rs::LIVE_HEIGHT/inline_height_cap",
+        "Local harness probe: no winpty, pywinpty, ptyprocess, pexpect, ConEmuC, or repo PTY dependency",
+        "crates/agent/src/tui/transcript.rs::pin_answer_header",
+        "cargo test --workspace --offline -- --test-threads=1; cargo clippy --workspace --all-targets --offline -- -D warnings"
+      ],
+      "acceptance": "Keep async deep research pending; no raw log, timer/batching, insert_before mutation, or viewport-floor mutation until local facts and physical evidence justify a bounded change."
+    },
+    "follow_up_query_24": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PROCEED_VERIFIED_LOCALLY",
+      "recommendation": "Prioritize focused block rail glow; also consider resource-pressure styling and a superstep divider.",
+      "local_decision": "Accepted only the real focused-detail rail gap: CodeGraph shows ToolBlock::append_live_tail marks the focus marker on the summary only, while draw already receives contiguous visible rows. The render loop now propagates that marker across adjacent ToolDetail rows and live_rail maps focused detail to existing Primary. Rejected resource-budget styling for now: current draw/Vitals expose observed ctx_used, task_tokens, and ctx_window, while context_pressure_role already covers grounded ctx% semantics; no direct budget-to-TUI contract is present. Rejected a Superstep divider for now: LiveTranscript has no step-owned block and adding a new divider/state needs a separate event/display contract. No invented focus_index, budget inference, hidden reasoning, key, approval, cancellation, scrollback, or provider semantics.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/transcript.rs::ToolBlock::append_live_tail",
+        "CodeGraph: crates/agent/src/tui/draw.rs::draw/live_rail",
+        "CodeGraph: crates/agent/src/tui/status.rs::Vitals/context_pressure_role",
+        "crates/agent/src/tui/tests.rs::live_rail_uses_semantic_kind_and_focus_only",
+        "crates/agent/src/tui/tests.rs::full_tui_frame_survives_narrow_cjk_and_escape_text",
+        "cargo test -p agent --offline --quiet -- --test-threads=1 exit 0: 99 agent + 85 TUI"
+      ],
+      "acceptance": "Focused summary and all contiguous visible detail rails remain one cell, Primary unless existing Error color overrides; no additional state or scope expansion."
+    },
+    "follow_up_query_25": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PROCEED_VERIFIED_LOCALLY",
+      "recommendation": "Brand fenced code with a bounded language rail; focused context hints and a streaming density pulse remain secondary candidates.",
+      "local_decision": "Accepted only the adapted language badge. CodeGraph verified md_line_spans colors the complete fence and draw owns a one-cell rail; the implementation extracts only a bounded valid opening token, renders ‹language› as an ANSI16 Info/BOLD prefix when at least four content cells remain, and otherwise leaves the original fence unchanged. Parser normalization occurs only when the badge is shown; static Markdown/scrollback remains untouched. Rejected context hints because no focus_index or current context-hint block identity exists; deferred density pulse because no real latency or semantic signal is present. No new persistent state, key, provider, or PTY behavior.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/render.rs::md_line_spans/live_markdown_line",
+        "CodeGraph: crates/agent/src/tui/draw.rs::draw one-cell rail and prefix-width calculation",
+        "crates/agent/src/tui/render.rs::fence_language/fence_without_language",
+        "crates/agent/src/tui/tests.rs::fence_language_badge_is_bounded_and_display_only",
+        "crates/agent/src/tui/tests.rs::full_tui_frame_survives_narrow_cjk_and_escape_text rust badge",
+        "cargo test -p agent --offline --quiet -- --test-threads=1 exit 0: 99 agent + 86 TUI"
+      ],
+      "acceptance": "Badge remains bounded and ANSI16, rail remains one cell, narrow fallback retains the original fence, and no persistent state or Markdown semantics change."
+    },
+    "follow_up_query_26": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PROCEED_VERIFIED_LOCALLY",
+      "recommendation": "Increase reasoning/Answer visual hierarchy, expose contextual Ctrl+O/Ctrl+R guidance, and keep badge width safe; alternatives are a streaming power meter and fenced-context depth rail.",
+      "local_decision": "Accepted only the contextual-hint gap after local verification. Live reasoning already uses actual content with Color::DarkGray plus DIM/ITALIC and a Muted semantic rail, so the proposed Info recolor is rejected as a duplicate and potentially less dim. summarize_event accepts only an event string and has no Ui/LiveTranscript focus, so an active-tool suffix there is rejected; ToolBlock already renders the bounded [Ctrl+O details] affordance. fence_language badge width is already owned by draw.rs using the actual frame width and four-cell reserve, so transcript Paragraph line-width work is rejected. Added only width-tiered input chrome hints for the already implemented Ctrl+R reasoning inspection and Ctrl+O tool details; no key, event, focus, parser, provider, PTY, or input-state change.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/transcript.rs::visible_lines uses actual reasoning Color::DarkGray and bounded rows",
+        "CodeGraph: crates/agent/src/tui/draw.rs::draw applies DIM/ITALIC to Reasoning and already renders badge width fallback",
+        "CodeGraph: crates/agent/src/tui/eventfmt.rs::summarize_event(m: &str) has no Ui/LiveTranscript focus context",
+        "crates/agent/src/tui/transcript.rs::ToolBlock::append_live_tail emits bounded [Ctrl+O details]",
+        "crates/agent/src/tui/status.rs::input_chrome and tests.rs::input_chrome_exposes_submit_or_queue_mode",
+        "cargo test -p agent --offline --quiet -- --test-threads=1 exit 0: 99 agent + 86 TUI",
+        "cargo test --workspace --offline --quiet -- --test-threads=1 passed; cargo clippy --workspace --all-targets --offline --quiet -- -D warnings passed; cargo build --workspace --offline --quiet passed",
+        "cargo run -p agent --bin ridgecode --offline --quiet exit 0; pre-existing codegraph-mcp executable warning only"
+      ],
+      "acceptance": "At wide and medium widths existing Ctrl+R/Ctrl+O behavior is discoverable; narrow queue fallback remains bounded; no new key semantics or hidden reasoning is introduced."
+    },
+    "follow_up_query_27": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PROCEED_VERIFIED_LOCALLY",
+      "recommendation": "NLM prioritized a PTY write-fidelity audit, with reasoning/Answer contrast and adaptive language badge as alternatives.",
+      "local_decision": "Rejected the proposed raw ANSI logging because the approved scope forbids raw logs/insert_before mutation and no reproducible Windows PTY harness exists. Rejected the proposed Info recolor and language-badge redesign because current draw already applies DarkGray plus DIM/ITALIC to actual reasoning and owns width-safe badge fallback. Accepted the narrower real gap: when existing Ctrl+R reasoning inspection is expanded, the input chrome now says Ctrl+R collapse; collapsed state continues to say Ctrl+R reasoning. The hint derives only from LiveTranscript's existing boolean, changes no key or input semantics, and the TestBackend frame verifies draw-to-chrome wiring.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/transcript.rs::toggle_reasoning and is_reasoning_expanded",
+        "CodeGraph: crates/agent/src/tui/draw.rs::draw passes existing transcript state to input_chrome",
+        "CodeGraph: crates/agent/src/tui/input.rs::input_action maps the unchanged Ctrl+R action",
+        "crates/agent/src/tui/status.rs::input_chrome",
+        "crates/agent/src/tui/tests.rs::input_chrome_exposes_submit_or_queue_mode",
+        "crates/agent/src/tui/tests.rs::full_tui_frame_survives_narrow_cjk_and_escape_text verifies collapsed/expanded frame hints",
+        "cargo test -p agent --offline --quiet -- --test-threads=1 exit 0: 99 agent + 86 TUI",
+        "cargo test --workspace --offline --quiet -- --test-threads=1 passed; cargo clippy --workspace --all-targets --offline --quiet -- -D warnings passed; cargo build --workspace --offline --quiet passed",
+        "cargo run -p agent --bin ridgecode --offline --quiet exit 0; pre-existing codegraph-mcp executable warning only"
+      ],
+      "acceptance": "Existing Ctrl+R toggles remain unchanged; collapsed and expanded states expose the correct action at a medium-width frame; narrow fallback remains bounded; no hidden reasoning, new key, PTY, parser, provider, or scrollback behavior is introduced."
+    },
+    "follow_up_query_28": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "REJECT_REDUNDANT_LOCAL_ALREADY_SATISFIED",
+      "recommendation": "NLM proposed body-level reasoning recolor, a viewport floor guard, and additional context-pressure gauges.",
+      "local_decision": "Rejected body recolor: current reasoning already uses actual DarkGray content plus DIM/ITALIC, while Answer uses White/BOLD. Rejected a duplicate viewport floor state: draw's existing Layout reserves input and status slots; a bounded TestBackend probe at 12x6 and 18x8 kept both visible, while 8x4 is physically clipped without panic. Rejected extra pressure gauges: context_pressure_role already colors the rendered status bar from observed ctx%, and no new budget signal is present. Added only a permanent tiny-frame regression; no production layout, state, key, scrollback, or semantic change.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/draw.rs::draw uses Min(1) output plus fixed input/status constraints",
+        "CodeGraph: crates/agent/src/tui/draw.rs::context_pressure_role(ctx) styles the status slot",
+        "CodeGraph: crates/agent/src/tui/transcript.rs::visible_lines bounds live rows",
+        "crates/agent/src/tui/tests.rs::tiny_frames_keep_input_slot_visible",
+        "cargo test -p agent --offline --quiet -- --test-threads=1 exit 0: 99 agent + 87 TUI",
+        "cargo test --workspace --offline --quiet -- --test-threads=1 passed; cargo clippy --workspace --all-targets --offline --quiet -- -D warnings passed; cargo build --workspace --offline --quiet passed",
+        "cargo run -p agent --bin ridgecode --offline --quiet exit 0; pre-existing codegraph-mcp executable warning only"
+      ],
+      "acceptance": "No duplicate floor or gauge state is introduced; fixed input/status slots remain visible under bounded tiny-frame coverage; reasoning/Answer and tool visibility contracts remain unchanged."
+    },
+    "follow_up_query_29": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PARTIALLY_ACCEPTED_FACT_CORRECTED",
+      "recommendation": "NLM proposed focus/action decoupling, a running-tool marker, and historical tool-space decay or summary-render cleanup.",
+      "local_decision": "Reject the focus/action proposal as already implemented: Alt+Up/Down moves the existing live focus and Ctrl+O toggles that focused block, with transcript regression coverage. Defer a running marker: pending_call already projects a bounded, redacted tool intent in the busy bar, but the current display contract has no deterministic pending-call-to-live-row identity; adding one would expand state/semantics without an approved requirement or failing frame. Defer historical decay and summary-render refactoring: live blocks, details, and Tool History are already bounded, and no measured allocation or latency failure justifies changing their retention or ownership.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/transcript.rs::LiveTranscript::move_tool_focus/toggle_details",
+        "crates/agent/src/tui/transcript.rs::tool_focus_moves_and_ctrl_o_targets_focused_block",
+        "crates/agent/src/tui/transcript.rs::focused_tool_keeps_summary_when_expanded_tail_is_tall",
+        "CodeGraph: crates/agent/src/tui/status.rs::fmt_busy_bar and crates/agent/src/tui/mod.rs::pending_call projection",
+        "crates/agent/src/tui/tests.rs::busy_bar_projects_bounded_safe_tool_intent",
+        "crates/agent/src/tui/tests.rs::live_blocks_and_tool_details_stay_bounded",
+        "crates/agent/src/tui/tests.rs::tool_history_is_bounded"
+      ],
+      "acceptance": "No new key, pending-row identity, hidden reasoning, tool outcome inference, retention policy, or provider/scrollback semantic is introduced; keep the manual research source as strategy evidence and await physical PTY evidence or a reproducible UX failure before expanding scope."
+    },
+    "follow_up_query_30": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "REJECT_REDUNDANT_OR_UNVERIFIED",
+      "recommendation": "NLM proposed matching pending_call to a live ToolBlock, recoloring reasoning content, and a narrow language-badge fallback; it also suggested consolidating tool-summary rendering.",
+      "local_decision": "Reject candidate 1 as unverified and contract-expanding: pending_call is a global state projection and current ToolBlock identity is local TUI ordering; matching by tool name/arguments would mislabel repeated calls, and no stable correlation field is approved. Reject candidate 2 as duplicate: actual reasoning already uses DarkGray plus DIM/ITALIC while Answer uses White/BOLD, with existing rail and transition tests. Reject candidate 3 as duplicate: draw already suppresses the badge when width leaves fewer than four content cells and the one-cell rail remains. Defer summary-render consolidation until a measured allocation/latency signal exists; no production code change this round.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/status.rs::fmt_busy_bar and crates/agent/src/tui/mod.rs::pending_call synchronization",
+        "CodeGraph: crates/agent/src/tui/transcript.rs::ToolBlock::push_tool/append_live_tail and local focus model",
+        "crates/agent/src/tui/tests.rs::busy_bar_projects_bounded_safe_tool_intent",
+        "crates/agent/src/tui/tests.rs::tool_focus_moves_and_ctrl_o_targets_focused_block",
+        "CodeGraph: crates/agent/src/tui/draw.rs::reasoning_role/live_rail and crates/agent/src/tui/render.rs::fence_language",
+        "crates/agent/src/tui/tests.rs::reasoning_answer_transition_rail_is_bounded",
+        "crates/agent/src/tui/tests.rs::fence_language_badge_is_bounded_and_display_only"
+      ],
+      "acceptance": "No pending-row correlation guess, cursor animation, duplicate color/badge logic, new key, hidden reasoning, parser/dependency, tool semantic, or scrollback change is introduced; proceed only from a new failing deterministic test or measured performance signal."
+    },
+    "follow_up_query_31": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PROCEED_VERIFIED_LOCALLY",
+      "recommendation": "NLM candidates 1-3 were rejected as unstable or already satisfied; local audit found one bounded discoverability gap in busy input chrome.",
+      "local_decision": "Accepted a render-only correction: expose the already implemented Alt+Up/Down live-tool focus action when tools exist. Use width tiers so focus remains visible instead of being right-clipped; retain queue/cancel semantics, keep the full reasoning/focus/details set at wide width, and keep the narrow fallback bounded. No input routing, focus state, provider, scrollback, PTY, parser, or tool semantic change.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/input.rs::tool_focus_action accepts existing Alt+Up/Down without busy-state mutation",
+        "CodeGraph: crates/agent/src/tui/app.rs::has_live_tools delegates to LiveTranscript::has_tools",
+        "CodeGraph: crates/agent/src/tui/draw.rs::draw wires input_chrome from the live UI state",
+        "crates/agent/src/tui/status.rs::input_chrome",
+        "crates/agent/src/tui/tests.rs::input_chrome_exposes_submit_or_queue_mode",
+        "cargo test -p agent --offline --quiet -- --test-threads=1 exit 0: 99 agent + 87 TUI",
+        "cargo test --workspace --offline --quiet -- --test-threads=1 exit 0; cargo clippy --workspace --all-targets --offline --quiet -- -D warnings exit 0; cargo build --workspace --offline --quiet exit 0",
+        "cargo run -p agent --bin ridgecode --offline --quiet exit 0; pre-existing codegraph-mcp executable warning only",
+        "cargo fmt --all -- --check exit 0; git diff --check exit 0"
+      ],
+      "acceptance": "Focus hint appears only when live tools exist, remains visible across the tested medium/wide tiers, narrow queue fallback stays bounded, and existing key/input semantics remain unchanged."
+    },
+    "follow_up_query_32": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "REJECT_REDUNDANT_LOCAL_ALREADY_SATISFIED",
+      "recommendation": "NLM recommended reasoning/Answer recoloring, a busy tail rail pulse, and narrow badge hiding; it ranked reasoning recoloring first.",
+      "local_decision": "Reject candidate 1: current reasoning already uses actual DarkGray content plus DIM/ITALIC, while Answer uses White/BOLD and existing semantic rails/transitions distinguish them. Reject candidate 2: active busy reasoning-tail Primary projection already exists and is covered by deterministic tests. Reject candidate 3: draw already suppresses the language badge when width leaves fewer than four content cells and preserves the one-cell rail. The NLM answer relied on stale/incomplete source facts; no production change from this query.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/draw.rs::draw applies line.color plus Reasoning DIM/ITALIC and Answer BOLD",
+        "CodeGraph: crates/agent/src/tui/draw.rs::active_reasoning_tail_role",
+        "CodeGraph: crates/agent/src/tui/render.rs::fence_language and draw badge width guard",
+        "crates/agent/src/tui/tests.rs::active_reasoning_tail_focus_is_render_only",
+        "crates/agent/src/tui/tests.rs::fence_language_badge_is_bounded_and_display_only",
+        "cargo test --workspace --offline --quiet -- --test-threads=1 exit 0; cargo clippy --workspace --all-targets --offline --quiet -- -D warnings exit 0"
+      ],
+      "acceptance": "Do not duplicate existing color, active-tail, or badge fallback behavior; continue only from a new deterministic display failure or measured performance signal."
+    },
+    "follow_up_query_33": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PROCEED_VERIFIED_LOCALLY",
+      "recommendation": "NLM's three candidates were rejected; local CodeGraph found a distinct static-scrollback hierarchy gap.",
+      "local_decision": "Accepted the smallest display-only correction: static CommitBlock::Reasoning now reuses the Live reasoning hierarchy with existing Muted ANSI16 color plus DIM/ITALIC. Answer Markdown, actual content, metadata, commit order, native insert_before scrollback, tools, keys, and provider contracts are unchanged. This is not a duplicate of Live reasoning styling because the static path previously applied color only.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/app.rs::flush_commits and insert_commit",
+        "CodeGraph: crates/agent/src/tui/mod.rs::StreamEvent::Superstep commits reasoning before clearing Live streams",
+        "crates/agent/src/tui/tests.rs::reasoning_commit_renders_in_inline_scrollback asserts DIM/ITALIC TestBackend modifiers",
+        "cargo test -p agent --offline --quiet -- --test-threads=1 exit 0: 99 agent + 87 TUI",
+        "cargo test --workspace --offline --quiet -- --test-threads=1 exit 0; cargo clippy --workspace --all-targets --offline --quiet -- -D warnings exit 0; cargo build --workspace --offline --quiet exit 0",
+        "cargo run -p agent --bin ridgecode --offline --quiet exit 0; NotebookLM MCP connected; pre-existing codegraph-mcp executable warning only",
+        "cargo fmt --all -- --check exit 0; git diff --check exit 0"
+      ],
+      "acceptance": "Static reasoning remains readable, visibly subordinate to Answer, cell-bounded, and native-scrollback ordered; no content/state/input semantics change."
+    },
+    "follow_up_query_34": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PARTIALLY_ACCEPTED_FACT_CORRECTED",
+      "recommendation": "NLM proposed a new Superstep divider, historical tool recession, and narrow-terminal badge/rail degradation; it ranked the narrow-terminal proposal.",
+      "local_decision": "Reject a new StepDivider block: LiveTranscript has no step-owned block identity, and spending another row plus adding cross-layer state is not justified. Reject historical tool recession: no deterministic current-step ownership or measured space/latency failure exists. Reject the badge/rail proposal as stated: current draw already uses actual cell-width guard and preserves the one-cell rail; no failing 30-column frame exists. Accept only a smaller grounded adaptation: expose the already observed Vitals.step in the existing busy bar when step > 0. This preserves the current row budget and makes reasoning execution context visible without new state or scrollback semantics.",
+      "evidence": [
+        "CodeGraph: crates/agent/src/tui/status.rs::fmt_busy_bar and Vitals::step",
+        "CodeGraph: crates/agent/src/tui/draw.rs::draw already receives observed vitals.step and renders the busy bar",
+        "CodeGraph: crates/agent/src/tui/transcript.rs::LiveTranscript has no step-owned block contract",
+        "crates/agent/src/tui/tests.rs::busy_bar_shows_observed_step_only_when_available",
+        "crates/agent/src/tui/tests.rs::fence_language_badge_is_bounded_and_display_only",
+        "cargo test -p agent --offline --quiet -- --test-threads=1 exit 0: 99 agent + 88 TUI",
+        "cargo test --workspace --offline --quiet exit 0; cargo clippy --workspace --all-targets --offline -- -D warnings exit 0; cargo build --workspace --offline --quiet exit 0",
+        "cargo run -p agent --bin ridgecode --offline --quiet exit 0; NotebookLM MCP connected; pre-existing codegraph-mcp executable warning only",
+        "cargo fmt --all -- --check exit 0; git diff --check exit 0"
+      ],
+      "acceptance": "Observed step appears only for step > 0 in the existing busy chrome; step 0 output remains unchanged, narrow clipping remains bounded, and no divider/block/key/tool/scrollback semantics are added."
+    },
+    "follow_up_query_35": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "NEEDS_MORE_EVIDENCE",
+      "recommendation": "NLM ranked a no-code Windows PTY search/copy fidelity audit first, followed by an Answer floor-budget change and an adaptive narrow badge fallback.",
+      "local_decision": "Accept only the no-code PTY/native scrollback audit as the next evidence task: do not alter insert_before, ANSI policy, batching, or sanitization before physical evidence. Reject the Answer floor proposal as unproven and likely redundant: current answer_budget/visible_lines path already preserves an Answer tail and Input/status slots, with long-frame regression coverage. Reject the adaptive badge proposal: current draw uses actual cell-width guards and the 30-column failure premise is not reproduced. If no usable Windows PTY harness or physical run is available, record the environment limitation and keep production code unchanged.",
+      "evidence": [
+        "NotebookLM follow-up 35: PTY experiment ranked first; no-code scope recommended",
+        "CodeGraph: crates/agent/src/tui/draw.rs::answer_budget/pin_answer_header/visible_lines",
+        "CodeGraph: crates/agent/src/tui/render.rs::fence_language and draw.rs actual cell-width badge guard",
+        "crates/agent/src/tui/tests.rs::answer_header_anchor_preserves_budget_and_fence_boundary",
+        "crates/agent/src/tui/tests.rs::long_reasoning_clamp_preserves_answer_and_input_slots",
+        "crates/agent/src/tui/tests.rs::fence_language_badge_is_bounded_and_display_only",
+        "Known workflow boundary: no automated Windows PTY harness; native scrollback change remains evidence-gated"
+      ],
+      "acceptance": "Run or document one physical Windows terminal test with mixed CJK/emoji, styled Answer text, Ctrl+F, mouse copy, and resize. Only a reproduced failure can authorize a production change; passing or unavailable evidence leaves code unchanged."
+    },
+    "follow_up_query_36": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "NEEDS_MORE_EVIDENCE",
+      "recommendation": "NLM again ranked a no-code PTY cross-wrap search/copy audit first, then a collapsed-tool native-search audit and a 64-block long-text performance audit.",
+      "local_decision": "Accept the PTY item only as an evidence gate; no usable automated harness or physical terminal control is available, so keep insert_before, ANSI, sanitization, and batching unchanged. CodeGraph confirms collapsed static ToolBlock commits intentionally contain the summary only, while Tool History retains bounded details and panel_filter searches both row key and detail value; this is an existing product trade-off, not a proven regression, so do not change scrollback semantics. The 64-block performance premise is unmeasured; current MAX_LIVE_BLOCKS=64, MAX_LIVE_TEXT_CHARS=32768, MAX_TOOL_DETAIL_LINES=20, and 14-row rendering are deterministic bounds, but no latency/CPU threshold is established. Add no production optimization without a reproducible failure or measurement.",
+      "evidence": [
+        "NLM follow-up 36 returned three evidence-first candidates",
+        "CodeGraph: crates/agent/src/tui/transcript.rs::ToolBlock::commit_lines/append_live_tail and bounds",
+        "CodeGraph: crates/agent/src/tui/panel.rs::tool_history_panel/panel_filter searches details_text in PanelRow.value",
+        "crates/agent/src/tui/tests.rs::tool_history_is_collapsed_and_expandable_after_static_commit",
+        "crates/agent/src/tui/tests.rs::live_blocks_and_tool_details_stay_bounded",
+        "crates/agent/src/tui/tests.rs::long_reasoning_clamp_preserves_answer_and_input_slots",
+        "cargo test -p agent --offline --quiet -- --test-threads=1 exit 0: 99 agent + 88 TUI",
+        "Environment audit: wt.exe/wsl.exe present; no winpty, ConEmuC.exe, pywinpty, ptyprocess, or pexpect",
+        "First cargo test --workspace --offline --quiet exit 1 exposed knowledge test temp-directory collision; unique test-purpose suffixes were added and the same command reran exit 0",
+        "cargo clippy --workspace --all-targets --offline -- -D warnings exit 0; cargo build --workspace --offline --quiet exit 0; ridgecode smoke exit 0 with pre-existing codegraph-mcp warning"
+      ],
+      "acceptance": "No PTY/scrollback or performance code change occurs without physical failure or deterministic measurement. Existing Tool History remains the bounded searchable route for collapsed details; native scrollback stays summary-only by contract."
+    },
+    "follow_up_query_37": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "status": "PROCEED_VERIFIED_LOCALLY",
+      "recommendation": "NLM ranked virtualized active-tool detail scrolling first, structural Markdown fidelity second, and a no-code PTY audit third.",
+      "local_decision": "Reject virtualized detail scrolling for now: the proposed scroll_offset and Alt+PageUp/PageDown would add unapproved key/state semantics, while current ToolBlock detail bounds are deterministic. Accept the pure render-layer Markdown slice: quote prefixes become an ANSI16 Info side rail, ordered/unordered list prefixes retain indentation and markers in Info, and body text keeps the existing inline Markdown renderer. Keep the PTY item evidence-gated because no physical failure or automated harness exists.",
+      "evidence": [
+        "NLM follow-up 37 identified the current md_line_spans gap: nested lists and blockquotes were plain text; its suggested quote rail/list-prefix treatment is render-only.",
+        "CodeGraph: crates/agent/src/tui/render.rs::md_line_spans, live_markdown_line, markdown_lines; three callers share the parser and no prior quote/list coverage existed.",
+        "crates/agent/src/tui/render.rs::markdown_quote_prefix/markdown_list_prefix/markdown_structure_spans preserve source indentation, marker width, inline Markdown, and fenced-code state boundaries.",
+        "crates/agent/src/tui/tests.rs::markdown_structure_preserves_quote_and_nested_list_hierarchy and live_markdown_structure_stays_within_narrow_cell_bound",
+        "cargo test -p agent --offline --quiet -- --test-threads=1 exit 0: 99 agent + 90 TUI",
+        "cargo test --workspace --offline --quiet exit 0; cargo clippy --workspace --all-targets --offline -- -D warnings exit 0; cargo build --workspace --offline --quiet exit 0",
+        "cargo run -p agent --bin ridgecode --offline --quiet exit 0; NotebookLM MCP connected; pre-existing codegraph-mcp executable warning only",
+        "cargo fmt --all -- --check and git diff --check exit 0"
+      ],
+      "acceptance": "Answer structure is more legible without changing content, parser state, keys, tool behavior, native scrollback, or terminal-width bounds; virtualized details and PTY changes remain deferred."
+    }
+  },
+  "stop_conditions": [
+    "新增键位改变输入编辑、取消或审批模态语义。",
+    "焦点状态导致单帧可见行超过视口，或工具摘要不可见。",
+    "未有 Windows PTY 证据前，不引入定时合并或改变 insert_before 提交语义。"
+  ],
+  "display_boundaries": {
+    "model_answer": "只展示实际 Answer；静态提交可走 Markdown 语义渲染。",
+    "reasoning_content": "只展示实际 StreamChunk::Reasoning，不生成隐藏推理。",
+    "tool_summary": "焦点工具摘要始终可见；非焦点工具按视口尾部有界显示。",
+    "tool_detail": "默认折叠、最多 20 行；Ctrl+O 针对焦点块。"
+  }
+}

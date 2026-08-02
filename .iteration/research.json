@@ -1,0 +1,21 @@
+{
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "task_id": "b578cfd6-26b3-49f3-af59-1282376d7a9f",
+  "mode": "deep",
+  "source": "web",
+  "status": "manual_only",
+  "remote_status_last_known": "in_progress",
+  "polling_disabled": true,
+  "polling_disabled_at": "2026-08-02T09:28:21+08:00",
+  "basis": "manual_imported_source",
+  "started_at": "2026-08-01",
+  "last_poll": "2026-08-02T09:25:51+08:00",
+  "imported": false,
+  "manual_imported": true,
+  "manual_source_id": "8862d715-ffad-4288-b7eb-173260e2dcff",
+  "manual_source_title": "Architectural Optimization of High-Frequency Inline Terminal User Interfaces for AI Coding Agents",
+  "manual_imported_at": "2026-08-02T07:30:30+08:00",
+  "manual_source_chars": 40374,
+  "latest_local_slice": "Manual-report strategy applied: Live Answer carries bounded fence_before metadata, Live rows use centralized render_live_line, Ctrl+R/Ctrl+O inspection composes without hiding expanded focused-tool details, non-focused tools retain compact summaries, single-row Live budgets prioritize Answer, busy cursor width is reserved, Ctrl+O collapse consumes the event before history fallback, width-tier hints expose tool details plus reasoning, compressed busy hints reflect Ctrl+R collapse state, Ctrl+R is now a no-op without an actual Reasoning block, busy state follows the graph's active frontier, successful approval replies restore busy state, task startup requires the old task handle to be gone, Tool History now shows explicit collapsed/expanded markers, Ctrl+O input chrome now distinguishes live details from history and omits the action when neither exists, busy chrome now exposes the last actual LiveBlock as [THINK]/[ANSWER]/[TOOL], InputState::end no longer allocates a whole-buffer Vec<char>, top chrome projection is isolated from draw layout, its narrow-width priority keeps safety/channel badges visible before clipping phase text, append_answer_tail now drains its bounded VecDeque directly after marker assignment instead of collecting a second Vec, append_text_tail now builds its bounded tail with VecDeque::push_front instead of a temporary Vec plus reverse, the pre-Answer viewport now preserves the chronological order of Reasoning and non-focused Tool blocks, dynamic Reasoning metadata markers now yield to actual model text on narrow frames while full step/token metadata remains in the top chrome, first Answer arrival now auto-collapses an explicitly expanded Reasoning inspection while preserving Ctrl+R as the manual reopen path, manual Tool focus now remains pinned across incoming tools until the user selects the latest tool, medium input chrome now spells the actual Ctrl+O details shortcut at 56/64 columns, and static top chrome badges now borrow `&'static str` directly into spans to avoid per-frame formatting/copying; Answer/Reasoning budgets, fence context, markers, and tool focus semantics remain unchanged; no NLM query was made.",
+  "note": "User explicitly disabled further NotebookLM research_status polling because the in-progress deep-research record is the manually imported report for this iteration. Treat source 8862d715-ffad-4288-b7eb-173260e2dcff (Architectural Optimization of High-Frequency Inline Terminal User Interfaces for AI Coding Agents, 40374 chars) as the sole theory/strategy basis. The remote task state is retained only as last-known metadata and is not queried, imported, or used as completion evidence. Follow-up 37's pure Markdown structure projection is implemented and verified: Info quote rail, preserved list indentation/markers, existing inline Markdown, no new keys or state. Full workspace tests, clippy, build, smoke, targeted tests, and format/diff gates passed."
+}

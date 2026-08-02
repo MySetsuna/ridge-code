@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260802-05",
+  "classification": "active",
+  "summary": "在已批准 ReRelease 范围内，将稳定 release 二进制替换为本机 PATH 中的旧 RidgeCode 安装并验证。",
+  "requirement_ids": [
+    "REQ-20260802-02"
+  ],
+  "pending_ids": [],
+  "approval_reasons": [],
+  "open_questions": [],
+  "approval_evidence": "",
+  "request_sha256": "d1513902cd65e58b28926724bbee5a4a73c7ab9c7d12ddc4fd188a261ad17353",
+  "requirements_sha256": "c7933ea98ebce160e8c08ac818ce1a6aedaf280bb397dbcb458d6d190b6e998b",
+  "pending_sha256": "3b2a1c2d01c1d0e6c33d8e5ec0365873066e4b3b541c2f63d703025b8f44425a",
+  "draft_sha256": "",
+  "previous_intake_sha256": "",
+  "executable": true,
+  "reasons": []
+}

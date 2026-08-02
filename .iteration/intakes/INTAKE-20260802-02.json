@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260802-02",
+  "classification": "pending",
+  "summary": "ReRelease 与 GitHub README 更新超出已批准 TUI 需求边界；版本标签与稳定源码提交范围尚未冻结。",
+  "requirement_ids": [],
+  "pending_ids": [
+    "PENDING-REQ-20260802-01"
+  ],
+  "approval_reasons": [
+    "需确认建议版本 v0.5.0 及远端提交范围；当前工作树含本轮源码、provider、项目文档与本地迭代状态。"
+  ],
+  "open_questions": [
+    "是否按 v0.5.0 发布？",
+    "是否提交当前稳定源码与项目文档，排除 .iteration/、dist/、本地测试脚本与 samples/config.json？"
+  ],
+  "approval_evidence": "",
+  "request_sha256": "3f527203bd7f0b633d2a86128fb86290c02fb203536cc2648118223c5726481e",
+  "requirements_sha256": "feede1242f3a8527a5366f6fd63e5ddfedb478e87f9df4a20388368a92942334",
+  "pending_sha256": "5eb4eb3dea811adacbbfb6f63f39d385d9865fe92a17bcea69bfe3063bc63855",
+  "draft_sha256": "2b8a81f96d888f0864a4c57d790c4e1f65e99c8f792499766b30603800952755",
+  "previous_intake_sha256": "",
+  "executable": false,
+  "reasons": [
+    "approval_required"
+  ]
+}

@@ -26,6 +26,11 @@
       "name": "anysearch",
       "cmd": "cmd",
       "args": ["/c", "npx", "-y", "mcp-remote", "https://api.anysearch.com/mcp"]
+    },
+    {
+      "name": "codegraph",
+      "cmd": "codegraph",
+      "args": ["serve", "--mcp"]
     }
   ]
 }

@@ -1,0 +1,74 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "当前 TUI 已具备 Answer/Reasoning 分流、工具折叠/焦点、窄端适配与确定性回归覆盖。",
+      "evidence": "本轮 cold-loop 决策包与本地 workspace test/clippy 结果；非 NLM 独立证据。"
+    },
+    {
+      "fact": "NLM 返回首选为活跃工具块局部详情滚动，另列 KKP 与可见代码高亮。",
+      "evidence": "本轮 conversation 68791fb7-659a-4ad6-a86c-beb7ac694781 查询结果。"
+    }
+  ],
+  "contradictions": [
+    "NLM 返回 sources_used=[]、citations={}；其建议须经 CodeGraph、现有测试与终端证据回核。",
+    "KKP 候选依赖支持 KKP 的真实终端，当前无自动 PTY/终端证据。"
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "长活跃工具详情的局部滚动比现有有界尾部更能满足信息不丢。",
+      "support": ["NLM 将其列为首选", "当前详情有确定性行数上限"],
+      "against": ["当前没有用户复现的回溯缺口", "需要新增滚动状态与按键契约"],
+      "experiment": "TestBackend 构造 100 行详情，在 14 行视口下验证可复现截断，并先确定单焦点滚动语义。"
+    },
+    {
+      "hypothesis": "可见行级代码高亮能提升 Answer 可读性且不破坏性能。",
+      "support": ["NLM 将其列为第三候选", "渲染已有可见行边界"],
+      "against": ["当前没有 CPU/延迟基线", "语言解析规则尚未定义"],
+      "experiment": "仅对可见代码围栏做 TestBackend 颜色断言，并记录是否需要缓存。"
+    }
+  ],
+  "candidates": [
+    {
+      "core": "活跃工具块局部详情滚动",
+      "constraints": ["单一焦点", "保留摘要、折叠、Ctrl+O 与工具历史", "不改协议/工具结果语义"],
+      "risks": ["新增状态可能与焦点切换、静态归档不同步", "新按键在 Windows 终端存在兼容性风险"],
+      "reversibility": "局部渲染与输入层可回退；需先以实验确认缺口。",
+      "scope": ["ToolBlock 局部偏移", "visible_lines 切片", "明确且可回退的单焦点滚动键"],
+      "validation": ["100 行详情 TestBackend", "窄端 14 行预算", "焦点切换/展开/归档回归"]
+    },
+    {
+      "core": "Kitty keyboard protocol 增强",
+      "constraints": ["保留 Ctrl+J 等回退", "不改变提交/队列语义"],
+      "risks": ["Windows 控制台兼容性不确定", "缺少真实终端证据"],
+      "reversibility": "可通过能力探测关闭。",
+      "scope": ["KKP 能力协商", "CSI u 解码"],
+      "validation": ["需支持 KKP 的真实终端手测", "回退序列测试"]
+    },
+    {
+      "core": "可见代码围栏语义高亮",
+      "constraints": ["只处理可见行", "保留 ANSI16 角色、Markdown 与静态 scrollback"],
+      "risks": ["逐行解析造成 CPU 抖动", "语言识别误判"],
+      "reversibility": "纯渲染层，可独立撤回。",
+      "scope": ["轻量语言检测", "可见代码行样式映射"],
+      "validation": ["TestBackend 颜色断言", "窄宽度与长 Answer 回归"]
+    }
+  ],
+  "recommendation": "把局部工具详情滚动列为下一候选，但先执行有界 TestBackend 缺口实验；实验未证明用户需要回溯前，不新增生产状态或按键。",
+  "next_step": {
+    "type": "experiment",
+    "value": "构造 100 行 ToolBlock 详情，验证现有 14 行 live 视口是否确实丢失可回溯信息，并定义单焦点、可回退的最小滚动契约。"
+  },
+  "stop_conditions": [
+    "实验不能证明现有折叠/工具历史已不足时，停止局部滚动实现。",
+    "不得以 NLM 建议替代 CodeGraph、测试或真实终端证据。",
+    "不得查询或修改进行中的深度调研任务。"
+  ],
+  "metadata": {
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "sources_used": [],
+    "notes_listed": 1,
+    "deletable_completed_or_expired_notes": 0
+  }
+}

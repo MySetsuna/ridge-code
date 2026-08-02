@@ -1,0 +1,77 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "第二次查询明确限定手动源 8862d715-ffad-4288-b7eb-173260e2dcff，NLM 仍返回 sources_used=[]、citations={}。",
+      "evidence": "conversation 68791fb7-659a-4ad6-a86c-beb7ac694781 的 source_ids 限定查询结果。"
+    },
+    {
+      "fact": "NLM 第二次候选依次为可见代码高亮、动态高度缓存、KKP 输入解歧。",
+      "evidence": "同一 source-scoped 查询返回的候选计划；未视为仓库事实。"
+    }
+  ],
+  "contradictions": [
+    "外部 tree-sitter/syntect 方案与当前 REQ 的无外部解析依赖边界冲突。",
+    "动态高度缓存缺少本地 CPU/延迟基线；报告性能数字不能替代测量。",
+    "KKP 在 Windows 已有兼容性边界，必须先有真实终端证据。"
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "可见代码行语义着色能提升 Answer 阅读且不会造成高频帧开销。",
+      "support": ["手动报告主题与 NLM 候选"],
+      "against": ["现有围栏/代码 rail 已有展示层色彩", "无语言级需求或性能基线"],
+      "experiment": "先用 CodeGraph/TestBackend 审计现有代码围栏颜色与可见行边界；不引入解析依赖。"
+    },
+    {
+      "hypothesis": "行高缓存可降低长任务重绘成本。",
+      "support": ["NLM 转述报告策略"],
+      "against": ["无可复现性能失败", "窗口宽度变化会使缓存失效"],
+      "experiment": "先建立确定性 64-block 多宽度渲染基线；无测量回归则不改生产代码。"
+    }
+  ],
+  "candidates": [
+    {
+      "core": "可见代码围栏语义高亮",
+      "constraints": ["无外部解析依赖", "只处理可见行", "保留 ANSI16 rail/Markdown/scrollback"],
+      "risks": ["误判语言", "逐行解析增加高频渲染成本"],
+      "reversibility": "纯渲染层，可撤回。",
+      "scope": ["现有 fence/body 颜色回核", "必要时最小 token 样式"],
+      "validation": ["TestBackend 可见行颜色断言", "窄宽与长 Answer 回归"]
+    },
+    {
+      "core": "虚拟化动态高度缓存",
+      "constraints": ["不使用未验证 unstable API", "宽度变化必须失效", "先有基线"],
+      "risks": ["错误缓存造成行重叠/丢行", "无性能阈值无法判定收益"],
+      "reversibility": "可先做实验，不改生产语义。",
+      "scope": ["64-block 多宽度确定性基线"],
+      "validation": ["结构/宽度回归", "仅在测量显示真实瓶颈后实现"]
+    },
+    {
+      "core": "KKP 输入解歧",
+      "constraints": ["保留 Ctrl+J/Alt+Enter 回退", "Windows 不强启"],
+      "risks": ["平台兼容与转义延迟", "需真实终端握手证据"],
+      "reversibility": "能力探测可关闭。",
+      "scope": ["仅真实终端实验"],
+      "validation": ["支持 KKP 终端与 Windows 回退手测"]
+    }
+  ],
+  "recommendation": "本轮不直接采纳三项代码建议；先保留已验证的局部工具滚动，并把代码高亮/缓存/KKP 分别置于本地证据门。",
+  "next_step": {
+    "type": "experiment",
+    "value": "用现有 CodeGraph 与 TestBackend 回核代码围栏展示和 64-block 多宽度渲染基线；无新失败或测量阈值则不新增依赖/缓存。"
+  },
+  "stop_conditions": [
+    "不得把 sources_used=[] 的 NLM 答案当作源证据。",
+    "不得查询或修改进行中的深度调研任务。",
+    "不得为满足视觉效果引入未批准解析依赖或虚构性能收益。"
+  ],
+  "metadata": {
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "requested_source_id": "8862d715-ffad-4288-b7eb-173260e2dcff",
+    "sources_used": [],
+    "citations": {},
+    "notes_listed": 1,
+    "deletable_completed_or_expired_notes": 0
+  }
+}

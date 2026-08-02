@@ -1,0 +1,102 @@
+{
+  "status": "PROCEED",
+  "confirmed_facts": [
+    {
+      "fact": "当前 Tool History 已用 PanelRow key/value 复用 panel_filter 做大小写不敏感子串过滤，但列表只投影摘要；详情仍须手动 Enter 展开。",
+      "evidence": "CodeGraph crates/agent/src/tui/panel.rs::panel_filter/tool_history_panel; crates/agent/src/tui/draw.rs::draw_tool_history_panel"
+    },
+    {
+      "fact": "当前 top_chrome 已有宽度分级、焦点工具/THINKING chip，responsive_live_layout 已为 Answer/Input 保留槽位，Render Demand 已分离 dirty 与 animation_due。",
+      "evidence": "CodeGraph crates/agent/src/tui/draw.rs::top_chrome/responsive_live_layout; crates/agent/src/tui/render.rs::should_draw; crates/agent/src/tui/mod.rs::main"
+    }
+  ],
+  "contradictions": [
+    "NLM 所称折叠内容缺基础检索不成立；本地已有详情文本参与 panel_filter，真实缺口是命中后的可见定位与自动展开。",
+    "报告建议的 tree-sitter/syntect 与性能数字不属于当前批准范围或本地测量事实，本轮不引入解析依赖、不宣称收益。"
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "Tool History 查询命中详情时自动选中并展开首个命中块，详情视口按匹配行确定性定位，可减少找到内容后仍不可见的断点。",
+      "support": [
+        "panel_filter 已保留 key/value 命中索引",
+        "draw_tool_history_panel 已有 selected detail 与有界详情槽"
+      ],
+      "against": [
+        "当前 Panel 只有全局 detail_open，没有详情 scroll 偏移",
+        "极窄模态必须继续保留列表、Esc 与详情边界"
+      ],
+      "experiment": "ToolHistory retype 在详情命中时打开首个匹配块；按换行/显示宽计算匹配行 scroll；TestBackend 验证命中详情可见、非命中与窄框不越界。"
+    }
+  ],
+  "candidates": [
+    {
+      "core": "折叠工具结构化检索定位",
+      "constraints": [
+        "复用现有 PanelRow key/value 与 panel_filter，不改变静态 scrollback",
+        "一次只自动展开首个匹配块，保留手动 Enter 与详情有界槽",
+        "不新增键位、依赖或工具状态语义"
+      ],
+      "risks": [
+        "自动展开可能改变用户手动折叠预期",
+        "长行换行定位需与现有 cell-width 口径一致"
+      ],
+      "reversibility": "高；仅影响 Tool History modal 的查询投影与详情滚动",
+      "scope": [
+        "crates/agent/src/tui/panel.rs",
+        "crates/agent/src/tui/draw.rs",
+        "crates/agent/src/tui/tests.rs"
+      ],
+      "validation": [
+        "详情末行特征词查询自动展开并显示命中行",
+        "摘要命中、空查询、无命中保持原行为",
+        "18x8、12x6、8x4 TestBackend 不越界且 Esc/列表仍可见"
+      ]
+    },
+    {
+      "core": "窄端 telemetry 语义压减",
+      "constraints": [
+        "保留关键 token/context 数据，不改变 status_bar 模板",
+        "只改 top_chrome 投影，不伪造或重新计算指标"
+      ],
+      "risks": [
+        "窄端宽度竞争可能遮蔽安全/通道 badge",
+        "需要更多宽度矩阵验收"
+      ],
+      "reversibility": "高；纯展示字符串分级",
+      "scope": ["crates/agent/src/tui/draw.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["40/32/18 列保留可辨识 telemetry 或明确状态", "Answer/Input 不丢" ]
+    },
+    {
+      "core": "可见行语法高亮",
+      "constraints": [
+        "仅处理实际 Answer Markdown 代码块",
+        "不得引入未经批准解析依赖或伪造语言语义"
+      ],
+      "risks": [
+        "高频流式解析与依赖体积风险",
+        "当前本地无性能基线"
+      ],
+      "reversibility": "中；可能触及现有 Markdown 呈现管线",
+      "scope": ["crates/agent/src/tui/render.rs", "crates/agent/src/tui/draw.rs"],
+      "validation": ["先补基线与依赖决策；无证据则不实施"]
+    }
+  ],
+  "recommendation": "先实施候选一：现有过滤已足够，最小新增为命中详情自动展开与确定性定位；候选二留待真实 telemetry 丢失帧，候选三被依赖与性能证据门控。",
+  "next_step": {
+    "type": "implementation",
+    "value": "为 ToolHistory Panel 增加详情命中自动展开与基于 cell-width 的可见定位，并补确定性窄框回归。"
+  },
+  "stop_conditions": [
+    "若自动展开遮蔽列表、Esc 或 Answer/Input 语义，立即回退本切片。",
+    "不得把报告性能数字写成 RidgeCode 测量事实。",
+    "不得查询或修改进行中的深度调研任务。"
+  ],
+  "metadata": {
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "source_id": "8862d715-ffad-4288-b7eb-173260e2dcff",
+    "sources_used": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "notes_listed": 1,
+    "deletable_completed_or_expired_notes": 0
+  }
+}

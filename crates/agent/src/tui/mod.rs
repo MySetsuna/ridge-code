@@ -153,7 +153,7 @@ pub(super) async fn run(
     let (_guard, mut terminal) = TerminalGuard::enter()?;
     let mut ui = Ui::default();
     ui.note(
-        "RidgeCode  ·  inline mode: output lands in terminal history (native scroll/select) · Enter to send · Ctrl+J newline (Shift+Enter where supported) · Ctrl-C to interrupt · /help",
+        "RidgeCode  ·  inline mode: output lands in terminal history (native scroll/select) · Enter to send · Ctrl+J newline (Shift+Enter where supported) · Ctrl-C interrupts; press twice to exit · /help",
         Color::Cyan,
     );
     if skip_danger {
@@ -233,8 +233,76 @@ pub(super) async fn run(
 
     // 「已按下集」:去重 Windows 每键的 Press+Release,并识别输入法「仅 Release」的悬空字符注入。
     let mut pressed: std::collections::HashSet<KeyCode> = std::collections::HashSet::new();
+    let mut last_ctrl_c: Option<Instant> = None;
 
     'main: loop {
+        let oauth_device_event = match ui.oauth_device.as_mut() {
+            Some(flow) => match flow.receiver.try_recv() {
+                Ok(event) => Some(event),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => None,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => Some(
+                    DeviceOAuthEvent::Complete(Err("device OAuth task stopped".into())),
+                ),
+            },
+            None => None,
+        };
+        if let Some(event) = oauth_device_event {
+            match event {
+                DeviceOAuthEvent::Ready { user_code, opened } => ui.note(
+                    format!(
+                        "Codex device auth: {} browser at {} and enter code: {user_code}",
+                        if opened {
+                            "browser opened; visit"
+                        } else {
+                            "open"
+                        },
+                        provider::oauth::OPENAI_DEVICE_VERIFICATION_URL
+                    ),
+                    Color::Cyan,
+                ),
+                DeviceOAuthEvent::Complete(result) => {
+                    ui.oauth_device.take();
+                    match result {
+                        Ok(token) => {
+                            apply_oauth_token(
+                                &provider::oauth::OPENAI,
+                                token,
+                                &mut meta,
+                                &swap,
+                                &mut ui,
+                            );
+                        }
+                        Err(error) => {
+                            ui.note(format!("Codex device OAuth failed: {error}"), Color::Red)
+                        }
+                    }
+                }
+            }
+            dirty = true;
+        }
+        // OAuth callback server runs independently of keyboard input; poll it on
+        // the 100ms event loop so browser completion needs no code paste.
+        let oauth_result = match ui.oauth_callback.as_mut() {
+            Some(callback) => match callback.receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    Some(Err("local OAuth callback listener stopped".into()))
+                }
+            },
+            None => None,
+        };
+        if let Some(result) = oauth_result {
+            ui.oauth_callback.take();
+            match result {
+                Ok(code) => {
+                    apply_oauth_code(&provider::oauth::OPENAI, &code, &mut meta, &swap, &mut ui)
+                        .await;
+                }
+                Err(error) => ui.note(format!("OAuth callback failed: {error}"), Color::Red),
+            }
+            dirty = true;
+        }
         // 统一提交点(iter-33):非 busy 时消费 pending_submit —— 键入的新提交,或上一任务毕后接跑的队首。
         // 起任务/跑命令的逻辑**只此一处**(键 Submit 臂与 done 队列接跑共用),消除重复。
         if can_start_task(ui.busy, task.is_some()) {
@@ -330,6 +398,45 @@ pub(super) async fn run(
                 let Some(key) = decide_key(&mut pressed, &key) else {
                     continue;
                 };
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.code == KeyCode::Char('c')
+                {
+                    let now = Instant::now();
+                    if is_second_ctrl_c(last_ctrl_c, now) {
+                        break 'main;
+                    }
+                    last_ctrl_c = Some(now);
+                    if let Some(handle) = task.take() {
+                        handle.abort();
+                        *bus.lock().unwrap() = None;
+                        ui.busy = false;
+                        ui.commit_live_reasoning(
+                            ui.superstep,
+                            task_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                        );
+                        ui.clear_streams();
+                        ui.commit_live_tools();
+                        ui.superstep = 0;
+                        ui.pending_call = None;
+                        task_started = None;
+                        retry_count = 0;
+                        let dropped = ui.queued.len();
+                        ui.queued.clear();
+                        pending_submit = None;
+                        let tail = if dropped > 0 {
+                            format!("interrupted current task (and cleared {dropped} queued)")
+                        } else {
+                            "interrupted current task".into()
+                        };
+                        ui.note(tail, Color::Yellow);
+                    } else {
+                        ui.note(
+                            "press Ctrl-C again within 2 seconds to exit",
+                            Color::Yellow,
+                        );
+                    }
+                    continue;
+                }
                 if pending.is_some() {
                     // 模态状态机:审批态下滚动键**只滚不拒**(可先看 diff),仅 y/Enter 批准、n/Esc 拒绝,余键忽略。
                     match approval_action(key.code) {
@@ -358,11 +465,17 @@ pub(super) async fn run(
                 if ui.panel.is_some() {
                     match panel_action(&key) {
                         PanelAction::Esc => {
+                            let cancel_oauth = ui.panel.as_ref().is_some_and(|p| {
+                                p.editing.is_some() && p.oauth_verifier.is_some()
+                            });
                             let p = ui.panel.as_mut().unwrap();
                             if p.editing.is_some() {
                                 p.editing = None; // 取消编辑
                             } else {
                                 ui.panel = None; // 关页
+                            }
+                            if cancel_oauth {
+                                ui.oauth_callback.take();
                             }
                         }
                         PanelAction::Up => {
@@ -594,9 +707,26 @@ pub(super) async fn run(
                             p.selected = (p.selected + p.items.len() - 1) % p.items.len();
                         }
                     }
-                    InputAction::PopupApply => {
+                    InputAction::PopupAccept => {
                         if let Some(p) = ui.popup.take() {
                             apply_completion(&mut ui.input, &p);
+                        }
+                    }
+                    InputAction::PopupSubmit => {
+                        if let Some(p) = ui.popup.take() {
+                            apply_completion(&mut ui.input, &p);
+                        }
+                        let input = ui.input.take().trim().to_owned();
+                        if !input.is_empty() {
+                            if ui.busy {
+                                ui.queued.push_back(input.clone());
+                                ui.note(
+                                    format!("⏳ queued ({} pending): {input}", ui.queued.len()),
+                                    role_color(Role::Muted),
+                                );
+                            } else {
+                                pending_submit = Some(input);
+                            }
                         }
                     }
                     InputAction::PopupClose => ui.popup = None,

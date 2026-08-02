@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "upsert": [
+    {
+      "id": "PENDING-REQ-20260801-02",
+      "section": "pending",
+      "markdown": "### PENDING-REQ-20260801-02 · 将已验证的 NLM TUI 渲染建议纳入本轮\n\n- Type:`MODIFY`\n- Original intent:`把 NLM 对当前 TUI 的下一步建议纳入本次迭代，但先经过审批。`\n- Related Active requirement:`REQ-20260801-01`\n- Target behavior:`在现有 LiveTranscript 与工具折叠交互基础上，增加有界、无外部解析依赖的行级 Markdown 展示（bold、code、header）及 ANSI 16 色语义角色，使 Answer、实际 reasoning_content、工具摘要/详情层次更清晰；不得伪造隐藏推理，工具详情仍默认折叠。`\n- Scope:`crates/agent/src/tui/render.rs、crates/agent/src/tui/transcript.rs 及其直接 TUI 测试；必要时调整直接渲染调用点。`\n- Non-goals:`不引入外部 Markdown 解析依赖；不使用硬编码 RGB；不改变 langgraph 核心、provider/MCP SDK 边界、安全门、输入排队/取消或 NotebookLM 需求审批；不上传 Pending；不覆盖 samples/config.json 与 test_codegraph.ps1。`\n- Frozen boundary:`保留 Viewport::Inline、insert_before 原生 scrollback、ANSI 16 色兼容、工具摘要默认保留、Ctrl+O 展开、工具详情有界及 LiveTranscript 的内存上限。`\n- Assumptions/open questions:`NLM 建议仅为候选，须由当前代码与 CodeGraph 复核；需实测窄终端折行、CJK/emoji 宽度、静态提交文本纯度、长任务内存与单帧刷新开销；若出现明显卡顿（>16ms）或滚动抖动则停止并回退。`\n- Deterministic acceptance:`补充 Markdown span/语义色角色/折叠边界/窄终端纯逻辑测试；证明静态提交文本无 ANSI 逃逸残留、工具详情不越界、64 块上限有效；通过 cargo fmt --all --check、cargo test --workspace、cargo clippy --workspace --all-targets -- -D warnings，并完成可复现终端渲染验收。`\n- Expected traceability:`PENDING-REQ-20260801-02 → .iteration/notebooklm-response.json → crates/agent/src/tui/render.rs 与 transcript.rs → TUI 测试及 workspace 质量闸。"
+    }
+  ],
+  "remove": []
+}

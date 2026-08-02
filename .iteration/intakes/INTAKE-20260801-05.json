@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260801-05",
+  "classification": "approved",
+  "summary": "已批准将 NLM 的 TUI 渲染建议纳入本轮。",
+  "requirement_ids": [
+    "REQ-20260801-01"
+  ],
+  "pending_ids": [
+    "PENDING-REQ-20260801-02"
+  ],
+  "approval_reasons": [],
+  "open_questions": [],
+  "approval_evidence": "批准",
+  "request_sha256": "f98ee96e7192ad1a226957caa7eb9f1115595b81b2e9a8be31b393d0c94ea4e2",
+  "requirements_sha256": "8e6c6243997e819aad903a1ab788fe831377c69798b2c306ba779d9a9a1b6486",
+  "pending_sha256": "666dfafa8fe6dfe40bcff8776ae500badd8113f18a0f96d9cdf13e40ba796a06",
+  "draft_sha256": "40c06f95c979573424c5c8c49fc47c6c189c968ca80e7e03c5722b90049b5b68",
+  "previous_intake_sha256": "2fc600719a57f7dc99f85335d995b24e9883eeb3212c733736436ed64589c507",
+  "executable": true,
+  "reasons": []
+}

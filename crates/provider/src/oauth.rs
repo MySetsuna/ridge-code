@@ -33,7 +33,7 @@ pub struct OAuthConfig {
     pub token_url: &'static str,
     pub redirect_uri: &'static str,
     pub scopes: &'static str,
-    /// authorize URL 前置额外 query(anthropic 特有 `code=true&`;无则空串)。
+    /// authorize URL 前置额外 query(各 provider 的活 OAuth 流所需;无则空串)。
     pub extra_query: &'static str,
     pub token_wire: TokenWire,
 }
@@ -49,18 +49,26 @@ pub const ANTHROPIC: OAuthConfig = OAuthConfig {
     token_wire: TokenWire::Json,
 };
 
-/// ChatGPT Plus/Pro(Codex)订阅(iter-48 G2)。client_id 为 Codex CLI 公开值;
-/// redirect 是本地回调(见 [`parse_callback_path`]),端点/参数属活验证边界。
+/// ChatGPT Plus/Pro(Codex)订阅(iter-48 G2)。保持官方 Codex CLI 的授权参数;
+/// 缺少简化流标记/连接器 scopes 会被 Hydra 判为 invalid_request。
 pub const OPENAI: OAuthConfig = OAuthConfig {
     provider: "openai",
     client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
     authorize_url: "https://auth.openai.com/oauth/authorize",
     token_url: "https://auth.openai.com/oauth/token",
     redirect_uri: "http://localhost:1455/auth/callback",
-    scopes: "openid profile email offline_access",
-    extra_query: "",
+    scopes: "openid profile email offline_access api.connectors.read api.connectors.invoke",
+    extra_query:
+        "id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=codex_cli_rs&",
     token_wire: TokenWire::Form,
 };
+
+/// OpenAI Codex 无本地端口设备授权端点。
+pub const OPENAI_DEVICE_USERCODE_URL: &str =
+    "https://auth.openai.com/api/accounts/deviceauth/usercode";
+pub const OPENAI_DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
+pub const OPENAI_DEVICE_VERIFICATION_URL: &str = "https://auth.openai.com/codex/device";
+pub const OPENAI_DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 
 /// 无填充 base64url 编码(RFC 4648 §5;非 crypto,纯编码,手写 + 测,省一依赖)。
 pub fn base64url_nopad(bytes: &[u8]) -> String {
@@ -81,6 +89,59 @@ pub fn base64url_nopad(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+fn decode_base64url_nopad(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let mut buffer = 0u32;
+    let mut bits = 0u8;
+    for byte in s.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            _ => return None,
+        } as u32;
+        buffer = (buffer << 6) | value;
+        bits += 6;
+        while bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+            buffer &= if bits == 0 { 0 } else { (1u32 << bits) - 1 };
+        }
+    }
+    Some(out)
+}
+
+fn jwt_payload(jwt: &str) -> Option<Value> {
+    let mut parts = jwt.split('.');
+    let (_header, payload, _signature) = (parts.next()?, parts.next()?, parts.next()?);
+    if payload.is_empty() {
+        return None;
+    }
+    serde_json::from_slice(&decode_base64url_nopad(payload)?).ok()
+}
+
+fn account_id_from_claims(payload: &Value) -> Option<String> {
+    let auth = payload
+        .get("https://api.openai.com/auth")
+        .or_else(|| payload.get("auth"));
+    auth.and_then(|claims| claims.get("chatgpt_account_id"))
+        .or_else(|| payload.get("chatgpt_account_id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// Extract the ChatGPT workspace/account id required by the Codex backend.
+/// Only the JWT payload is decoded; signature verification remains the server's job.
+pub fn chatgpt_account_id(id_token: Option<&str>, access_token: &str) -> Option<String> {
+    id_token
+        .into_iter()
+        .chain(std::iter::once(access_token))
+        .find_map(|token| jwt_payload(token).and_then(|payload| account_id_from_claims(&payload)))
 }
 
 /// PKCE 对:`challenge = base64url_nopad(sha256(verifier))`(S256)。
@@ -123,6 +184,28 @@ pub struct OAuthToken {
     pub refresh_token: String,
     /// 过期时刻(epoch 秒)。刷新判定用它 —— 纯函数 now 传参,不读墙钟。
     pub expires_at_epoch: u64,
+    /// OpenAI OAuth returns this JWT; kept for account-id recovery after refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_token: Option<String>,
+    /// ChatGPT workspace/account id used by `chatgpt.com/backend-api`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+}
+
+/// OpenAI device authorization 的一次性用户码。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceCode {
+    pub device_auth_id: String,
+    pub user_code: String,
+    pub interval_secs: u64,
+}
+
+/// 设备流轮询完成后，交给标准 OAuth token 交换的 PKCE 材料。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceAuthorization {
+    pub authorization_code: String,
+    pub code_challenge: String,
+    pub code_verifier: String,
 }
 
 impl OAuthToken {
@@ -130,13 +213,32 @@ impl OAuthToken {
     pub fn needs_refresh(&self, now_epoch: u64) -> bool {
         now_epoch + 60 >= self.expires_at_epoch
     }
+
+    pub fn preserve_chatgpt_metadata_from(&mut self, previous: &Self) {
+        self.id_token = self.id_token.clone().or_else(|| previous.id_token.clone());
+        self.account_id = self
+            .account_id
+            .clone()
+            .or_else(|| previous.account_id.clone())
+            .or_else(|| chatgpt_account_id(self.id_token.as_deref(), &self.access_token));
+    }
 }
 
 /// 构造订阅授权 URL(纯;per-provider 经 [`OAuthConfig`])。用户浏览器打开授权,
 /// 回调页给出 `code#state`(anthropic)或重定向到本地回调(openai)。
 pub fn authorize_url(cfg: &OAuthConfig, challenge: &str, state: &str) -> String {
+    authorize_url_with_redirect(cfg, challenge, state, cfg.redirect_uri)
+}
+
+/// Build an authorization URL while selecting a registered localhost fallback port.
+pub fn authorize_url_with_redirect(
+    cfg: &OAuthConfig,
+    challenge: &str,
+    state: &str,
+    redirect_uri: &str,
+) -> String {
     let scope_enc = cfg.scopes.replace(' ', "%20");
-    let redirect_enc = cfg.redirect_uri.replace(':', "%3A").replace('/', "%2F");
+    let redirect_enc = redirect_uri.replace(':', "%3A").replace('/', "%2F");
     format!(
         "{}?{}client_id={}&response_type=code\
              &redirect_uri={redirect_enc}&scope={scope_enc}\
@@ -162,10 +264,14 @@ pub fn parse_token_response(
         .or_else(|| fallback_refresh.map(str::to_string))
         .ok_or("token response missing refresh_token")?;
     let expires_in = v["expires_in"].as_u64().unwrap_or(3600);
+    let id_token = v["id_token"].as_str().map(str::to_string);
+    let account_id = chatgpt_account_id(id_token.as_deref(), &access_token);
     Ok(OAuthToken {
         access_token,
         refresh_token,
         expires_at_epoch: now_epoch + expires_in,
+        account_id,
+        id_token,
     })
 }
 
@@ -178,6 +284,26 @@ pub async fn exchange_code(
     verifier: &str,
     now_epoch: u64,
 ) -> Result<OAuthToken, ProviderError> {
+    exchange_code_with_redirect(
+        http,
+        cfg,
+        code_and_state,
+        verifier,
+        cfg.redirect_uri,
+        now_epoch,
+    )
+    .await
+}
+
+/// 授权码换 token,允许设备授权流覆盖 redirect URI。
+pub async fn exchange_code_with_redirect(
+    http: &dyn HttpClient,
+    cfg: &OAuthConfig,
+    code_and_state: &str,
+    verifier: &str,
+    redirect_uri: &str,
+    now_epoch: u64,
+) -> Result<OAuthToken, ProviderError> {
     let (code, state) = split_code_state(code_and_state);
     let v = match cfg.token_wire {
         TokenWire::Json => {
@@ -186,7 +312,7 @@ pub async fn exchange_code(
                 "code": code,
                 "state": state,
                 "client_id": cfg.client_id,
-                "redirect_uri": cfg.redirect_uri,
+                "redirect_uri": redirect_uri,
                 "code_verifier": verifier,
             });
             http.post_json(cfg.token_url, &json_headers(), &body)
@@ -197,13 +323,113 @@ pub async fn exchange_code(
                 ("grant_type", "authorization_code"),
                 ("code", code.as_str()),
                 ("client_id", cfg.client_id),
-                ("redirect_uri", cfg.redirect_uri),
+                ("redirect_uri", redirect_uri),
                 ("code_verifier", verifier),
             ];
             http.post_form(cfg.token_url, &form).await?
         }
     };
     parse_token_response(&v, now_epoch, None)
+}
+
+/// 请求 OpenAI device authorization 用户码。
+pub async fn request_device_code(
+    http: &dyn HttpClient,
+    client_id: &str,
+) -> Result<DeviceCode, ProviderError> {
+    let v = http
+        .post_json(
+            OPENAI_DEVICE_USERCODE_URL,
+            &json_headers(),
+            &json!({ "client_id": client_id }),
+        )
+        .await?;
+    let device_auth_id = v["device_auth_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or("device auth response missing device_auth_id")?
+        .to_string();
+    let user_code = v
+        .get("user_code")
+        .or_else(|| v.get("usercode"))
+        .and_then(Value::as_str)
+        .filter(|code| !code.is_empty())
+        .ok_or("device auth response missing user_code")?
+        .to_string();
+    let interval_secs = json_u64(&v, "interval").unwrap_or(5).max(1);
+    Ok(DeviceCode {
+        device_auth_id,
+        user_code,
+        interval_secs,
+    })
+}
+
+/// 轮询 OpenAI device authorization,直至用户完成授权或 15 分钟超时。
+pub async fn poll_device_code(
+    http: &dyn HttpClient,
+    device: &DeviceCode,
+) -> Result<DeviceAuthorization, ProviderError> {
+    let started = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(15 * 60);
+    loop {
+        let response = http
+            .post_json(
+                OPENAI_DEVICE_TOKEN_URL,
+                &json_headers(),
+                &json!({
+                    "device_auth_id": device.device_auth_id,
+                    "user_code": device.user_code,
+                }),
+            )
+            .await;
+        match response {
+            Ok(v) => {
+                let authorization_code = v["authorization_code"]
+                    .as_str()
+                    .filter(|code| !code.is_empty())
+                    .ok_or("device auth response missing authorization_code")?
+                    .to_string();
+                let code_challenge = v["code_challenge"]
+                    .as_str()
+                    .filter(|challenge| !challenge.is_empty())
+                    .ok_or("device auth response missing code_challenge")?
+                    .to_string();
+                let code_verifier = v["code_verifier"]
+                    .as_str()
+                    .filter(|verifier| !verifier.is_empty())
+                    .ok_or("device auth response missing code_verifier")?
+                    .to_string();
+                return Ok(DeviceAuthorization {
+                    authorization_code,
+                    code_challenge,
+                    code_verifier,
+                });
+            }
+            Err(error) if is_device_pending(&error) => {
+                if started.elapsed() >= timeout {
+                    return Err("device auth timed out after 15 minutes".into());
+                }
+                let remaining = timeout.saturating_sub(started.elapsed());
+                tokio::time::sleep(
+                    std::time::Duration::from_secs(device.interval_secs).min(remaining),
+                )
+                .await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn json_u64(value: &Value, key: &str) -> Option<u64> {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .or_else(|| value.get(key).and_then(Value::as_str)?.trim().parse().ok())
+}
+
+fn is_device_pending(error: &ProviderError) -> bool {
+    let text = error.to_string();
+    text.starts_with("http 403") || text.starts_with("http 404")
 }
 
 /// refresh_token 换新 token(HTTP 走接缝;body 格式同 exchange 按 wire 分流)。
@@ -258,6 +484,22 @@ pub fn parse_callback_path(line: &str) -> Option<(String, String)> {
         }
     }
     code.map(|c| (c, state))
+}
+
+/// Parse a browser callback URL or code#state, preserving validated state.
+pub fn parse_authorization_input(
+    input: &str,
+    expected_state: &str,
+) -> Result<String, ProviderError> {
+    let input = input.trim();
+    let (code, state) = parse_callback_path(input).unwrap_or_else(|| split_code_state(input));
+    if code.is_empty() {
+        return Err("OAuth authorization input has no code".into());
+    }
+    if state.is_empty() || state != expected_state {
+        return Err("OAuth state mismatch; restart login".into());
+    }
+    Ok(format!("{code}#{state}"))
 }
 
 /// 回调页返回 `code#state`;拆成 (code, state)。无 `#` 则 state 空。

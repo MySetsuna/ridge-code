@@ -62,6 +62,10 @@ pub(crate) struct Ui {
     pub(crate) queued: VecDeque<String>,
     /// 交互页(iter-35):Some = 模态页开(键位模态优先级:审批 > Panel > 浮窗 > 输入)。
     pub(crate) panel: Option<Panel>,
+    /// Automatic localhost OAuth callback, polled by the TUI main loop.
+    pub(crate) oauth_callback: Option<LocalOAuthCallback>,
+    /// Device OAuth fallback, used when the registered localhost ports are unavailable.
+    pub(crate) oauth_device: Option<DeviceOAuthFlow>,
     /// 自定义/skill 命令请求「以任务身份跑」(iter-39):`run_command` 展开 body 置此,主环取走起任务。
     pub(crate) run_task: Option<String>,
 }

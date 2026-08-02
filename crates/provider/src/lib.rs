@@ -269,6 +269,9 @@ impl LlmProvider for ScriptedProvider {
 /// OpenAI 兼容响应的归一化(纯函数,离线可测)。
 pub mod openai;
 
+/// ChatGPT subscription OAuth wire: Codex Responses API + account header.
+pub mod responses;
+
 /// Anthropic Messages 响应的归一化(纯函数,离线可测)。
 pub mod anthropic;
 
@@ -285,6 +288,9 @@ pub mod http;
 /// client_id / 所需 system 前缀 / beta header 值属 ToS 灰区且需订阅,**由用户实跑
 /// `ridgecode login --claude` 验证**。常量集中于 [`anthropic_oauth`],补全侧 base_url 可配置覆盖。
 pub mod oauth;
+
+mod chatgpt;
+pub use chatgpt::ChatGptProvider;
 
 /// 实时模型目录 —— 向某 provider 的 `{base_url}/models` 发鉴权 GET,解析出模型 id 与
 /// (端点自报的)上下文窗口大小。抓取只走 [`http::HttpClient`] 接缝,测试注入替身 → 零网络可测。

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "upsert": [
+    {
+      "id": "REQ-20260802-02",
+      "section": "active",
+      "markdown": "### REQ-20260802-02 · ReRelease 稳定包与 GitHub README\n\n- 状态:`ACTIVE`\n- 版本:`v0.2.0`\n- 行为:稳定 TUI 基线通过质量门后，发布 v0.5.0 供实际验证；版本归档必须包含可运行的 RidgeCode 二进制、完整用法 README 与对应安装脚本，并将同一 README 更新至 GitHub 主分支。\n- 边界:发布范围包含 README、Cargo 版本元数据、当前稳定 TUI/provider 源码及必要项目文档；排除 .iteration/、dist/、samples/config.json、本地测试脚本与 Pending 审批文件；不查询或修改 NotebookLM 进行中深研状态，不重写远端历史，不改变已验证的 TUI、安全门、provider 与 MCP 语义。\n- 验收:提交前通过 cargo fmt --all -- --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked；本机归档列出 README；推送后确认 origin/main、v0.5.0 标签、GitHub Release 资产与 README 可读且内容一致。\n- 追踪:REQ → README/Cargo 版本与 crates/agent/src/tui、crates/provider/src 稳定代码 → workspace 质量门与 dist 归档 → GitHub main/tag/Release。"
+    }
+  ],
+  "remove": [
+    "PENDING-REQ-20260802-01"
+  ]
+}

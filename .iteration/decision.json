@@ -1,0 +1,47 @@
+{
+  "question": "在 v0.5.0 稳定基线与现有 Answer/Reasoning、工具折叠实现之上，下一项最能提升 TUI 可理解性、交互感与真实终端适配性的可逆实验是什么？",
+  "target": "让 NotebookLM 仅基于手动导入理论与当前快照，排序最多三项候选；主 Agent 用 CodeGraph 和确定性测试选择一项落地。",
+  "approved_constraints": [
+    "REQ-20260801-01 已批准且本轮 intake 为 active",
+    "用户要求先询问既有 NLM 对话，但禁止查询进行中的深研状态",
+    "唯一理论源为手动导入源 8862d715-ffad-4288-b7eb-173260e2dcff",
+    "不把 NLM 建议当作代码事实、根因或性能结论"
+  ],
+  "verified_facts": [
+    {"fact": "v0.5.0 已发布，main 与 tag 均指向 676e801。", "evidence": "git refs; GitHub Release workflow success"},
+    {"fact": "Answer/Reasoning 分层、工具默认折叠、Ctrl+R/Ctrl+O、窄屏布局与 bounded live transcript 已有确定性回归。", "evidence": "crates/agent/src/tui/*.rs; workspace tests/clippy/build"},
+    {"fact": "本机没有自动 Windows PTY/native scrollback 证据，当前仍需真实终端验收。", "evidence": "docs/PROJECT-STATE.md PTY evidence audit"},
+    {"fact": "用户已手动导入 40374 字符理论报告；远程深研状态仅保留历史元数据。", "evidence": ".iteration/research.json; user instruction"}
+  ],
+  "failure_signals": [
+    "候选重复已有语义或没有明确可证伪验收",
+    "建议依赖未批准的新键位、外部 Markdown/语法解析器或新 provider/MCP 状态",
+    "窄终端丢失 Answer、Reasoning、工具摘要、输入、审批或退出提示",
+    "无法建立真实终端证据却宣称性能或行业领先"
+  ],
+  "attempts": [
+    {
+      "experiment": "以 source_ids=8862d715-ffad-4288-b7eb-173260e2dcff 继续既有 NotebookLM 对话，询问下一步计划",
+      "result": {"status": "failed", "summary": "MCP 返回 UNAUTHENTICATED；refresh_auth 确认磁盘凭据 stale，未查询 research_status。"},
+      "evidence": {"tool": "mcp__notebooklm_mcp__notebook_query", "command": "notebook_query existing conversation with manual source", "exit_code": 1, "pointer": ".iteration/decision.json#attempt-1", "error": "Google rejected the query (error code 16: UNAUTHENTICATED)", "refresh": "Auth tokens were reloaded from disk but are no longer valid (reason: stale)"}
+    },
+    {
+      "experiment": "用户声称已登录后重试 NotebookLM 对话查询，并运行 nlm login --check",
+      "result": {"status": "failed", "summary": "MCP 仍返回 UNAUTHENTICATED；refresh_auth 仍判定 stale；CLI 检查为 network_error。未查询 research_status。"},
+      "evidence": {"tool": "mcp__notebooklm_mcp__notebook_query", "command": "notebook_query existing conversation with manual source; nlm login --check", "exit_code": 1, "pointer": ".iteration/decision.json#attempt-2", "error": "Google rejected the query (error code 16: UNAUTHENTICATED)", "refresh": "Auth tokens were reloaded from disk but are no longer valid (reason: stale)", "cli": "Authentication failed: Could not reach NotebookLM (network_error: ClientAuthenticationError)"}
+    }
+  ],
+  "candidate_solutions": [],
+  "hypotheses": [
+    "下一项高价值工作可能是补强真实终端验收/可复制证据，而非继续堆叠静态装饰",
+    "若物理证据暂不可自动化，应优先设计可复现的人工验收脚本与无副作用观察路径"
+  ],
+  "prohibitions": [
+    "不查询 research_status、research_import 或修改远端深研记录",
+    "不把 NLM 输出原样写入需求或直接实施",
+    "不使用未经批准的新键位、不重写历史、不覆盖用户脏文件"
+  ],
+  "questions": [
+    "请按可逆性、真实证据收益与适配风险排序最多三项下一步候选，并明确每项验收实验。"
+  ]
+}

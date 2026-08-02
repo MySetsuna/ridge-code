@@ -43,6 +43,8 @@ pub(crate) struct Panel {
     pub(crate) sel: usize,
     pub(crate) editing: Option<String>,
     pub(crate) oauth_verifier: Option<String>,
+    pub(crate) oauth_state: Option<String>,
+    pub(crate) oauth_redirect_uri: Option<String>,
     pub(crate) detail_open: bool,
     /// Manual visual-row adjustment around an automatic search hit.
     pub(crate) detail_scroll: i16,
@@ -72,6 +74,8 @@ impl Panel {
             sel: 0,
             editing: None,
             oauth_verifier: None,
+            oauth_state: None,
+            oauth_redirect_uri: None,
             detail_open: false,
             detail_scroll: 0,
         }

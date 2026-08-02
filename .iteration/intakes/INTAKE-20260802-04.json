@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260802-04",
+  "classification": "active",
+  "summary": "沿已批准 TUI 需求继续迭代；先向既有 NotebookLM 对话索取计划，再以代码与终端证据推进 Answer/Reasoning、工具折叠与适配性。",
+  "requirement_ids": [
+    "REQ-20260801-01"
+  ],
+  "pending_ids": [],
+  "approval_reasons": [],
+  "open_questions": [],
+  "approval_evidence": "",
+  "request_sha256": "02efaf2660ad47ec9af227132d0401238f98709f8fbd3950aea0779fa565767f",
+  "requirements_sha256": "c7933ea98ebce160e8c08ac818ce1a6aedaf280bb397dbcb458d6d190b6e998b",
+  "pending_sha256": "3b2a1c2d01c1d0e6c33d8e5ec0365873066e4b3b541c2f63d703025b8f44425a",
+  "draft_sha256": "",
+  "previous_intake_sha256": "",
+  "executable": true,
+  "reasons": []
+}

@@ -1130,7 +1130,7 @@ fn apply_scroll_saturates() {
 }
 
 /// iter-27:主输入键位路由矩阵 —— Shift/Alt+Enter/Ctrl+J 换行,Up/Down 归光标/历史枢纽,
-/// busy 时 Enter 不提交,浮窗态 ↑↓/Tab/Enter/Esc 归浮窗、字符穿透,松键忽略。
+/// busy 时 Enter 不提交,浮窗态 ↑↓选择、Tab补全、Enter提交,字符穿透,松键忽略。
 #[test]
 fn input_action_routes_keys() {
     let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
@@ -1315,10 +1315,10 @@ fn input_action_routes_keys() {
         ),
         None
     );
-    // 浮窗态
+    // 浮窗态:Tab 接受补全但不提交;Enter 接受补全并直接提交。
     assert_eq!(
         input_action(&press(KeyCode::Tab), false, true),
-        InputAction::PopupNext
+        InputAction::PopupAccept
     );
     assert_eq!(
         input_action(&press(KeyCode::Down), false, true),
@@ -1330,7 +1330,7 @@ fn input_action_routes_keys() {
     );
     assert_eq!(
         input_action(&press(KeyCode::Enter), false, true),
-        InputAction::PopupApply
+        InputAction::PopupSubmit
     );
     assert_eq!(
         input_action(&press(KeyCode::Esc), false, true),
@@ -1369,6 +1369,20 @@ fn input_action_routes_keys() {
         ),
         InputAction::Ignore
     );
+}
+
+#[test]
+fn ctrl_c_requires_second_press_within_two_seconds() {
+    let now = std::time::Instant::now();
+    assert!(!is_second_ctrl_c(None, now));
+    assert!(is_second_ctrl_c(
+        Some(now),
+        now + std::time::Duration::from_secs(1)
+    ));
+    assert!(!is_second_ctrl_c(
+        Some(now),
+        now + std::time::Duration::from_secs(3)
+    ));
 }
 
 /// iter-30:wcwidth 显示宽度 —— CJK/emoji 占 2 格,光标显示列按实占累加,折行按实占计。

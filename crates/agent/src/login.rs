@@ -46,6 +46,7 @@ pub(crate) fn print_presets() {
         "\nExample:  ridgecode login deepseek sk-...            (verifies connection, registers + sets as default)\n\
          \x20         ridgecode login kimi --no-default          (add as a switchable profile)\n\
          \x20         ridgecode login openai sk-... --no-verify  (skip the connection check)\n\
+         OAuth fallback: ridgecode login --codex --device-auth (no localhost callback port required).\n\
          Login verifies the key against the endpoint before saving. Key goes to ~/.ridge/auth.json\n\
          (never into config.json). Omit KEY to be prompted on stdin."
     );
@@ -64,6 +65,7 @@ pub(crate) async fn run_login(args: &[String]) -> anyhow::Result<()> {
     let mut no_verify = false;
     let mut oauth_claude = false;
     let mut oauth_codex = false;
+    let mut device_auth = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -71,6 +73,7 @@ pub(crate) async fn run_login(args: &[String]) -> anyhow::Result<()> {
             "--no-default" => make_default = false,
             "--default" => make_default = true,
             "--no-verify" => no_verify = true,
+            "--device-auth" => device_auth = true,
             "--claude" => oauth_claude = true, // iter-43:OAuth 订阅登录(接 Claude Pro/Max)
             "--codex" => oauth_codex = true,   // iter-48:OAuth 订阅登录(接 ChatGPT Plus/Pro)
             "--model" => model = it.next().cloned(),
@@ -80,9 +83,15 @@ pub(crate) async fn run_login(args: &[String]) -> anyhow::Result<()> {
     }
     // OAuth(PKCE)订阅登录,与 api-key 登录分道(iter-43 claude / iter-48 codex)。
     if oauth_claude {
+        if device_auth {
+            anyhow::bail!("--device-auth is only supported with `--codex`");
+        }
         return run_login_oauth(&provider::oauth::ANTHROPIC, no_verify).await;
     }
     if oauth_codex {
+        if device_auth {
+            return run_login_device_auth(no_verify).await;
+        }
         return run_login_oauth(&provider::oauth::OPENAI, no_verify).await;
     }
     if list || positional.is_empty() {
@@ -196,7 +205,7 @@ pub(crate) fn save_oauth_token(
 /// 订阅 OAuth 各家默认 (model, base_url)(env RIDGE_MODEL/RIDGE_BASE_URL 或 config 可覆盖)。
 pub(crate) fn oauth_defaults(provider_id: &str) -> (&'static str, &'static str) {
     match provider_id {
-        "openai" => ("gpt-5", "https://api.openai.com/v1"),
+        "openai" => ("gpt-5", "https://chatgpt.com/backend-api/codex"),
         _ => ("claude-sonnet-4-6", "https://api.anthropic.com/v1"),
     }
 }
@@ -207,11 +216,14 @@ fn oauth_provider(
     base: String,
     model: String,
     access: String,
+    account_id: Option<String>,
 ) -> Arc<dyn LlmProvider> {
     if provider_id == "anthropic" {
         Arc::new(AnthropicProvider::new_oauth(base, model, access))
     } else {
-        Arc::new(OpenAiProvider::new(base, model, access))
+        Arc::new(provider::ChatGptProvider::new(
+            base, model, access, account_id,
+        ))
     }
 }
 
@@ -225,7 +237,26 @@ pub(crate) async fn run_login_oauth(
     use provider::oauth;
     let pkce = oauth::Pkce::generate();
     let state = oauth::random_token();
-    let url = oauth::authorize_url(ocfg, &pkce.challenge, &state);
+    let callback = if ocfg.token_wire == oauth::TokenWire::Form {
+        match start_local_callback(state.clone()) {
+            Ok(callback) => Some(callback),
+            Err(e) => {
+                if ocfg.provider == "openai" {
+                    eprintln!("  local callback unavailable ({e}); switching to device auth");
+                    return run_login_device_auth(no_verify).await;
+                }
+                eprintln!("  local callback unavailable ({e}); switching to copy/paste fallback");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let redirect_uri = callback
+        .as_ref()
+        .map(|c| c.redirect_uri.clone())
+        .unwrap_or_else(|| ocfg.redirect_uri.to_string());
+    let url = oauth::authorize_url_with_redirect(ocfg, &pkce.challenge, &state, &redirect_uri);
     let flag = if ocfg.provider == "openai" {
         "--codex"
     } else {
@@ -236,30 +267,145 @@ pub(crate) async fn run_login_oauth(
         "注:授权站点可能有地域限制。所在区域若无法直连,浏览器需走代理打开下方 URL;\n   \
          并给本进程设 HTTP_PROXY/HTTPS_PROXY 环境变量 —— token 交换/刷新会自动走它。\n"
     );
-    println!("1) 在浏览器打开以下 URL,用你的订阅账号授权:\n\n{url}\n");
-    // 取 code:openai 重定向到本地回调端口,起临时 listener 接;anthropic 回调页显码,用户回贴。
-    let code = if ocfg.token_wire == oauth::TokenWire::Form {
-        println!("2) 等待浏览器授权回调(监听 localhost:1455;Ctrl-C 取消)…");
-        let expect = state.clone();
-        tokio::task::spawn_blocking(move || read_local_callback("127.0.0.1:1455", &expect))
-            .await??
+    if open_in_browser(&url) {
+        println!("1) 已在默认浏览器打开授权页（下方 URL 仍可手动复制）：\n");
     } else {
-        println!("2) 授权后页面会显示形如 `code#state` 的码。粘贴到此处并回车:");
+        println!("1) 请在浏览器打开下方 URL：\n");
+    }
+    println!("{url}\n");
+    // 取 code:openai 由已启动的 listener 自动接收;anthropic 回调页显码,用户回贴。
+    let code = if let Some(callback) = callback {
+        println!(
+            "2) 等待浏览器授权回调(监听 localhost:{};Ctrl-C 取消)…",
+            callback.port
+        );
+        let value = callback.wait().await.map_err(|e| anyhow::anyhow!(e))?;
+        value
+    } else if ocfg.token_wire == oauth::TokenWire::Form {
+        read_pasted_authorization(&state)?
+    } else {
+        println!("2) 授权后页面会显示形如 code#state 的码。粘贴到此处并回车:");
         eprint!("code: ");
         std::io::stderr().flush().ok();
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
-        line.trim().to_string()
+        provider::oauth::parse_authorization_input(&line, &state)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?
     };
     if code.is_empty() {
         anyhow::bail!("no authorization code provided; aborted (nothing written).");
     }
     let http = provider::http::ReqwestClient::new();
-    let token = oauth::exchange_code(&http, ocfg, &code, &pkce.verifier, now_epoch())
+    let token = oauth::exchange_code_with_redirect(
+        &http,
+        ocfg,
+        &code,
+        &pkce.verifier,
+        &redirect_uri,
+        now_epoch(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("token exchange failed: {e}"))?;
+    finish_oauth_login(ocfg, token, no_verify).await
+}
+
+/// OpenAI device-auth 登录:不占用本机回调端口,适配 1455 被系统排除的主机。
+pub(crate) async fn run_login_device_auth(no_verify: bool) -> anyhow::Result<()> {
+    use provider::oauth;
+
+    let http = provider::http::ReqwestClient::new();
+    let device = oauth::request_device_code(&http, oauth::OPENAI.client_id)
         .await
-        .map_err(|e| anyhow::anyhow!("token exchange failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("device auth request failed: {e}"))?;
+    let opened = open_in_browser(oauth::OPENAI_DEVICE_VERIFICATION_URL);
+    println!("\n== ridgecode login --codex --device-auth ==\n");
+    println!(
+        "1) {}:\n{}\n",
+        if opened {
+            "已在默认浏览器打开设备授权页（下方 URL 仍可手动复制）"
+        } else {
+            "请在浏览器打开设备授权页"
+        },
+        oauth::OPENAI_DEVICE_VERIFICATION_URL
+    );
+    println!("2) 在页面输入一次性设备码：{}", device.user_code);
+    println!("   等待浏览器完成授权（最多 15 分钟）…");
+
+    let authorization = oauth::poll_device_code(&http, &device)
+        .await
+        .map_err(|e| anyhow::anyhow!("device auth polling failed: {e}"))?;
+    let token = oauth::exchange_code_with_redirect(
+        &http,
+        &oauth::OPENAI,
+        &authorization.authorization_code,
+        &authorization.code_verifier,
+        oauth::OPENAI_DEVICE_REDIRECT_URI,
+        now_epoch(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("token exchange failed: {e}"))?;
+    finish_oauth_login(&oauth::OPENAI, token, no_verify).await
+}
+
+pub(crate) enum DeviceOAuthEvent {
+    Ready { user_code: String, opened: bool },
+    Complete(Result<provider::oauth::OAuthToken, String>),
+}
+
+pub(crate) struct DeviceOAuthFlow {
+    pub(crate) receiver: tokio::sync::mpsc::UnboundedReceiver<DeviceOAuthEvent>,
+    cancel: tokio::task::AbortHandle,
+}
+
+impl Drop for DeviceOAuthFlow {
+    fn drop(&mut self) {
+        self.cancel.abort();
+    }
+}
+
+pub(crate) fn start_device_oauth() -> DeviceOAuthFlow {
+    let (tx, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        let result = async {
+            let http = provider::http::ReqwestClient::new();
+            let device =
+                provider::oauth::request_device_code(&http, provider::oauth::OPENAI.client_id)
+                    .await
+                    .map_err(|e| format!("device auth request failed: {e}"))?;
+            let opened = open_in_browser(provider::oauth::OPENAI_DEVICE_VERIFICATION_URL);
+            let _ = tx.send(DeviceOAuthEvent::Ready {
+                user_code: device.user_code.clone(),
+                opened,
+            });
+            let authorization = provider::oauth::poll_device_code(&http, &device)
+                .await
+                .map_err(|e| format!("device auth polling failed: {e}"))?;
+            provider::oauth::exchange_code_with_redirect(
+                &http,
+                &provider::oauth::OPENAI,
+                &authorization.authorization_code,
+                &authorization.code_verifier,
+                provider::oauth::OPENAI_DEVICE_REDIRECT_URI,
+                now_epoch(),
+            )
+            .await
+            .map_err(|e| format!("token exchange failed: {e}"))
+        }
+        .await;
+        let _ = tx.send(DeviceOAuthEvent::Complete(result));
+    });
+    DeviceOAuthFlow {
+        receiver,
+        cancel: task.abort_handle(),
+    }
+}
+
+async fn finish_oauth_login(
+    ocfg: &provider::oauth::OAuthConfig,
+    token: provider::oauth::OAuthToken,
+    no_verify: bool,
+) -> anyhow::Result<()> {
     let path = save_oauth_token(ocfg.provider, &token)?;
-    // iter-48 G3:顺手登记 use_oauth 命名档 —— /provider 页可列可切,订阅成一等公民。
     if let Some(name) = register_oauth_profile(ocfg.provider) {
         println!(
             "     profile    -> {}  (name \"{name}\", oauth)",
@@ -267,17 +413,27 @@ pub(crate) async fn run_login_oauth(
         );
     }
     println!("\n[OK] 订阅已接入({})。", ocfg.provider);
-    println!("     credential saved -> {path}  (access+refresh, chmod 600 where supported)");
+    println!(
+        "     credential saved -> {path}  (OAuth tokens + account metadata, chmod 600 where supported)"
+    );
     println!("     just run: ridgecode   (启动自动用订阅凭据,过期自动刷新)");
-    // best-effort 校验(默认;--no-verify 跳过):bearer 打一次最小调用证明能到模型。
-    // 失败仅告警不判失败 —— 活 OAuth wire(端点/system 前缀/beta 头)无法离线核验。
     if !no_verify {
         eprint!("verifying subscription reaches the model … ");
         std::io::stderr().flush().ok();
         let (dm, db) = oauth_defaults(ocfg.provider);
         let model = std::env::var("RIDGE_MODEL").unwrap_or_else(|_| dm.to_string());
-        let base = std::env::var("RIDGE_BASE_URL").unwrap_or_else(|_| db.to_string());
-        let p = oauth_provider(ocfg.provider, base, model, token.access_token.clone());
+        let base = if ocfg.provider == "openai" {
+            std::env::var("RIDGE_CHATGPT_BASE_URL").unwrap_or_else(|_| db.to_string())
+        } else {
+            std::env::var("RIDGE_BASE_URL").unwrap_or_else(|_| db.to_string())
+        };
+        let p = oauth_provider(
+            ocfg.provider,
+            base,
+            model,
+            token.access_token.clone(),
+            token.account_id.clone(),
+        );
         let req = provider::CompletionRequest {
             messages: vec![Message::user("ping")],
             tools: vec![],
@@ -292,8 +448,191 @@ pub(crate) async fn run_login_oauth(
     Ok(())
 }
 
+fn open_in_browser(url: &str) -> bool {
+    #[cfg(windows)]
+    let result = std::process::Command::new("rundll32.exe")
+        .args(["url.dll,FileProtocolHandler", url])
+        .spawn()
+        .or_else(|_| std::process::Command::new("explorer.exe").arg(url).spawn());
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open").arg(url).spawn();
+    result.is_ok()
+}
+
+/// A short-lived localhost OAuth callback listener shared by CLI and TUI.
+/// The listener starts before the browser opens, serves a real HTML response,
+/// and tries the registered Codex fallback port when 1455 is unavailable.
+pub(crate) struct LocalOAuthCallback {
+    pub(crate) port: u16,
+    pub(crate) redirect_uri: String,
+    pub(crate) receiver: tokio::sync::oneshot::Receiver<Result<String, String>>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl LocalOAuthCallback {
+    pub(crate) async fn wait(mut self) -> Result<String, String> {
+        (&mut self.receiver)
+            .await
+            .map_err(|_| "local OAuth callback listener stopped".to_string())?
+    }
+}
+
+impl Drop for LocalOAuthCallback {
+    fn drop(&mut self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+pub(crate) fn start_local_callback(expected_state: String) -> Result<LocalOAuthCallback, String> {
+    const PORTS: &[u16] = &[1455, 1457];
+    let mut errors = Vec::new();
+    let (listener, port) = PORTS
+        .iter()
+        .find_map(
+            |port| match std::net::TcpListener::bind(("127.0.0.1", *port)) {
+                Ok(listener) => Some((listener, *port)),
+                Err(error) => {
+                    errors.push(format!("cannot listen on 127.0.0.1:{port}: {error}"));
+                    None
+                }
+            },
+        )
+        .ok_or_else(|| {
+            format!(
+                "{}; tried registered ports 1455 and 1457",
+                errors.join("; ")
+            )
+        })?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("cannot configure localhost:{port}: {e}"))?;
+    let (tx, receiver) = tokio::sync::oneshot::channel();
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let thread_cancel = cancel.clone();
+    std::thread::spawn(move || {
+        let mut sender = Some(tx);
+        while !thread_cancel.load(std::sync::atomic::Ordering::Acquire) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    if let Some(result) = handle_local_callback_stream(&mut stream, &expected_state)
+                    {
+                        if let Some(tx) = sender.take() {
+                            let _ = tx.send(result);
+                        }
+                        break;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                }
+                Err(error) => {
+                    if let Some(tx) = sender.take() {
+                        let _ = tx.send(Err(format!("local OAuth listener failed: {error}")));
+                    }
+                    break;
+                }
+            }
+        }
+    });
+    Ok(LocalOAuthCallback {
+        port,
+        redirect_uri: format!("http://localhost:{port}/auth/callback"),
+        receiver,
+        cancel,
+    })
+}
+
+fn handle_local_callback_stream(
+    stream: &mut std::net::TcpStream,
+    expected_state: &str,
+) -> Option<Result<String, String>> {
+    use std::io::Read;
+    let mut request = [0u8; 8192];
+    let size = stream.read(&mut request).ok()?;
+    let first = String::from_utf8_lossy(&request[..size])
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let path = first
+        .strip_prefix("GET ")
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or(&first);
+    if path == "/" {
+        let _ = write_http_response(
+            stream,
+            "200 OK",
+            "text/html; charset=utf-8",
+            "<h2>RidgeCode is waiting for the OAuth callback.</h2><p>Keep this window open while you authorize.</p>",
+        );
+        return None;
+    }
+    if path == "/favicon.ico" {
+        let _ = write_http_response(stream, "204 No Content", "text/plain", "");
+        return None;
+    }
+    if !path.starts_with("/auth/callback") {
+        let _ = write_http_response(stream, "404 Not Found", "text/plain", "Not Found");
+        return None;
+    }
+    let Some((code, state)) = provider::oauth::parse_callback_path(&first) else {
+        let _ = write_http_response(
+            stream,
+            "400 Bad Request",
+            "text/html; charset=utf-8",
+            "<h2>OAuth callback did not contain a code.</h2><p>Restart login in RidgeCode.</p>",
+        );
+        return Some(Err("OAuth callback did not contain a code".into()));
+    };
+    if state != expected_state {
+        let _ = write_http_response(
+            stream,
+            "400 Bad Request",
+            "text/html; charset=utf-8",
+            "<h2>OAuth state mismatch.</h2><p>Restart login in RidgeCode.</p>",
+        );
+        return Some(Err("OAuth state mismatch; restart login".into()));
+    }
+    let _ = write_http_response(
+        stream,
+        "200 OK",
+        "text/html; charset=utf-8",
+        "<h2>RidgeCode login successful.</h2><p>You can close this window.</p>",
+    );
+    Some(Ok(format!("{code}#{state}")))
+}
+
+fn write_http_response(
+    stream: &mut std::net::TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &str,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )?;
+    stream.flush()
+}
+
 /// iter-48 G3:把订阅登记为 `use_oauth` 命名档(同名覆盖,best-effort)。
 /// 成功返回档名;失败静默 None(凭据已落 oauth.json,档只是列切便利)。
+fn read_pasted_authorization(expected_state: &str) -> anyhow::Result<String> {
+    println!("   授权后复制浏览器地址栏中的完整 localhost 回调 URL，或粘贴 code#state:",);
+    eprint!("callback: ");
+    std::io::stderr().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    provider::oauth::parse_authorization_input(&line, expected_state)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
 pub(crate) fn register_oauth_profile(provider_id: &str) -> Option<String> {
     let (dm, db) = oauth_defaults(provider_id);
     let prof = agent::ProviderProfile {
@@ -319,35 +658,6 @@ pub(crate) fn register_oauth_profile(provider_id: &str) -> Option<String> {
     Some(prof.name)
 }
 
-/// 起临时本地 TCP listener 接 OAuth 回调(阻塞;spawn_blocking 里跑)。
-/// 循环 accept 直到某请求首行含 code(浏览器杂请求如 favicon 跳过);校验 state 防 CSRF。
-fn read_local_callback(addr: &str, expected_state: &str) -> anyhow::Result<String> {
-    use std::io::{BufRead, BufReader, Write as _};
-    let listener = std::net::TcpListener::bind(addr)
-        .map_err(|e| anyhow::anyhow!("cannot listen on {addr}: {e} (port in use?)"))?;
-    for stream in listener.incoming() {
-        let Ok(mut stream) = stream else { continue };
-        let mut first = String::new();
-        if BufReader::new(&stream).read_line(&mut first).is_err() {
-            continue;
-        }
-        let Some((code, state)) = provider::oauth::parse_callback_path(first.trim()) else {
-            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n");
-            continue;
-        };
-        if state != expected_state {
-            let _ =
-                stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\nstate mismatch; restart login");
-            anyhow::bail!("OAuth state mismatch (possible CSRF); aborted.");
-        }
-        let _ = stream.write_all(
-            b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n\r\n<h2>Login successful. You can close this window.</h2>",
-        );
-        return Ok(code);
-    }
-    anyhow::bail!("listener closed before callback arrived")
-}
-
 /// key 全无时的回退(iter-43;iter-48 泛化) —— oauth.json 依次找 anthropic → openai
 /// 订阅 token,命中则构造 bearer-mode provider。过期(含 60s 余量)先刷新并落盘;
 /// 刷新失败退回旧 token 让 API 定夺。
@@ -361,7 +671,8 @@ pub(crate) async fn resolve_claude_oauth_provider(cfg: &Config) -> Option<Arc<dy
         if token.needs_refresh(now) {
             let http = provider::http::ReqwestClient::new();
             match provider::oauth::refresh(&http, ocfg, &token.refresh_token, now).await {
-                Ok(fresh) => {
+                Ok(mut fresh) => {
+                    fresh.preserve_chatgpt_metadata_from(&token);
                     let _ = save_oauth_token(ocfg.provider, &fresh);
                     token = fresh;
                 }
@@ -373,10 +684,14 @@ pub(crate) async fn resolve_claude_oauth_provider(cfg: &Config) -> Option<Arc<dy
             .ok()
             .or_else(|| cfg.model.clone())
             .unwrap_or_else(|| dm.to_string());
-        let base = std::env::var("RIDGE_BASE_URL")
-            .ok()
-            .or_else(|| cfg.base_url.clone())
-            .unwrap_or_else(|| db.to_string());
+        let base = if ocfg.provider == "openai" {
+            std::env::var("RIDGE_CHATGPT_BASE_URL").unwrap_or_else(|_| db.to_string())
+        } else {
+            std::env::var("RIDGE_BASE_URL")
+                .ok()
+                .or_else(|| cfg.base_url.clone())
+                .unwrap_or_else(|| db.to_string())
+        };
         eprintln!(
             "[ridgecode] starting with {} subscription (OAuth) · {model}",
             ocfg.provider
@@ -386,6 +701,7 @@ pub(crate) async fn resolve_claude_oauth_provider(cfg: &Config) -> Option<Arc<dy
             base,
             model,
             token.access_token,
+            token.account_id,
         ));
     }
     None
@@ -426,5 +742,28 @@ mod tests {
         assert!(verify_key_via(&bad, "openai", "https://x", "k")
             .await
             .is_err());
+    }
+
+    #[test]
+    fn local_callback_serves_waiting_page_and_returns_code() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let expected = "state-123".to_string();
+        let thread = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handle_local_callback_stream(&mut stream, &expected)
+        });
+        let mut client = std::net::TcpStream::connect(addr).unwrap();
+        client
+            .write_all(b"GET /auth/callback?code=code-abc&state=state-123 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        let result = thread.join().unwrap();
+        assert_eq!(result, Some(Ok("code-abc#state-123".into())));
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("RidgeCode login successful"));
     }
 }

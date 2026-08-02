@@ -997,7 +997,7 @@ pub(crate) fn draw(
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" Tab/↑↓ select · Enter use · Esc close "),
+                        .title(" ↑↓ select · Tab complete · Enter send · Esc close "),
                 )
                 .highlight_style(
                     Style::default()

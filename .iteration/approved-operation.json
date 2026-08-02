@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "upsert": [
+    {
+      "id": "REQ-20260801-01",
+      "section": "active",
+      "markdown": "### REQ-20260801-01 · TUI 视觉、交互与展示层迭代\n\n- Status:`ACTIVE`\n- Version:`v0.1.0`\n- Behavior:`RidgeCode TUI 以清晰、科技感强且终端主题友好的界面呈现实际收到且允许展示的模型输出与最终回答；工具调用默认折叠并可按需展开；关键交互可发现、可操作，长任务期间保持响应。`\n- Boundary:`范围限于 crates/agent/src/tui 及其直接交互/渲染依赖、展示状态模型、布局、事件处理、渲染与测试，以及按迭代门进行的 NotebookLM 架构/业界方案调研与本轮 Note 清理。不改变 langgraph 核心语义，不把具体 LLM/MCP SDK 耦合进 TUI，不牺牲安全门、确定性验证、跨平台终端兼容或数据完整性，不升级无关依赖；保留 maker/checker、权限门、危险命令拦截、输入排队/取消、事件驱动主环与 ANSI 16 色主题适配方向；不覆盖 samples/config.json 与 test_codegraph.ps1。`\n- Acceptance:`通过 cargo fmt --all --check、cargo test --workspace、cargo clippy --workspace --all-targets -- -D warnings；TUI 纯逻辑测试覆盖折叠、展开、状态迁移、窄终端布局与关键键位；完成真实终端或可复现渲染验收，证明长输出不刷屏、工具默认收起且可展开、输入与取消不阻塞；NotebookLM 建议经 CodeGraph、当前代码与测试核验后方可落地。`\n- Traceability:`REQ → crates/agent/src/tui/*.rs 的状态/事件/渲染符号 → crates/agent/src/tui/tests.rs 与 workspace 质量闸；Note 清理以本轮迭代 ID、闭环证据与本地 archive 记录为准。`"
+    }
+  ],
+  "remove": ["PENDING-REQ-20260801-01"]
+}

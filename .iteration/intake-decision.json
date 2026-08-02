@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260802-05",
+  "classification": "active",
+  "summary": "在已批准 ReRelease 范围内，将稳定 release 二进制替换为本机 PATH 中的旧 RidgeCode 安装并验证。",
+  "requirement_ids": ["REQ-20260802-02"],
+  "pending_ids": [],
+  "approval_reasons": [],
+  "open_questions": [],
+  "approval_evidence": "",
+  "notes": "Operational installation step within the approved ReRelease requirement; no new requirement or scope expansion."
+}

@@ -100,9 +100,17 @@ ridgecode login openai "your-key" --no-verify
 ~~~bash
 ridgecode login --claude
 ridgecode login --codex
+# 无法监听 localhost:1455 时，使用无本地端口的设备授权
+ridgecode login --codex --device-auth
 ~~~
 
 程序打开授权流程，用户在浏览器完成授权。凭据独立保存到 ~/.ridge/oauth.json；不把 access token 打进日志、配置或任务内容。OAuth 端点、账号权限和 provider wire 仍以实际账号与服务端结果为准。
+
+`ridgecode login --codex` 使用 ChatGPT/Codex 订阅通道：授权成功后保存 `id_token` 与 `chatgpt_account_id`，补全请求发往 `https://chatgpt.com/backend-api/codex/responses`，并带 `ChatGPT-Account-Id`。已有旧版 `oauth.json` 若缺少账号标识，需重新执行 `ridgecode login --codex`；可用 `RIDGE_CHATGPT_BASE_URL` 覆盖后端地址。API Key 路径仍使用 `RIDGE_BASE_URL` 与 OpenAI 兼容的 Chat Completions。
+
+`ridgecode login --codex --device-auth` 不占用本机回调端口：浏览器打开设备页，输入一次性设备码，程序自动轮询并保存凭据。
+
+也可先启动 `ridgecode`，在 TUI 输入 `/login`，选择 `codex-oauth`；入口会自动打开浏览器。若 Windows 无法监听已登记的 localhost:1455/1457，Codex TUI 自动切设备授权，无需复制粘贴回调 URL。
 
 ## 交互式 TUI
 
@@ -132,7 +140,8 @@ ridgecode login --codex
 | Alt+PageUp/PageDown | 优先滚动工具详情；否则检视 Live Answer/Reasoning 或 Tool History 详情 |
 | Alt+End | Live Answer/Reasoning 回到最新尾部 |
 | ↑/↓ | 空闲输入时浏览历史；面板中移动选项 |
-| Tab | 打开或选择补全；可补全 /command 与 @path |
+| Tab | 只接受当前补全，不提交；可补全 /command 与 @path |
+| Enter | 接受当前补全并提交；忙时进入队列 |
 | Esc | 关闭浮窗/面板；审批中拒绝 |
 | 审批 y / Enter | 批准工具调用 |
 | 审批 n / Esc | 拒绝工具调用 |
@@ -169,7 +178,7 @@ ridgecode login --codex
 | /provider use <name> | 热切换到指定档案 |
 | /login | 打开掩码登录面板 |
 | /login list | 列出预设与 OAuth 入口 |
-| /login --claude、/login --codex | 启动对应 OAuth 登录 |
+| /login --claude、/login --codex | 启动对应 OAuth 登录；端口受限时可执行 `ridgecode login --codex --device-auth` |
 | /login <id> <API_KEY> | 校验并接入指定预设 |
 | /agent | 查看可派发的只读 sub-agent |
 | /mcp | 查看已配置 MCP server |
@@ -224,12 +233,14 @@ ridgecode login --codex
 | allow_jailbreak | 是否允许 cwd 子树外写入；默认关 |
 | notify | 每个任务完成时响终端铃 |
 | sandbox_cmd | run_shell 的外置 sandbox 包裹模板，{cwd} 替换项目目录 |
-| proxy | 出站 HTTP 代理，例如 http://127.0.0.1:7890 |
+| proxy | 出站代理；HTTP/Mixed 例如 http://127.0.0.1:51081，SOCKS5 例如 socks5h://127.0.0.1:51080 |
 | providers | 命名 provider 档案数组 |
 | mcp | MCP server 数组 |
 | hooks | pre_tool、post_tool、session_start、stop hook 数组 |
 
 /config set 允许持久化：provider、model、base_url、budget_tokens、skills_dir、skip_danger、status_bar、allow_jailbreak、proxy。结构化字段（如 mcp、providers、hooks）请直接编辑 JSON。
+
+代理优先级为 `RIDGE_PROXY` > 配置项 `proxy` > 通用 `HTTP_PROXY`/`HTTPS_PROXY`；需临时覆盖配置时用 `RIDGE_PROXY`。
 
 ### Provider 档案
 
@@ -332,7 +343,7 @@ read_file、search、web_search、fetch_url、todo_write、signal_write 与 disp
 | RIDGE_CONFIG | 配置文件路径 | ~/.ridge/config.json |
 | RIDGE_API_KEY | 顶层 API key | 优先于配置 key |
 | RIDGE_PROVIDER / RIDGE_MODEL / RIDGE_BASE_URL | 覆盖顶层 provider 身份 | env 优先于 config |
-| RIDGE_PROXY | 出站代理 | 也可用 config proxy |
+| RIDGE_PROXY | 出站代理（http://... 或 socks5h://...） | 也可用 config proxy |
 | RIDGE_AUTH | API key 密钥库路径 | ~/.ridge/auth.json |
 | RIDGE_OAUTH | OAuth 密钥库路径 | ~/.ridge/oauth.json |
 | RIDGE_SESSION | 会话恢复文件 | ~/.ridge/session.json |

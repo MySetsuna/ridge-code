@@ -1,0 +1,95 @@
+{
+  "status": "PROCEED",
+  "confirmed_facts": [
+    {
+      "fact": "当前 Answer 已有行级 Markdown 结构、围栏状态、语言 badge 与 ANSI16 rail，但代码块正文仍统一使用 Muted 单色；live 路径按可见尾部绘制。",
+      "evidence": "CodeGraph crates/agent/src/tui/render.rs::md_line_spans/live_markdown_line/fence_language; crates/agent/src/tui/transcript.rs::visible_lines"
+    },
+    {
+      "fact": "长 Answer/Reasoning 已有 Answer tail、header anchor、Ctrl+R 检视与有界布局；PTY/native scrollback 缺真实 Windows 物理证据。",
+      "evidence": "CodeGraph crates/agent/src/tui/transcript.rs::pin_answer_header/visible_lines; existing TestBackend regressions; PROJECT-STATE PTY audit"
+    }
+  ],
+  "contradictions": [
+    "NLM 所称 PageUp/PageDown 尚未成为确定性动作不完全适用于当前实现：模态面板与审批已有分页/滚动，但 live Answer 没有独立块级导航契约；不能直接复制全屏 viewport 语义。",
+    "报告建议 tree-sitter/syntect 与 O(k/n) 性能数字不属于已批准依赖或本地测量事实；本轮只可做无依赖、可见行、可回退的词法呈现实验。"
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "在现有 fence 状态与 visible_lines 之上加入有限词法角色，可提升代码 Answer 的可读性与科技感，且不改变模型文本。",
+      "support": [
+        "live_markdown_line 已只处理进入视口的行",
+        "Role 已有 Primary/Info/Success/Warn/Muted ANSI16 语义色"
+      ],
+      "against": [
+        "无语言级 parser 与跨行字符串状态",
+        "错误词法高亮可能降低可读性，需保持纯文本降级"
+      ],
+      "experiment": "对 fenced live code 的可见行做 bounded lexer：仅识别通用关键字、字符串、数字、注释，保留未知文本 Muted；TestBackend/纯逻辑测试确认截断不越界、非代码行不变。"
+    }
+  ],
+  "candidates": [
+    {
+      "core": "视口内通用代码词法语义色",
+      "constraints": [
+        "不引入 tree-sitter/syntect/pulldown-cmark 等新依赖",
+        "仅作用于实际 fenced code 的可见 live 行，未知 token 继续 Muted",
+        "不改 Answer/Reasoning 文本、fence 状态、键位或 native scrollback"
+      ],
+      "risks": [
+        "有限词法器不是完整语言解析器",
+        "跨行字符串/注释不能猜测，必须降级而非伪造"
+      ],
+      "reversibility": "高；纯 render.rs 投影，可整体回退为单色代码行",
+      "scope": ["crates/agent/src/tui/render.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": [
+        "Rust/Python/JS 常见关键字、字符串、数字、注释具不同 ANSI16 角色",
+        "视口裁切后不可见 token 不进入 Span，非代码 Markdown 回归不变",
+        "窄 CJK/emoji 与 fence close 仍无 ANSI 残留/越界"
+      ]
+    },
+    {
+      "core": "块内 PageUp/PageDown 导航",
+      "constraints": [
+        "不得与 Panel/审批/浮窗优先级冲突",
+        "必须先定义 live transcript 的焦点块与持久 offset"
+      ],
+      "risks": [
+        "新增键位/状态契约可能改变现有输入与滚动语义",
+        "动态折行无缓存时定位不稳定"
+      ],
+      "reversibility": "中高；但需新增交互状态",
+      "scope": ["crates/agent/src/tui/transcript.rs", "crates/agent/src/tui/input.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["30 行 Answer 的页跳转精确可复现", "Panel/审批优先级与输入不回归"]
+    },
+    {
+      "core": "PTY/native scrollback 物理审计",
+      "constraints": [
+        "只做证据实验，不改 insert_before/ANSI/Viewport",
+        "必须使用真实 Windows Terminal 与跨样式 CJK/emoji 文本"
+      ],
+      "risks": ["当前无自动 harness，结果依赖人工复现"],
+      "reversibility": "N/A；不改生产代码",
+      "scope": ["docs/PROJECT-STATE.md", "docs/archive/events-2026-08.jsonl"],
+      "validation": ["跨样式 Ctrl+F 与鼠标复制命中、无乱码；否则记录失败签名"]
+    }
+  ],
+  "recommendation": "先做候选一的无依赖可见行通用词法色实验；候选二需另立键位/状态设计，候选三继续证据阶段，不把报告性能数字写成事实。",
+  "next_step": {
+    "type": "implementation",
+    "value": "在 render.rs 为 fenced live code 增加有限 bounded lexer 与 ANSI16 token roles，补纯逻辑和 TestBackend 回归；未知语法保持 Muted。"
+  },
+  "stop_conditions": [
+    "若非代码 Markdown、fence close、窄端或 Answer/Reasoning 预算回归，立即回退。",
+    "不得引入未经批准依赖或宣称性能收益。",
+    "不得查询或修改进行中的深度调研任务。"
+  ],
+  "metadata": {
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "source_id": "8862d715-ffad-4288-b7eb-173260e2dcff",
+    "sources_used": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "notes_listed": 1,
+    "deletable_completed_or_expired_notes": 0
+  }
+}

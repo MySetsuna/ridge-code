@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "task": "沿 REQ-20260801-01 继续推进 TUI：根据手动导入理论与既有 NLM 对话，确定下一项高价值交互/展示实验",
+  "symbols": [
+    "LiveTranscript::visible_lines",
+    "LiveTranscript::push_answer",
+    "LiveTranscript::push_tool",
+    "draw",
+    "top_chrome",
+    "input_chrome",
+    "render_live_line",
+    "tool_history_panel"
+  ],
+  "files": [
+    "crates/agent/src/tui/app.rs",
+    "crates/agent/src/tui/command.rs",
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/eventfmt.rs",
+    "crates/agent/src/tui/input.rs",
+    "crates/agent/src/tui/mod.rs",
+    "crates/agent/src/tui/panel.rs",
+    "crates/agent/src/tui/render.rs",
+    "crates/agent/src/tui/status.rs",
+    "crates/agent/src/tui/tests.rs",
+    "crates/agent/src/tui/transcript.rs",
+    "docs/PROJECT-STATE.md",
+    "docs/REQUIREMENTS-SPEC.md"
+  ],
+  "tests": [
+    "targeted TUI TestBackend regression covering the selected experiment",
+    "cargo fmt --all -- --check",
+    "cargo test -p agent --offline --quiet -- --test-threads=1",
+    "cargo clippy --workspace --all-targets --locked --offline --quiet -- -D warnings",
+    "cargo build --workspace --locked --offline --quiet"
+  ],
+  "requirements": {
+    "source": "docs/REQUIREMENTS-SPEC.md",
+    "ids": ["REQ-20260801-01"],
+    "records": [{"id": "REQ-20260801-01", "section": "active"}]
+  },
+  "constraints": [
+    "仅使用用户手动导入源 8862d715-ffad-4288-b7eb-173260e2dcff 作为理论依据",
+    "不查询 research_status、research_import 或用户明确禁用的进行中深研状态",
+    "NLM 只给候选与风险；代码事实必须由 CodeGraph、测试、运行或物理终端证据确认",
+    "一轮只选择一个最小可逆 TUI 实验，不改 langgraph、provider 协议、安全门或工具语义",
+    "保留 Answer/Reasoning 真实性、工具默认折叠、原生 scrollback、输入/审批/取消与 ANSI16 兼容"
+  ],
+  "read_policy": {
+    "allowed_files": [
+      "crates/agent/src/tui/app.rs",
+      "crates/agent/src/tui/command.rs",
+      "crates/agent/src/tui/draw.rs",
+      "crates/agent/src/tui/eventfmt.rs",
+      "crates/agent/src/tui/input.rs",
+      "crates/agent/src/tui/mod.rs",
+      "crates/agent/src/tui/panel.rs",
+      "crates/agent/src/tui/render.rs",
+      "crates/agent/src/tui/status.rs",
+      "crates/agent/src/tui/tests.rs",
+      "crates/agent/src/tui/transcript.rs",
+      "docs/PROJECT-STATE.md",
+      "docs/REQUIREMENTS-SPEC.md"
+    ],
+    "deny_unlisted": true,
+    "max_files": 25
+  },
+  "write_policy": {
+    "allowed_paths": [
+      "crates/agent/src/tui/app.rs",
+      "crates/agent/src/tui/command.rs",
+      "crates/agent/src/tui/draw.rs",
+      "crates/agent/src/tui/eventfmt.rs",
+      "crates/agent/src/tui/input.rs",
+      "crates/agent/src/tui/mod.rs",
+      "crates/agent/src/tui/panel.rs",
+      "crates/agent/src/tui/render.rs",
+      "crates/agent/src/tui/status.rs",
+      "crates/agent/src/tui/tests.rs",
+      "crates/agent/src/tui/transcript.rs",
+      "docs/PROJECT-STATE.md",
+      ".iteration/context.json",
+      ".iteration/decision.json",
+      ".iteration/PROJECT-STATE.snapshot.md",
+      "docs/archive/events-2026-08.jsonl"
+    ],
+    "deny_unlisted": true
+  },
+  "codegraph": {
+    "mode": "targeted",
+    "queries": [
+      "LiveTranscript visible projection and interaction ownership",
+      "draw responsive live layout and top chrome",
+      "input tool focus/history/detail scrolling and tests"
+    ],
+    "full_rebuild": false
+  },
+  "response_policy": {
+    "format": "delta_evidence_next",
+    "forbid_background_recap": true
+  },
+  "budget": {
+    "schema_version": 1,
+    "max": {
+      "exploration_calls": 5,
+      "codegraph_queries": 10,
+      "files_read": 25,
+      "retries": 3,
+      "token": 80000
+    }
+  }
+}

@@ -6,6 +6,11 @@ pub(crate) fn current_api_key() -> Option<String> {
     resolve_top_level_key(&Config::load(config_path()), &load_auth())
 }
 
+fn openai_oauth_token() -> Option<provider::oauth::OAuthToken> {
+    let text = std::fs::read_to_string(oauth_path()).ok()?;
+    agent::oauth_get(&text, "openai")
+}
+
 /// TUI `/login` 落盘核(与 CLI `run_login` 同语义,精简版):key → auth.json(收权限),
 /// 档案 + 顶层默认 → config.json。**key 不回显、不进 config**。热切由调用方做。
 pub(crate) fn tui_login(preset: &agent::ProviderPreset, key: &str) -> Result<(), String> {
@@ -62,23 +67,62 @@ pub(crate) async fn login_apply_verified(
     }
 }
 
-/// 订阅 OAuth 起步(iter-48 泛化):生成授权 URL,面板转就地输入态等码。
-/// anthropic 回调页显 `code#state` 回贴;openai 重定向 localhost:1455(TUI 不起 listener)——
-/// 授权后从浏览器地址栏拷整个回调 URL 贴回,`parse_callback_path` 提取 code。
+/// 订阅 OAuth 起步:先起本地回调 listener,再自动打开浏览器;收到回调后主循环自动换 token。
 pub(crate) fn begin_oauth(ui: &mut Ui, ocfg: &provider::oauth::OAuthConfig) {
     let pkce = provider::oauth::Pkce::generate();
     let state = provider::oauth::random_token();
-    let url = provider::oauth::authorize_url(ocfg, &pkce.challenge, &state);
+    let callback = if ocfg.token_wire == provider::oauth::TokenWire::Form {
+        match start_local_callback(state.clone()) {
+            Ok(callback) => Some(callback),
+            Err(error) => {
+                if ocfg.provider == "openai" {
+                    ui.oauth_device = Some(start_device_oauth());
+                    if let Some(panel) = ui.panel.as_mut() {
+                        panel.editing = None;
+                        panel.title =
+                            "Codex OAuth · device auth · browser will open · Esc cancel".into();
+                    }
+                    ui.note(
+                        format!(
+                            "OAuth localhost callback unavailable: {error}. Switching to device auth; browser will open automatically."
+                        ),
+                        Color::Yellow,
+                    );
+                    return;
+                }
+                ui.note(
+                    format!(
+                        "OAuth local callback unavailable: {error}. Manual callback paste remains available."
+                    ),
+                    Color::Yellow,
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let redirect_uri = callback
+        .as_ref()
+        .map(|c| c.redirect_uri.clone())
+        .unwrap_or_else(|| ocfg.redirect_uri.to_string());
+    let url =
+        provider::oauth::authorize_url_with_redirect(ocfg, &pkce.challenge, &state, &redirect_uri);
+    ui.oauth_callback = callback;
     if let Some(panel) = ui.panel.as_mut() {
         panel.oauth_verifier = Some(pkce.verifier);
+        panel.oauth_state = Some(state.clone());
+        panel.oauth_redirect_uri = Some(redirect_uri);
         panel.editing = Some(String::new());
         panel.title = format!(
             "{} OAuth · paste code · Enter connect · Esc cancel",
             ocfg.provider
         );
     }
-    let hint = if ocfg.token_wire == provider::oauth::TokenWire::Form {
-        "2. After authorizing, the browser redirects to localhost:1455 (page may fail to load).\n   Copy the FULL URL from the address bar and paste it here, then press Enter."
+    let hint = if ui.oauth_callback.is_some() {
+        "2. Authorize in the browser; RidgeCode will receive the localhost callback and connect automatically."
+    } else if ocfg.token_wire == provider::oauth::TokenWire::Form {
+        "2. After authorizing, paste the FULL localhost callback URL here and press Enter (fallback)."
     } else {
         "2. Paste the returned code#state here and press Enter."
     };
@@ -98,9 +142,10 @@ pub(crate) fn begin_oauth(ui: &mut Ui, ocfg: &provider::oauth::OAuthConfig) {
 /// 用系统默认浏览器开 URL(best-effort;detach 不等待)。授权 URL 无空格/引号,直接传参安全。
 fn open_in_browser(url: &str) -> bool {
     #[cfg(windows)]
-    let r = std::process::Command::new("cmd")
-        .args(["/c", "start", "", url])
-        .spawn();
+    let r = std::process::Command::new("rundll32.exe")
+        .args(["url.dll,FileProtocolHandler", url])
+        .spawn()
+        .or_else(|_| std::process::Command::new("explorer.exe").arg(url).spawn());
     #[cfg(target_os = "macos")]
     let r = std::process::Command::new("open").arg(url).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -120,7 +165,12 @@ pub(crate) async fn apply_oauth_code(
         .as_ref()
         .and_then(|p| p.oauth_verifier.clone())
         .unwrap_or_default();
-    if verifier.is_empty() {
+    let expected_state = ui
+        .panel
+        .as_ref()
+        .and_then(|p| p.oauth_state.clone())
+        .unwrap_or_default();
+    if verifier.is_empty() || expected_state.is_empty() {
         ui.note(
             "OAuth session expired; select the oauth row again",
             Color::Yellow,
@@ -133,54 +183,87 @@ pub(crate) async fn apply_oauth_code(
         return;
     }
     // 贴的是整个回调 URL(openai 流)→ 纯核提取 code;否则按 code / code#state 原样交换。
-    let code = match provider::oauth::parse_callback_path(input) {
-        Some((c, _)) if input.contains("code=") => c,
-        _ => input.to_string(),
+    let code_and_state = match provider::oauth::parse_authorization_input(input, &expected_state) {
+        Ok(value) => value,
+        Err(e) => {
+            ui.note(format!("invalid OAuth callback: {e}"), Color::Yellow);
+            return;
+        }
     };
+    let redirect_uri = ui
+        .panel
+        .as_ref()
+        .and_then(|p| p.oauth_redirect_uri.as_deref())
+        .unwrap_or(ocfg.redirect_uri)
+        .to_string();
+    ui.oauth_callback.take();
     ui.note(
         format!("exchanging {} OAuth code...", ocfg.provider),
         Color::Gray,
     );
     let http = provider::http::ReqwestClient::new();
-    match provider::oauth::exchange_code(&http, ocfg, &code, &verifier, now_epoch()).await {
-        Ok(token) => match save_oauth_token(ocfg.provider, &token) {
-            Ok(path) => {
-                let (dm, db) = oauth_defaults(ocfg.provider);
-                let model = std::env::var("RIDGE_MODEL")
-                    .ok()
-                    .or_else(|| Config::load(config_path()).model)
-                    .unwrap_or_else(|| dm.to_string());
-                let base_url = std::env::var("RIDGE_BASE_URL")
-                    .ok()
-                    .or_else(|| Config::load(config_path()).base_url)
-                    .unwrap_or_else(|| db.to_string());
-                swap.swap(oauth_swap_provider(
-                    ocfg.provider,
-                    base_url.clone(),
-                    model.clone(),
-                    token.access_token,
-                ));
-                meta.provider = ocfg.provider.to_string();
-                meta.model = model;
-                meta.base_url = base_url;
-                ui.panel = None;
-                // iter-48 G3:顺手登记 use_oauth 命名档,/provider 页可列可切。
-                register_oauth_profile(ocfg.provider);
-                ui.note(
-                    format!(
-                        "✓ {} OAuth connected · credential saved to {path}",
-                        ocfg.provider
-                    ),
-                    Color::Green,
-                );
-            }
-            Err(e) => ui.note(
-                format!("OAuth token received but save failed: {e}"),
-                Color::Red,
-            ),
-        },
+    match provider::oauth::exchange_code_with_redirect(
+        &http,
+        ocfg,
+        &code_and_state,
+        &verifier,
+        &redirect_uri,
+        now_epoch(),
+    )
+    .await
+    {
+        Ok(token) => apply_oauth_token(ocfg, token, meta, swap, ui),
         Err(e) => ui.note(
             format!("{} OAuth exchange failed: {e}", ocfg.provider),
+            Color::Red,
+        ),
+    }
+}
+
+pub(crate) fn apply_oauth_token(
+    ocfg: &provider::oauth::OAuthConfig,
+    token: provider::oauth::OAuthToken,
+    meta: &mut ReplMeta,
+    swap: &Arc<SwapProvider>,
+    ui: &mut Ui,
+) {
+    match save_oauth_token(ocfg.provider, &token) {
+        Ok(path) => {
+            let (dm, db) = oauth_defaults(ocfg.provider);
+            let model = std::env::var("RIDGE_MODEL")
+                .ok()
+                .or_else(|| Config::load(config_path()).model)
+                .unwrap_or_else(|| dm.to_string());
+            let base_url = if ocfg.provider == "openai" {
+                std::env::var("RIDGE_CHATGPT_BASE_URL").unwrap_or_else(|_| db.to_string())
+            } else {
+                std::env::var("RIDGE_BASE_URL")
+                    .ok()
+                    .or_else(|| Config::load(config_path()).base_url)
+                    .unwrap_or_else(|| db.to_string())
+            };
+            swap.swap(oauth_swap_provider(
+                ocfg.provider,
+                base_url.clone(),
+                model.clone(),
+                token.access_token,
+                token.account_id,
+            ));
+            meta.provider = ocfg.provider.to_string();
+            meta.model = model;
+            meta.base_url = base_url;
+            ui.panel = None;
+            register_oauth_profile(ocfg.provider);
+            ui.note(
+                format!(
+                    "✓ {} OAuth connected · credential saved to {path}",
+                    ocfg.provider
+                ),
+                Color::Green,
+            );
+        }
+        Err(e) => ui.note(
+            format!("OAuth token received but save failed: {e}"),
             Color::Red,
         ),
     }
@@ -192,17 +275,38 @@ fn oauth_swap_provider(
     base: String,
     model: String,
     access: String,
+    account_id: Option<String>,
 ) -> Arc<dyn provider::LlmProvider> {
     if provider_id == "anthropic" {
         Arc::new(AnthropicProvider::new_oauth(base, model, access))
     } else {
-        Arc::new(provider::OpenAiProvider::new(base, model, access))
+        Arc::new(provider::ChatGptProvider::new(
+            base, model, access, account_id,
+        ))
     }
 }
 
 /// 热切换模型(iter-32 共用路径):密钥经 `current_api_key`(env 优先,回落 config 内联)——
 /// `/model <name>` 文本命令与模型选择器浮窗同走此路,顺带修「内联 key 无法切模型」根因。
 pub(crate) fn swap_model(swap: &Arc<SwapProvider>, meta: &mut ReplMeta, model: &str, ui: &mut Ui) {
+    let oauth_base = std::env::var("RIDGE_CHATGPT_BASE_URL")
+        .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
+    if meta.provider == "openai"
+        && meta.base_url.trim_end_matches('/') == oauth_base.trim_end_matches('/')
+    {
+        if let Some(token) = openai_oauth_token() {
+            swap.swap(oauth_swap_provider(
+                "openai",
+                meta.base_url.clone(),
+                model.to_string(),
+                token.access_token,
+                token.account_id,
+            ));
+            meta.model = model.to_string();
+            ui.note(format!("switched model={model}"), Color::Green);
+            return;
+        }
+    }
     match current_api_key() {
         Some(key) => {
             swap.swap(make_provider(&meta.provider, model, &meta.base_url, key));
@@ -243,15 +347,21 @@ pub(crate) fn switch_provider(
                             Color::Yellow,
                         );
                     }
+                    let base_url = if p.kind == "openai" {
+                        oauth_defaults("openai").1.to_string()
+                    } else {
+                        p.base_url.clone()
+                    };
                     swap.swap(oauth_swap_provider(
                         &p.kind,
-                        p.base_url.clone(),
+                        base_url.clone(),
                         p.model.clone(),
                         token.access_token,
+                        token.account_id,
                     ));
                     meta.provider = p.kind;
                     meta.model = p.model;
-                    meta.base_url = p.base_url;
+                    meta.base_url = base_url;
                     ui.note(format!("switched provider {name} (oauth)"), Color::Green);
                 }
                 None => ui.note(
@@ -369,7 +479,31 @@ pub(crate) fn panel_enter(ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvi
                     let cfg = Config::load(config_path());
                     let auth = load_auth();
                     if let Some(p) = cfg.providers.into_iter().find(|p| p.name == provider_name) {
-                        if let Some(k) = p.resolve_key_with(&auth) {
+                        if p.use_oauth == Some(true) && p.kind == "openai" {
+                            if let Some(token) = openai_oauth_token() {
+                                let base_url = std::env::var("RIDGE_CHATGPT_BASE_URL")
+                                    .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
+                                swap.swap(oauth_swap_provider(
+                                    "openai",
+                                    base_url.clone(),
+                                    model.to_string(),
+                                    token.access_token,
+                                    token.account_id,
+                                ));
+                                meta.provider = p.kind;
+                                meta.model = model.to_string();
+                                meta.base_url = base_url;
+                                if let Some(w) = sel_ctx {
+                                    meta.ctx_window = w;
+                                }
+                                ui.note(
+                                    format!("switched to {} / {model}", provider_name),
+                                    Color::Green,
+                                );
+                                ui.panel = None;
+                                return;
+                            }
+                        } else if let Some(k) = p.resolve_key_with(&auth) {
                             swap.swap(make_provider(&p.kind, model, &p.base_url, k));
                             meta.provider = p.kind;
                             meta.model = model.to_string();
@@ -448,7 +582,7 @@ pub(crate) async fn run_command(
 ) -> anyhow::Result<bool> {
     match input {
         "/exit" | "/quit" => return Ok(true),
-        "/help" => ui.note("/exit /reset /compact /cost /tools /history /login [list|--claude|<id> <key>] /model [<name>] (no arg = live model picker) /provider [list|use <name>|add ...] /agent /mcp /init (generate AGENTS.md) /skills /commands (custom /name from ~/.ridge/commands/*.md + skills; $ARGS) /config [set key value] /jailbreak [on|off]; @path to reference a file; Ctrl-C to interrupt; Ctrl+R toggles live reasoning view; Ctrl+O toggles live tool details or opens Tool history; /history opens searchable completed tool calls; approval prompt: y/Enter approve, n/Esc reject, ↑↓ scroll details.", Color::Gray),
+        "/help" => ui.note("/exit /reset /compact /cost /tools /history /login [list|--claude|--codex|<id> <key>] /model [<name>] (no arg = live model picker) /provider [list|use <name>|add ...] /agent /mcp /init (generate AGENTS.md) /skills /commands (custom /name from ~/.ridge/commands/*.md + skills; $ARGS) /config [set key value] /jailbreak [on|off]; @path to reference a file; Ctrl-C interrupts; press twice within 2 seconds to exit; Ctrl+R toggles live reasoning view; Ctrl+O toggles live tool details or opens Tool history; /history opens searchable completed tool calls; approval prompt: y/Enter approve, n/Esc reject, ↑↓ scroll details.", Color::Gray),
         "/tools" => ui.panel = Some(tools_panel(&meta.tools)),
         "/history" => {
             if !ui.open_tool_history() {
@@ -470,24 +604,63 @@ pub(crate) async fn run_command(
                 kind: String,
                 base_url: String,
                 _key: String,
+                oauth: bool,
+                account_id: Option<String>,
             }
             let mut targets: Vec<Target> = Vec::new();
-            if let Some(key) = current_api_key() {
+            let oauth_base = std::env::var("RIDGE_CHATGPT_BASE_URL")
+                .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
+            if meta.provider == "openai"
+                && meta.base_url.trim_end_matches('/') == oauth_base.trim_end_matches('/')
+            {
+                if let Some(token) = openai_oauth_token() {
+                    targets.push(Target {
+                        name: meta.provider.clone(),
+                        kind: meta.provider.clone(),
+                        base_url: meta.base_url.clone(),
+                        _key: token.access_token,
+                        oauth: true,
+                        account_id: token.account_id,
+                    });
+                }
+            } else if let Some(key) = current_api_key() {
                 targets.push(Target {
                     name: meta.provider.clone(),
                     kind: meta.provider.clone(),
                     base_url: meta.base_url.clone(),
                     _key: key,
+                    oauth: false,
+                    account_id: None,
                 });
             }
             for p in &cfg.providers {
-                if let Some(key) = p.resolve_key_with(&auth) {
+                if p.use_oauth == Some(true) && p.kind == "openai" {
+                    let already_added = targets.iter().any(|t| {
+                        t.oauth
+                            && t.base_url.trim_end_matches('/')
+                                == p.base_url.trim_end_matches('/')
+                    });
+                    if !already_added {
+                        if let Some(token) = openai_oauth_token() {
+                            targets.push(Target {
+                                name: p.name.clone(),
+                                kind: p.kind.clone(),
+                                base_url: p.base_url.clone(),
+                                _key: token.access_token,
+                                oauth: true,
+                                account_id: token.account_id,
+                            });
+                        }
+                    }
+                } else if let Some(key) = p.resolve_key_with(&auth) {
                     if !targets.iter().any(|t| t.name == p.name) {
                         targets.push(Target {
                             name: p.name.clone(),
                             kind: p.kind.clone(),
                             base_url: p.base_url.clone(),
                             _key: key,
+                            oauth: false,
+                            account_id: None,
                         });
                     }
                 }
@@ -499,8 +672,22 @@ pub(crate) async fn run_command(
                 let mut has_current = false;
                 let mut fail_count = 0u32;
                 for t in &targets {
-                    let fut = provider::models::fetch_models(&http, &t.kind, &t.base_url, &t._key);
-                    match tokio::time::timeout(Duration::from_secs(10), fut).await {
+                    let result = tokio::time::timeout(Duration::from_secs(10), async {
+                        if t.oauth {
+                            provider::models::fetch_chatgpt_models(
+                                &http,
+                                &t.base_url,
+                                &t._key,
+                                t.account_id.as_deref(),
+                            )
+                            .await
+                        } else {
+                            provider::models::fetch_models(&http, &t.kind, &t.base_url, &t._key)
+                                .await
+                        }
+                    })
+                    .await;
+                    match result {
                         Ok(Ok(list)) if !list.is_empty() => {
                             // 缓存当前模型的真实上下文窗口
                             if t.name == meta.provider {
@@ -564,7 +751,7 @@ pub(crate) async fn run_command(
         _ if input == "/login" => ui.panel = Some(login_panel()),
         _ if input == "/login list" => {
             let ids: Vec<&str> = PROVIDER_PRESETS.iter().map(|p| p.id).collect();
-            ui.note(format!("built-in providers: {}\nOAuth: claude-oauth (/login --claude) · codex-oauth (/login --codex)\ninteractive: /login  ·  quick: /login <id> <API_KEY> (verified; key → ~/.ridge/auth.json, not config)", ids.join(", ")), Color::Gray);
+            ui.note(format!("built-in providers: {}\nOAuth: claude-oauth (/login --claude) · codex-oauth (/login --codex)\n端口受限时执行: ridgecode login --codex --device-auth\ninteractive: /login  ·  quick: /login <id> <API_KEY> (verified; key → ~/.ridge/auth.json, not config)", ids.join(", ")), Color::Gray);
         }
         _ if input == "/login --claude" || input == "/login claude-oauth" => {
             ui.panel = Some(login_panel());

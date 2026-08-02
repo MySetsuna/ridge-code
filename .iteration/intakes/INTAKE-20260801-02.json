@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260801-02",
+  "classification": "approved",
+  "summary": "已批准 RidgeCode TUI 视觉、交互与展示层迭代。",
+  "requirement_ids": [
+    "REQ-20260801-01"
+  ],
+  "pending_ids": [
+    "PENDING-REQ-20260801-01"
+  ],
+  "approval_reasons": [],
+  "open_questions": [],
+  "approval_evidence": "批准 PENDING-REQ-20260801-01",
+  "request_sha256": "5cd2014ced3870027fb9a938d8c1209bf1303be1c667dc3aa9ea9c6e2c12d961",
+  "requirements_sha256": "6f8ed389a8fcbc67bfa2ca5eac7b76176b5ef7e22a2952574e83beb741f4326a",
+  "pending_sha256": "666dfafa8fe6dfe40bcff8776ae500badd8113f18a0f96d9cdf13e40ba796a06",
+  "draft_sha256": "8b9476ad360e0028ccba01e6558594da40599c5780492d83aaec19df35b50c2a",
+  "previous_intake_sha256": "5bc057449812b12cdb30402d465bbe9bace4325ffe2f694c38b6b9ac3181c854",
+  "executable": true,
+  "reasons": []
+}

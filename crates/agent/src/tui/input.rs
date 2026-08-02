@@ -61,7 +61,10 @@ pub(crate) enum InputAction {
     PopupOpen,
     PopupNext,
     PopupPrev,
-    PopupApply,
+    /// Tab 接受当前补全,仅写回输入框,不提交。
+    PopupAccept,
+    /// Enter 接受当前补全并直接提交整条输入。
+    PopupSubmit,
     PopupClose,
     Ignore,
 }
@@ -134,11 +137,13 @@ pub(crate) fn input_action(key: &KeyEvent, busy: bool, popup_open: bool) -> Inpu
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o') {
             return InputAction::Ignore;
         }
-        // 浮窗态:↑↓/Tab 选、Enter 应用、Esc 关;字符/退格穿透继续编辑(主环先关浮窗)。
+        // 浮窗态:↑↓选、Tab 接受但不提交、Enter 接受并提交、Esc 关;
+        // 字符/退格穿透继续编辑(主环先关浮窗)。
         return match key.code {
-            KeyCode::Tab | KeyCode::Down => InputAction::PopupNext,
+            KeyCode::Tab => InputAction::PopupAccept,
+            KeyCode::Down => InputAction::PopupNext,
             KeyCode::Up => InputAction::PopupPrev,
-            KeyCode::Enter => InputAction::PopupApply,
+            KeyCode::Enter => InputAction::PopupSubmit,
             KeyCode::Char(c) => InputAction::Insert(c),
             KeyCode::Backspace => InputAction::Backspace,
             _ => InputAction::PopupClose,
@@ -175,6 +180,16 @@ pub(crate) fn input_action(key: &KeyEvent, busy: bool, popup_open: bool) -> Inpu
 }
 
 /// Live 工具焦点快捷键:仅在无浮窗且确有工具块时拦截 Alt+↑/↓,避免破坏输入编辑回退。
+/// Ctrl-C requires a second press within the window to terminate the TUI.
+pub(crate) fn is_second_ctrl_c(
+    previous: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    previous
+        .and_then(|at| now.checked_duration_since(at))
+        .is_some_and(|elapsed| elapsed <= std::time::Duration::from_secs(2))
+}
+
 pub(crate) fn tool_focus_action(key: &KeyEvent, popup_open: bool, has_tools: bool) -> Option<i8> {
     if key.kind != KeyEventKind::Press
         || popup_open
@@ -499,7 +514,7 @@ pub(crate) fn path_candidates(part: &str) -> Vec<String> {
     v
 }
 
-/// Tab 触发:行首 `/` 词补命令;词内 `@` 补路径(候选带回词前缀,应用时整词替换)。
+/// Tab/输入触发:行首 `/` 词补命令;词内 `@` 补路径(候选带回词前缀,应用时整词替换)。
 pub(crate) fn build_popup(input: &InputState) -> Option<Popup> {
     let (anchor, word) = current_word(&input.buffer, input.cursor);
     if word.starts_with('/') && anchor == 0 {

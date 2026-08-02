@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260801-04",
+  "classification": "pending",
+  "summary": "将 NLM 的 TUI 渲染建议纳入本轮，但先经过需求审批。",
+  "requirement_ids": [
+    "REQ-20260801-01"
+  ],
+  "pending_ids": [
+    "PENDING-REQ-20260801-02"
+  ],
+  "approval_reasons": [
+    "请求新增本轮实现范围与验收边界，须先形成 Pending 记录。"
+  ],
+  "open_questions": [
+    "是否批准将 NLM 候选方案具体化为行级 Markdown/ANSI 16 色渲染增量。"
+  ],
+  "approval_evidence": "",
+  "request_sha256": "207a76669f7185a8546de73c4647de804037dabaa7db328a34ffa2f3f556e495",
+  "requirements_sha256": "6f8ed389a8fcbc67bfa2ca5eac7b76176b5ef7e22a2952574e83beb741f4326a",
+  "pending_sha256": "b51a924f8a23f7e0627a0c7f1da3875784c28a5ed49e81e8bf7c879428e455a7",
+  "draft_sha256": "40c06f95c979573424c5c8c49fc47c6c189c968ca80e7e03c5722b90049b5b68",
+  "previous_intake_sha256": "",
+  "executable": false,
+  "reasons": [
+    "approval_required"
+  ]
+}

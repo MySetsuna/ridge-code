@@ -4,7 +4,7 @@ members = ["crates/langgraph", "crates/agent", "crates/tools", "crates/provider"
 
 [workspace.package]
 edition = "2021"
-version = "0.5.0"
+version = "0.5.1"
 license = "MIT"
 
 # 依赖版本统一在此管理,子 crate 用 `dep.workspace = true`。
@@ -16,7 +16,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1"
 # rustls-tls(非默认 native-tls):纯 Rust TLS,去掉 openssl 系统依赖 —— 全平台跨编无忧、二进制更可移植。
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2", "charset"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2", "charset", "socks"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ratatui = "0.29"

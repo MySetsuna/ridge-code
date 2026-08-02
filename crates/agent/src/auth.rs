@@ -383,6 +383,8 @@ mod tests {
             access_token: "acc".into(),
             refresh_token: "ref".into(),
             expires_at_epoch: 4600,
+            id_token: None,
+            account_id: None,
         };
         let text = oauth_upsert("", "anthropic", &tok);
         assert_eq!(oauth_get(&text, "anthropic"), Some(tok.clone()));

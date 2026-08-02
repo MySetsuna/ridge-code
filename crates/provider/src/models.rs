@@ -16,11 +16,16 @@ pub fn parse_model_list(v: &Value) -> Vec<ModelInfo> {
     let arr = v
         .get("data")
         .and_then(|d| d.as_array())
+        .or_else(|| v.get("models").and_then(|m| m.as_array()))
         .or_else(|| v.as_array());
     let Some(arr) = arr else { return vec![] };
     arr.iter()
         .filter_map(|m| {
-            let id = m.get("id").and_then(|x| x.as_str())?;
+            let id = m
+                .get("id")
+                .or_else(|| m.get("slug"))
+                .or_else(|| m.get("model"))
+                .and_then(|x| x.as_str())?;
             Some(ModelInfo {
                 id: id.to_string(),
                 context: extract_context(m),
@@ -64,5 +69,31 @@ pub async fn fetch_models(
 ) -> Result<Vec<ModelInfo>, ProviderError> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let v = http.get_json(&url, &auth_headers(kind, key)).await?;
+    Ok(parse_model_list(&v))
+}
+
+/// Fetch the account-scoped model catalog used by ChatGPT-authenticated Codex.
+/// The endpoint is `/backend-api/codex/models`, and its response uses `models[]`
+/// with `slug` identifiers rather than the public API's `data[].id` shape.
+pub async fn fetch_chatgpt_models(
+    http: &dyn HttpClient,
+    base_url: &str,
+    access_token: &str,
+    account_id: Option<&str>,
+) -> Result<Vec<ModelInfo>, ProviderError> {
+    let account_id = account_id.ok_or(
+        "ChatGPT OAuth token has no chatgpt_account_id; run ridgecode login --codex again",
+    )?;
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let headers = vec![
+        (
+            "Authorization".to_string(),
+            format!("Bearer {access_token}"),
+        ),
+        ("ChatGPT-Account-Id".to_string(), account_id.to_string()),
+        ("Accept".to_string(), "application/json".to_string()),
+        ("originator".to_string(), "codex_cli_rs".to_string()),
+    ];
+    let v = http.get_json(&url, &headers).await?;
     Ok(parse_model_list(&v))
 }

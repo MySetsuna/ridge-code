@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260801-02",
+  "classification": "approved",
+  "summary": "已批准 RidgeCode TUI 视觉、交互与展示层迭代。",
+  "requirement_ids": ["REQ-20260801-01"],
+  "pending_ids": ["PENDING-REQ-20260801-01"],
+  "approval_reasons": [],
+  "open_questions": [],
+  "approval_evidence": "批准 PENDING-REQ-20260801-01"
+}

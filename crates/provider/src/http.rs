@@ -84,7 +84,9 @@ impl HttpClient for ReqwestClient {
         let mut rb = self
             .client
             .post(url)
-            .json(body)
+            // 显式序列化，避免部分 SOCKS/HTTP 代理对 reqwest `.json()` 的
+            // transfer framing 处理异常，导致服务端把 JSON 看成无效 body。
+            .body(body.to_string())
             .timeout(std::time::Duration::from_secs(timeout_secs()));
         for (k, v) in headers {
             rb = rb.header(k.as_str(), v.as_str());
@@ -120,10 +122,17 @@ impl HttpClient for ReqwestClient {
     }
 
     async fn post_form(&self, url: &str, form: &[(&str, &str)]) -> Result<Value, ProviderError> {
+        let body = form
+            .iter()
+            .map(|(key, value)| format!("{}={}", form_component(key), form_component(value)))
+            .collect::<Vec<_>>()
+            .join("&");
         let rb = self
             .client
             .post(url)
-            .form(form)
+            // Match the OpenAI Codex token exchange wire: explicit raw form body.
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(body)
             .timeout(std::time::Duration::from_secs(timeout_secs()));
         let resp = rb.send().await?;
         let status = resp.status();
@@ -141,7 +150,7 @@ impl HttpClient for ReqwestClient {
         body: &Value,
         on_line: &(dyn Fn(String) + Send + Sync),
     ) -> Result<(), ProviderError> {
-        let mut rb = self.client.post(url).json(body);
+        let mut rb = self.client.post(url).body(body.to_string());
         for (k, v) in headers {
             rb = rb.header(k.as_str(), v.as_str());
         }
@@ -185,4 +194,19 @@ impl HttpClient for ReqwestClient {
         }
         Ok(())
     }
+}
+
+fn form_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    encoded
 }

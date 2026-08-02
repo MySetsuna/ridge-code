@@ -63,7 +63,7 @@ fn handle_meta_flags() -> bool {
              --read-only                    read-only mode: only offer read/search/research tools, reject all write/shell side effects\n  \
              --resume/--continue            resume the last session\n  \
              -h/--help, -V/--version        this help / version\n\n\
-             In the TUI: slash commands /model /provider /config /agent /compact etc.; @path to reference a file, Ctrl-C to interrupt.\
+             In the TUI: slash commands /model /provider /config /agent /compact etc.; @path to reference a file, Ctrl-C interrupts; press twice within 2 seconds to exit.\
              Pipe/non-TTY: stdin lines are run as tasks (headless, no slash commands).\n\n\
              Config: ~/.ridge/config.json (provider/model/budget/multiple mcp/skills; env overrides);\
              /config set <key> <value> in the TUI persists changes. Key: RIDGE_API_KEY env, or a config profile's api_key (plaintext) / key_env (env var name).\
@@ -272,21 +272,10 @@ pub(crate) fn apply_proxy_env(proxy: &str) {
     }
 }
 
-/// 启动时据 config 落代理:env(`RIDGE_PROXY`) > config(`proxy`) > 直连。
-/// 进程已显式设了 `HTTP(S)_PROXY` 则尊重之(shell 临时覆盖优先)。
+/// 启动时据 config 落代理:`RIDGE_PROXY` > config(`proxy`) > 通用 `HTTP(S)_PROXY` > 直连。
+/// 专用配置优先于 shell 的通用代理；临时覆盖请用 `RIDGE_PROXY`。
 /// 见 [`apply_proxy_env`]。
 fn apply_config_proxy(cfg: &Config) {
-    let env_set = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]
-        .iter()
-        .any(|v| std::env::var_os(v).map(|x| !x.is_empty()).unwrap_or(false));
-    if env_set {
-        if let Some(p) = std::env::var("HTTP_PROXY").ok().filter(|s| !s.is_empty()) {
-            eprintln!("[ridgecode] proxy ← env(HTTP_PROXY): {p}");
-        } else if let Some(p) = std::env::var("HTTPS_PROXY").ok().filter(|s| !s.is_empty()) {
-            eprintln!("[ridgecode] proxy ← env(HTTPS_PROXY): {p}");
-        }
-        return;
-    }
     if let Some(v) = std::env::var("RIDGE_PROXY").ok().filter(|s| !s.is_empty()) {
         eprintln!("[ridgecode] proxy ← env RIDGE_PROXY: {v}");
         apply_proxy_env(&v);
@@ -300,6 +289,14 @@ fn apply_config_proxy(cfg: &Config) {
     {
         eprintln!("[ridgecode] proxy ← config: {v}");
         apply_proxy_env(v);
+        return;
+    }
+    if let Some(p) = std::env::var("HTTP_PROXY").ok().filter(|s| !s.is_empty()) {
+        eprintln!("[ridgecode] proxy ← env(HTTP_PROXY): {p}");
+        return;
+    }
+    if let Some(p) = std::env::var("HTTPS_PROXY").ok().filter(|s| !s.is_empty()) {
+        eprintln!("[ridgecode] proxy ← env(HTTPS_PROXY): {p}");
         return;
     }
     eprintln!("[ridgecode] proxy: (直连)");
