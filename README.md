@@ -115,6 +115,7 @@ ridgecode login --codex
 - fenced code 的可见行按有限词法规则区分关键字、类型、字符串、数字、字面量和注释；未知文本保持普通 Muted 色，不猜测跨行语法。
 - 工具调用默认显示摘要；Ctrl+O 展开当前工具详情。Alt+↑/↓ 选择旧工具并锁定焦点；详情展开且可滚动时，Alt+PageUp/PageDown 查看旧/新详情位置。
 - Ctrl+R 展开或收起实际 Reasoning；Answer 到达时默认回到 Answer 优先视图。
+- Live Answer/Reasoning 默认跟随最新尾部；`Alt+PageUp/PageDown` 暂停并检视较早/较新内容，`Alt+End` 回到最新尾部。检视状态会在顶栏显示。
 - 长任务中可继续编辑输入；任务忙时按 Enter 会排队，当前任务结束后继续执行。
 
 ### 输入与快捷键
@@ -128,7 +129,8 @@ ridgecode login --codex
 | Ctrl+R | 切换 Reasoning 视图 |
 | Ctrl+O | 切换工具详情；无 live 工具时打开 Tool History |
 | Alt+↑/↓ | 选择 live 工具焦点 |
-| Alt+PageUp/PageDown | 滚动当前展开工具详情 |
+| Alt+PageUp/PageDown | 优先滚动工具详情；否则检视 Live Answer/Reasoning 或 Tool History 详情 |
+| Alt+End | Live Answer/Reasoning 回到最新尾部 |
 | ↑/↓ | 空闲输入时浏览历史；面板中移动选项 |
 | Tab | 打开或选择补全；可补全 /command 与 @path |
 | Esc | 关闭浮窗/面板；审批中拒绝 |
@@ -136,7 +138,7 @@ ridgecode login --codex
 | 审批 n / Esc | 拒绝工具调用 |
 | 审批 ↑↓ / PageUp/PageDown | 滚动 diff 或详情预览 |
 
-面板通用操作：输入字符即时过滤 key/value，Backspace 删除过滤词，Home/End 跳到首尾，PageUp/PageDown 翻页，Enter 执行动作或展开详情，Esc 关闭。配置面板的 Enter 进入编辑，再按 Enter 写回；Esc 取消编辑。
+面板通用操作：输入字符即时过滤 key/value，Backspace 删除过滤词，Home/End 跳到首尾，PageUp/PageDown 翻页，Enter 执行动作或展开详情，Esc 关闭。Tool History 展开详情后，Alt+PageUp/PageDown 在搜索命中位置附近滚动；配置面板的 Enter 进入编辑，再按 Enter 写回；Esc 取消编辑。
 
 ### 斜杠命令
 

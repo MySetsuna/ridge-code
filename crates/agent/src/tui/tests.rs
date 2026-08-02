@@ -105,7 +105,9 @@ fn top_chrome_surfaces_reasoning_visibility_without_tools() {
         ..Ui::default()
     };
     ui.push_chunk(provider::StreamChunk::Reasoning("r0\nr1".into()));
-    ui.push_chunk(provider::StreamChunk::Answer("answer".into()));
+    ui.push_chunk(provider::StreamChunk::Answer(
+        "answer0\nanswer1\nanswer2".into(),
+    ));
     let vitals = Vitals {
         step: 2,
         elapsed_s: 3,
@@ -137,6 +139,13 @@ fn top_chrome_surfaces_reasoning_visibility_without_tools() {
         .map(|span| span.content.as_ref())
         .collect::<String>();
     assert!(expanded.contains("Ctrl+R collapse"), "{expanded}");
+    assert!(ui.scroll_live(1));
+    let inspected = top_chrome(&ui, &vitals, 96)
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(inspected.contains("INSPECT"), "{inspected}");
 }
 
 #[test]
@@ -540,6 +549,8 @@ fn chrome(
         has_tools,
         has_history,
         has_scrollable_tool_details: false,
+        has_live_output: false,
+        live_inspecting: false,
     })
 }
 
@@ -567,6 +578,33 @@ fn input_chrome_exposes_submit_or_queue_mode() {
     assert!(busy_tools.contains("Alt+↑/↓ focus"));
     assert!(busy_tools.contains("Ctrl+O details"));
 
+    let (live_inspect, _) = input_chrome(InputChromeArgs {
+        busy: false,
+        queued: 0,
+        width: 96,
+        reasoning_expanded: false,
+        has_reasoning: false,
+        has_tools: false,
+        has_history: false,
+        has_scrollable_tool_details: false,
+        has_live_output: true,
+        live_inspecting: false,
+    });
+    assert!(live_inspect.contains("Alt+PgUp inspect"));
+    let (live_follow, _) = input_chrome(InputChromeArgs {
+        busy: false,
+        queued: 0,
+        width: 96,
+        reasoning_expanded: false,
+        has_reasoning: false,
+        has_tools: false,
+        has_history: false,
+        has_scrollable_tool_details: false,
+        has_live_output: true,
+        live_inspecting: true,
+    });
+    assert!(live_follow.contains("Alt+End follow"));
+
     let (busy_tools_expanded, _) = chrome(true, 2, 80, true, true, true, false);
     assert!(busy_tools_expanded.contains("Ctrl+R collapse"));
     assert!(!busy_tools_expanded.contains("Ctrl+R reasoning"));
@@ -579,6 +617,8 @@ fn input_chrome_exposes_submit_or_queue_mode() {
         has_tools: true,
         has_history: false,
         has_scrollable_tool_details: true,
+        has_live_output: false,
+        live_inspecting: false,
     });
     assert!(busy_tools_scrolled.contains("Alt+PgUp/PgDn scroll"));
 
@@ -791,6 +831,15 @@ fn tool_history_search_opens_and_positions_detail() {
 }
 
 #[test]
+fn tool_history_detail_scroll_moves_around_search_anchor() {
+    let text = "zero\none\nneedle\nlast";
+    assert_eq!(detail_scroll_position(text, "needle", 40, 2, 0), 1);
+    assert_eq!(detail_scroll_position(text, "needle", 40, 2, -4), 0);
+    assert_eq!(detail_scroll_position(text, "needle", 40, 2, 4), 2);
+    assert_eq!(detail_scroll_position(text, "", 40, 2, 4), 2);
+}
+
+#[test]
 fn narrow_frame_retains_context_and_token_status() {
     let ui = Ui::default();
     let meta = ReplMeta {
@@ -910,6 +959,14 @@ fn panel_action_routes_keys() {
     assert_eq!(
         panel_action(&press(KeyCode::PageDown)),
         PanelAction::PageDown
+    );
+    assert_eq!(
+        panel_action(&KeyEvent::new(KeyCode::PageUp, KeyModifiers::ALT)),
+        PanelAction::DetailPageUp
+    );
+    assert_eq!(
+        panel_action(&KeyEvent::new(KeyCode::PageDown, KeyModifiers::ALT)),
+        PanelAction::DetailPageDown
     );
     assert_eq!(panel_action(&press(KeyCode::Home)), PanelAction::First);
     assert_eq!(panel_action(&press(KeyCode::End)), PanelAction::Last);
@@ -1217,6 +1274,42 @@ fn input_action_routes_keys() {
     assert_eq!(
         tool_detail_scroll_action(
             &KeyEvent::new(KeyCode::PageUp, KeyModifiers::ALT),
+            true,
+            true
+        ),
+        None
+    );
+    assert_eq!(
+        live_scroll_action(
+            &KeyEvent::new(KeyCode::PageUp, KeyModifiers::ALT),
+            false,
+            false,
+            true
+        ),
+        Some(LiveScrollAction::Older)
+    );
+    assert_eq!(
+        live_scroll_action(
+            &KeyEvent::new(KeyCode::PageDown, KeyModifiers::ALT),
+            false,
+            false,
+            true
+        ),
+        Some(LiveScrollAction::Newer)
+    );
+    assert_eq!(
+        live_scroll_action(
+            &KeyEvent::new(KeyCode::End, KeyModifiers::ALT),
+            false,
+            false,
+            true
+        ),
+        Some(LiveScrollAction::Follow)
+    );
+    assert_eq!(
+        live_scroll_action(
+            &KeyEvent::new(KeyCode::PageUp, KeyModifiers::ALT),
+            false,
             true,
             true
         ),
@@ -1652,6 +1745,39 @@ fn stream_tail_takes_last_k_lines() {
     assert_eq!(stream_tail("a\nb\nc", 5), vec!["a", "b", "c"]);
     assert_eq!(stream_tail("a\nb\nc\nd\ne\nf", 3), vec!["d", "e", "f"]);
     assert!(stream_tail("", 3).is_empty());
+}
+
+#[test]
+fn live_output_inspection_pauses_and_returns_to_follow() {
+    let mut transcript = LiveTranscript::default();
+    transcript.push_reasoning("r0\nr1\nr2\nr3\nr4\nr5\nr6\nr7\nr8\nr9");
+    transcript.push_answer("a0\na1\na2\na3\na4");
+
+    assert!(!transcript.is_inspecting());
+    assert_eq!(
+        transcript.visible_lines(4).last().map(|line| line.text),
+        Some("a4")
+    );
+    assert!(transcript.scroll_live(1));
+    assert!(transcript.is_inspecting());
+    let older = transcript.visible_lines(4);
+    assert_ne!(older.last().map(|line| line.text), Some("a4"));
+
+    transcript.push_answer("\na5");
+    assert_ne!(
+        transcript.visible_lines(4).last().map(|line| line.text),
+        Some("a5")
+    );
+    assert!(transcript.follow_live());
+    assert!(!transcript.is_inspecting());
+    assert_eq!(
+        transcript.visible_lines(4).last().map(|line| line.text),
+        Some("a5")
+    );
+
+    transcript.scroll_live(1);
+    transcript.clear_streams();
+    assert!(!transcript.is_inspecting());
 }
 
 /// iter-26:静态提交队列 —— note 入队有序,drain 取尽且清空(有界性 = 提交即出队)。

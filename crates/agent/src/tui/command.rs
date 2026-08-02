@@ -422,7 +422,7 @@ pub(crate) fn panel_enter(ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvi
         (PanelKind::Login, Some(_)) => {}
         (PanelKind::ToolHistory, _) => {
             if let Some(p) = ui.panel.as_mut() {
-                p.detail_open = !p.detail_open;
+                p.toggle_detail();
             }
         }
         // 只读页:Enter 关页。

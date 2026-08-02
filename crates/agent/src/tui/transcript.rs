@@ -6,6 +6,8 @@ const MAX_LIVE_BLOCKS: usize = 64;
 const MAX_LIVE_TEXT_CHARS: usize = 32_768;
 const MAX_TOOL_DETAIL_LINES: usize = 20;
 const TOOL_DETAIL_SCROLL_STEP: usize = 4;
+const LIVE_SCROLL_STEP: usize = 4;
+const MAX_LIVE_INSPECT_OFFSET: usize = 512;
 pub(crate) const MAX_TOOL_HISTORY: usize = 64;
 /// Answer 已占用 Live 视口时仍保留一行实际 reasoning；纯思考阶段不钳位。
 const LIVE_REASONING_ROWS: usize = 1;
@@ -256,6 +258,8 @@ pub(crate) struct LiveTranscript {
     /// 用户用 Alt+↑/↓ 选定旧工具后，暂时阻止新工具夺走焦点。
     focus_pinned: bool,
     reasoning_expanded: bool,
+    /// Rows behind the newest live tail; zero keeps the default Follow view.
+    inspect_offset: usize,
     answer_chars: usize,
     reasoning_chars: usize,
 }
@@ -275,6 +279,7 @@ impl LiveTranscript {
                 // A newly opened Answer phase restores the default readable
                 // projection; Ctrl+R remains the explicit inspection escape.
                 self.reasoning_expanded = false;
+                self.inspect_offset = 0;
                 self.answer_chars = 0;
                 let mut current = AnswerBlock {
                     text: String::new(),
@@ -325,6 +330,7 @@ impl LiveTranscript {
         self.answer_chars = 0;
         self.reasoning_chars = 0;
         self.reasoning_expanded = false;
+        self.inspect_offset = 0;
         self.focus_pinned = false;
         if !self.has_tools() {
             self.focused_tool = None;
@@ -337,6 +343,7 @@ impl LiveTranscript {
         self.answer_chars = 0;
         self.reasoning_chars = 0;
         self.reasoning_expanded = false;
+        self.inspect_offset = 0;
         self.focused_tool = None;
         self.focus_pinned = false;
         self.splash = Some(super::render::sanitize_display_text(&text));
@@ -381,6 +388,38 @@ impl LiveTranscript {
         self.blocks
             .iter()
             .any(|block| matches!(block, LiveBlock::Reasoning(_)))
+    }
+
+    pub(crate) fn has_inspectable_output(&self) -> bool {
+        self.blocks
+            .iter()
+            .any(|block| matches!(block, LiveBlock::Answer(_) | LiveBlock::Reasoning(_)))
+    }
+
+    pub(crate) fn scroll_live(&mut self, delta: i8) -> bool {
+        if !self.has_inspectable_output() {
+            return false;
+        }
+        let before = self.inspect_offset;
+        if delta > 0 {
+            self.inspect_offset = self
+                .inspect_offset
+                .saturating_add(LIVE_SCROLL_STEP)
+                .min(MAX_LIVE_INSPECT_OFFSET);
+        } else if delta < 0 {
+            self.inspect_offset = self.inspect_offset.saturating_sub(LIVE_SCROLL_STEP);
+        }
+        self.inspect_offset != before
+    }
+
+    pub(crate) fn follow_live(&mut self) -> bool {
+        let changed = self.inspect_offset != 0;
+        self.inspect_offset = 0;
+        changed
+    }
+
+    pub(crate) fn is_inspecting(&self) -> bool {
+        self.inspect_offset != 0
     }
 
     /// 顶栏焦点 chip 只读取当前已净化的工具摘要，不复制工具详情或引入新状态。
@@ -487,6 +526,9 @@ impl LiveTranscript {
         if max_rows == 0 {
             return Vec::new();
         }
+        let requested_rows = max_rows;
+        let inspect_offset = self.inspect_offset.min(MAX_LIVE_INSPECT_OFFSET);
+        let max_rows = requested_rows.saturating_add(inspect_offset);
         if let Some(splash) = &self.splash {
             return tail_lines(
                 text_lines(splash, Color::White, LiveLineKind::Splash),
@@ -625,6 +667,17 @@ impl LiveTranscript {
         };
         visible.extend(focused);
         visible.extend(answers);
+        let effective_offset = inspect_offset.min(visible.len().saturating_sub(requested_rows));
+        if effective_offset > 0 {
+            let end = visible.len().saturating_sub(effective_offset);
+            let start = end.saturating_sub(requested_rows);
+            visible = visible
+                .into_iter()
+                .skip(start)
+                .take(end.saturating_sub(start))
+                .collect();
+            reasoning_truncated = true;
+        }
         reasoning_truncated |= visible
             .iter()
             .filter(|line| line.kind == LiveLineKind::Reasoning)

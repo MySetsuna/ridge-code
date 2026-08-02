@@ -155,6 +155,15 @@ impl Ui {
     pub(crate) fn toggle_reasoning(&mut self) -> bool {
         self.transcript.toggle_reasoning()
     }
+    pub(crate) fn scroll_live(&mut self, delta: i8) -> bool {
+        self.transcript.scroll_live(delta)
+    }
+    pub(crate) fn follow_live(&mut self) -> bool {
+        self.transcript.follow_live()
+    }
+    pub(crate) fn has_inspectable_live_output(&self) -> bool {
+        self.transcript.has_inspectable_output()
+    }
     pub(crate) fn has_live_tools(&self) -> bool {
         self.transcript.has_tools()
     }

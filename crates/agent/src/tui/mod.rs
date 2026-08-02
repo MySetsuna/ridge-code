@@ -377,6 +377,18 @@ pub(super) async fn run(
                                 p.move_down();
                             }
                         }
+                        PanelAction::DetailPageUp => {
+                            let p = ui.panel.as_mut().unwrap();
+                            if p.editing.is_none() {
+                                let _ = p.scroll_detail(-1);
+                            }
+                        }
+                        PanelAction::DetailPageDown => {
+                            let p = ui.panel.as_mut().unwrap();
+                            if p.editing.is_none() {
+                                let _ = p.scroll_detail(1);
+                            }
+                        }
                         PanelAction::PageUp => {
                             let p = ui.panel.as_mut().unwrap();
                             if p.editing.is_none() {
@@ -487,6 +499,25 @@ pub(super) async fn run(
                     ui.has_scrollable_live_tool(),
                 ) {
                     let _ = ui.scroll_tool_details(delta);
+                    continue;
+                }
+                if let Some(action) = live_scroll_action(
+                    &key,
+                    ui.popup.is_some(),
+                    ui.has_scrollable_live_tool(),
+                    ui.has_inspectable_live_output(),
+                ) {
+                    match action {
+                        LiveScrollAction::Older => {
+                            let _ = ui.scroll_live(1);
+                        }
+                        LiveScrollAction::Newer => {
+                            let _ = ui.scroll_live(-1);
+                        }
+                        LiveScrollAction::Follow => {
+                            let _ = ui.follow_live();
+                        }
+                    }
                     continue;
                 }
                 match input_action(&key, ui.busy, ui.popup.is_some()) {

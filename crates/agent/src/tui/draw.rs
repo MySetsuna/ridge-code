@@ -64,7 +64,7 @@ fn panel_hint(panel: &Panel, width: u16) -> String {
             }
             PanelKind::Login => "↑↓ pick provider · Enter enter key · type to filter · Esc close",
             PanelKind::ToolHistory => {
-                "↑↓/PgUp/PgDn select · Home/End jump · Enter expand · Esc close"
+                "↑↓/PgUp/PgDn select · Alt+PgUp/PgDn scroll detail · Home/End jump · Enter expand · Esc close"
             }
             PanelKind::Tools | PanelKind::Agent | PanelKind::Mcp | PanelKind::Skills => {
                 "↑↓ scroll · type to filter · Esc close"
@@ -73,6 +73,8 @@ fn panel_hint(panel: &Panel, width: u16) -> String {
     };
     let compact = if panel.editing.is_some() {
         "Enter · Esc"
+    } else if panel.kind == PanelKind::ToolHistory {
+        "↑↓ · Enter · Alt+PgUp/PgDn · Esc"
     } else {
         "↑↓ · Enter · Esc"
     };
@@ -118,6 +120,25 @@ pub(crate) fn detail_match_scroll(text: &str, query: &str, width: u16, visible_r
         offset = offset.saturating_add(wrapped_rows(line, width));
     }
     0
+}
+
+pub(crate) fn detail_scroll_position(
+    text: &str,
+    query: &str,
+    width: u16,
+    visible_rows: u16,
+    adjustment: i16,
+) -> u16 {
+    let search_scroll = detail_match_scroll(text, query, width, visible_rows);
+    let requested_scroll = if adjustment < 0 {
+        search_scroll.saturating_sub(adjustment.unsigned_abs())
+    } else {
+        search_scroll.saturating_add(adjustment as u16)
+    };
+    let max_scroll = wrapped_rows(text, width)
+        .saturating_sub(visible_rows as usize)
+        .min(u16::MAX as usize) as u16;
+    requested_scroll.min(max_scroll)
 }
 
 fn detail_match_row(line: &str, query: &str, width: usize) -> Option<usize> {
@@ -367,11 +388,12 @@ fn draw_tool_history_panel(frame: &mut ratatui::Frame, area: Rect, panel: &Panel
     if let Some(detail) = selected_detail {
         let detail_index = list_index + 1;
         let visible_rows = rows[detail_index].height.saturating_sub(1).max(1);
-        let detail_scroll = detail_match_scroll(
+        let detail_scroll = detail_scroll_position(
             &detail,
             &panel.query,
             rows[detail_index].width,
             visible_rows,
+            panel.detail_scroll,
         );
         frame.render_widget(
             Paragraph::new(detail)
@@ -631,6 +653,18 @@ fn reasoning_visibility_chip(expanded: bool, remaining: usize) -> Option<String>
     (str_cells(compact) <= remaining).then_some(compact.to_owned())
 }
 
+fn live_inspection_chip(remaining: usize) -> Option<String> {
+    if remaining < 10 {
+        return None;
+    }
+    let full = " ◇ INSPECT · Alt+End follow ";
+    if str_cells(full) <= remaining {
+        return Some(full.to_owned());
+    }
+    let compact = " ◇ INSPECT ";
+    (str_cells(compact) <= remaining).then_some(compact.to_owned())
+}
+
 fn push_channel_badge(
     spans: &mut Vec<Span<'static>>,
     used: &mut usize,
@@ -722,6 +756,15 @@ pub(crate) fn top_chrome(ui: &Ui, vitals: &Vitals, area_width: u16) -> Line<'sta
             .bg(Color::Cyan)
             .add_modifier(Modifier::BOLD);
         let _ = push_chrome_fit(&mut above, &mut used, width, " RDG ", brand_style);
+    }
+    if ui.transcript.is_inspecting() {
+        if let Some(chip) = live_inspection_chip(width.saturating_sub(used)) {
+            let style = Style::default()
+                .fg(Color::Black)
+                .bg(role_color(Role::Info))
+                .add_modifier(Modifier::BOLD);
+            let _ = push_chrome_dynamic_fit(&mut above, &mut used, width, chip, style);
+        }
     }
     if ui.has_live_tools() && width >= 48 {
         if let Some(summary) = ui.transcript.focused_tool_summary() {
@@ -892,6 +935,8 @@ pub(crate) fn draw(
                 has_tools: ui.has_live_tools(),
                 has_history: !ui.tool_history.is_empty(),
                 has_scrollable_tool_details: ui.has_scrollable_live_tool(),
+                has_live_output: ui.has_inspectable_live_output(),
+                live_inspecting: ui.transcript.is_inspecting(),
             });
             Block::default()
                 .borders(Borders::ALL)

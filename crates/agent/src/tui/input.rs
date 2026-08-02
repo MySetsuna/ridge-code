@@ -210,6 +210,36 @@ pub(crate) fn tool_detail_scroll_action(
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum LiveScrollAction {
+    Older,
+    Newer,
+    Follow,
+}
+
+/// Live Answer/Reasoning inspection: tool detail scrolling and modal input keep priority.
+pub(crate) fn live_scroll_action(
+    key: &KeyEvent,
+    popup_open: bool,
+    tool_details_scrollable: bool,
+    has_output: bool,
+) -> Option<LiveScrollAction> {
+    if key.kind != KeyEventKind::Press
+        || popup_open
+        || tool_details_scrollable
+        || !has_output
+        || !key.modifiers.contains(KeyModifiers::ALT)
+    {
+        return None;
+    }
+    match key.code {
+        KeyCode::PageUp => Some(LiveScrollAction::Older),
+        KeyCode::PageDown => Some(LiveScrollAction::Newer),
+        KeyCode::End => Some(LiveScrollAction::Follow),
+        _ => None,
+    }
+}
+
 /// 首逻辑行内 Up 的回退决策(iter-48 G5,修「光标卡首行」):`move_up` 失败(已在首逻辑行)时,
 /// 若首行折成**多视觉行**且光标不在行首 → 先跳行首(true),免历史召回突变替换长草稿;
 /// 行首 / 单视觉行 → 照常召回(false)。纯函数。

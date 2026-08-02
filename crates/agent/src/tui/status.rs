@@ -166,6 +166,8 @@ pub(crate) struct InputChromeArgs {
     pub(crate) has_tools: bool,
     pub(crate) has_history: bool,
     pub(crate) has_scrollable_tool_details: bool,
+    pub(crate) has_live_output: bool,
+    pub(crate) live_inspecting: bool,
 }
 
 pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
@@ -178,6 +180,8 @@ pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
         has_tools,
         has_history,
         has_scrollable_tool_details,
+        has_live_output,
+        live_inspecting,
     } = args;
     let reasoning_hint = if !has_reasoning {
         None
@@ -207,26 +211,33 @@ pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
     } else {
         ""
     };
+    let live_hint = if !has_live_output || has_scrollable_tool_details {
+        ""
+    } else if live_inspecting {
+        " · Alt+End follow"
+    } else {
+        " · Alt+PgUp inspect"
+    };
     let text = match (busy, width) {
         (true, width) if width >= 96 && has_tools => format!(
-            " Queue [{queued}] · Enter enqueue · Ctrl+C cancel{reasoning_suffix}{focus_hint}{toggle_separator}{toggle_hint}{scroll_hint}"
+            " Queue [{queued}] · Enter enqueue · Ctrl+C cancel{reasoning_suffix}{focus_hint}{toggle_separator}{toggle_hint}{scroll_hint}{live_hint}"
         ),
         (true, width) if width >= 72 && has_tools => {
             // 工具运行时压缩动作词，但同时保留 focus/details 与真实 reasoning 入口。
             format!(
-                " Queue [{queued}] · Enter · Ctrl+C · Alt+↑/↓ focus · {toggle_hint}{scroll_hint}{reasoning_suffix}"
+                " Queue [{queued}] · Enter · Ctrl+C · Alt+↑/↓ focus · {toggle_hint}{scroll_hint}{live_hint}{reasoning_suffix}"
             )
         }
         (true, width) if width >= 72 => format!(
-            " Queue [{queued}] · Enter enqueue · Ctrl+C cancel{reasoning_suffix}{toggle_separator}{toggle_hint}"
+            " Queue [{queued}] · Enter enqueue · Ctrl+C cancel{reasoning_suffix}{toggle_separator}{toggle_hint}{live_hint}"
         ),
         (true, width) if width >= 56 && has_tools => {
             format!(
-                " Q:[{queued}] · Alt+↑/↓ focus · Ctrl+O details{scroll_hint}{reasoning_suffix} "
+                " Q:[{queued}] · Alt+↑/↓ focus · Ctrl+O details{scroll_hint}{live_hint}{reasoning_suffix} "
             )
         }
         (true, width) if width >= 56 => {
-            format!(" Queue [{queued}] · Enter enqueue · Ctrl+C cancel{reasoning_suffix} ")
+                format!(" Queue [{queued}] · Enter enqueue · Ctrl+C cancel{reasoning_suffix}{live_hint} ")
         }
         (true, width) if width >= 18 && (has_tools || has_history) => {
             let reasoning = if has_reasoning { " ^R" } else { "" };
@@ -241,10 +252,10 @@ pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
         (true, width) if width >= 14 && has_reasoning => format!(" Q:[{queued}] · ^R "),
         (true, _) => format!(" Q:[{queued}] "),
         (false, width) if width >= 88 => format!(
-            " Input (Enter send · Shift/Alt+Enter newline · Tab complete{focus_hint}{toggle_separator}{toggle_hint}{scroll_hint}{reasoning_suffix}) "
+            " Input (Enter send · Shift/Alt+Enter newline · Tab complete{focus_hint}{toggle_separator}{toggle_hint}{scroll_hint}{live_hint}{reasoning_suffix}) "
         ),
         (false, width) if width >= 56 => {
-            format!(" Input{reasoning_suffix}{focus_hint}{toggle_separator}{toggle_hint}{scroll_hint} ")
+            format!(" Input{reasoning_suffix}{focus_hint}{toggle_separator}{toggle_hint}{scroll_hint}{live_hint} ")
         }
         (false, width) if width >= 18 && (has_tools || has_history) => {
             let reasoning = if has_reasoning { " ^R" } else { "" };

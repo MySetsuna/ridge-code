@@ -1,5 +1,7 @@
 use super::*;
 
+const DETAIL_SCROLL_STEP: i16 = 4;
+
 /// 交互页类别:决定 Enter 动作与提示文案。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PanelKind {
@@ -42,6 +44,8 @@ pub(crate) struct Panel {
     pub(crate) editing: Option<String>,
     pub(crate) oauth_verifier: Option<String>,
     pub(crate) detail_open: bool,
+    /// Manual visual-row adjustment around an automatic search hit.
+    pub(crate) detail_scroll: i16,
 }
 
 /// 过滤:key/value 不分大小写子串命中;空 query = 全含。有序稳态(保 rows 原序)。纯函数。
@@ -69,10 +73,12 @@ impl Panel {
             editing: None,
             oauth_verifier: None,
             detail_open: false,
+            detail_scroll: 0,
         }
     }
     /// query 变更后重算 view 并把 sel 钳回范围内。
     pub(crate) fn retype(&mut self) {
+        self.detail_scroll = 0;
         self.view = panel_filter(&self.rows, &self.query);
         if self.sel >= self.view.len() {
             self.sel = self.view.len().saturating_sub(1);
@@ -92,26 +98,53 @@ impl Panel {
         }
     }
     pub(crate) fn move_up(&mut self) {
+        self.detail_scroll = 0;
         self.sel = self.sel.saturating_sub(1);
     }
     pub(crate) fn move_down(&mut self) {
+        self.detail_scroll = 0;
         if self.sel + 1 < self.view.len() {
             self.sel += 1;
         }
     }
     pub(crate) fn page_up(&mut self) {
+        self.detail_scroll = 0;
         self.sel = self.sel.saturating_sub(8);
     }
     pub(crate) fn page_down(&mut self) {
+        self.detail_scroll = 0;
         if !self.view.is_empty() {
             self.sel = (self.sel + 8).min(self.view.len() - 1);
         }
     }
     pub(crate) fn first(&mut self) {
+        self.detail_scroll = 0;
         self.sel = 0;
     }
     pub(crate) fn last(&mut self) {
+        self.detail_scroll = 0;
         self.sel = self.view.len().saturating_sub(1);
+    }
+    pub(crate) fn toggle_detail(&mut self) -> bool {
+        if self.kind != PanelKind::ToolHistory {
+            return false;
+        }
+        self.detail_scroll = 0;
+        self.detail_open = !self.detail_open;
+        self.detail_open
+    }
+    /// Move the expanded detail view around its search anchor.
+    pub(crate) fn scroll_detail(&mut self, delta: i8) -> bool {
+        if self.kind != PanelKind::ToolHistory || !self.detail_open {
+            return false;
+        }
+        let before = self.detail_scroll;
+        if delta > 0 {
+            self.detail_scroll = self.detail_scroll.saturating_add(DETAIL_SCROLL_STEP);
+        } else if delta < 0 {
+            self.detail_scroll = self.detail_scroll.saturating_sub(DETAIL_SCROLL_STEP);
+        }
+        self.detail_scroll != before
     }
     pub(crate) fn selected(&self) -> Option<&PanelRow> {
         self.view.get(self.sel).map(|&i| &self.rows[i])
@@ -344,6 +377,8 @@ pub(crate) enum PanelAction {
     Down,
     PageUp,
     PageDown,
+    DetailPageUp,
+    DetailPageDown,
     First,
     Last,
     Enter,
@@ -356,6 +391,13 @@ pub(crate) enum PanelAction {
 pub(crate) fn panel_action(key: &KeyEvent) -> PanelAction {
     if key.kind != KeyEventKind::Press {
         return PanelAction::Ignore;
+    }
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        match key.code {
+            KeyCode::PageUp => return PanelAction::DetailPageUp,
+            KeyCode::PageDown => return PanelAction::DetailPageDown,
+            _ => {}
+        }
     }
     match key.code {
         KeyCode::Up => PanelAction::Up,
