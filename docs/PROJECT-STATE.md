@@ -765,3 +765,11 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - `ridgecode-x86_64-pc-windows-msvc.zip` SHA-256 为 `ee1f12dc30237d100c3d175a558f54309a86b2b86f12f252d14fb1f61ed38db5`，远端 digest、大小 `3009866` 与本地一致；`.zip.sha256` 旁车文件亦已同步。
 - 归档含 `ridgecode.exe`、`README.md`、`install.ps1`；README 随包发布，覆盖安装、配置、TUI、命令与故障排查用法。
 - Release 二进制 `--version`、`--help` 与无参数离线 smoke 均 exit 0；smoke 仅报告本机未安装 `codegraph-mcp`，NotebookLM MCP 仍成功连接。
+
+## Live Answer/Reasoning Follow/Inspect（2026-08-02）
+- `LiveTranscript` 现默认跟随最新尾部；`Alt+PageUp` 向较早内容检视，`Alt+PageDown` 向较新内容移动，`Alt+End` 回到 Follow。检视状态在顶栏显示，工具详情滚动仍优先消费同组快捷键。
+- 检视采用有界偏移（最多 512 行），不复制完整 transcript；追加同一 Answer 时保留检视位置，新 Answer、清空流与 splash 重置为 Follow。
+- Tool History 长详情支持 `Alt+PageUp/PageDown` 绕搜索命中手动微调；Enter/方向键/普通 Page 键仍负责面板选择与翻页。
+- `4aa40f8` 已推送 `origin/main`；agent 99、TUI 120 及 workspace 测试、`clippy -D warnings`、fmt、diff 检查均通过。
+- ReRelease `v0.5.0` 已覆盖：`ridgecode-x86_64-pc-windows-msvc.zip` 大小 `3011518`，SHA-256 为 `f14ab5c378f70f342103367e84dd13032066ef554677ada0aa5b8085260dbb6b`；归档含 `ridgecode.exe`、`README.md`、`install.ps1`，旁车 SHA 文件已同步。
+- 本轮不查询用户指定停止查询的 NLM 深研状态；理论依据仍唯一为手动导入源 `8862d715-ffad-4288-b7eb-173260e2dcff`。真实 Windows 原生 scrollback 搜索/复制仍待用户实机验收。
