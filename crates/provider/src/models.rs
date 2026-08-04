@@ -21,6 +21,15 @@ pub fn parse_model_list(v: &Value) -> Vec<ModelInfo> {
     let Some(arr) = arr else { return vec![] };
     arr.iter()
         .filter_map(|m| {
+            // ChatGPT's Codex endpoint includes hidden rollout entries in the
+            // same response. Only `visibility: list` belongs in the picker;
+            // ordinary provider responses omit this field.
+            if matches!(
+                m.get("visibility").and_then(Value::as_str),
+                Some(visibility) if visibility != "list"
+            ) {
+                return None;
+            }
             let id = m
                 .get("id")
                 .or_else(|| m.get("slug"))
@@ -75,6 +84,8 @@ pub async fn fetch_models(
 /// Fetch the account-scoped model catalog used by ChatGPT-authenticated Codex.
 /// The endpoint is `/backend-api/codex/models`, and its response uses `models[]`
 /// with `slug` identifiers rather than the public API's `data[].id` shape.
+pub const DEFAULT_CHATGPT_CLIENT_VERSION: &str = "0.145.0";
+
 pub async fn fetch_chatgpt_models(
     http: &dyn HttpClient,
     base_url: &str,
@@ -84,7 +95,14 @@ pub async fn fetch_chatgpt_models(
     let account_id = account_id.ok_or(
         "ChatGPT OAuth token has no chatgpt_account_id; run ridgecode login --codex again",
     )?;
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let client_version = std::env::var("RIDGE_CODEX_CLIENT_VERSION")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_CHATGPT_CLIENT_VERSION.to_string());
+    let url = format!(
+        "{}/models?client_version={client_version}",
+        base_url.trim_end_matches('/')
+    );
     let headers = vec![
         (
             "Authorization".to_string(),

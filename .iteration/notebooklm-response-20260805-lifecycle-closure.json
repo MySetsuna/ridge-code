@@ -1,0 +1,38 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "The same-session NLM response again proposed per-block colored borders, a closed conclusion line, and queue placeholders, but returned sources_used:[] with empty citation mappings.",
+      "evidence": "NotebookLM conversation 68791fb7-659a-4ad6-a86c-beb7ac694781 response; source selection was limited to 8862d715-ffad-4288-b7eb-173260e2dcff."
+    },
+    {
+      "fact": "The proposal's claimed missing horizontal delimiter and per-block container must be checked against the existing bounded live rails, block-end rail, rounded live surface, and static scrollback projection.",
+      "evidence": "NLM response itself identifies these as hypotheses requiring CodeGraph and width/resize validation."
+    }
+  ],
+  "contradictions": [],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "A new per-block border container would improve Reasoning-to-Answer closure more than the existing one-cell block-end rail and live surface.",
+      "support": [
+        "NLM claims horizontal closure improves scanability"
+      ],
+      "against": [
+        "approved constraints prohibit extra rows and a second renderer",
+        "current code may already derive block-end rails from adjacent visible anchors"
+      ],
+      "experiment": "Use CodeGraph to verify live_block_end_rail and render_live_tail_projection, then accept only a missing presentation signal that survives 18/24/32/40/80/96 width and HOLD/FOLLOW checks."
+    }
+  ],
+  "candidates": [],
+  "recommendation": "Do not implement per-block borders or queue placeholders until local CodeGraph proves the existing rail/closure path is insufficient.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Audit existing block-end rail, lifecycle anchor, and static Reasoning/Answer closure before selecting the next local slice."
+  },
+  "stop_conditions": [
+    "Any extra physical rows, duplicated renderer, or changed Tab/Enter/queue/takeover semantics",
+    "Any width, CJK, Markdown, HOLD/FOLLOW, or resize regression",
+    "No concrete local gap after CodeGraph audit"
+  ]
+}

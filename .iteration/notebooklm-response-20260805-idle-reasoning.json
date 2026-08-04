@@ -1,0 +1,65 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "The latest same-session NLM answer again proposed viewport-bound highlighting and lifecycle dimming, but returned sources_used empty with no citation mapping.",
+      "evidence": "NotebookLM notebook_query using source 8862d715-ffad-4288-b7eb-173260e2dcff; local CodeGraph audit."
+    },
+    {
+      "fact": "Live Reasoning already uses a width-aware contrast helper, while the idle completed-result card's THK detail path still applied DIM and ITALIC unconditionally at all widths.",
+      "evidence": "crates/agent/src/tui/draw.rs live_reasoning_chrome_modifier, idle_detail_line, live_empty_state; narrow_live_reasoning_keeps_readability_floor and local source audit."
+    }
+  ],
+  "contradictions": [
+    {
+      "claim": "A new viewport highlighter, parser, or lifecycle engine is required.",
+      "local_evidence": "The existing bounded live tail, Markdown span projection, semantic rails, and cache boundaries already cover viewport work; only the idle THK style policy was inconsistent."
+    }
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "Applying the existing narrow live-Reasoning contrast floor to the idle THK result detail improves post-run thought readability without making the Answer/SUM card hierarchy noisy.",
+      "support": [
+        "The idle THK body is currently DIM at 32/40 columns while the live Reasoning body already drops DIM there."
+      ],
+      "against": [
+        "A brighter idle thought excerpt could compete with the completed Answer or SUM signal."
+      ],
+      "experiment": "Reuse the existing width-aware modifier only for idle THK detail and verify 32/40/80/96 styles, completed result-card hierarchy, CJK/Markdown wrapping, resize, and ConPTY."
+    }
+  ],
+  "candidates": [
+    {
+      "core": "Unify the existing narrow Reasoning contrast policy in the idle result card by reusing live_reasoning_chrome_modifier for THK detail.",
+      "constraints": [
+        "presentation-only",
+        "no new renderer/cache/parser or lifecycle state",
+        "preserve Answer/SUM roles, body text, card geometry, scrollback, keys, queue, takeover, and execution"
+      ],
+      "risks": [
+        "narrow THK may compete with Answer; retain italic separation and keep wide DIM styling unchanged"
+      ],
+      "reversibility": "high",
+      "scope": [
+        "crates/agent/src/tui/draw.rs",
+        "crates/agent/src/tui/tests.rs"
+      ],
+      "validation": [
+        "32/40/80/96 style regression",
+        "completed result-card hierarchy and CJK/Markdown/resize tests",
+        "workspace/fmt/clippy/Debug/Release/ConPTY"
+      ]
+    }
+  ],
+  "recommendation": "Reject the duplicate viewport architecture. Accept only the local idle THK contrast consistency slice and verify it against the existing Answer/SUM hierarchy.",
+  "next_step": {
+    "type": "implementation",
+    "value": "Reuse live_reasoning_chrome_modifier in idle_detail_line for THK, then run the completed-card and terminal matrix."
+  },
+  "stop_conditions": [
+    "Do not add a second renderer, parser, virtualizer, execution state machine, dependency, or global sidebar.",
+    "Do not dim or recolor Answer/SUM, change text/geometry, or alter Tab/Enter/HOLD/FOLLOW/takeover/Ctrl-C semantics.",
+    "Do not query old Deep Research status or create a Note/source.",
+    "If the narrow card loses Answer/SUM hierarchy, revert this presentation-only change."
+  ]
+}

@@ -3,6 +3,1764 @@ use super::*;
 fn event_colours_are_semantic() {
     assert_eq!(event_color("verify: PASS"), Color::Green);
     assert_eq!(event_color("act: run_shell"), Color::Yellow);
+    assert_eq!(event_color("(final) done"), role_color(Role::Answer));
+}
+
+#[test]
+fn read_file_result_is_collapsed_but_expandable() {
+    let message = "act: read_file -> first line\nsecond line\nthird line";
+    let block = tool_preview(message).expect("read result should be a tool block");
+    let compact = block.live_lines();
+    assert!(compact
+        .iter()
+        .any(|line| line.text.contains("Read complete")));
+    assert!(compact
+        .iter()
+        .any(|line| line.text.contains("Ctrl+O details")));
+    assert!(!compact.iter().any(|line| line.text == "second line"));
+
+    let mut expanded = block;
+    assert!(expanded.toggle());
+    assert!(expanded
+        .live_lines()
+        .iter()
+        .any(|line| line.text.contains("second line")));
+}
+
+#[test]
+fn long_tool_preview_keeps_both_file_ends_when_expanded() {
+    let content = (0..24)
+        .map(|index| format!("line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let preview = preview_lines(&content, 12);
+    let rendered = preview
+        .iter()
+        .map(|(line, _)| line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("line 0"));
+    assert!(rendered.contains("line 23"));
+    assert!(rendered.contains("folded"));
+    assert!(!rendered.contains("line 12"));
+}
+
+#[test]
+fn read_file_call_and_result_share_one_collapsed_tool_block() {
+    let call = r#"reason#1: tool_call read_file {"path":"src/x.rs"}"#;
+    let result = "act: read_file -> first line\nsecond line\nthird line";
+    let mut ui = Ui::default();
+    ui.push_tool(tool_preview(call).expect("read call"));
+    ui.push_tool(tool_preview(result).expect("read result"));
+
+    let compact = ui.transcript.visible_lines(8);
+    assert_eq!(
+        compact
+            .iter()
+            .filter(|line| line.kind == LiveLineKind::ToolSummary)
+            .count(),
+        1,
+        "call/result must collapse to one tool block"
+    );
+    assert!(compact
+        .iter()
+        .any(|line| line.text.contains("Read complete")));
+    assert!(!compact.iter().any(|line| line.text == "second line"));
+
+    assert!(ui.toggle_details());
+    let expanded = ui.transcript.visible_lines(8);
+    assert!(expanded
+        .iter()
+        .any(|line| line.text.contains("Read src/x.rs")));
+    assert!(expanded
+        .iter()
+        .any(|line| line.text.contains("second line")));
+    ui.commit_live_tools();
+    assert_eq!(ui.tool_history.len(), 1);
+}
+
+#[test]
+fn consecutive_read_file_results_group_into_one_collapsed_batch() {
+    let mut ui = Ui::default();
+    for (index, path) in [(1, "src/alpha.rs"), (2, "src/beta.rs")] {
+        let call = format!(r#"reason#{index}: tool_call read_file {{"path":"{path}"}}"#);
+        let result = format!("act: read_file -> line {index}\nnext line {index}");
+        ui.push_tool(tool_preview(&call).expect("read call"));
+        ui.push_tool(tool_preview(&result).expect("read result"));
+    }
+
+    let compact = ui.transcript.visible_lines(8);
+    let summaries = compact
+        .iter()
+        .filter(|line| line.kind == LiveLineKind::ToolSummary)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        summaries.len(),
+        1,
+        "adjacent reads should occupy one row: {compact:?}"
+    );
+    assert!(summaries[0].text.contains("Read batch · 2 files"));
+    assert!(compact
+        .iter()
+        .any(|line| line.text.contains("Ctrl+O details")));
+    assert!(!compact.iter().any(|line| line.text.contains("next line")));
+
+    assert!(ui.toggle_details());
+    let expanded = ui.transcript.visible_lines(16);
+    assert!(expanded
+        .iter()
+        .any(|line| line.text.contains("Read src/alpha.rs")));
+    assert!(expanded
+        .iter()
+        .any(|line| line.text.contains("Read src/beta.rs")));
+    assert!(expanded
+        .iter()
+        .any(|line| line.text.contains("next line 1")));
+    assert!(expanded
+        .iter()
+        .any(|line| line.text.contains("next line 2")));
+}
+
+#[test]
+fn read_file_batch_preserves_detail_order_and_bound() {
+    let mut ui = Ui::default();
+    for index in 0..4 {
+        let path = format!("src/read-{index}.rs");
+        let call = format!(r#"reason#{index}: tool_call read_file {{"path":"{path}"}}"#);
+        let body = (0..20)
+            .map(|line| format!("file {index} line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = format!("act: read_file -> {body}");
+        ui.push_tool(tool_preview(&call).expect("read call"));
+        ui.push_tool(tool_preview(&result).expect("read result"));
+    }
+    assert!(ui.toggle_details());
+    ui.commit_live_tools();
+
+    assert_eq!(ui.tool_history.len(), 1);
+    let batch = ui.tool_history.front().expect("read batch");
+    assert!(batch.summary().contains("Read batch · 4 files"));
+    let first = batch
+        .summary()
+        .find("src/read-0.rs")
+        .expect("first path indexed");
+    let last = batch
+        .summary()
+        .find("src/read-2.rs")
+        .expect("third path indexed");
+    assert!(
+        first < last,
+        "read summary lost arrival order: {}",
+        batch.summary()
+    );
+    assert!(batch.summary().contains("+1 more"));
+    let details = batch.details_text();
+    assert!(
+        details.lines().count() <= 32,
+        "detail bound exceeded: {details}"
+    );
+    assert!(
+        details.contains("file 0 line 0"),
+        "detail head lost: {details}"
+    );
+    assert!(
+        details.contains("file 3 line 19"),
+        "detail tail lost: {details}"
+    );
+}
+
+#[test]
+fn read_file_batch_does_not_cross_other_tools() {
+    let mut ui = Ui::default();
+    let read_call = |index: usize| {
+        tool_preview(&format!(
+            r#"reason#{index}: tool_call read_file {{"path":"src/read-{index}.rs"}}"#
+        ))
+        .expect("read call")
+    };
+    let read_result = |index: usize| {
+        tool_preview(&format!("act: read_file -> content {index}")).expect("read result")
+    };
+
+    ui.push_tool(read_call(1));
+    ui.push_tool(read_result(1));
+    ui.push_tool(
+        tool_preview(r#"reason#2: tool_call run_shell {"cmd":"echo gap"}"#).expect("shell call"),
+    );
+    ui.push_tool(tool_preview("act: run_shell -> gap").expect("shell result"));
+    ui.push_tool(read_call(3));
+    ui.push_tool(read_result(3));
+
+    let summaries = ui
+        .transcript
+        .visible_lines(16)
+        .into_iter()
+        .filter(|line| line.kind == LiveLineKind::ToolSummary)
+        .map(|line| line.text.to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        summaries.len(),
+        3,
+        "the shell must split read batches: {summaries:?}"
+    );
+    assert_eq!(
+        summaries
+            .iter()
+            .filter(|line| line.contains("Read batch"))
+            .count(),
+        0
+    );
+    assert_eq!(
+        summaries
+            .iter()
+            .filter(|line| line.contains("Read complete"))
+            .count(),
+        2
+    );
+    assert!(summaries.iter().any(|line| line.contains("run_shell")));
+}
+
+#[test]
+fn activity_history_is_bounded_deduplicated_and_newest_first() {
+    let mut ui = Ui::default();
+    ui.set_activity("starting task");
+    ui.set_activity("starting task");
+    for step in 0..(MAX_ACTIVITY_HISTORY + 3) {
+        ui.set_activity(format!("node · {step}"));
+    }
+
+    assert_eq!(ui.activity_history.len(), MAX_ACTIVITY_HISTORY);
+    assert_eq!(ui.activity, format!("node · {}", MAX_ACTIVITY_HISTORY + 2));
+    assert_eq!(ui.activity_history.front().unwrap().text, "node · 3");
+    assert_eq!(
+        ui.activity_history.back().unwrap().text,
+        format!("node · {}", MAX_ACTIVITY_HISTORY + 2)
+    );
+
+    let panel = activity_panel(&ui.activity_history);
+    assert_eq!(panel.kind, PanelKind::Activity);
+    assert_eq!(panel.rows.len(), MAX_ACTIVITY_HISTORY);
+    assert_eq!(panel.rows[0].key, "SYS now");
+    assert_eq!(
+        panel.rows[0].value,
+        format!("node · {}", MAX_ACTIVITY_HISTORY + 2)
+    );
+
+    ui.open_activity_panel();
+    ui.set_activity("completed");
+    assert_eq!(
+        ui.panel
+            .as_ref()
+            .and_then(|panel| panel.selected())
+            .map(|row| row.value.as_str()),
+        Some("completed")
+    );
+    ui.toggle_activity_panel();
+    assert!(ui.panel.is_none());
+}
+
+#[test]
+fn activity_history_retains_actionable_boundaries_during_node_chatter() {
+    let mut ui = Ui::default();
+    ui.record_activity(ActivityKind::Waiting, "waiting · no stream for 8s");
+    ui.record_activity(ActivityKind::Conclusion, "settling result");
+    ui.record_activity(ActivityKind::Completed, "completed");
+
+    for step in 0..(MAX_ACTIVITY_HISTORY + 4) {
+        ui.record_activity(ActivityKind::Reasoning, format!("node · reason {step}"));
+    }
+
+    assert_eq!(ui.activity_history.len(), MAX_ACTIVITY_HISTORY);
+    for text in ["waiting · no stream for 8s", "settling result", "completed"] {
+        assert!(
+            ui.activity_history.iter().any(|entry| entry.text == text),
+            "retained activity signal missing: {text}"
+        );
+    }
+    assert_eq!(ui.activity_history.back().unwrap().text, "node · reason 15");
+}
+
+#[test]
+fn activity_panel_keeps_latest_event_visible_on_narrow_terminal() {
+    let mut ui = Ui::default();
+    ui.set_activity("model · thinking");
+    ui.set_activity("tool · read_file");
+    let panel = activity_panel(&ui.activity_history);
+    let mut terminal =
+        Terminal::new(ratatui::backend::TestBackend::new(32, 10)).expect("activity terminal");
+    terminal
+        .draw(|frame| draw_panel(frame, frame.area(), &panel))
+        .expect("activity draw");
+    let symbols = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(
+        symbols.contains("read_file"),
+        "latest activity missing: {symbols}"
+    );
+}
+
+#[test]
+fn activity_panel_can_expand_selected_event_detail() {
+    let mut ui = Ui::default();
+    ui.set_activity("model · waiting for a long-running investigation conclusion");
+    let mut panel = activity_panel(&ui.activity_history);
+
+    assert!(panel.supports_detail());
+    assert!(panel.toggle_detail());
+    assert!(panel.detail_open);
+
+    let mut terminal =
+        Terminal::new(ratatui::backend::TestBackend::new(40, 12)).expect("activity terminal");
+    terminal
+        .draw(|frame| draw_panel(frame, frame.area(), &panel))
+        .expect("activity detail draw");
+    let symbols = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(
+        symbols.contains("long-running"),
+        "activity detail missing: {symbols}"
+    );
+}
+
+#[test]
+fn reasoning_history_panel_exposes_think_rail_and_detail_anchor() {
+    let mut ui = Ui::default();
+    ui.push_chunk(provider::StreamChunk::Reasoning("inspect state".into()));
+    ui.commit_live_reasoning(3, 2);
+    let mut panel = reasoning_history_panel(&ui.reasoning_history);
+    assert!(panel.toggle_detail());
+
+    let mut terminal =
+        Terminal::new(ratatui::backend::TestBackend::new(48, 14)).expect("reasoning terminal");
+    terminal
+        .draw(|frame| draw_panel(frame, frame.area(), &panel))
+        .expect("reasoning draw");
+    let symbols = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(
+        symbols.contains("THINK"),
+        "semantic detail anchor missing: {symbols}"
+    );
+    assert!(
+        symbols.contains("┃") || symbols.contains("│"),
+        "reasoning rail missing: {symbols}"
+    );
+}
+
+#[test]
+fn live_inspector_detail_anchor_tracks_answer_and_thinking_focus() {
+    let mut ui = Ui::default();
+    ui.push_chunk(provider::StreamChunk::Reasoning("plan".into()));
+    ui.push_chunk(provider::StreamChunk::Answer("answer".into()));
+    assert!(ui.open_live_history());
+    let panel = ui.panel.as_mut().expect("live panel");
+    assert!(panel.toggle_detail());
+
+    let mut terminal =
+        Terminal::new(ratatui::backend::TestBackend::new(56, 14)).expect("live terminal");
+    terminal
+        .draw(|frame| draw_panel(frame, frame.area(), panel))
+        .expect("answer detail draw");
+    let answer_symbols = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(
+        answer_symbols.contains("ANSWER"),
+        "answer detail anchor missing: {answer_symbols}"
+    );
+
+    panel.move_down();
+    terminal
+        .draw(|frame| draw_panel(frame, frame.area(), panel))
+        .expect("thinking detail draw");
+    let thinking_symbols = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(
+        thinking_symbols.contains("THINK"),
+        "thinking detail anchor missing: {thinking_symbols}"
+    );
+}
+
+#[test]
+fn wide_live_inspector_keeps_block_list_and_detail_side_by_side() {
+    let mut ui = Ui::default();
+    ui.push_chunk(provider::StreamChunk::Reasoning("plan".into()));
+    ui.push_chunk(provider::StreamChunk::Answer("answer detail".into()));
+    assert!(ui.open_live_history());
+    let panel = ui.panel.as_mut().expect("live panel");
+    assert!(panel.toggle_detail());
+
+    let mut terminal =
+        Terminal::new(ratatui::backend::TestBackend::new(96, 16)).expect("wide live terminal");
+    terminal
+        .draw(|frame| draw_panel(frame, frame.area(), panel))
+        .expect("wide live detail draw");
+    let buffer = terminal.backend().buffer();
+    let area = buffer.area();
+    let width = area.width as usize;
+    let divider_visible = buffer.content().iter().enumerate().any(|(index, cell)| {
+        let x = (index % width) as u16;
+        let y = (index / width) as u16;
+        cell.symbol() == "│"
+            && x >= 20
+            && x < area.width.saturating_sub(20)
+            && y >= 2
+            && y < area.height.saturating_sub(2)
+    });
+    let symbols = buffer
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(
+        divider_visible,
+        "wide inspector lost adaptive divider: {symbols}"
+    );
+    assert!(
+        symbols.contains("ANSWER"),
+        "answer detail anchor missing: {symbols}"
+    );
+    assert!(
+        symbols.contains("answer detail"),
+        "answer content missing: {symbols}"
+    );
+}
+
+#[test]
+fn audit_detail_reuses_markdown_heading_style() {
+    let mut panel = Panel::new(
+        PanelKind::ReasoningHistory,
+        "reasoning".into(),
+        vec![PanelRow {
+            key: "#1 step 4 · 8 tok · +2s".into(),
+            value:
+                "# Decision\n\n> [!WARNING] caution\n> keep this\n\n```rust\nlet answer = 1;\n```"
+                    .into(),
+            ctx: None,
+        }],
+    );
+    assert!(panel.toggle_detail());
+
+    let mut terminal =
+        Terminal::new(ratatui::backend::TestBackend::new(56, 16)).expect("markdown detail");
+    terminal
+        .draw(|frame| draw_panel(frame, frame.area(), &panel))
+        .expect("markdown detail draw");
+    let cells = terminal.backend().buffer().content();
+    assert!(
+        cells.iter().any(|cell| {
+            cell.symbol() == "#"
+                && cell.fg == role_color(Role::Primary)
+                && cell.modifier.contains(Modifier::BOLD)
+        }),
+        "markdown heading lost semantic style"
+    );
+    let symbols = cells.iter().map(|cell| cell.symbol()).collect::<String>();
+    assert!(
+        symbols.contains("let"),
+        "markdown code detail missing: {symbols}"
+    );
+    assert!(
+        cells.iter().any(|cell| cell.fg == role_color(Role::Warn)),
+        "markdown alert lost semantic warning style"
+    );
+}
+
+#[test]
+fn narrow_open_detail_prioritizes_audit_body_over_competing_list_rows() {
+    let mut panel = Panel::new(
+        PanelKind::ReasoningHistory,
+        "reasoning".into(),
+        vec![
+            PanelRow {
+                key: "#1 selected".into(),
+                value: "# conclusion\n\nretain the selected reasoning body".into(),
+                ctx: None,
+            },
+            PanelRow {
+                key: "#2 LIST-ONLY-ROW".into(),
+                value: "this row should yield the narrow detail viewport".into(),
+                ctx: None,
+            },
+        ],
+    );
+    assert!(panel.toggle_detail());
+
+    let mut terminal =
+        Terminal::new(ratatui::backend::TestBackend::new(40, 12)).expect("narrow detail");
+    terminal
+        .draw(|frame| draw_panel(frame, frame.area(), &panel))
+        .expect("narrow detail draw");
+    let symbols = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(
+        symbols.contains("retain the selected"),
+        "selected detail was squeezed out: {symbols}"
+    );
+    assert!(
+        !symbols.contains("LIST-ONLY-ROW"),
+        "narrow modal still spent rows on the competing list: {symbols}"
+    );
+    assert!(
+        symbols.contains("Esc"),
+        "close affordance disappeared: {symbols}"
+    );
+}
+
+#[test]
+fn narrow_audit_modal_clears_underlying_gutters() {
+    let panel = Panel::new(
+        PanelKind::AnswerHistory,
+        "answers".into(),
+        vec![PanelRow {
+            key: "#1 answer".into(),
+            value: "answer body".into(),
+            ctx: None,
+        }],
+    );
+    let mut terminal =
+        Terminal::new(ratatui::backend::TestBackend::new(40, 12)).expect("audit terminal");
+    terminal
+        .draw(|frame| {
+            frame.render_widget(
+                Block::default().style(Style::default().fg(Color::Red)),
+                frame.area(),
+            );
+            draw_panel(frame, frame.area(), &panel);
+        })
+        .expect("audit draw");
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer.cell((0, 0)).expect("gutter cell").fg, Color::Reset);
+    assert_eq!(buffer.cell((1, 5)).expect("gutter cell").fg, Color::Reset);
+}
+
+#[test]
+fn narrow_answer_metadata_wraps_at_word_boundaries() {
+    let panel = Panel::new(
+        PanelKind::AnswerHistory,
+        "answers".into(),
+        vec![PanelRow {
+            key: "#1 ANSWER · step 1 · 25 tok · +0s · 51 chars · p#2".into(),
+            value: "answer body".into(),
+            ctx: None,
+        }],
+    );
+    let mut terminal =
+        Terminal::new(ratatui::backend::TestBackend::new(18, 12)).expect("narrow answers");
+    terminal
+        .draw(|frame| draw_panel(frame, frame.area(), &panel))
+        .expect("narrow answers draw");
+    let width = 18;
+    let rows = (0..12)
+        .map(|y| {
+            (0..width)
+                .map(|x| terminal.backend().buffer().cell((x, y)).unwrap().symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        rows.iter().any(|row| row.contains("▸ #1 ANSWER")),
+        "answer label disappeared: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("▸ step 1")),
+        "metadata split through a word: {rows:?}"
+    );
+}
+
+#[test]
+fn medium_answer_hint_preserves_expand_and_close_actions() {
+    let panel = Panel::new(
+        PanelKind::AnswerHistory,
+        "answers".into(),
+        vec![PanelRow {
+            key: "#1 ANSWER".into(),
+            value: "answer body".into(),
+            ctx: None,
+        }],
+    );
+    for width in [32, 40] {
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(width, 12)).expect("medium answers");
+        terminal
+            .draw(|frame| draw_panel(frame, frame.area(), &panel))
+            .expect("medium answers draw");
+        let symbols = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            symbols.contains("Enter expand"),
+            "expand affordance clipped at {width}: {symbols}"
+        );
+        assert!(
+            symbols.contains("Esc close"),
+            "close affordance clipped at {width}: {symbols}"
+        );
+    }
+}
+
+#[test]
+fn detail_layout_cache_reuses_same_snapshot_and_invalidates_on_width_or_panel() {
+    let panel = Panel::new(
+        PanelKind::ReasoningHistory,
+        "reasoning".into(),
+        vec![PanelRow {
+            key: "#1 decision".into(),
+            value: "# Decision\n\n```rust\nlet answer = 1;\n```".into(),
+            ctx: None,
+        }],
+    );
+    let detail = panel.selected().expect("detail row");
+    let mut cache = DetailLayoutCache::default();
+    let first = cache.prepare(
+        panel.content_revision,
+        panel.selected_index().expect("selection"),
+        &detail.value,
+        panel.kind,
+        &detail.key,
+        32,
+    );
+    let second = cache.prepare(
+        panel.content_revision,
+        panel.selected_index().expect("selection"),
+        &detail.value,
+        panel.kind,
+        &detail.key,
+        32,
+    );
+    assert_eq!(first, second);
+    assert_eq!(cache.rebuilds(), 1);
+
+    let _ = cache.prepare(
+        panel.content_revision,
+        panel.selected_index().expect("selection"),
+        &detail.value,
+        panel.kind,
+        &detail.key,
+        24,
+    );
+    assert_eq!(cache.rebuilds(), 2);
+
+    let replacement = Panel::new(
+        PanelKind::ReasoningHistory,
+        "reasoning".into(),
+        vec![PanelRow {
+            key: "#2 decision".into(),
+            value: "replacement".into(),
+            ctx: None,
+        }],
+    );
+    let replacement_detail = replacement.selected().expect("replacement row");
+    let _ = cache.prepare(
+        replacement.content_revision,
+        replacement.selected_index().expect("replacement selection"),
+        &replacement_detail.value,
+        replacement.kind,
+        &replacement_detail.key,
+        24,
+    );
+    assert_eq!(cache.rebuilds(), 3);
+}
+
+#[test]
+fn panel_items_cache_reuses_wrapped_snapshot_and_invalidates_on_view_changes() {
+    let mut panel = Panel::new(
+        PanelKind::ReasoningHistory,
+        "reasoning".into(),
+        vec![
+            PanelRow {
+                key: "#1 first".into(),
+                value: "a long reasoning detail that wraps in a narrow audit list".into(),
+                ctx: None,
+            },
+            PanelRow {
+                key: "#2 second".into(),
+                value: "another reasoning detail".into(),
+                ctx: None,
+            },
+        ],
+    );
+    let mut cache = PanelItemsCache::default();
+    assert_eq!(cache.items(&panel, 24).len(), 2);
+    assert_eq!(cache.items(&panel, 24).len(), 2);
+    assert_eq!(cache.rebuilds(), 1);
+    let (visible, selected) = cache.viewport(&panel, 24, 1, Some(1));
+    assert_eq!(visible.len(), 1, "viewport should omit off-screen items");
+    assert_eq!(
+        selected,
+        Some(0),
+        "selection must be remapped into the window"
+    );
+
+    panel.query = "second".into();
+    panel.retype();
+    assert_eq!(cache.items(&panel, 24).len(), 1);
+    assert_eq!(cache.rebuilds(), 2);
+
+    panel.detail_open = true;
+    let _ = cache.items(&panel, 24);
+    assert_eq!(cache.rebuilds(), 3);
+    let _ = cache.items(&panel, 16);
+    assert_eq!(cache.rebuilds(), 4);
+}
+
+#[test]
+fn standard_panel_selection_reuses_wrapped_items() {
+    let mut panel = Panel::new(
+        PanelKind::Config,
+        "config".into(),
+        (0..32)
+            .map(|index| PanelRow {
+                key: format!("setting-{index}"),
+                value: "a value that wraps in a narrow list".into(),
+                ctx: None,
+            })
+            .collect(),
+    );
+    let mut cache = PanelItemsCache::default();
+
+    let _ = cache.items(&panel, 20);
+    assert_eq!(cache.rebuilds(), 1);
+    panel.move_down();
+    let _ = cache.items(&panel, 20);
+    assert_eq!(
+        cache.rebuilds(),
+        1,
+        "standard list selection is rendered by ListState, not item content"
+    );
+
+    panel.query = "setting-3".into();
+    panel.retype();
+    let _ = cache.items(&panel, 20);
+    assert_eq!(cache.rebuilds(), 2, "query changes still invalidate rows");
+}
+
+#[test]
+fn detail_panel_selection_still_rebuilds_semantic_markers() {
+    let mut panel = Panel::new(
+        PanelKind::AnswerHistory,
+        "answers".into(),
+        vec![
+            PanelRow {
+                key: "#1 answer".into(),
+                value: "first answer".into(),
+                ctx: None,
+            },
+            PanelRow {
+                key: "#2 answer".into(),
+                value: "second answer".into(),
+                ctx: None,
+            },
+        ],
+    );
+    let mut cache = PanelItemsCache::default();
+
+    let _ = cache.items(&panel, 32);
+    assert_eq!(cache.rebuilds(), 1);
+    panel.move_down();
+    let _ = cache.items(&panel, 32);
+    assert_eq!(
+        cache.rebuilds(),
+        2,
+        "detail rows encode the selected marker in their content"
+    );
+}
+
+#[test]
+fn panel_viewport_range_respects_wrapped_item_heights() {
+    let heights = [1, 2, 1, 3, 1, 1];
+    let (start, end) = panel_viewport_range(&heights, 4, Some(4));
+    assert!(start <= 4 && 4 < end, "selected item fell outside viewport");
+    let used = heights[start..end].iter().sum::<usize>();
+    assert!(
+        used <= 4 || heights[4] > 4,
+        "window exceeded physical budget"
+    );
+
+    let (start, end) = panel_viewport_range(&heights, 3, None);
+    assert_eq!((start, end), (0, 2));
+}
+
+#[test]
+fn detail_layout_cache_uses_ratatui_rendered_height_for_cjk_markdown() {
+    let panel = Panel::new(
+        PanelKind::ReasoningHistory,
+        "reasoning".into(),
+        vec![PanelRow {
+            key: "#1 decision".into(),
+            value: "# 结论\n\n> [!WARNING] 注意\n> 保留这段\n\n```rust\nlet answer = 1;\n```"
+                .into(),
+            ctx: None,
+        }],
+    );
+    let detail = panel.selected().expect("detail row");
+    let width = 13;
+    let mut cache = DetailLayoutCache::default();
+    let rows = cache.prepare(
+        panel.content_revision,
+        panel.selected_index().expect("selection"),
+        &detail.value,
+        panel.kind,
+        &detail.key,
+        width,
+    );
+    let expected = Paragraph::new(cache.text())
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+        .max(1);
+    assert_eq!(rows, expected);
+    assert!(
+        rows >= 6,
+        "CJK/markdown detail unexpectedly collapsed: {rows}"
+    );
+}
+
+#[test]
+fn activity_panel_enter_toggles_detail_without_closing() {
+    let mut ui = Ui::default();
+    ui.set_activity("model · waiting for investigation");
+    ui.open_activity_panel();
+    let mut meta = ReplMeta {
+        tools: Vec::new(),
+        provider: "test".into(),
+        provider_label: "test".into(),
+        model: "model".into(),
+        base_url: String::new(),
+        status_bar: "{provider} · {model}".into(),
+        ctx_window: 200_000,
+    };
+    let swap = Arc::new(provider::SwapProvider::new(Arc::new(
+        provider::ScriptedProvider::new(Vec::new()),
+    )));
+
+    panel_enter(&mut ui, &mut meta, &swap);
+    assert!(ui.panel.as_ref().is_some_and(|panel| panel.detail_open));
+    panel_enter(&mut ui, &mut meta, &swap);
+    assert!(ui.panel.as_ref().is_some_and(|panel| !panel.detail_open));
+}
+
+#[test]
+fn activity_panel_refresh_preserves_live_selection_and_detail() {
+    let mut ui = Ui::default();
+    ui.set_activity("model · thinking");
+    ui.open_activity_panel();
+    assert!(ui.panel.as_mut().expect("activity panel").toggle_detail());
+
+    ui.set_activity("tool · read_file");
+
+    let panel = ui.panel.as_ref().expect("refreshed activity panel");
+    assert_eq!(panel.kind, PanelKind::Activity);
+    assert!(panel.detail_open);
+    assert_eq!(
+        panel.selected().map(|row| row.value.as_str()),
+        Some("model · thinking")
+    );
+}
+
+#[test]
+fn queue_panel_exposes_fifo_and_removes_only_pending_intent() {
+    let mut ui = Ui::default();
+    ui.queued.push_back("first pending request".into());
+    ui.queued.push_back("second pending request".into());
+    ui.open_queue_panel();
+
+    let panel = ui.panel.as_ref().expect("queue panel");
+    assert_eq!(panel.kind, PanelKind::Queue);
+    assert_eq!(panel.selected_index(), Some(0));
+    assert_eq!(
+        panel.selected().map(|row| row.value.as_str()),
+        Some("first pending request")
+    );
+
+    assert_eq!(
+        ui.remove_queued(0).as_deref(),
+        Some("first pending request")
+    );
+    ui.refresh_queue_panel();
+    assert_eq!(ui.queued.len(), 1);
+    assert_eq!(
+        ui.panel
+            .as_ref()
+            .and_then(|panel| panel.selected())
+            .map(|row| row.value.as_str()),
+        Some("second pending request")
+    );
+    assert!(ui.toggle_queue_panel());
+    assert!(ui.panel.is_none());
+}
+
+#[test]
+fn narrow_activity_row_is_single_line_and_keeps_tag() {
+    let row = PanelRow {
+        key: "THK now".into(),
+        value: "reasoning · scanning a very long node path".into(),
+        ctx: None,
+    };
+    let compact = compact_activity_item(&row, 18);
+    assert!(compact.starts_with("THK›"));
+    assert!(str_cells(&compact) <= 18, "activity overflow: {compact}");
+    assert!(!compact.contains("very long node path"));
+}
+
+#[test]
+fn activity_ledger_tags_lifecycle_without_changing_current_phase() {
+    let mut ui = Ui::default();
+    ui.set_activity("model · thinking");
+    ui.record_activity(ActivityKind::Queue, "queued · inspect tests");
+    ui.record_activity(ActivityKind::Waiting, "waiting · no stream for 8s");
+    ui.set_activity("approval required · user can take over");
+
+    assert_eq!(ui.activity, "approval required · user can take over");
+    assert_eq!(
+        ui.activity_history
+            .iter()
+            .map(|entry| entry.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            ActivityKind::Reasoning,
+            ActivityKind::Queue,
+            ActivityKind::Waiting,
+            ActivityKind::Approval,
+        ]
+    );
+    let panel = activity_panel(&ui.activity_history);
+    assert_eq!(panel.rows[0].key, "ASK now");
+    assert_eq!(panel.rows[1].key, "WAIT #3");
+    assert_eq!(panel.rows[2].key, "QUE #2");
+}
+
+#[test]
+fn activity_classifier_exposes_investigation_verification_and_conclusion() {
+    let mut ui = Ui::default();
+    ui.set_activity("node · reason");
+    assert_eq!(
+        ui.activity_history.back().map(|entry| entry.kind),
+        Some(ActivityKind::Reasoning)
+    );
+    ui.set_activity("node · verify");
+    assert_eq!(
+        ui.activity_history.back().map(|entry| entry.kind),
+        Some(ActivityKind::Verification)
+    );
+    ui.set_activity("settling result");
+    assert_eq!(
+        ui.activity_history.back().map(|entry| entry.kind),
+        Some(ActivityKind::Conclusion)
+    );
+    assert_eq!(ActivityKind::Reasoning.tag(), "THK");
+    assert_eq!(ActivityKind::Verification.tag(), "CHK");
+    assert_eq!(ActivityKind::Conclusion.tag(), "SUM");
+}
+
+#[test]
+fn activity_classifier_keeps_chinese_lifecycle_states_observable() {
+    let cases = [
+        ("调查中：读取上下文", ActivityKind::Reasoning),
+        ("等待模型响应", ActivityKind::Waiting),
+        ("验证工具结果", ActivityKind::Verification),
+        ("形成结论", ActivityKind::Conclusion),
+        ("接管已就绪", ActivityKind::Takeover),
+        ("任务完成", ActivityKind::Completed),
+        ("执行失败", ActivityKind::Error),
+        ("审批待确认", ActivityKind::Approval),
+    ];
+    let mut ui = Ui::default();
+    for (text, expected) in cases {
+        ui.set_activity(text);
+        assert_eq!(
+            ui.activity_history.back().map(|entry| entry.kind),
+            Some(expected),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn retained_activity_leaves_a_static_anchor_with_a_detail_affordance() {
+    let mut ui = Ui::default();
+    ui.set_activity("waiting · no stream for 8s");
+
+    assert!(matches!(
+        ui.commits.as_slice(),
+        [CommitBlock::Activity {
+            sequence: 1,
+            kind: ActivityKind::Waiting,
+            text,
+        }] if text == "waiting · no stream for 8s"
+    ));
+    let rendered = ui
+        .drain_commits()
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rendered,
+        vec!["⟦WAIT #1⟧ waiting · no stream for 8s  [Ctrl+T activity]"]
+    );
+}
+
+#[test]
+fn plan_snapshot_uses_a_bounded_reasoning_activity_anchor() {
+    let mut ui = Ui::default();
+    ui.record_plan("[✓] inspect context\n[~] verify output\n[ ] publish result");
+
+    assert_eq!(
+        ui.activity_history.back().map(|entry| entry.kind),
+        Some(ActivityKind::Plan)
+    );
+    let panel = activity_panel(&ui.activity_history);
+    assert_eq!(panel.rows[0].key, "PLAN now");
+    assert!(panel.rows[0].value.contains("verify output"));
+
+    let mut terminal = Terminal::with_options(
+        ratatui::backend::TestBackend::new(48, 10),
+        TerminalOptions {
+            viewport: Viewport::Inline(5),
+        },
+    )
+    .expect("plan terminal");
+    flush_commits(&mut terminal, &mut ui).expect("plan scrollback");
+    let symbols = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(symbols.contains("PLAN"), "plan tag missing: {symbols}");
+    assert!(
+        symbols.contains("Ctrl+T"),
+        "plan detail affordance missing: {symbols}"
+    );
+    assert!(
+        symbols.contains("verify output"),
+        "plan body missing: {symbols}"
+    );
+    assert!(!symbols.contains('\x1b'));
+}
+
+#[test]
+fn retained_activity_anchor_wraps_in_native_scrollback() {
+    let mut ui = Ui::default();
+    ui.set_activity("waiting · no stream for 8s");
+    let mut terminal = Terminal::with_options(
+        ratatui::backend::TestBackend::new(32, 8),
+        TerminalOptions {
+            viewport: Viewport::Inline(4),
+        },
+    )
+    .expect("activity terminal");
+
+    flush_commits(&mut terminal, &mut ui).expect("activity scrollback");
+    let symbols = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(symbols.contains("WAIT"), "activity tag missing: {symbols}");
+    assert!(
+        symbols.contains("Ctrl+T"),
+        "activity detail affordance missing: {symbols}"
+    );
+    assert!(!symbols.contains('\x1b'));
+}
+
+#[test]
+fn static_activity_anchor_emphasizes_semantic_tag() {
+    let mut ui = Ui::default();
+    ui.set_activity("waiting · no stream for 8s");
+    let mut terminal = Terminal::with_options(
+        ratatui::backend::TestBackend::new(64, 8),
+        TerminalOptions {
+            viewport: Viewport::Inline(4),
+        },
+    )
+    .expect("activity style terminal");
+
+    flush_commits(&mut terminal, &mut ui).expect("activity style scrollback");
+    let tag = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .find(|cell| cell.symbol() == "W")
+        .expect("WAIT tag");
+    assert_eq!(tag.fg, role_color(Role::Warn));
+    assert!(tag.modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn wide_busy_chrome_surfaces_recent_activity_breadcrumb() {
+    let mut ui = Ui {
+        busy: true,
+        activity: "tool · read_file".into(),
+        ..Ui::default()
+    };
+    ui.activity_started = Some(std::time::Instant::now());
+    ui.record_activity(ActivityKind::System, "agent ready");
+    ui.record_activity(ActivityKind::Reasoning, "model · thinking");
+    ui.record_activity(ActivityKind::Tool, "tool · read_file");
+    let line = top_chrome(
+        &ui,
+        &Vitals {
+            step: 2,
+            elapsed_s: 4,
+            task_tokens: 12,
+            rate: 3,
+            ctx_used: 20,
+            queued: 1,
+        },
+        96,
+    );
+    let text = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(text.contains("+"), "activity age missing: {text}");
+    assert!(
+        text.contains("⟦SYS›THK›TLS⟧"),
+        "activity trail missing: {text}"
+    );
+}
+
+#[test]
+fn takeover_records_interrupting_boundary_before_abort() {
+    let mut ui = Ui::default();
+    mark_takeover_requested(&mut ui);
+    assert_eq!(
+        ui.activity_history.back().map(|entry| entry.kind),
+        Some(ActivityKind::Takeover)
+    );
+    assert_eq!(
+        ui.activity_history.back().map(|entry| entry.text.as_str()),
+        Some("interrupting · cancelling current turn")
+    );
+}
+
+#[test]
+fn idle_chrome_keeps_takeover_outcome_visible() {
+    let mut ui = Ui::default();
+    ui.set_activity("takeover ready");
+    let text = top_chrome(
+        &ui,
+        &Vitals {
+            step: 0,
+            elapsed_s: 0,
+            task_tokens: 0,
+            rate: 0,
+            ctx_used: 0,
+            queued: 2,
+        },
+        40,
+    )
+    .spans
+    .iter()
+    .map(|span| span.content.as_ref())
+    .collect::<String>();
+    assert!(text.contains("takeover"), "takeover outcome hidden: {text}");
+}
+
+#[test]
+fn narrow_idle_chrome_keeps_activity_kind_and_full_takeover_outcome() {
+    let mut ui = Ui::default();
+    ui.set_activity("takeover ready");
+    for width in [32, 40] {
+        let text = top_chrome(
+            &ui,
+            &Vitals {
+                step: 0,
+                elapsed_s: 0,
+                task_tokens: 0,
+                rate: 0,
+                ctx_used: 0,
+                queued: 0,
+            },
+            width,
+        )
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+        assert!(
+            text.contains("TAKE"),
+            "activity kind hidden at {width}: {text}"
+        );
+        assert!(
+            text.contains("takeover ready"),
+            "takeover outcome clipped at {width}: {text}"
+        );
+        assert!(str_cells(&text) <= width as usize);
+    }
+}
+
+#[test]
+fn completed_idle_surface_exposes_answer_recovery_at_narrow_width() {
+    let mut ui = Ui::default();
+    ui.note_markdown("final answer body remains in the Answer archive");
+    ui.record_activity(ActivityKind::Conclusion, "settling result");
+    ui.record_activity(ActivityKind::Completed, "completed");
+
+    let lines = live_empty_state_for_test(&ui, 32, 6);
+    let rendered = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    let text = rendered.join("\n");
+
+    assert!(text.contains("DONE"), "completion summary missing: {text}");
+    assert!(
+        text.contains("answer archived"),
+        "answer state missing: {text}"
+    );
+    assert!(text.contains("ANS"), "answer channel missing: {text}");
+    assert!(
+        text.contains("SUM") && text.contains("settling result"),
+        "conclusion summary missing: {text}"
+    );
+    assert!(text.contains("^A"), "answer recovery hint missing: {text}");
+    assert!(
+        text.contains("^R"),
+        "reasoning recovery hint missing: {text}"
+    );
+    assert!(
+        rendered.iter().all(|line| str_cells(line) <= 32),
+        "summary overflowed narrow frame: {rendered:?}"
+    );
+    assert!(
+        text.contains("ANS · final answer"),
+        "bounded answer excerpt missing: {text}"
+    );
+}
+
+#[test]
+fn completed_idle_surface_exposes_reasoning_excerpt_when_room_exists() {
+    let mut ui = Ui::default();
+    ui.push_chunk(provider::StreamChunk::Reasoning(
+        "plan checks the held viewport before answering".into(),
+    ));
+    ui.commit_live_reasoning(2, 3);
+    ui.note_markdown("final answer remains visible");
+    ui.record_activity(ActivityKind::Conclusion, "settling result");
+    ui.record_activity(ActivityKind::Completed, "completed");
+
+    let text = live_empty_state_for_test(&ui, 32, 6)
+        .iter()
+        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+        .collect::<String>();
+
+    assert!(
+        text.contains("THK · plan checks"),
+        "bounded reasoning excerpt missing: {text}"
+    );
+    assert!(
+        text.contains("ANS · final answer"),
+        "answer excerpt missing: {text}"
+    );
+    assert!(
+        text.contains("^R"),
+        "reasoning recovery hint missing: {text}"
+    );
+    assert!(
+        live_empty_state_for_test(&ui, 32, 6).iter().all(|line| {
+            line.spans
+                .iter()
+                .map(|span| str_cells(span.content.as_ref()))
+                .sum::<usize>()
+                <= 32
+        }),
+        "summary overflowed with reasoning excerpt"
+    );
+
+    let narrow = live_empty_state_for_test(&ui, 24, 6)
+        .iter()
+        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+        .collect::<String>();
+    assert!(
+        !narrow.contains("THK ·"),
+        "reasoning excerpt should yield to controls: {narrow}"
+    );
+    assert!(
+        narrow.contains("^R"),
+        "narrow reasoning control missing: {narrow}"
+    );
+}
+
+#[test]
+fn completed_idle_surface_keeps_semantic_roles_for_answer_reasoning_and_conclusion() {
+    let mut ui = Ui::default();
+    ui.push_chunk(provider::StreamChunk::Reasoning("think clearly".into()));
+    ui.commit_live_reasoning(1, 1);
+    ui.note_markdown("answer clearly");
+    ui.record_activity(ActivityKind::Conclusion, "result ready");
+    ui.record_activity(ActivityKind::Completed, "completed");
+
+    let lines = live_empty_state_for_test(&ui, 40, 6);
+    let tag = |prefix: &str| {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.as_ref() == prefix)
+            .unwrap_or_else(|| panic!("missing semantic idle tag: {prefix}"))
+    };
+    let answer = tag("ANS · ");
+    assert_eq!(answer.style.fg, Some(role_color(Role::Primary)));
+    assert!(answer.style.add_modifier.contains(Modifier::BOLD));
+    let thinking = tag("THK · ");
+    assert_eq!(thinking.style.fg, Some(role_color(Role::Reasoning)));
+    assert!(thinking.style.add_modifier.contains(Modifier::BOLD));
+    let conclusion = tag("SUM · ");
+    assert_eq!(conclusion.style.fg, Some(role_color(Role::Success)));
+    assert!(conclusion.style.add_modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn live_surface_prefers_current_answer_over_stale_conclusion_activity() {
+    let mut ui = Ui {
+        busy: true,
+        ..Ui::default()
+    };
+    ui.record_activity(ActivityKind::Conclusion, "settling result");
+    ui.push_chunk(provider::StreamChunk::Answer("answer is streaming".into()));
+
+    let title = live_surface_title(&ui, 64);
+    assert!(
+        title.contains("LIVE · ANS"),
+        "current answer hidden: {title}"
+    );
+    assert!(
+        !title.contains("LIVE · SUM"),
+        "stale conclusion won: {title}"
+    );
+}
+
+#[test]
+fn live_surface_keeps_lifecycle_badge_during_answer_inspection() {
+    let mut ui = Ui {
+        busy: true,
+        phase: "answering".into(),
+        ..Ui::default()
+    };
+    ui.set_activity("verify · deterministic gate");
+    ui.push_chunk(provider::StreamChunk::Answer("answer is streaming".into()));
+
+    for width in [40, 80, 96] {
+        let title = live_surface_title(&ui, width);
+        assert!(title.contains("LIVE · ANS"), "width={width}: {title}");
+        assert!(title.contains("· CHK"), "width={width}: {title}");
+        assert!(
+            str_cells(&title) <= width as usize,
+            "width={width}: {title}"
+        );
+    }
+
+    assert!(ui.hold_live());
+    let vitals = Vitals {
+        step: 4,
+        elapsed_s: 2,
+        task_tokens: 9,
+        rate: 7,
+        ctx_used: 12,
+        queued: 0,
+    };
+    let anchor = live_phase_anchor(&ui, &vitals, 40).expect("held phase anchor");
+    let text = anchor
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(text.contains("CHK"), "{text}");
+    assert!(str_cells(&text) <= 40, "{text}");
+}
+
+#[test]
+fn wide_completed_idle_surface_uses_bounded_result_card() {
+    let mut ui = Ui::default();
+    ui.push_chunk(provider::StreamChunk::Reasoning("check state".into()));
+    ui.commit_live_reasoning(1, 1);
+    ui.note_markdown("final answer");
+    ui.record_activity(ActivityKind::Conclusion, "result ready");
+    ui.record_activity(ActivityKind::Completed, "completed");
+
+    let lines = live_empty_state_for_test(&ui, 64, 10);
+    let nonempty = lines
+        .iter()
+        .filter(|line| !line.spans.is_empty())
+        .collect::<Vec<_>>();
+    assert!(nonempty.first().is_some_and(|line| {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+            .starts_with("╭─")
+    }));
+    assert!(nonempty.last().is_some_and(|line| {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+            .starts_with("╰")
+    }));
+    assert!(nonempty.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref() == "ANS · ")
+    }));
+    assert!(lines.iter().all(|line| {
+        line.spans
+            .iter()
+            .map(|span| str_cells(span.content.as_ref()))
+            .sum::<usize>()
+            <= 64
+    }));
+}
+
+#[test]
+fn completed_idle_surface_keeps_whole_labels_at_extreme_widths() {
+    let mut ui = Ui::default();
+    ui.note_markdown("final answer body remains in the Answer archive");
+    ui.record_activity(ActivityKind::Conclusion, "settling result");
+    ui.record_activity(ActivityKind::Completed, "completed");
+
+    for width in [18, 24] {
+        let rendered = live_empty_state_for_test(&ui, width, 6)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let text = rendered.join("\n");
+
+        assert!(
+            text.contains("DONE"),
+            "completion tag missing at {width}: {text}"
+        );
+        assert!(
+            text.contains("SUM"),
+            "conclusion tag missing at {width}: {text}"
+        );
+        assert!(
+            text.contains("ANS"),
+            "answer tag missing at {width}: {text}"
+        );
+        assert!(
+            text.contains("^A"),
+            "answer shortcut missing at {width}: {text}"
+        );
+        assert!(
+            text.contains("^R"),
+            "reasoning shortcut missing at {width}: {text}"
+        );
+        assert!(
+            !text.contains('…'),
+            "semantic labels must not be ellipsized at {width}: {text}"
+        );
+        assert!(
+            !text.contains("final answer body"),
+            "answer excerpt should yield to recovery controls at {width}: {text}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .all(|line| str_cells(line) <= width as usize),
+            "summary overflowed at {width}: {rendered:?}"
+        );
+    }
+}
+
+#[test]
+fn empty_live_states_keep_whole_intervention_labels_at_narrow_widths() {
+    let text = |lines: &[Line<'static>]| {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    };
+
+    for width in [18, 24, 32] {
+        let mut ready = Ui::default();
+        let ready_text = text(&live_empty_state_for_test(&ready, width, 5));
+        assert!(ready_text.contains("READY"), "ready tag missing at {width}");
+        assert!(
+            !ready_text.contains('…'),
+            "ready action was semantically clipped at {width}: {ready_text}"
+        );
+
+        ready.queued.push_back("/queued".to_owned());
+        let queued_text = text(&live_empty_state_for_test(&ready, width, 5));
+        assert!(
+            queued_text.contains("QUEUE"),
+            "queue tag missing at {width}"
+        );
+        assert!(
+            queued_text.contains("Enter") || queued_text.contains("^Enter"),
+            "queue intervention missing at {width}: {queued_text}"
+        );
+        assert!(
+            !queued_text.contains('…'),
+            "queue action was semantically clipped at {width}: {queued_text}"
+        );
+
+        ready.busy = true;
+        ready.activity = "model · thinking".to_owned();
+        let busy_text = text(&live_empty_state_for_test(&ready, width, 5));
+        assert!(busy_text.contains("LIVE"), "live tag missing at {width}");
+        assert!(
+            busy_text.contains("^Space") || busy_text.contains("Ctrl+Space"),
+            "hold intervention missing at {width}: {busy_text}"
+        );
+        assert!(
+            !busy_text.contains('…'),
+            "live action was semantically clipped at {width}: {busy_text}"
+        );
+        assert!(
+            live_empty_state_for_test(&ready, width, 5)
+                .iter()
+                .all(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| str_cells(span.content.as_ref()))
+                        .sum::<usize>()
+                        <= width as usize
+                }),
+            "empty live state overflowed at {width}"
+        );
+    }
+}
+
+#[test]
+fn idle_conclusion_without_answer_does_not_advertise_empty_archive() {
+    let mut ui = Ui::default();
+    ui.record_activity(ActivityKind::Conclusion, "settling result");
+
+    let text = live_empty_state_for_test(&ui, 32, 5)
+        .iter()
+        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+        .collect::<String>();
+
+    assert!(text.contains("SUM"), "conclusion summary missing: {text}");
+    assert!(text.contains("Ctrl+T"), "activity recovery missing: {text}");
+    assert!(
+        !text.contains("Ctrl+A"),
+        "empty answer archive advertised: {text}"
+    );
+}
+
+#[test]
+fn different_tool_events_do_not_merge_without_same_name_adjacency() {
+    let mut ui = Ui::default();
+    ui.push_tool(
+        tool_preview(r#"reason#1: tool_call read_file {"path":"src/x.rs"}"#).expect("read call"),
+    );
+    ui.push_tool(
+        tool_preview("reason#2: tool_call search {\"pattern\":\"needle\"}").expect("search call"),
+    );
+
+    let lines = ui.transcript.visible_lines(8);
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.kind == LiveLineKind::ToolSummary)
+            .count(),
+        2,
+        "unrelated calls must stay separate"
+    );
+}
+
+#[test]
+fn live_output_wraps_long_lines_to_terminal_cells() {
+    let rows = wrap_live_spans(vec![Span::raw("abcdefgh")], 4);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0]
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>(),
+        "abcd"
+    );
+    assert_eq!(
+        rows[1]
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>(),
+        "efgh"
+    );
+}
+
+#[test]
+fn committed_semantic_prefixes_survive_narrow_reflow() {
+    let line_text = |line: &Line<'static>| {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    };
+    let within = |line: &Line<'static>, width: usize| {
+        line.spans
+            .iter()
+            .map(|span| str_cells(span.content.as_ref()))
+            .sum::<usize>()
+            <= width
+    };
+    let long = "abcdefghijklmnopqrstuvwxyz0123456789";
+
+    let answer = wrap_commit_lines(answer_commit_lines(&format!("\u{1f916} {long}")), 18);
+    assert!(answer.len() > 1);
+    assert!(line_text(&answer[0]).starts_with("\u{256d} ANSWER "));
+    assert!(answer.iter().all(|line| within(line, 18)));
+    assert!(answer
+        .iter()
+        .skip(1)
+        .all(|line| line_text(line).starts_with("\u{2502} ") && within(line, 18)));
+
+    let reasoning = wrap_commit_lines(
+        vec![Line::from(Span::styled(
+            format!("\u{257a} step 1 {long}"),
+            Style::default().fg(role_color(Role::Reasoning)),
+        ))],
+        18,
+    );
+    assert!(reasoning.len() > 1);
+    assert!(line_text(&reasoning[0]).starts_with("\u{257a} "));
+    assert!(reasoning.iter().all(|line| within(line, 18)));
+    assert!(reasoning
+        .iter()
+        .skip(1)
+        .all(|line| line_text(line).starts_with("\u{2502} ") && within(line, 18)));
+
+    let tool = wrap_commit_lines(vec![Line::from(Span::raw(format!("\u{25c8} {long}")))], 18);
+    assert!(tool.len() > 1);
+    assert!(tool.iter().all(|line| within(line, 18)));
+    assert!(tool
+        .iter()
+        .skip(1)
+        .all(|line| line_text(line).starts_with("  \u{2506} ") && within(line, 18)));
+}
+
+#[test]
+fn zwj_emoji_stays_one_display_cluster_when_wrapped() {
+    let rows = wrap_live_spans(vec![Span::raw("👩‍🔬A")], 2);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0]
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>(),
+        "👩‍🔬"
+    );
+    assert_eq!(
+        rows[1]
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>(),
+        "A"
+    );
+    assert!(rows.iter().all(|row| {
+        row.iter()
+            .map(|span| str_cells(span.content.as_ref()))
+            .sum::<usize>()
+            <= 2
+    }));
+}
+
+#[test]
+fn zwj_emoji_tail_and_input_share_cluster_width() {
+    assert_eq!(tail_display_cells("prefix👩‍🔬", 3, 1), "…👩‍🔬");
+    let (lines, row, col) = wrap_input("👩‍🔬A", 4, 2);
+    assert_eq!(lines, vec!["👩‍🔬", "A"]);
+    assert_eq!((row, col), (1, 1));
+}
+
+#[test]
+fn cjk_reasoning_and_answer_reflow_keep_semantic_rails_within_cells() {
+    let mut ui = Ui {
+        busy: true,
+        ..Ui::default()
+    };
+    ui.push_chunk(provider::StreamChunk::Reasoning(
+        "调查阶段正在读取上下文并核对工具结果。\n思考尾部".into(),
+    ));
+    ui.push_chunk(provider::StreamChunk::Answer(
+        "回答开头保持可读并随宽度重流。\n最终回答尾部".into(),
+    ));
+    let vitals = Vitals {
+        step: 3,
+        elapsed_s: 5,
+        task_tokens: 24,
+        rate: 6,
+        ctx_used: 12,
+        queued: 0,
+    };
+
+    for width in [32, 40] {
+        let mut cache = LiveOutputCache::default();
+        let lines = cache.lines(&ui.transcript, width, 8, true, &vitals);
+        let text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(
+            text.contains("最终回答尾部"),
+            "answer tail lost at {width}: {text}"
+        );
+        assert!(
+            text.contains("╰") || text.contains("┃"),
+            "answer rail lost at {width}: {text}"
+        );
+        assert!(lines.iter().all(|line| {
+            line.spans
+                .iter()
+                .map(|span| str_cells(span.content.as_ref()))
+                .sum::<usize>()
+                <= width as usize
+        }));
+    }
 }
 
 #[test]
@@ -13,7 +1771,7 @@ fn live_rail_uses_semantic_kind_and_focus_only() {
     );
     assert_eq!(
         live_rail(LiveLineKind::Reasoning, false, None),
-        Some(("┌", Role::Muted))
+        Some(("┌", Role::Reasoning))
     );
     assert_eq!(
         live_rail(LiveLineKind::ToolSummary, true, None),
@@ -35,10 +1793,83 @@ fn live_rail_uses_semantic_kind_and_focus_only() {
 }
 
 #[test]
+fn live_phase_markers_adapt_without_adding_rows() {
+    let reasoning = Some("💭 [step 2 · t+4s · 12 task tok]");
+    let wide = live_phase_marker(LiveLineKind::Reasoning, reasoning, None, 96)
+        .expect("wide reasoning marker");
+    let medium = live_phase_marker(LiveLineKind::Reasoning, reasoning, None, 64)
+        .expect("medium reasoning marker");
+    assert!(wide.starts_with(" THINK "), "{wide}");
+    assert!(medium.starts_with(" THK "), "{medium}");
+    assert_eq!(wide.lines().count(), 1);
+    assert_eq!(medium.lines().count(), 1);
+
+    assert_eq!(
+        live_phase_marker(LiveLineKind::Reasoning, reasoning, None, 40).as_deref(),
+        reasoning
+    );
+    assert_eq!(
+        live_phase_marker(
+            LiveLineKind::ToolSummary,
+            None,
+            Some(LiveLineKind::Answer),
+            96
+        )
+        .as_deref(),
+        Some(" TOOL ")
+    );
+    assert!(live_phase_marker(
+        LiveLineKind::ToolSummary,
+        None,
+        Some(LiveLineKind::ToolDetail),
+        96
+    )
+    .is_none());
+    assert!(str_cells(&wide) <= 96);
+    assert!(str_cells(&medium) <= 64);
+}
+
+#[test]
+fn live_rows_surface_observed_phase_labels_in_one_projection() {
+    let mut ui = Ui {
+        busy: true,
+        ..Ui::default()
+    };
+    ui.push_chunk(provider::StreamChunk::Reasoning("plan".into()));
+    ui.push_tool(ToolBlock::from_lines(vec![("tool summary".into(), Color::Cyan)]).expect("tool"));
+    ui.push_chunk(provider::StreamChunk::Answer("answer".into()));
+    let vitals = Vitals {
+        step: 2,
+        elapsed_s: 4,
+        task_tokens: 12,
+        rate: 3,
+        ctx_used: 8,
+        queued: 0,
+    };
+    let mut cache = LiveOutputCache::default();
+    let lines = cache.lines(&ui.transcript, 96, 12, true, &vitals);
+    let text = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(text.contains("THINK"), "{text}");
+    assert!(text.contains("TOOL"), "{text}");
+    assert!(text.contains("ANSWER"), "{text}");
+    assert!(lines.iter().all(|line| {
+        line.spans
+            .iter()
+            .map(|span| str_cells(span.content.as_ref()))
+            .sum::<usize>()
+            <= 96
+    }));
+}
+
+#[test]
 fn stream_channel_badges_keep_actual_output_semantics() {
     assert_eq!(
         stream_channel_badge(LiveChannel::Reasoning),
-        ("[THINK]", Role::Muted)
+        ("[THINK]", Role::Reasoning)
     );
     assert_eq!(
         stream_channel_badge(LiveChannel::Answer),
@@ -48,6 +1879,74 @@ fn stream_channel_badges_keep_actual_output_semantics() {
         stream_channel_badge(LiveChannel::Tool),
         ("[TOOL]", Role::Info)
     );
+}
+
+#[test]
+fn top_chrome_keeps_brand_and_channel_on_flat_surface() {
+    let mut ui = Ui {
+        busy: true,
+        phase: "answering".into(),
+        activity: "model · thinking".into(),
+        ..Ui::default()
+    };
+    ui.push_chunk(provider::StreamChunk::Answer("answer".into()));
+    let vitals = Vitals {
+        step: 1,
+        elapsed_s: 1,
+        task_tokens: 2,
+        rate: 2,
+        ctx_used: 0,
+        queued: 0,
+    };
+    let line = top_chrome(&ui, &vitals, 96);
+    let span = |needle: &str| {
+        line.spans
+            .iter()
+            .find(|span| span.content.contains(needle))
+            .unwrap_or_else(|| panic!("missing chrome span: {needle}"))
+    };
+    assert_eq!(span("RidgeCode").style.bg, None);
+    assert_eq!(span("[ANSWER]").style.bg, None);
+    assert_eq!(
+        line.spans.last().and_then(|span| span.style.fg),
+        Some(role_color(Role::Primary))
+    );
+    assert!(line
+        .spans
+        .iter()
+        .any(|span| span.content.contains("model · thinking")));
+}
+
+#[test]
+fn top_chrome_keeps_token_telemetry_in_the_bottom_status_contract() {
+    let mut ui = Ui {
+        busy: true,
+        phase: "answering".into(),
+        activity: "model · answering".into(),
+        ..Ui::default()
+    };
+    ui.push_chunk(provider::StreamChunk::Answer("answer".into()));
+    let text = top_chrome(
+        &ui,
+        &Vitals {
+            step: 2,
+            elapsed_s: 4,
+            task_tokens: 40,
+            rate: 12,
+            ctx_used: 20,
+            queued: 1,
+        },
+        96,
+    )
+    .spans
+    .iter()
+    .map(|span| span.content.as_ref())
+    .collect::<String>();
+    assert!(text.contains("t+4s"), "{text}");
+    assert!(text.contains("12/s"), "{text}");
+    assert!(!text.contains(" in "), "{text}");
+    assert!(!text.contains(" out "), "{text}");
+    assert!(!text.contains("effort"), "{text}");
 }
 
 #[test]
@@ -145,7 +2044,414 @@ fn top_chrome_surfaces_reasoning_visibility_without_tools() {
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>();
-    assert!(inspected.contains("INSPECT"), "{inspected}");
+    assert!(inspected.contains("HOLD"), "{inspected}");
+}
+
+#[test]
+fn top_chrome_surfaces_reasoning_visibility_alongside_tools() {
+    let mut ui = Ui {
+        busy: true,
+        phase: "answering".into(),
+        ..Ui::default()
+    };
+    ui.push_chunk(provider::StreamChunk::Reasoning("plan".into()));
+    ui.push_tool(ToolBlock::from_lines(vec![("search".into(), Color::Cyan)]).expect("tool"));
+    ui.push_chunk(provider::StreamChunk::Answer("answer".into()));
+    let vitals = Vitals {
+        step: 2,
+        elapsed_s: 3,
+        task_tokens: 40,
+        rate: 12,
+        ctx_used: 0,
+        queued: 0,
+    };
+
+    for width in [120, 96, 80, 64, 48] {
+        let text = top_chrome(&ui, &vitals, width)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(str_cells(&text) <= width as usize, "width={width}: {text}");
+        if width >= 48 {
+            assert!(text.contains("THINK"), "width={width}: {text}");
+        }
+    }
+}
+
+#[test]
+fn live_phase_anchor_keeps_activity_inside_held_viewport() {
+    let mut ui = Ui {
+        busy: true,
+        phase: "reasoning".into(),
+        activity: "reasoning · inspect prior tool".into(),
+        ..Ui::default()
+    };
+    ui.push_chunk(provider::StreamChunk::Answer("answer tail".into()));
+    let vitals = Vitals {
+        step: 7,
+        elapsed_s: 0,
+        task_tokens: 0,
+        rate: 0,
+        ctx_used: 0,
+        queued: 0,
+    };
+
+    assert!(ui.scroll_live(1));
+    let line = live_phase_anchor(&ui, &vitals, 40).expect("held viewport anchor");
+    let text = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(text.contains("HOLD"));
+    assert!(text.contains("inspect prior tool"));
+    assert!(str_cells(&text) <= 40);
+    assert!(ui.follow_live());
+    assert!(live_phase_anchor(&ui, &vitals, 40).is_none());
+}
+
+#[test]
+fn live_phase_anchor_adapts_trace_to_terminal_width() {
+    let mut ui = Ui {
+        busy: true,
+        phase: "answering".into(),
+        ..Ui::default()
+    };
+    ui.push_chunk(provider::StreamChunk::Reasoning("plan".into()));
+    ui.push_tool(ToolBlock::from_lines(vec![("search".into(), Color::Cyan)]).expect("tool"));
+    ui.push_chunk(provider::StreamChunk::Answer("answer".into()));
+    let vitals = Vitals {
+        step: 3,
+        elapsed_s: 1,
+        task_tokens: 2,
+        rate: 3,
+        ctx_used: 4,
+        queued: 0,
+    };
+    assert!(ui.hold_live());
+
+    let text = |width| {
+        live_phase_anchor(&ui, &vitals, width)
+            .expect("phase anchor")
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    };
+    let wide = text(96);
+    assert!(wide.contains("THK›TLS›ANS"), "{wide}");
+    assert!(str_cells(&wide) <= 96);
+    let narrow = text(40);
+    assert!(narrow.contains("T›L›A"), "{narrow}");
+    assert!(!narrow.contains("THK›TLS›ANS"), "{narrow}");
+    assert!(str_cells(&narrow) <= 40);
+}
+
+#[test]
+fn top_chrome_surfaces_waiting_target_after_event_silence() {
+    let mut ui = Ui {
+        busy: true,
+        waiting: true,
+        phase: "reasoning".into(),
+        ..Ui::default()
+    };
+    let vitals = Vitals {
+        step: 2,
+        elapsed_s: 12,
+        task_tokens: 0,
+        rate: 0,
+        ctx_used: 0,
+        queued: 0,
+    };
+    let model = top_chrome(&ui, &vitals, 96)
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(model.contains("waiting"), "{model}");
+    assert!(model.contains("model"), "{model}");
+
+    ui.pending_call = Some(provider::ToolCall {
+        id: "wait-1".into(),
+        name: "search".into(),
+        arguments: serde_json::json!({}),
+    });
+    let tool = top_chrome(&ui, &vitals, 96)
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(tool.contains("waiting"), "{tool}");
+    assert!(tool.contains("tool"), "{tool}");
+}
+
+#[test]
+fn medium_busy_chrome_exposes_semantic_activity_chip_without_live_channel() {
+    let mut ui = Ui {
+        busy: true,
+        phase: "verify".into(),
+        ..Ui::default()
+    };
+    ui.set_activity("node · verify");
+    for width in [48, 56, 63] {
+        let text = top_chrome(
+            &ui,
+            &Vitals {
+                step: 2,
+                elapsed_s: 4,
+                task_tokens: 12,
+                rate: 3,
+                ctx_used: 4,
+                queued: 0,
+            },
+            width,
+        )
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+        assert!(
+            text.contains("CHK"),
+            "verification chip missing at {width}: {text}"
+        );
+        assert!(str_cells(&text) <= width as usize, "width={width}: {text}");
+    }
+
+    ui.set_activity("settling result");
+    let text = top_chrome(
+        &ui,
+        &Vitals {
+            step: 2,
+            elapsed_s: 4,
+            task_tokens: 12,
+            rate: 3,
+            ctx_used: 4,
+            queued: 0,
+        },
+        56,
+    )
+    .spans
+    .iter()
+    .map(|span| span.content.as_ref())
+    .collect::<String>();
+    assert!(text.contains("SUM"), "conclusion chip missing: {text}");
+}
+
+#[test]
+fn medium_busy_chrome_keeps_hold_priority_over_activity_chip() {
+    let mut ui = Ui {
+        busy: true,
+        ..Ui::default()
+    };
+    ui.set_activity("node · verify");
+    ui.push_chunk(provider::StreamChunk::Answer("answer".into()));
+    assert!(ui.hold_live());
+    let text = top_chrome(
+        &ui,
+        &Vitals {
+            step: 2,
+            elapsed_s: 4,
+            task_tokens: 12,
+            rate: 3,
+            ctx_used: 4,
+            queued: 0,
+        },
+        56,
+    )
+    .spans
+    .iter()
+    .map(|span| span.content.as_ref())
+    .collect::<String>();
+    assert!(text.contains("HOLD"), "hold priority lost: {text}");
+    assert!(str_cells(&text) <= 56);
+}
+
+#[test]
+fn narrow_busy_chrome_keeps_waiting_phase_visible() {
+    let mut ui = Ui {
+        busy: true,
+        waiting: true,
+        activity: "waiting".into(),
+        ..Ui::default()
+    };
+    ui.push_chunk(provider::StreamChunk::Answer("answer".into()));
+    let vitals = Vitals {
+        step: 3,
+        elapsed_s: 8,
+        task_tokens: 12,
+        rate: 1,
+        ctx_used: 20,
+        queued: 1,
+    };
+    for width in [18, 24, 32, 40, 80] {
+        let line = top_chrome(&ui, &vitals, width);
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(str_cells(&text) <= width as usize, "width={width}: {text}");
+        assert!(
+            text.contains("waiting"),
+            "waiting phase must survive narrow chrome at width={width}: {text}"
+        );
+        if width < 48 {
+            assert!(
+                text.contains("⏭1"),
+                "front queue marker must survive narrow chrome at width={width}: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn narrow_busy_chrome_keeps_hold_beacon_visible() {
+    let mut ui = Ui {
+        busy: true,
+        phase: "answering".into(),
+        activity: "answering · inspect prior output".into(),
+        ..Ui::default()
+    };
+    ui.push_chunk(provider::StreamChunk::Answer("answer".into()));
+    assert!(ui.hold_live());
+    let vitals = Vitals {
+        step: 7,
+        elapsed_s: 8,
+        task_tokens: 12,
+        rate: 1,
+        ctx_used: 20,
+        queued: 1,
+    };
+    for width in [18, 24, 32, 40, 47] {
+        let line = top_chrome(&ui, &vitals, width);
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(str_cells(&text) <= width as usize, "width={width}: {text}");
+        assert!(
+            text.contains("HOLD"),
+            "narrow busy chrome must show the held live viewport at width={width}: {text}"
+        );
+        let (input, _) = input_chrome(InputChromeArgs {
+            busy: true,
+            queued: 1,
+            width,
+            reasoning_expanded: false,
+            has_reasoning: false,
+            has_reasoning_history: false,
+            has_live_answer: false,
+            has_answer_history: false,
+            has_live_history: false,
+            has_tools: false,
+            has_history: false,
+            has_scrollable_tool_details: false,
+            has_live_output: true,
+            live_inspecting: true,
+        });
+        assert!(
+            input.contains("^Space"),
+            "narrow input chrome must expose follow while held at width={width}: {input}"
+        );
+    }
+}
+
+#[test]
+fn narrow_live_matrix_keeps_state_and_takeover_signals_observable() {
+    let meta = ReplMeta {
+        tools: Vec::new(),
+        provider: "openai".into(),
+        provider_label: "openai".into(),
+        model: "gpt-5".into(),
+        base_url: String::new(),
+        status_bar: "{provider} · {model} · {tokens}".into(),
+        ctx_window: 200_000,
+    };
+    let vitals = Vitals {
+        step: 3,
+        elapsed_s: 8,
+        task_tokens: 12,
+        rate: 1,
+        ctx_used: 20,
+        queued: 1,
+    };
+    let rendered = |ui: &Ui, width: u16, height: u16, approval: Option<&ApprovalRequest>| {
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(width, height)).expect("matrix");
+        terminal
+            .draw(|frame| draw(frame, ui, &meta, 42, &vitals, approval))
+            .expect("matrix draw");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    for &(width, height) in &[(18, 7), (24, 10), (32, 14), (40, 7), (80, 14)] {
+        let mut waiting = Ui {
+            busy: true,
+            waiting: true,
+            activity: "waiting".into(),
+            ..Ui::default()
+        };
+        waiting.push_chunk(provider::StreamChunk::Answer("answer".into()));
+        let waiting_text = rendered(&waiting, width, height, None);
+        assert!(
+            waiting_text.contains("waiting"),
+            "waiting hidden at {width}x{height}: {waiting_text}"
+        );
+
+        let mut tool = Ui {
+            busy: true,
+            activity: "tool · search".into(),
+            ..Ui::default()
+        };
+        tool.push_tool(
+            ToolBlock::from_lines(vec![
+                ("tool: search".into(), Color::Cyan),
+                ("  result detail".into(), Color::Gray),
+            ])
+            .expect("tool block"),
+        );
+        let tool_text = rendered(&tool, width, height, None);
+        assert!(
+            tool_text.contains("search"),
+            "tool activity hidden at {width}x{height}: {tool_text}"
+        );
+
+        let mut queued = Ui {
+            busy: true,
+            activity: "model · thinking".into(),
+            ..Ui::default()
+        };
+        queued.queued.push_back("priority intent".into());
+        queued.input.insert_str("draft");
+        let queued_text = rendered(&queued, width, height, None);
+        assert!(
+            queued_text.contains("priority") || queued_text.contains("Q:"),
+            "queue affordance hidden at {width}x{height}: {queued_text}"
+        );
+    }
+
+    let (_reply, _receiver) = std::sync::mpsc::sync_channel(1);
+    let approval = ApprovalRequest {
+        action: "run_shell".into(),
+        detail: "+ cargo test\n- cargo check".into(),
+        reply: _reply,
+    };
+    for &(width, height) in &[(18, 7), (32, 10), (80, 14)] {
+        let text = rendered(&Ui::default(), width, height, Some(&approval));
+        assert!(
+            text.contains("Permission") || text.contains("Allow"),
+            "approval affordance hidden at {width}x{height}: {text}"
+        );
+    }
 }
 
 #[test]
@@ -156,7 +2462,7 @@ fn reasoning_answer_transition_rail_is_bounded() {
             false,
             Some(LiveLineKind::ToolSummary)
         ),
-        Some(("┌", Role::Muted))
+        Some(("┌", Role::Reasoning))
     );
     assert_eq!(
         live_rail(
@@ -164,7 +2470,7 @@ fn reasoning_answer_transition_rail_is_bounded() {
             false,
             Some(LiveLineKind::Reasoning)
         ),
-        Some(("│", Role::Muted))
+        Some(("│", Role::Reasoning))
     );
     assert_eq!(
         live_rail(LiveLineKind::Answer, false, Some(LiveLineKind::Reasoning)),
@@ -295,11 +2601,11 @@ fn active_reasoning_tail_focus_is_render_only() {
     );
     assert_eq!(
         active_reasoning_tail_role(LiveLineKind::Reasoning, true, false),
-        Some(Role::Muted)
+        Some(Role::Reasoning)
     );
     assert_eq!(
         active_reasoning_tail_role(LiveLineKind::Reasoning, false, true),
-        Some(Role::Muted)
+        Some(Role::Reasoning)
     );
     assert_eq!(
         active_reasoning_tail_role(LiveLineKind::Answer, true, true),
@@ -331,6 +2637,26 @@ fn final_answer_gets_assistant_marker() {
     assert!(!is_final_event("reason#2: tool_call search {}"));
 }
 
+#[test]
+fn unfinished_answer_is_retained_for_error_and_non_final_stops() {
+    let error: Result<AgentState, String> = Err("provider stopped".into());
+    assert_eq!(
+        unfinished_answer_reason(&error),
+        Some("run ended before final response")
+    );
+
+    let stopped: Result<AgentState, String> = Ok(AgentState::default());
+    assert_eq!(
+        unfinished_answer_reason(&stopped),
+        Some("run stopped before final response")
+    );
+
+    let mut completed = AgentState::default();
+    completed.messages.push("(final) done".into());
+    let completed = Ok(completed);
+    assert_eq!(unfinished_answer_reason(&completed), None);
+}
+
 /// iter-50:输出流总览化 —— 读只显路径、读回执丢内容、改显 ± diff、写显预览。
 #[test]
 fn display_text_strips_terminal_escape_sequences() {
@@ -358,10 +2684,11 @@ fn summarize_event_overviews_tools() {
     let r = summarize_event(r#"reason#1: tool_call read_file {"path":"src/x.rs"}"#);
     assert_eq!(r.len(), 1);
     assert!(r[0].0.contains("Read src/x.rs"), "{}", r[0].0);
-    // 读回执:丢内容,只回执字数。
+    // 读回执:摘要行只回执字数,内容进入可折叠的有界详情。
     let a = summarize_event("act: read_file -> 一二三四五");
     assert!(a[0].0.contains("Read complete"), "{}", a[0].0);
     assert!(!a[0].0.contains("一二三"), "内容不应回显");
+    assert!(a.iter().any(|(line, _)| line.contains("一二三")));
     // 改:git-diff 式 ± 行,红减绿增。
     let e = summarize_event(
         r#"reason#2: tool_call edit_file {"path":"a.rs","old_string":"let n=1;","new_string":"let n=2;"}"#,
@@ -414,6 +2741,32 @@ fn summarize_event_overviews_tools() {
         .any(|(line, color)| { line.starts_with("  + ") && *color == role_color(Role::Success) }));
 }
 
+#[test]
+fn empty_tool_observation_is_explicit_across_projections() {
+    let message = "act: run_shell ->   ";
+    let summary = summarize_event(message);
+    assert_eq!(summary.len(), 1);
+    assert!(summary[0].0.contains("run_shell: no output"));
+
+    let block = tool_preview(message).expect("empty observation should remain inspectable");
+    assert!(block.summary().contains("no output"));
+    assert!(!block.has_details());
+    assert_eq!(block.details_text(), "no output");
+    assert_eq!(block.commit_lines().len(), 1);
+
+    let mut ui = Ui::default();
+    ui.push_tool(block);
+    assert!(ui
+        .transcript
+        .visible_lines(4)
+        .iter()
+        .any(|line| line.text.contains("no output")));
+    ui.commit_live_tools();
+    let panel = tool_history_panel(&ui.tool_history);
+    assert!(panel.rows[0].key.contains("no output"));
+    assert_eq!(panel.rows[0].value, "no output");
+}
+
 /// iter-29:上下文窗口人读化。
 #[test]
 fn ctx_size_is_human_readable() {
@@ -433,10 +2786,10 @@ fn token_rate_guards_div_zero_and_scales() {
 
 #[test]
 fn reasoning_meta_omits_unobserved_step_and_keeps_real_measurements() {
-    assert_eq!(fmt_reasoning_meta(0, 2, 8), "💭 [t+2s · 8 task tok] ");
+    assert_eq!(fmt_reasoning_meta(0, 2, 8), "THK[t+2s · 8 task tok] ");
     assert_eq!(
         fmt_reasoning_meta(3, 12, 34),
-        "💭 [step 3 · t+12s · 34 task tok] "
+        "THK[step 3 · t+12s · 34 task tok] "
     );
 }
 
@@ -499,6 +2852,22 @@ fn busy_bar_shows_observed_step_only_when_available() {
 }
 
 #[test]
+fn busy_signal_keeps_activity_rail_free_of_duplicate_token_telemetry() {
+    let todos = vec![Todo {
+        content: "inspect".into(),
+        status: "in_progress".into(),
+    }];
+    let signal = fmt_busy_signal("tool · search · step 4", &todos, 12, 3, 2, None);
+    assert_eq!(
+        signal,
+        "⚡ tool · search · step 4 · t+12s · 3/s · todo 0/1 · ⏳2"
+    );
+    assert!(!signal.contains(" in "));
+    assert!(!signal.contains(" out "));
+    assert!(!signal.contains("effort"));
+}
+
+#[test]
 fn busy_bar_projects_bounded_safe_tool_intent() {
     let call = provider::ToolCall {
         id: "1".into(),
@@ -546,6 +2915,10 @@ fn chrome(
         width,
         reasoning_expanded,
         has_reasoning,
+        has_reasoning_history: false,
+        has_live_answer: false,
+        has_answer_history: false,
+        has_live_history: false,
         has_tools,
         has_history,
         has_scrollable_tool_details: false,
@@ -565,9 +2938,57 @@ fn input_chrome_exposes_submit_or_queue_mode() {
 
     let (queued, queued_role) = chrome(true, 2, 80, false, true, false, false);
     assert!(queued.contains("Queue [2]"));
+    assert!(queued.contains("Ctrl+Enter front"));
+    assert!(queued.contains("Ctrl+C takeover"));
     assert!(queued.contains("Ctrl+R reasoning"));
     assert!(!queued.contains("Ctrl+O"));
-    assert_eq!(queued_role, Role::Warn);
+    assert_eq!(queued_role, Role::Primary);
+
+    let (reasoning_history, _) = input_chrome(InputChromeArgs {
+        busy: false,
+        queued: 0,
+        width: 96,
+        reasoning_expanded: false,
+        has_reasoning: false,
+        has_reasoning_history: true,
+        has_live_answer: false,
+        has_answer_history: false,
+        has_live_history: false,
+        has_tools: false,
+        has_history: false,
+        has_scrollable_tool_details: false,
+        has_live_output: false,
+        live_inspecting: false,
+    });
+    assert!(reasoning_history.contains("Ctrl+R history"));
+    assert!(
+        reasoning_history.contains("Ctrl+T activity"),
+        "{reasoning_history}"
+    );
+    assert!(str_cells(&reasoning_history) <= 94, "{reasoning_history}");
+
+    let (answers_history, _) = input_chrome(InputChromeArgs {
+        busy: false,
+        queued: 0,
+        width: 96,
+        reasoning_expanded: false,
+        has_reasoning: false,
+        has_reasoning_history: false,
+        has_live_answer: false,
+        has_answer_history: true,
+        has_live_history: false,
+        has_tools: false,
+        has_history: false,
+        has_scrollable_tool_details: false,
+        has_live_output: false,
+        live_inspecting: false,
+    });
+    assert!(answers_history.contains("Ctrl+A answers"));
+    assert!(
+        answers_history.contains("Ctrl+T activity"),
+        "{answers_history}"
+    );
+    assert!(str_cells(&answers_history) <= 94, "{answers_history}");
 
     let (idle_history, _) = chrome(false, 0, 80, false, true, false, true);
     assert!(idle_history.contains("Ctrl+O history"));
@@ -575,8 +2996,46 @@ fn input_chrome_exposes_submit_or_queue_mode() {
 
     let (busy_tools, _) = chrome(true, 2, 80, false, true, true, false);
     assert!(busy_tools.contains("Queue [2]"));
-    assert!(busy_tools.contains("Alt+↑/↓ focus"));
-    assert!(busy_tools.contains("Ctrl+O details"));
+    assert!(busy_tools.contains("Alt+↑/↓"));
+    assert!(busy_tools.contains("^O details"));
+    assert!(busy_tools.contains("^C takeover"));
+    assert!(busy_tools.contains("^R"));
+
+    let (busy_answer, _) = input_chrome(InputChromeArgs {
+        busy: true,
+        queued: 1,
+        width: 80,
+        reasoning_expanded: false,
+        has_reasoning: false,
+        has_reasoning_history: false,
+        has_live_answer: true,
+        has_answer_history: false,
+        has_live_history: true,
+        has_tools: false,
+        has_history: false,
+        has_scrollable_tool_details: false,
+        has_live_output: true,
+        live_inspecting: false,
+    });
+    assert!(busy_answer.contains("Ctrl+A focus"), "{busy_answer}");
+
+    let (held_answer, _) = input_chrome(InputChromeArgs {
+        busy: true,
+        queued: 1,
+        width: 96,
+        reasoning_expanded: false,
+        has_reasoning: false,
+        has_reasoning_history: false,
+        has_live_answer: true,
+        has_answer_history: false,
+        has_live_history: true,
+        has_tools: false,
+        has_history: false,
+        has_scrollable_tool_details: false,
+        has_live_output: true,
+        live_inspecting: true,
+    });
+    assert!(held_answer.contains("^A answer"), "{held_answer}");
 
     let (live_inspect, _) = input_chrome(InputChromeArgs {
         busy: false,
@@ -584,19 +3043,28 @@ fn input_chrome_exposes_submit_or_queue_mode() {
         width: 96,
         reasoning_expanded: false,
         has_reasoning: false,
+        has_reasoning_history: false,
+        has_live_answer: false,
+        has_answer_history: false,
+        has_live_history: true,
         has_tools: false,
         has_history: false,
         has_scrollable_tool_details: false,
         has_live_output: true,
         live_inspecting: false,
     });
-    assert!(live_inspect.contains("Alt+PgUp inspect"));
+    assert!(live_inspect.contains("PgUp/PgDn page"));
+    assert!(live_inspect.contains("Ctrl+I inspect"));
     let (live_follow, _) = input_chrome(InputChromeArgs {
         busy: false,
         queued: 0,
         width: 96,
         reasoning_expanded: false,
         has_reasoning: false,
+        has_reasoning_history: false,
+        has_live_answer: false,
+        has_answer_history: false,
+        has_live_history: true,
         has_tools: false,
         has_history: false,
         has_scrollable_tool_details: false,
@@ -604,16 +3072,37 @@ fn input_chrome_exposes_submit_or_queue_mode() {
         live_inspecting: true,
     });
     assert!(live_follow.contains("Alt+End follow"));
+    let (held_focus, _) = input_chrome(InputChromeArgs {
+        busy: true,
+        queued: 1,
+        width: 96,
+        reasoning_expanded: false,
+        has_reasoning: true,
+        has_reasoning_history: false,
+        has_live_answer: true,
+        has_answer_history: false,
+        has_live_history: true,
+        has_tools: false,
+        has_history: false,
+        has_scrollable_tool_details: false,
+        has_live_output: true,
+        live_inspecting: true,
+    });
+    assert!(held_focus.contains("Alt+←/→ focus"), "{held_focus}");
 
     let (busy_tools_expanded, _) = chrome(true, 2, 80, true, true, true, false);
-    assert!(busy_tools_expanded.contains("Ctrl+R collapse"));
-    assert!(!busy_tools_expanded.contains("Ctrl+R reasoning"));
+    assert!(busy_tools_expanded.contains("^C takeover"));
+    assert!(busy_tools_expanded.contains("^R collapse"));
     let (busy_tools_scrolled, _) = input_chrome(InputChromeArgs {
         busy: true,
         queued: 2,
         width: 160,
         reasoning_expanded: true,
         has_reasoning: true,
+        has_reasoning_history: false,
+        has_live_answer: false,
+        has_answer_history: false,
+        has_live_history: false,
         has_tools: true,
         has_history: false,
         has_scrollable_tool_details: true,
@@ -634,24 +3123,37 @@ fn input_chrome_exposes_submit_or_queue_mode() {
     let (wide_idle, _) = chrome(false, 0, 96, false, true, true, false);
     assert!(wide_idle.contains("Alt+↑/↓ focus"));
 
+    let (wide_idle_shortcuts, _) = chrome(false, 0, 120, false, false, false, false);
+    let expected_shortcut =
+        if cfg!(windows) && std::env::var("RIDGE_TUI_KITTY").ok().as_deref() != Some("1") {
+            "Alt+Enter/Ctrl+J newline"
+        } else {
+            "Shift/Alt+Enter newline"
+        };
+    assert_eq!(multiline_shortcut_label(true), "Shift/Alt+Enter newline");
+    assert_eq!(multiline_shortcut_label(false), "Alt+Enter/Ctrl+J newline");
+    assert!(wide_idle_shortcuts.contains(expected_shortcut));
+
     let (medium_without_tools, _) = chrome(true, 10, 64, false, true, false, false);
     assert!(!medium_without_tools.contains("Alt+↑/↓ focus"));
 
     let (medium_with_tools, _) = chrome(true, 10, 64, false, true, true, false);
-    assert!(medium_with_tools.contains("Alt+↑/↓ focus"));
-    assert!(medium_with_tools.contains("Ctrl+O details"));
-    assert!(medium_with_tools.contains("Ctrl+R"));
+    assert!(medium_with_tools.contains("^Enter front"));
+    assert!(medium_with_tools.contains("^C takeover"));
+    assert!(medium_with_tools.contains("^O details"));
+    assert!(medium_with_tools.contains("^R"));
 
     let (narrow_medium_with_tools, _) = chrome(true, 10, 56, false, true, true, false);
-    assert!(narrow_medium_with_tools.contains("Ctrl+O details"));
+    assert!(narrow_medium_with_tools.contains("^O details"));
 
     let (medium_with_tools_expanded, _) = chrome(true, 10, 64, true, true, true, false);
-    assert!(medium_with_tools_expanded.contains("Ctrl+R collapse"));
+    assert!(medium_with_tools_expanded.contains("^R"));
 
     let (narrow, narrow_role) = chrome(true, 10, 15, false, false, true, false);
-    assert_eq!(narrow, " Q:[10] ^O ");
-    assert_eq!(narrow_role, Role::Warn);
+    assert_eq!(narrow, " Q:[10]^C^O ");
+    assert_eq!(narrow_role, Role::Primary);
     assert!(str_cells(&narrow) <= 13);
+    assert!(narrow.contains("^C"), "takeover disappeared: {narrow}");
 
     let (narrow_idle_tools, _) = chrome(false, 0, 15, false, true, true, false);
     assert!(narrow_idle_tools.contains("^O"), "{narrow_idle_tools}");
@@ -671,6 +3173,191 @@ fn input_chrome_exposes_submit_or_queue_mode() {
     let (narrow_history, _) = chrome(false, 0, 15, false, false, false, true);
     assert!(narrow_history.contains("^O"), "{narrow_history}");
     assert!(str_cells(&narrow_history) <= 13);
+
+    for width in [12, 15, 18, 32] {
+        let (busy, _) = chrome(true, 2, width, false, true, true, false);
+        assert!(busy.contains("^C"), "takeover hidden at {width}: {busy}");
+        assert!(str_cells(&busy) <= width.saturating_sub(2) as usize);
+    }
+}
+
+#[test]
+fn narrow_idle_history_keeps_answer_and_reasoning_entrypoints_visible() {
+    let answer = input_chrome(InputChromeArgs {
+        busy: false,
+        queued: 0,
+        width: 32,
+        reasoning_expanded: false,
+        has_reasoning: false,
+        has_reasoning_history: false,
+        has_live_answer: false,
+        has_answer_history: true,
+        has_live_history: false,
+        has_tools: false,
+        has_history: false,
+        has_scrollable_tool_details: false,
+        has_live_output: false,
+        live_inspecting: false,
+    })
+    .0;
+    assert!(answer.contains("^A"), "answer archive hidden: {answer}");
+    assert!(str_cells(&answer) <= 30);
+
+    let reasoning = input_chrome(InputChromeArgs {
+        busy: false,
+        queued: 0,
+        width: 32,
+        reasoning_expanded: false,
+        has_reasoning: false,
+        has_reasoning_history: true,
+        has_live_answer: false,
+        has_answer_history: false,
+        has_live_history: false,
+        has_tools: false,
+        has_history: false,
+        has_scrollable_tool_details: false,
+        has_live_output: false,
+        live_inspecting: false,
+    })
+    .0;
+    assert!(
+        reasoning.contains("^R"),
+        "reasoning archive hidden: {reasoning}"
+    );
+    assert!(str_cells(&reasoning) <= 30);
+}
+
+#[test]
+fn busy_tool_action_rail_preserves_reasoning_and_focus_at_medium_widths() {
+    for width in [72, 80, 88, 95] {
+        let (text, role) = input_chrome(InputChromeArgs {
+            busy: true,
+            queued: 2,
+            width,
+            reasoning_expanded: false,
+            has_reasoning: true,
+            has_reasoning_history: false,
+            has_live_answer: false,
+            has_answer_history: false,
+            has_live_history: false,
+            has_tools: true,
+            has_history: false,
+            has_scrollable_tool_details: false,
+            has_live_output: false,
+            live_inspecting: false,
+        });
+        assert_eq!(role, Role::Primary);
+        assert!(
+            str_cells(&text) <= width.saturating_sub(2) as usize,
+            "width={width}: {text}"
+        );
+        assert!(text.contains("^C"), "width={width}: {text}");
+        assert!(text.contains("^R"), "width={width}: {text}");
+        assert!(text.contains("^O"), "width={width}: {text}");
+        assert!(text.contains("Alt+↑/↓"), "width={width}: {text}");
+        if width < 88 {
+            assert!(
+                text.contains("queue"),
+                "queue affordance hidden at {width}: {text}"
+            );
+        } else {
+            assert!(
+                text.contains("Enter queue"),
+                "queue affordance hidden at {width}: {text}"
+            );
+        }
+    }
+
+    let (wide, _) = chrome(true, 2, 96, false, true, true, false);
+    assert!(wide.contains("Ctrl+R reasoning"), "{wide}");
+    assert!(wide.contains("Ctrl+O details"), "{wide}");
+    assert!(wide.contains("Alt+↑/↓ focus"), "{wide}");
+}
+
+#[test]
+fn busy_live_inspection_prioritizes_follow_and_takeover() {
+    for width in [48, 56, 64, 72, 80, 88, 96] {
+        let (text, role) = input_chrome(InputChromeArgs {
+            busy: true,
+            queued: 2,
+            width,
+            reasoning_expanded: false,
+            has_reasoning: true,
+            has_reasoning_history: false,
+            has_live_answer: false,
+            has_answer_history: false,
+            has_live_history: true,
+            has_tools: true,
+            has_history: true,
+            has_scrollable_tool_details: true,
+            has_live_output: true,
+            live_inspecting: true,
+        });
+        assert!(text.contains("Alt+End follow"), "{width}: {text}");
+        assert!(text.contains("^C takeover"), "{width}: {text}");
+        if width >= 72 {
+            assert!(text.contains("Esc/^C takeover"), "{width}: {text}");
+        }
+        if width >= 72 {
+            assert!(text.contains("Space toggle"), "{width}: {text}");
+        }
+        if width >= 88 {
+            assert!(text.contains("Alt+←/→ focus"), "{width}: {text}");
+        } else if width >= 80 {
+            assert!(text.contains("Alt<> focus"), "{width}: {text}");
+        } else if width >= 72 {
+            assert!(text.contains("←→"), "{width}: {text}");
+        }
+        assert!(str_cells(&text) <= width.saturating_sub(2) as usize);
+        assert_eq!(role, Role::Primary);
+    }
+}
+
+#[test]
+fn held_inspector_space_toggles_only_semantic_blocks() {
+    let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+    assert!(live_semantic_toggle_action(&space, false, true, true));
+    assert!(!live_semantic_toggle_action(&space, false, false, true));
+    assert!(!live_semantic_toggle_action(&space, true, true, true));
+    assert!(!live_semantic_toggle_action(&space, false, true, false));
+    assert!(!live_semantic_toggle_action(
+        &KeyEvent::new(KeyCode::Char(' '), KeyModifiers::SHIFT),
+        false,
+        true,
+        true
+    ));
+}
+
+#[test]
+fn semantic_toggle_dispatches_to_existing_tool_and_reasoning_state() {
+    let mut tools = Ui::default();
+    tools.push_tool(
+        ToolBlock::from_lines(vec![
+            ("read_file".into(), Color::Cyan),
+            ("detail line".into(), Color::Gray),
+        ])
+        .expect("tool"),
+    );
+    tools.push_chunk(provider::StreamChunk::Answer("answer".into()));
+    assert!(tools.hold_live());
+    assert!(tools.toggle_focused_semantic());
+    assert!(tools
+        .transcript
+        .visible_lines(8)
+        .iter()
+        .any(|line| line.text == "detail line"));
+    assert!(tools.toggle_focused_semantic());
+    assert!(!tools
+        .transcript
+        .visible_lines(8)
+        .iter()
+        .any(|line| line.text == "detail line"));
+
+    let mut reasoning = Ui::default();
+    reasoning.push_chunk(provider::StreamChunk::Reasoning("plan".into()));
+    assert!(reasoning.hold_live());
+    assert!(reasoning.toggle_focused_semantic());
+    assert!(reasoning.transcript.is_reasoning_expanded());
 }
 
 #[test]
@@ -845,6 +3532,7 @@ fn narrow_frame_retains_context_and_token_status() {
     let meta = ReplMeta {
         tools: Vec::new(),
         provider: "test".into(),
+        provider_label: "test".into(),
         model: "model".into(),
         base_url: String::new(),
         status_bar: "ctx {ctx} · {tokens} tok".into(),
@@ -871,17 +3559,169 @@ fn narrow_frame_retains_context_and_token_status() {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
+        if width >= 32 {
+            assert!(
+                symbols.contains("C80") || symbols.contains("ctx"),
+                "context telemetry hidden at {width}: {symbols}"
+            );
+        }
         assert!(
-            symbols.contains("ctx"),
-            "context telemetry hidden at {width}: {symbols}"
+            symbols.contains("I~160K") || symbols.contains("in ~160000"),
+            "input token telemetry hidden at {width}: {symbols}"
         );
         assert!(
-            symbols.contains("12_345") || symbols.contains("12,345") || symbols.contains("12345"),
+            symbols.contains("O0") || symbols.contains("out 0"),
+            "output token telemetry hidden at {width}: {symbols}"
+        );
+        assert!(
+            symbols.contains("Edef") || symbols.contains("effort default"),
+            "effort telemetry hidden at {width}: {symbols}"
+        );
+        assert!(
+            symbols.contains("12_345")
+                || symbols.contains("12,345")
+                || symbols.contains("12345")
+                || width < 48,
             "token telemetry hidden at {width}: {symbols}"
         );
+    }
+}
+
+#[test]
+fn compact_status_prioritizes_live_telemetry_by_width() {
+    let wide = compact_status_line(
+        72, "openai", "gpt-5", "80%", 12_345, "~160000", "42", "high",
+    );
+    assert!(wide.contains("openai/gpt-5"));
+    assert!(wide.contains("I~160K O42"));
+    assert!(wide.contains("Ehigh"));
+    assert!(wide.contains("T12K"));
+
+    let medium = compact_status_line(
+        40, "openai", "gpt-5", "80%", 12_345, "~160000", "42", "default",
+    );
+    assert!(medium.contains("C80%"));
+    assert!(medium.contains("I~160K O42"));
+    assert!(medium.contains("Edef"));
+    assert!(str_cells(&medium) <= 40);
+
+    let tiny = compact_status_line(
+        18, "openai", "gpt-5", "80%", 12_345, "~160000", "42", "default",
+    );
+    assert!(tiny.contains("Edef"));
+    assert!(tiny.contains("I~160K"));
+    assert!(str_cells(&tiny) <= 18);
+}
+
+#[test]
+fn compact_status_projection_separates_labels_without_changing_text() {
+    let compact = compact_status_line(
+        40, "openai", "gpt-5", "80%", 12_345, "~160000", "42", "default",
+    );
+    let projected = status_line_projection(&compact);
+    let line = projected.lines.first().expect("status line");
+    let rendered = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+
+    assert_eq!(rendered, compact);
+    assert!(line.spans.iter().any(|span| {
+        span.content == "I"
+            && span.style.fg == Some(role_color(Role::Label))
+            && span.style.add_modifier.contains(Modifier::DIM)
+    }));
+    assert!(line.spans.iter().any(|span| {
+        span.content == "~160K" && span.style.fg == Some(role_color(Role::Metric))
+    }));
+}
+
+#[test]
+fn device_auth_code_is_visible_in_live_frame() {
+    let ui = Ui {
+        device_auth_status: Some("Device code: TEST-1234".into()),
+        ..Ui::default()
+    };
+    let meta = ReplMeta {
+        tools: Vec::new(),
+        provider: "openai".into(),
+        provider_label: "openai".into(),
+        model: "gpt-5".into(),
+        base_url: String::new(),
+        status_bar: "ready".into(),
+        ctx_window: 200_000,
+    };
+    let vitals = Vitals {
+        step: 0,
+        elapsed_s: 0,
+        task_tokens: 0,
+        rate: 0,
+        ctx_used: 0,
+        queued: 0,
+    };
+    let mut terminal =
+        Terminal::new(ratatui::backend::TestBackend::new(80, 12)).expect("device auth terminal");
+    terminal
+        .draw(|frame| draw(frame, &ui, &meta, 0, &vitals, None))
+        .expect("device auth draw");
+    let symbols = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(
+        symbols.contains("TEST-1234"),
+        "device code hidden: {symbols}"
+    );
+    assert!(
+        symbols.contains("auth.openai.com/codex/device"),
+        "device URL hidden: {symbols}"
+    );
+    assert!(
+        symbols.contains('╭'),
+        "device auth modal lost rounded frame: {symbols}"
+    );
+}
+
+#[test]
+fn input_surface_uses_rounded_frame() {
+    let ui = Ui::default();
+    let meta = ReplMeta {
+        tools: Vec::new(),
+        provider: "openai".into(),
+        provider_label: "openai".into(),
+        model: "gpt-5".into(),
+        base_url: String::new(),
+        status_bar: "ready".into(),
+        ctx_window: 200_000,
+    };
+    let vitals = Vitals {
+        step: 0,
+        elapsed_s: 0,
+        task_tokens: 0,
+        rate: 0,
+        ctx_used: 0,
+        queued: 0,
+    };
+    let mut terminal =
+        Terminal::new(ratatui::backend::TestBackend::new(80, 12)).expect("input terminal");
+    terminal
+        .draw(|frame| draw(frame, &ui, &meta, 0, &vitals, None))
+        .expect("input draw");
+    let symbols = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    for corner in ['╭', '╮', '╰', '╯'] {
         assert!(
-            symbols.contains("tok"),
-            "token unit hidden at {width}: {symbols}"
+            symbols.contains(corner),
+            "input corner {corner} missing: {symbols}"
         );
     }
 }
@@ -894,6 +3734,22 @@ fn config_panel_lists_all_config_keys() {
         assert!(keys.contains(k), "配置页缺键 {k}");
     }
     assert_eq!(p.rows.len(), agent::CONFIG_KEYS.len());
+}
+
+#[test]
+fn named_provider_selection_keeps_profile_identity_separate_from_wire_kind() {
+    let cfg = Config::parse(
+        r#"{
+            "providers": [{
+                "name": "Zai",
+                "kind": "openai",
+                "model": "glm-4.6",
+                "base_url": "https://open.bigmodel.cn/api/paas/v4"
+            }]
+        }"#,
+    );
+    assert_eq!(named_profile_name(&cfg, "zai").as_deref(), Some("Zai"));
+    assert_eq!(named_profile_name(&cfg, "openai"), None);
 }
 
 /// 登录页(iter-38):列 Claude OAuth 入口 + 全部内置 preset,kind 为 Login。
@@ -929,12 +3785,46 @@ fn models_panel_selects_current() {
             mi("c", None),
         ],
     )];
-    let p = models_panel(&grouped, "test", "b");
+    let p = models_panel_with_effort(&grouped, "test", "b", "medium");
     assert_eq!(p.kind, PanelKind::Models);
     // key 格式: "provider · model_id"
     assert_eq!(p.selected().map(|r| r.key.as_str()), Some("test · b"));
     assert_eq!(p.rows[0].ctx, Some(128_000)); // 携真实窗口供选中缓存
     assert!(p.rows[2].value.contains('?')); // 缺 ctx 显 ?
+}
+
+#[test]
+fn models_panel_keeps_chatgpt_in_dedicated_group() {
+    let grouped = vec![
+        ("zai".into(), vec![mi("glm-4.6", None)]),
+        (
+            CHATGPT_MODEL_GROUP.into(),
+            vec![mi("gpt-5.6-sol", Some(200_000))],
+        ),
+    ];
+    let p = models_panel_with_effort(&grouped, CHATGPT_MODEL_GROUP, "gpt-5.6-sol", "medium");
+    assert_eq!(
+        p.selected().map(|r| r.key.as_str()),
+        Some("ChatGPT (Codex) · gpt-5.6-sol")
+    );
+    assert!(p
+        .rows
+        .iter()
+        .any(|row| row.key.starts_with("ChatGPT (Codex) · ")));
+}
+
+#[test]
+fn models_panel_exposes_effort_group_and_current_value() {
+    let p = models_panel_with_effort(&[], CHATGPT_MODEL_GROUP, "gpt-5.6-sol", "high");
+    assert_eq!(
+        p.rows
+            .iter()
+            .find(|row| row.key == "Effort · high")
+            .map(|row| row.value.as_str()),
+        Some("current")
+    );
+    assert!(p.rows.iter().any(|row| row.key == "Effort · max"));
+    assert!(p.title.contains("effort high"));
 }
 
 /// iter-35:斜杠即弹 —— 打 `/` 现全表、`/mo` 滤到 `/model`(iter-37 合并后 `/models` 退出补全表)。
@@ -972,6 +3862,11 @@ fn panel_action_routes_keys() {
     assert_eq!(panel_action(&press(KeyCode::End)), PanelAction::Last);
     assert_eq!(panel_action(&press(KeyCode::Enter)), PanelAction::Enter);
     assert_eq!(panel_action(&press(KeyCode::Esc)), PanelAction::Esc);
+    assert_eq!(panel_action(&press(KeyCode::Delete)), PanelAction::Remove);
+    assert_eq!(
+        panel_action(&KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)),
+        PanelAction::Remove
+    );
     assert_eq!(
         panel_action(&press(KeyCode::Char('x'))),
         PanelAction::Char('x')
@@ -994,6 +3889,7 @@ async fn history_command_opens_bounded_tool_history() {
     let mut meta = ReplMeta {
         tools: Vec::new(),
         provider: "test".into(),
+        provider_label: "test".into(),
         model: "model".into(),
         base_url: String::new(),
         status_bar: String::new(),
@@ -1025,7 +3921,47 @@ async fn history_command_opens_bounded_tool_history() {
         Some(PanelKind::ToolHistory)
     ));
     assert!(ui.panel.as_ref().is_some_and(|p| p.rows.len() == 1));
+    ui.panel = None;
+    ui.push_chunk(provider::StreamChunk::Reasoning("live inspect".into()));
+    run_command(
+        "/inspect",
+        &mut ui,
+        &mut history,
+        &mut meta,
+        &swap,
+        &agents,
+        &[],
+        &[],
+        0,
+        0,
+    )
+    .await
+    .expect("inspect command");
+    assert!(matches!(
+        ui.panel.as_ref().map(|p| p.kind),
+        Some(PanelKind::LiveHistory)
+    ));
+    run_command(
+        "/queue",
+        &mut ui,
+        &mut history,
+        &mut meta,
+        &swap,
+        &agents,
+        &[],
+        &[],
+        0,
+        0,
+    )
+    .await
+    .expect("queue command");
+    assert!(matches!(
+        ui.panel.as_ref().map(|panel| panel.kind),
+        Some(PanelKind::Queue)
+    ));
     assert!(SLASH_COMMANDS.contains(&"/history"));
+    assert!(SLASH_COMMANDS.contains(&"/activity"));
+    assert!(SLASH_COMMANDS.contains(&"/queue"));
 }
 
 /// 根因回归(输入法吞空格):去重 Windows 双触发 + 兜住输入法「仅 Release」的字符注入 +
@@ -1186,6 +4122,14 @@ fn input_action_routes_keys() {
         input_action(&press(KeyCode::Enter), true, false),
         InputAction::Queue
     );
+    assert_eq!(
+        input_action(
+            &KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+            true,
+            false
+        ),
+        InputAction::PushNow
+    );
     let active_frontier = vec!["verify".to_owned()];
     assert!(superstep_is_busy(&active_frontier));
     assert_eq!(
@@ -1240,6 +4184,79 @@ fn input_action_routes_keys() {
         InputAction::ToggleReasoning
     );
     assert_eq!(
+        input_action(
+            &KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            true,
+            false
+        ),
+        InputAction::ToggleAnswer
+    );
+    assert_eq!(
+        input_action(
+            &KeyEvent::new(KeyCode::Char('O'), KeyModifiers::CONTROL),
+            false,
+            false
+        ),
+        InputAction::ToggleDetails
+    );
+    assert_eq!(
+        input_action(
+            &KeyEvent::new(KeyCode::Char('R'), KeyModifiers::CONTROL),
+            true,
+            false
+        ),
+        InputAction::ToggleReasoning
+    );
+    assert_eq!(
+        input_action(
+            &KeyEvent::new(KeyCode::Char('T'), KeyModifiers::CONTROL),
+            true,
+            false
+        ),
+        InputAction::ToggleActivity
+    );
+    assert_eq!(
+        input_action(
+            &KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            true,
+            false
+        ),
+        InputAction::OpenLiveSearch
+    );
+    assert!(queue_panel_toggle_action(&KeyEvent::new(
+        KeyCode::Char('q'),
+        KeyModifiers::CONTROL
+    )));
+    assert!(!queue_panel_toggle_action(&press(KeyCode::Char('q'))));
+    assert!(live_history_toggle_action(
+        &KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL),
+        false,
+        true
+    ));
+    assert!(live_history_toggle_action(
+        &KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT),
+        false,
+        true
+    ));
+    assert!(!live_history_toggle_action(
+        &KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL),
+        true,
+        true
+    ));
+    assert!(!live_history_toggle_action(
+        &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        false,
+        true
+    ));
+    assert_eq!(
+        input_action(
+            &KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+            true,
+            false
+        ),
+        InputAction::PushNow
+    );
+    assert_eq!(
         tool_focus_action(&KeyEvent::new(KeyCode::Up, KeyModifiers::ALT), false, true),
         Some(-1)
     );
@@ -1253,6 +4270,42 @@ fn input_action_routes_keys() {
     );
     assert_eq!(
         tool_focus_action(&KeyEvent::new(KeyCode::Up, KeyModifiers::ALT), true, true),
+        None
+    );
+    assert_eq!(
+        semantic_focus_action(
+            &KeyEvent::new(KeyCode::Left, KeyModifiers::ALT),
+            false,
+            true,
+            true,
+        ),
+        Some(-1)
+    );
+    assert_eq!(
+        semantic_focus_action(
+            &KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            false,
+            true,
+            true,
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        semantic_focus_action(
+            &KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT),
+            false,
+            true,
+            true,
+        ),
+        None
+    );
+    assert_eq!(
+        semantic_focus_action(
+            &KeyEvent::new(KeyCode::Right, KeyModifiers::ALT),
+            false,
+            false,
+            true,
+        ),
         None
     );
     assert_eq!(
@@ -1296,6 +4349,64 @@ fn input_action_routes_keys() {
             true
         ),
         Some(LiveScrollAction::Newer)
+    );
+    assert_eq!(
+        live_scroll_action(
+            &KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+            false,
+            false,
+            true
+        ),
+        Some(LiveScrollAction::OlderPage)
+    );
+    assert_eq!(
+        live_scroll_action(
+            &KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            false,
+            false,
+            true
+        ),
+        Some(LiveScrollAction::NewerPage)
+    );
+    assert!(live_hold_toggle_action(
+        &KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
+        false,
+        true
+    ));
+    assert!(live_hold_toggle_action(
+        &KeyEvent::new(
+            KeyCode::Char('2'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        ),
+        false,
+        true
+    ));
+    assert!(live_hold_toggle_action(
+        &KeyEvent::new(
+            KeyCode::Char('@'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        ),
+        false,
+        true
+    ));
+    assert!(!live_hold_toggle_action(
+        &KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
+        true,
+        true
+    ));
+    assert!(!live_hold_toggle_action(
+        &KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
+        false,
+        false
+    ));
+    assert_eq!(
+        live_scroll_action(
+            &KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+            false,
+            true,
+            true
+        ),
+        Some(LiveScrollAction::OlderPage)
     );
     assert_eq!(
         live_scroll_action(
@@ -1351,11 +4462,27 @@ fn input_action_routes_keys() {
     );
     assert_eq!(
         input_action(
+            &KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            false,
+            true
+        ),
+        InputAction::Ignore
+    );
+    assert_eq!(
+        input_action(
             &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
             true,
             true
         ),
         InputAction::Interrupt
+    );
+    assert_eq!(
+        input_action(&press(KeyCode::Esc), true, false),
+        InputAction::Interrupt
+    );
+    assert_eq!(
+        input_action(&press(KeyCode::Esc), false, false),
+        InputAction::Ignore
     );
     assert_eq!(
         input_action(
@@ -1368,6 +4495,279 @@ fn input_action_routes_keys() {
             false
         ),
         InputAction::Ignore
+    );
+}
+
+#[test]
+fn decide_key_filters_windows_release_without_losing_ime_characters() {
+    let mut pressed = std::collections::HashSet::new();
+    let press = KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Press);
+    assert!(decide_key(&mut pressed, &press).is_some());
+    assert!(decide_key(
+        &mut pressed,
+        &KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Release,)
+    )
+    .is_none());
+
+    // Some IMEs inject a character only on Release; preserve it and normalize
+    // its non-breaking space representation before downstream routing.
+    let ime = decide_key(
+        &mut pressed,
+        &KeyEvent::new_with_kind(
+            KeyCode::Char('\u{a0}'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ),
+    )
+    .expect("unpaired character release should remain usable");
+    assert_eq!(ime.code, KeyCode::Char(' '));
+    assert_eq!(ime.kind, KeyEventKind::Press);
+}
+
+#[test]
+fn panel_attention_shortcuts_remain_global_while_browsing() {
+    let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+    assert_eq!(
+        panel_attention_action(&key('a'), true, false),
+        Some(InputAction::ToggleAnswer)
+    );
+    assert_eq!(
+        panel_attention_action(&key('r'), true, false),
+        Some(InputAction::ToggleReasoning)
+    );
+    assert_eq!(
+        panel_attention_action(&key('o'), true, false),
+        Some(InputAction::ToggleDetails)
+    );
+    assert_eq!(
+        panel_attention_action(&key('t'), true, false),
+        Some(InputAction::ToggleActivity)
+    );
+}
+
+#[test]
+fn panel_attention_shortcuts_ignore_editor_and_popup() {
+    let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+    for c in ['a', 'r', 'o', 't'] {
+        assert_eq!(panel_attention_action(&key(c), false, false), None);
+        assert_eq!(panel_attention_action(&key(c), true, true), None);
+    }
+}
+
+#[test]
+fn wide_audit_panel_hint_exposes_global_attention_switches() {
+    let panel = Panel::new(PanelKind::Activity, "Activity".into(), Vec::new());
+    let hint = panel_hint(&panel, 96);
+    assert!(
+        hint.contains("^R think"),
+        "missing reasoning affordance: {hint}"
+    );
+    assert!(
+        hint.contains("^A answers"),
+        "missing answer affordance: {hint}"
+    );
+    assert!(hint.contains("^O tools"), "missing tool affordance: {hint}");
+    assert!(
+        hint.contains("^T activity"),
+        "missing activity affordance: {hint}"
+    );
+    assert!(str_cells(&hint) <= 96, "hint overflow: {hint}");
+
+    let compact = panel_hint(&panel, 72);
+    assert!(
+        compact.contains("^A/^R/^O/^T audit"),
+        "missing compact affordance: {compact}"
+    );
+    assert!(
+        str_cells(&compact) <= 72,
+        "compact hint overflow: {compact}"
+    );
+
+    let mut editing = Panel::new(PanelKind::Activity, "Activity".into(), Vec::new());
+    editing.editing = Some("query".into());
+    assert!(!panel_hint(&editing, 96).contains("^R think"));
+}
+
+#[test]
+fn audit_panel_titles_keep_answer_and_reasoning_roles_distinct() {
+    assert_eq!(panel_title_role(PanelKind::AnswerHistory), Role::Primary);
+    assert_eq!(panel_title_role(PanelKind::ReasoningHistory), Role::Info);
+    assert_eq!(panel_title_role(PanelKind::ToolHistory), Role::Info);
+    assert_eq!(panel_title_role(PanelKind::Activity), Role::Info);
+}
+
+#[test]
+fn physical_enter_spellings_share_queue_and_front_queue_routing() {
+    for code in [KeyCode::Char('\r'), KeyCode::Char('\n'), KeyCode::Char('m')] {
+        let ctrl = KeyEvent::new(code, KeyModifiers::CONTROL);
+        assert_eq!(
+            input_action(&ctrl, true, false),
+            InputAction::PushNow,
+            "{code:?} with Ctrl must front-queue while busy"
+        );
+    }
+    for code in [KeyCode::Char('\r'), KeyCode::Char('\n')] {
+        let plain = KeyEvent::new(code, KeyModifiers::NONE);
+        assert_eq!(
+            input_action(&plain, true, false),
+            InputAction::Queue,
+            "{code:?} must queue while busy"
+        );
+    }
+
+    let mut pressed = std::collections::HashSet::new();
+    let normalized = decide_key(
+        &mut pressed,
+        &KeyEvent::new(KeyCode::Char('\n'), KeyModifiers::CONTROL),
+    )
+    .expect("LF press should remain an input event");
+    assert_eq!(normalized.code, KeyCode::Enter);
+    assert!(decide_key(
+        &mut pressed,
+        &KeyEvent::new_with_kind(
+            KeyCode::Char('\n'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        )
+    )
+    .is_none());
+}
+
+#[test]
+fn pending_queue_preview_wraps_and_remains_bounded() {
+    let queue = std::collections::VecDeque::from([
+        "first pending message with enough text to wrap".to_owned(),
+        "second pending message".to_owned(),
+        "third pending message".to_owned(),
+        "fourth pending message".to_owned(),
+    ]);
+    let lines = pending_queue_lines(&queue, 24);
+    assert!(lines.len() <= MAX_PENDING_PREVIEW_ROWS);
+    assert_eq!(lines[0].spans[0].style.fg, Some(role_color(Role::Primary)));
+    let text = |line: &Line<'static>| {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    };
+    assert!(text(&lines[0]).contains("next"));
+    assert!(lines.iter().any(|line| text(line).contains("first")));
+    assert!(lines.iter().all(|line| str_cells(&text(line)) <= 24));
+}
+
+#[test]
+fn pending_queue_preview_bounds_large_pasted_message() {
+    let queue = std::collections::VecDeque::from([format!(
+        "head of pending paste {}",
+        "x".repeat(MAX_PENDING_PREVIEW_CHARS * 8)
+    )]);
+    let lines = pending_queue_lines(&queue, 24);
+    let text = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert!(lines.len() <= MAX_PENDING_PREVIEW_ROWS);
+    assert!(text.iter().any(|line| line.contains("head of pending")));
+    assert!(text.iter().any(|line| line.contains("more queued text")));
+    assert!(text.iter().all(|line| str_cells(line) <= 24));
+}
+
+#[test]
+fn pending_queue_stays_visible_in_short_live_frame() {
+    let mut ui = Ui {
+        busy: true,
+        activity: "reasoning".into(),
+        ..Ui::default()
+    };
+    ui.queued
+        .push_back("keep this pending intent visible".into());
+    let meta = ReplMeta {
+        tools: Vec::new(),
+        provider: "test".into(),
+        provider_label: "test".into(),
+        model: "model".into(),
+        base_url: String::new(),
+        status_bar: "{provider} · {model}".into(),
+        ctx_window: 200_000,
+    };
+    let vitals = Vitals {
+        step: 1,
+        elapsed_s: 2,
+        task_tokens: 3,
+        rate: 1,
+        ctx_used: 4,
+        queued: 1,
+    };
+    let mut terminal =
+        Terminal::new(ratatui::backend::TestBackend::new(40, 7)).expect("short queue terminal");
+    terminal
+        .draw(|frame| draw(frame, &ui, &meta, 0, &vitals, None))
+        .expect("short queue draw");
+    let symbols = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(
+        symbols.contains("keep this pending") || symbols.contains("keep this"),
+        "queued intent hidden in short frame: {symbols}"
+    );
+}
+
+#[test]
+fn pending_queue_stays_above_wrapped_draft_and_cursor_tail() {
+    let mut ui = Ui {
+        busy: true,
+        activity: "reasoning".into(),
+        ..Ui::default()
+    };
+    ui.queued
+        .push_back("keep this pending intent visible".into());
+    ui.input
+        .insert_str(&format!("{}\nvisible draft tail", "x".repeat(160)));
+    let meta = ReplMeta {
+        tools: Vec::new(),
+        provider: "test".into(),
+        provider_label: "test".into(),
+        model: "model".into(),
+        base_url: String::new(),
+        status_bar: "status".into(),
+        ctx_window: 200_000,
+    };
+    let vitals = Vitals {
+        step: 1,
+        elapsed_s: 2,
+        task_tokens: 3,
+        rate: 1,
+        ctx_used: 4,
+        queued: 1,
+    };
+    let mut terminal =
+        Terminal::new(ratatui::backend::TestBackend::new(40, 8)).expect("queued draft terminal");
+    terminal
+        .draw(|frame| draw(frame, &ui, &meta, 0, &vitals, None))
+        .expect("queued draft draw");
+    let symbols = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(
+        symbols.contains("keep this pending"),
+        "queued intent hidden behind wrapped draft: {symbols}"
+    );
+    assert!(
+        symbols.contains("visible draft tail"),
+        "cursor-near input tail hidden by queue preview: {symbols}"
     );
 }
 
@@ -1398,6 +4798,9 @@ fn wcwidth_display_columns() {
     assert_eq!(clip_display_cells("abcdef", 4), "abc…");
     assert_eq!(clip_display_cells("你好a", 3), "你…");
     assert_eq!(clip_display_cells("你好", 1), "…");
+    let tail = tail_display_cells(&"x".repeat(100), 4, 2);
+    assert_eq!(str_cells(&tail), 8);
+    assert!(tail.starts_with('…'));
 }
 
 /// iter-49:输入折行 + 光标同口径(修「文字换到第二行时光标卡首行末」根因)。
@@ -1486,6 +4889,25 @@ fn input_state_history_recall_preserves_draft() {
     s.recall_next(); // 走出历史 → 还原草稿
     assert_eq!(s.buffer, "dra");
     assert_eq!(s.hist_idx, None);
+}
+
+#[test]
+fn input_history_switches_from_global_to_session_scope() {
+    let mut s = InputState::default();
+    s.set_history(vec!["global command".into()], false);
+    s.insert_str("session task");
+    assert_eq!(s.take(), "session task");
+    s.drop_last_history_if("session task");
+    s.begin_session();
+    s.push_history("session task");
+    s.insert_str("draft");
+    assert!(!s.move_up());
+    s.recall_prev();
+    assert_eq!(s.buffer, "session task");
+    s.recall_next();
+    assert_eq!(s.buffer, "draft");
+    assert!(s.session_mode);
+    assert!(!s.history.iter().any(|item| item == "global command"));
 }
 
 /// iter-27:词提取 + 前缀过滤 + 应用替换 + build_popup 触发条件。
@@ -1606,6 +5028,7 @@ fn responsive_live_layout_preserves_output_and_input_under_vertical_pressure() {
     let meta = ReplMeta {
         tools: Vec::new(),
         provider: "test".into(),
+        provider_label: "test".into(),
         model: "model".into(),
         base_url: String::new(),
         status_bar: "status".into(),
@@ -1657,6 +5080,7 @@ fn tiny_frames_keep_input_slot_visible() {
     let meta = ReplMeta {
         tools: Vec::new(),
         provider: "test".into(),
+        provider_label: "test".into(),
         model: "model".into(),
         base_url: String::new(),
         status_bar: "test".into(),
@@ -1753,6 +5177,60 @@ fn input_height_grows_and_clamps() {
     assert_eq!(input_height("abc", 0, 3, 8), 5);
 }
 
+#[test]
+fn live_page_rows_reserves_chrome_and_keeps_one_output_row() {
+    assert_eq!(live_page_rows(24), 19);
+    assert_eq!(live_page_rows(5), 1);
+    assert_eq!(live_page_rows(0), 1);
+}
+
+#[test]
+fn live_frame_plan_keeps_queue_status_and_slots_in_one_projection() {
+    let mut ui = Ui {
+        busy: true,
+        input_tokens: 12,
+        output_tokens: 7,
+        effort: Some("high".into()),
+        ..Ui::default()
+    };
+    ui.queued.push_back("/next".into());
+    let meta = ReplMeta {
+        tools: Vec::new(),
+        provider: "test".into(),
+        provider_label: "Test".into(),
+        model: "model".into(),
+        base_url: String::new(),
+        status_bar: "{provider} · {model} · {ctx} · {tokens}".into(),
+        ctx_window: 100,
+    };
+    let vitals = Vitals {
+        step: 2,
+        elapsed_s: 3,
+        task_tokens: 19,
+        rate: 4,
+        ctx_used: 20,
+        queued: 1,
+    };
+    let plan = LiveFramePlan::build(
+        Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 12,
+        },
+        &ui,
+        &meta,
+        19,
+        &vitals,
+    );
+    let slots = plan.slots();
+    assert_eq!(slots.iter().map(|slot| slot.height).sum::<u16>(), 12);
+    assert!(slots[0].height >= 1, "live output must retain one row");
+    assert!(plan.status_text().contains("I12"));
+    assert!(plan.status_text().contains("O7"));
+    assert!(plan.status_text().contains("Ehi"));
+}
+
 /// iter-26:流式尾巴 —— 少于 K 全量,多于 K 取尾。
 #[test]
 fn stream_tail_takes_last_k_lines() {
@@ -1794,6 +5272,116 @@ fn live_output_inspection_pauses_and_returns_to_follow() {
     assert!(!transcript.is_inspecting());
 }
 
+#[test]
+fn explicit_live_hold_is_visible_even_with_short_output() {
+    let mut transcript = LiveTranscript::default();
+    transcript.push_answer("one line");
+    assert!(!transcript.is_inspecting());
+    assert!(transcript.hold_live());
+    assert!(transcript.is_inspecting());
+    transcript.push_answer("\ntwo");
+    assert!(transcript.is_inspecting());
+    assert!(transcript.follow_live());
+    assert!(!transcript.is_inspecting());
+    assert_eq!(
+        transcript.visible_lines(2).last().map(|line| line.text),
+        Some("two")
+    );
+}
+
+#[test]
+fn live_hold_keeps_the_same_logical_rows_as_stream_grows() {
+    let mut transcript = LiveTranscript::default();
+    transcript.push_reasoning("line 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7");
+    assert!(transcript.hold_live());
+    let before = transcript
+        .visible_lines(3)
+        .into_iter()
+        .map(|line| line.text.to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(before, ["line 1", "line 2", "line 3"]);
+
+    transcript.push_reasoning("\nline 8");
+    let after = transcript
+        .visible_lines(3)
+        .into_iter()
+        .map(|line| line.text.to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(after, before);
+    assert!(transcript.is_inspecting());
+}
+
+#[test]
+fn held_cache_reflow_preserves_synthetic_continuation_anchor() {
+    let mut transcript = LiveTranscript::default();
+    transcript.push_answer(
+        &(0..14)
+            .map(|index| {
+                if index == 5 {
+                    format!("line {index} long-body-abcdefghijklmnopqrstuvwx")
+                } else {
+                    format!("line {index} unique")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    assert!(transcript.hold_live());
+
+    let mut cache = LiveOutputCache::default();
+    let vitals = Vitals {
+        step: 0,
+        elapsed_s: 0,
+        task_tokens: 0,
+        rate: 0,
+        ctx_used: 0,
+        queued: 0,
+    };
+    let before = cache.lines(&transcript, 12, 3, false, &vitals);
+    let after = cache.lines(&transcript, 24, 3, false, &vitals);
+    let text = |lines: &[Line<'static>]| {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    };
+    let before_text = text(&before);
+    let after_text = text(&after);
+    assert!(
+        before_text.contains("continues"),
+        "before resize: {before_text}"
+    );
+    assert!(
+        after_text.contains("continues"),
+        "after resize: {after_text}"
+    );
+    assert!(
+        !after_text.contains("line 0"),
+        "resize must not jump back to the pinned answer header: {after_text}"
+    );
+}
+
+#[test]
+fn live_page_scroll_moves_by_viewport_and_returns_to_follow() {
+    let mut transcript = LiveTranscript::default();
+    transcript.push_answer(
+        &(0..40)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+
+    assert!(transcript.scroll_live_page(1, 8));
+    let older = transcript.visible_lines(8);
+    assert_ne!(older.last().map(|line| line.text), Some("line39"));
+    assert!(transcript.scroll_live_page(-1, 8));
+    assert_eq!(
+        transcript.visible_lines(8).last().map(|line| line.text),
+        Some("line39")
+    );
+}
+
 /// iter-26:静态提交队列 —— note 入队有序,drain 取尽且清空(有界性 = 提交即出队)。
 #[test]
 fn commit_queue_drains_in_order() {
@@ -1816,8 +5404,118 @@ fn role_colors_are_ansi16() {
     assert_eq!(role_color(Role::DiffAdd), Color::Green);
     assert_eq!(role_color(Role::DiffDel), Color::Red);
     assert_eq!(role_color(Role::Primary), Color::Cyan);
+    assert_eq!(role_color(Role::Reasoning), Color::LightBlue);
     assert_eq!(role_color(Role::Border), Color::DarkGray);
-    assert_eq!(role_color(Role::Command), Color::LightGreen);
+    assert_eq!(role_color(Role::Command), Color::White);
+    assert_eq!(role_color(Role::Answer), Color::White);
+    assert_eq!(role_color(Role::Info), Color::Gray);
+    assert_eq!(role_color(Role::Muted), Color::DarkGray);
+    assert_eq!(role_color(Role::Metric), Color::White);
+    assert_eq!(role_color(Role::Label), Color::DarkGray);
+}
+
+#[test]
+fn telemetry_surface_keeps_muted_status_text_readable() {
+    let style = telemetry_surface().fg(role_color(Role::Muted));
+    assert_eq!(style.bg, Some(Color::Reset));
+    assert_ne!(style.fg, style.bg);
+}
+
+#[test]
+fn markdown_alerts_render_semantic_rails_without_leaking_syntax() {
+    let (warning, next) = md_line_spans("> [!WARNING] **Protect** the boundary", false);
+    assert!(!next);
+    assert_eq!(
+        warning
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>(),
+        "│ WARNING ┃ Protect the boundary"
+    );
+    assert_eq!(warning[0].style.fg, Some(role_color(Role::Warn)));
+    assert_eq!(warning[1].style.fg, Some(role_color(Role::Warn)));
+    assert!(warning[1].style.add_modifier.contains(Modifier::BOLD));
+
+    let (tip, _) = md_line_spans("> [!TIP] Use the fast path", false);
+    assert_eq!(tip[0].style.fg, Some(role_color(Role::Success)));
+    assert!(tip.iter().all(|span| !span.content.contains("[!TIP]")));
+
+    let (quote, _) = md_line_spans("> ordinary quote", false);
+    assert_eq!(
+        quote
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>(),
+        "│ ordinary quote"
+    );
+}
+
+#[test]
+fn markdown_alert_continuation_keeps_semantic_rail() {
+    let lines = markdown_lines(
+        "🤖 > [!WARNING] Protect the boundary\n> Continue **this** conclusion\nplain",
+    );
+    let continuation = lines[1]
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert_eq!(continuation, "└ Continue this conclusion");
+    assert_eq!(lines[1].spans[0].style.fg, Some(role_color(Role::Warn)));
+
+    let mut in_code = false;
+    let mut alert_role = None;
+    let _ = live_markdown_spans_with_alert(
+        "> [!WARNING] head",
+        &mut in_code,
+        Color::White,
+        Modifier::empty(),
+        &mut alert_role,
+    );
+    let live_continuation = live_markdown_spans_with_alert(
+        "> live conclusion",
+        &mut in_code,
+        Color::White,
+        Modifier::empty(),
+        &mut alert_role,
+    );
+    assert_eq!(live_continuation[0].style.fg, Some(role_color(Role::Warn)));
+    assert_eq!(
+        live_continuation
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>(),
+        "│ live conclusion"
+    );
+}
+
+#[test]
+fn markdown_alert_edges_form_a_bounded_static_container() {
+    let lines = markdown_lines(
+        "🤖 > [!WARNING] Protect the boundary\n> Continue **this** conclusion\nplain",
+    );
+    let rendered = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rendered[0], "🤖 ┌ WARNING ┃ Protect the boundary");
+    assert_eq!(rendered[1], "└ Continue this conclusion");
+    assert_eq!(rendered[2], "plain");
+    assert_eq!(lines[0].spans[1].style.fg, Some(role_color(Role::Warn)));
+    assert_eq!(lines[1].spans[0].style.fg, Some(role_color(Role::Warn)));
+}
+
+#[test]
+fn selection_style_is_quiet_focus() {
+    let style = selection_style();
+    assert_eq!(style.fg, Some(role_color(Role::Primary)));
+    assert_eq!(style.bg, Some(Color::DarkGray));
+    assert!(style.add_modifier.contains(Modifier::BOLD));
 }
 
 /// iter-28:md 轻渲染 —— 围栏切态、bounded code roles、标题粗、行内 code、未闭合按字面。
@@ -1825,7 +5523,9 @@ fn role_colors_are_ansi16() {
 fn md_line_rendering() {
     let (spans, state) = md_line_spans("```rust", false);
     assert!(state);
-    assert_eq!(spans.len(), 1);
+    assert_eq!(spans.len(), 2);
+    assert_eq!(spans[0].content, "```");
+    assert_eq!(spans[1].content, "rust");
     let (_, state2) = md_line_spans("```", true);
     assert!(!state2);
     let (s, st) = md_line_spans("let x = 1;", true);
@@ -1920,6 +5620,23 @@ fn markdown_answer_block_preserves_semantic_spans() {
 }
 
 #[test]
+fn committed_answer_keeps_a_semantic_rail_after_leaving_live_view() {
+    let lines = answer_commit_lines("🤖 **answer**\nnext line");
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0].spans[0].content.as_ref(), "╭ ANSWER ");
+    assert_eq!(lines[1].spans[0].content.as_ref(), "│ ");
+    assert!(lines[0]
+        .spans
+        .iter()
+        .any(|span| span.content.as_ref().contains("Ctrl+A answers")));
+    assert_eq!(lines[0].spans[0].style.fg, Some(role_color(Role::Primary)));
+    assert_eq!(
+        answer_commit_measure("first\nsecond"),
+        "╭ ANSWER first  [Ctrl+A answers]\n│ second"
+    );
+}
+
+#[test]
 fn live_answer_uses_bounded_markdown_roles_and_fence_state() {
     let mut in_code = false;
     let spans = live_markdown_line(
@@ -1960,6 +5677,28 @@ fn live_answer_uses_bounded_markdown_roles_and_fence_state() {
     let close = live_markdown_line("```", 64, &mut in_code, Color::White, Modifier::BOLD);
     assert_eq!(close[0].style.fg, Some(role_color(Role::Border)));
     assert!(!in_code);
+}
+
+#[test]
+fn live_alerts_keep_semantic_role_through_markdown_projection() {
+    let mut in_code = false;
+    let spans = live_markdown_line(
+        "> [!CAUTION] stop here",
+        32,
+        &mut in_code,
+        Color::White,
+        Modifier::BOLD,
+    );
+    assert_eq!(
+        spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>(),
+        "│ CAUTION ┃ stop here"
+    );
+    assert_eq!(spans[0].style.fg, Some(role_color(Role::Error)));
+    assert_eq!(spans[1].style.fg, Some(role_color(Role::Error)));
+    assert!(spans[1].style.add_modifier.contains(Modifier::BOLD));
 }
 
 #[test]
@@ -2050,15 +5789,141 @@ fn prefixed_final_event_uses_markdown_answer_path() {
     let blocks = ui.drain_commit_blocks();
     assert!(matches!(
         blocks.as_slice(),
-        [CommitBlock::Markdown { text }] if text == "🤖 **answer**"
+        [CommitBlock::Markdown { text, .. }] if text == "🤖 **answer**"
     ));
+}
+
+#[test]
+fn interrupted_live_answer_is_retained_without_faking_completion() {
+    let mut ui = Ui::default();
+    ui.push_chunk(provider::StreamChunk::Answer("partial\nanswer".into()));
+
+    ui.commit_live_answers("interrupted before final response", 3, 7);
+
+    assert_eq!(ui.answer_history.len(), 1);
+    assert!(ui
+        .answer_history
+        .back()
+        .is_some_and(|answer| answer.partial));
+    let panel = answer_history_panel(&ui.answer_history);
+    assert!(panel.rows[0].key.contains("PARTIAL"));
+    assert_eq!(panel.rows[0].value, "partial\nanswer");
+    let blocks = ui.drain_commit_blocks();
+    assert!(matches!(
+        blocks.as_slice(),
+        [
+            CommitBlock::Text { text, .. },
+            CommitBlock::Markdown { text: body, .. }
+        ] if text.contains("partial answer retained") && body == "partial\nanswer"
+    ));
+    assert!(!ui.transcript.has_inspectable_output());
+}
+
+#[test]
+fn partial_answer_scrollback_keeps_answer_channel_and_marks_partial() {
+    let mut terminal = Terminal::with_options(
+        ratatui::backend::TestBackend::new(64, 8),
+        TerminalOptions {
+            viewport: Viewport::Inline(4),
+        },
+    )
+    .expect("terminal");
+    let mut ui = Ui::default();
+    ui.push_chunk(provider::StreamChunk::Answer("partial answer".into()));
+    ui.commit_live_answers("interrupted before final response", 2, 3);
+
+    flush_commits(&mut terminal, &mut ui).expect("partial answer scrollback");
+    let symbols = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(symbols.contains("ANSWER"));
+    assert!(symbols.contains("PARTIAL"));
+}
+
+#[test]
+fn partial_answer_marker_wraps_cjk_markdown_at_supported_widths() {
+    let body = "🤖 # 结论\n> [!NOTE] 你你\n```rust\n你你\n```\nanswer tail";
+    for width in [32, 40, 80, 96] {
+        let lines = wrap_commit_lines(answer_commit_lines_with_status(body, true), width);
+        assert!(!lines.is_empty(), "width={width}");
+        assert!(
+            lines.iter().all(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| str_cells(span.content.as_ref()))
+                    .sum::<usize>()
+                    <= width as usize
+            }),
+            "width={width} lines={lines:?}"
+        );
+        let rendered = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(rendered.contains("ANSWER"), "width={width} {rendered}");
+        assert!(rendered.contains("PARTIAL"), "width={width} {rendered}");
+    }
+}
+
+#[test]
+fn partial_answer_archive_bounds_and_expands_long_detail() {
+    let mut ui = Ui::default();
+    let body = format!(
+        "PARTIAL HEAD {}\n{}\nPARTIAL TAIL",
+        "h".repeat(MAX_ANSWER_HISTORY_CHARS / 2),
+        "middle ".repeat(600)
+    );
+    ui.push_chunk(provider::StreamChunk::Answer(body));
+    ui.commit_live_answers("run ended before final response", 4, 12);
+
+    let stored = &ui.answer_history.back().expect("partial archive").text;
+    assert!(stored.contains("PARTIAL HEAD"));
+    assert!(stored.contains("middle omitted"));
+    assert!(stored.contains("PARTIAL TAIL"));
+    assert!(ui.open_answer_history());
+    let panel = ui.panel.as_mut().expect("answer archive panel");
+    assert!(panel
+        .selected()
+        .is_some_and(|row| row.key.contains("PARTIAL")));
+    assert!(panel.toggle_detail());
+    assert!(panel
+        .selected()
+        .is_some_and(|row| row.value.contains("PARTIAL TAIL")));
+}
+
+#[test]
+fn answer_archive_evicts_partial_before_completed_conclusions() {
+    let mut ui = Ui::default();
+    ui.note_markdown("completed investigation conclusion");
+    for index in 0..MAX_ANSWER_HISTORY {
+        ui.push_chunk(provider::StreamChunk::Answer(format!("partial {index}")));
+        ui.commit_live_answers("interrupted before final response", index, index as u64);
+    }
+
+    assert_eq!(ui.answer_history.len(), MAX_ANSWER_HISTORY);
+    assert!(ui
+        .answer_history
+        .iter()
+        .any(|entry| !entry.partial && entry.text == "completed investigation conclusion"));
+    assert_eq!(
+        ui.answer_history
+            .iter()
+            .filter(|entry| entry.partial)
+            .count(),
+        MAX_ANSWER_HISTORY - 1
+    );
 }
 
 /// iter-52:TestBackend 复现窄终端渲染，证明宽字符折行不注入 ANSI 残留且不 panic。
 #[test]
 fn markdown_render_survives_narrow_test_backend() {
     let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(12, 8)).expect("terminal");
-    let lines = markdown_lines("🤖 # 标题\n```rust\n你你\n```\nplain");
+    let lines = markdown_lines("🤖 # 标题\n> [!WARNING] 你你\n```rust\n你你\n```\nplain");
     terminal
         .draw(|frame| {
             Paragraph::new(Text::from(lines.clone()))
@@ -2094,6 +5959,7 @@ fn full_tui_frame_survives_narrow_cjk_and_escape_text() {
     let meta = ReplMeta {
         tools: Vec::new(),
         provider: "test".into(),
+        provider_label: "test".into(),
         model: "model".into(),
         base_url: String::new(),
         status_bar: "\x1b[31m{provider}\x1b[0m · {model}".into(),
@@ -2152,7 +6018,6 @@ fn full_tui_frame_survives_narrow_cjk_and_escape_text() {
         symbols.contains("step 3") && symbols.contains("t+2s"),
         "{symbols}"
     );
-    assert!(symbols.contains("8 task tok"), "{symbols}");
     assert!(symbols.contains("[THINK]"), "{symbols}");
     let active_rail = terminal
         .backend()
@@ -2202,7 +6067,7 @@ fn full_tui_frame_survives_narrow_cjk_and_escape_text() {
         .iter()
         .find(|cell| cell.symbol() == "┌")
         .expect("idle reasoning rail");
-    assert_eq!(idle_rail.fg, role_color(Role::Muted));
+    assert_eq!(idle_rail.fg, role_color(Role::Reasoning));
 
     let mut hint_before =
         Terminal::new(ratatui::backend::TestBackend::new(80, 8)).expect("reasoning hint terminal");
@@ -2410,15 +6275,15 @@ fn full_tui_frame_survives_narrow_cjk_and_escape_text() {
             .expect("panel draw");
     }
 
-    let mut clipped_ui = Ui::default();
-    clipped_ui.push_chunk(provider::StreamChunk::Answer(
+    let mut wrapped_ui = Ui::default();
+    wrapped_ui.push_chunk(provider::StreamChunk::Answer(
         "a very long live answer that must stay within the viewport".into(),
     ));
     let mut terminal =
-        Terminal::new(ratatui::backend::TestBackend::new(18, 8)).expect("clipped terminal");
+        Terminal::new(ratatui::backend::TestBackend::new(18, 8)).expect("wrapped terminal");
     terminal
-        .draw(|frame| draw(frame, &clipped_ui, &meta, 8, &vitals, None))
-        .expect("clipped draw");
+        .draw(|frame| draw(frame, &wrapped_ui, &meta, 8, &vitals, None))
+        .expect("wrapped draw");
     let symbols = terminal
         .backend()
         .buffer()
@@ -2427,8 +6292,12 @@ fn full_tui_frame_survives_narrow_cjk_and_escape_text() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(
-        symbols.contains('…'),
-        "live line should show a width marker: {symbols}"
+        symbols.contains("stay"),
+        "wrapped live answer disappeared: {symbols}"
+    );
+    assert!(
+        !symbols.contains('…'),
+        "wrapped live answer was clipped: {symbols}"
     );
 }
 
@@ -2459,7 +6328,38 @@ fn responsive_panel_chrome_keeps_actions_visible_in_narrow_frames() {
     history.retype();
     history.detail_open = true;
 
-    for (name, panel) in [("tools", tools), ("history", history)] {
+    let mut reasoning = Panel::new(
+        PanelKind::ReasoningHistory,
+        "Reasoning history · Enter expand · Esc close".into(),
+        vec![PanelRow {
+            key: "#1 step 3 · 8 tok".into(),
+            value: "inspect state and compare observations".into(),
+            ctx: None,
+        }],
+    );
+    reasoning.query = "state".into();
+    reasoning.retype();
+    reasoning.detail_open = true;
+
+    let mut live = Panel::new(
+        PanelKind::LiveHistory,
+        "Live blocks · Enter expand · Esc close".into(),
+        vec![PanelRow {
+            key: "#1 🤖 Answer · 12 chars".into(),
+            value: "answer detail".into(),
+            ctx: None,
+        }],
+    );
+    live.query = "answer".into();
+    live.retype();
+    live.detail_open = true;
+
+    for (name, panel) in [
+        ("tools", tools),
+        ("history", history),
+        ("reasoning", reasoning),
+        ("live", live),
+    ] {
         for (width, height) in [(18, 8), (12, 6), (8, 4)] {
             let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(width, height))
                 .expect("panel terminal");
@@ -2480,6 +6380,12 @@ fn responsive_panel_chrome_keeps_actions_visible_in_narrow_frames() {
                 symbols.contains("Esc"),
                 "{name} {width}x{height}: {symbols}"
             );
+            if width < 14 {
+                assert!(
+                    symbols.contains("↕"),
+                    "narrow action legend disappeared: {name} {symbols}"
+                );
+            }
             if width >= 18 {
                 assert!(
                     symbols.contains("Enter"),
@@ -2494,6 +6400,41 @@ fn responsive_panel_chrome_keeps_actions_visible_in_narrow_frames() {
             }
             assert!(!symbols.contains('\x1b'));
         }
+    }
+}
+
+#[test]
+fn live_inspector_panel_exposes_hold_follow_controls() {
+    let mut live = Panel::new(
+        PanelKind::LiveHistory,
+        "Live blocks · Enter expand · Esc close".into(),
+        vec![PanelRow {
+            key: "#1 🤖 Answer · 12 chars".into(),
+            value: "answer detail".into(),
+            ctx: None,
+        }],
+    );
+    live.detail_open = true;
+
+    for width in [24, 32, 40, 80] {
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(width, 10)).expect("live panel");
+        terminal
+            .draw(|frame| draw_panel(frame, frame.area(), &live))
+            .expect("live panel draw");
+        let symbols = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        let follow = if width >= 40 { "Ctrl+Space" } else { "^Space" };
+        assert!(
+            symbols.contains(follow),
+            "Live Inspector follow control disappeared at {width}: {symbols}"
+        );
+        assert!(!symbols.contains('\x1b'));
     }
 }
 
@@ -2526,6 +6467,7 @@ fn live_frame_pressure_stays_bounded_and_stable() {
     let meta = ReplMeta {
         tools: Vec::new(),
         provider: "test".into(),
+        provider_label: "test".into(),
         model: "model".into(),
         base_url: String::new(),
         status_bar: "{provider} · {model}".into(),
@@ -2585,6 +6527,7 @@ fn busy_live_cursor_keeps_one_cell_at_width_edge() {
     let meta = ReplMeta {
         tools: Vec::new(),
         provider: "test".into(),
+        provider_label: "test".into(),
         model: "model".into(),
         base_url: String::new(),
         status_bar: "{provider}".into(),
@@ -2632,6 +6575,7 @@ fn long_reasoning_clamp_preserves_answer_and_input_slots() {
     let meta = ReplMeta {
         tools: Vec::new(),
         provider: "test".into(),
+        provider_label: "test".into(),
         model: "model".into(),
         base_url: String::new(),
         status_bar: "{provider} · {model}".into(),
@@ -2666,8 +6610,8 @@ fn long_reasoning_clamp_preserves_answer_and_input_slots() {
         "answer tail: {symbols}"
     );
     assert!(
-        symbols.contains('┌') && symbols.contains('╰'),
-        "semantic rails: {symbols}"
+        symbols.contains('┃') && symbols.contains('╰'),
+        "answer semantic rails: {symbols}"
     );
     assert!(
         symbols.contains('┊'),
@@ -2722,6 +6666,31 @@ fn static_fenced_code_reuses_bounded_token_roles() {
 }
 
 #[test]
+fn fenced_language_token_has_display_only_semantic_style() {
+    let lines = markdown_lines("  ```rust extra\nlet value = 42;\n```");
+    let opener = &lines[0];
+    let rendered = opener
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert_eq!(rendered, "  ```rust extra");
+    assert_eq!(str_cells(&rendered), str_cells("  ```rust extra"));
+
+    let language = opener
+        .spans
+        .iter()
+        .find(|span| span.content.as_ref() == "rust")
+        .expect("language span");
+    assert_eq!(language.style.fg, Some(role_color(Role::Info)));
+    assert!(language.style.add_modifier.contains(Modifier::BOLD));
+
+    let bare = markdown_lines("```");
+    assert_eq!(bare[0].spans.len(), 1);
+    assert_eq!(bare[0].spans[0].style.fg, Some(role_color(Role::Border)));
+}
+
+#[test]
 fn static_scrollback_preserves_order_and_sanitizes_controls() {
     let mut terminal = Terminal::with_options(
         ratatui::backend::TestBackend::new(48, 20),
@@ -2761,6 +6730,31 @@ fn static_scrollback_preserves_order_and_sanitizes_controls() {
     // independently while the buffer assertions above cover order and sanitization.
     assert_eq!(unicode_width::UnicodeWidthStr::width("你好 🚀"), 7);
     assert!(!symbols.contains('\x1b') && !symbols.contains("2J"));
+}
+
+#[test]
+fn long_static_answer_keeps_head_tail_archive_and_bounded_commit_work() {
+    let mut terminal = Terminal::with_options(
+        ratatui::backend::TestBackend::new(40, 12),
+        TerminalOptions {
+            viewport: Viewport::Inline(6),
+        },
+    )
+    .expect("terminal");
+    let body = format!(
+        "STRESS_ANSWER_BEGIN\n{}\nSTRESS_ANSWER_END",
+        "中文 CJK markdown stream with `token` and **emphasis**. ".repeat(2_000)
+    );
+    let mut ui = Ui::default();
+    ui.note_markdown(body);
+
+    flush_commits(&mut terminal, &mut ui).expect("bounded static answer");
+
+    let archived = &ui.answer_history.back().expect("answer archive").text;
+    assert!(archived.starts_with("STRESS_ANSWER_BEGIN"));
+    assert!(archived.contains("middle omitted"));
+    assert!(archived.ends_with("STRESS_ANSWER_END"));
+    assert!(ui.commits.is_empty());
 }
 
 #[test]
@@ -2819,7 +6813,7 @@ fn tool_commit_keeps_summary_and_details_together() {
     assert!(symbols.contains("tool summary"));
     assert!(symbols.contains("detail one"));
     assert!(symbols.contains("detail two"));
-    assert!(symbols.contains("◈"));
+    assert!(symbols.contains("T tool summary"));
     assert!(symbols.contains("┆"));
 }
 
@@ -2827,10 +6821,14 @@ fn tool_commit_keeps_summary_and_details_together() {
 fn tool_history_is_collapsed_and_expandable_after_static_commit() {
     let mut ui = Ui::default();
     ui.push_tool(
-        ToolBlock::from_lines(vec![
-            ("tool summary".into(), Color::Cyan),
-            ("detail one".into(), Color::Gray),
-        ])
+        ToolBlock::from_lines_with_phase(
+            vec![
+                ("tool summary".into(), Color::Cyan),
+                ("detail one".into(), Color::Gray),
+            ],
+            ToolPhase::Observation,
+            Some("read_file".into()),
+        )
         .expect("tool"),
     );
     ui.commit_live_tools();
@@ -2853,13 +6851,18 @@ fn tool_history_is_collapsed_and_expandable_after_static_commit() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(static_symbols.contains("tool summary"));
-    assert!(static_symbols.contains("◈"));
+    assert!(static_symbols.contains("O tool summary"));
+    assert!(static_symbols.contains("folded"));
+    assert!(static_symbols.contains("Ctrl+O"));
+    assert!(static_symbols.contains("details"));
+    assert!(static_symbols.contains("1 rows"));
     assert!(!static_symbols.contains("detail one"));
     assert!(ui.toggle_details_or_history());
 
     let mut meta = ReplMeta {
         tools: Vec::new(),
         provider: "test".into(),
+        provider_label: "test".into(),
         model: "model".into(),
         base_url: String::new(),
         status_bar: "{provider} · {model}".into(),
@@ -2976,6 +6979,7 @@ fn actual_reasoning_is_committed_separately_from_answer() {
             step: 3,
             elapsed_s: 12,
             tokens: 8,
+            ..
         } if text == "inspect actual state"
     )));
     assert!(ui
@@ -2985,15 +6989,37 @@ fn actual_reasoning_is_committed_separately_from_answer() {
         .any(|line| { line.kind == LiveLineKind::Answer && line.text == "final answer" }));
     ui.clear_streams();
     assert!(ui.transcript.visible_lines(4).is_empty());
+    assert_eq!(ui.splash, SPLASH_TICKS);
     assert!(ui.drain_commits().iter().any(|(text, color)| text
-        == "💭 [step 3 · t+12s · 8 task tok] inspect actual state"
-        && *color == role_color(Role::Muted)));
+        == "┊ THK[step 3 · t+12s · 8 task tok] inspect actual state  [Ctrl+R history]"
+        && *color == role_color(Role::Reasoning)));
+}
+
+#[test]
+fn static_tool_projection_preserves_call_and_output_phase() {
+    let call = ToolBlock::from_lines_with_phase(
+        vec![("read_file: src/lib.rs".into(), Color::Cyan)],
+        ToolPhase::Call,
+        Some("read_file".into()),
+    )
+    .expect("call tool");
+    let output = ToolBlock::from_lines_with_phase(
+        vec![("read_file: 12 lines".into(), Color::Green)],
+        ToolPhase::Observation,
+        Some("read_file".into()),
+    )
+    .expect("output tool");
+
+    assert_eq!(call.phase_label(), "CALL");
+    assert_eq!(output.phase_label(), "OUT");
 }
 
 #[test]
 fn reasoning_commit_renders_in_inline_scrollback() {
     let mut ui = Ui::default();
-    ui.push_chunk(provider::StreamChunk::Reasoning("actual plan".into()));
+    ui.push_chunk(provider::StreamChunk::Reasoning(
+        "actual plan\nsecond thought".into(),
+    ));
     ui.commit_live_reasoning(2, 12);
     let mut terminal = Terminal::with_options(
         ratatui::backend::TestBackend::new(40, 8),
@@ -3013,7 +7039,10 @@ fn reasoning_commit_renders_in_inline_scrollback() {
     assert!(symbols.contains("actual plan"));
     assert!(symbols.contains("t+12s"));
     assert!(symbols.contains("task tok"));
+    assert!(symbols.contains("THK["));
+    assert!(symbols.contains("Ctrl+R"));
     assert!(symbols.contains("┊"));
+    assert!(symbols.contains("│"));
     let reasoning_cell = terminal
         .backend()
         .buffer()
@@ -3025,6 +7054,395 @@ fn reasoning_commit_renders_in_inline_scrollback() {
     assert!(reasoning_cell.modifier.contains(Modifier::ITALIC));
     assert!(ui.commits.is_empty());
     assert!(!symbols.contains('\x1b'));
+}
+
+#[test]
+fn reasoning_history_is_bounded_searchable_and_expandable() {
+    let mut ui = Ui::default();
+    for step in 0..=MAX_REASONING_HISTORY {
+        ui.push_chunk(provider::StreamChunk::Reasoning(format!(
+            "thought {step}\nsecond line"
+        )));
+        ui.commit_live_reasoning(step, step as u64);
+    }
+
+    assert_eq!(ui.reasoning_history.len(), MAX_REASONING_HISTORY);
+    assert!(!ui
+        .reasoning_history
+        .iter()
+        .any(|entry| entry.text.starts_with("thought 0")));
+    assert!(ui
+        .reasoning_history
+        .back()
+        .is_some_and(|entry| entry.text.starts_with("thought 8")));
+    assert!(ui.toggle_reasoning_or_history());
+
+    let panel = ui.panel.as_mut().expect("reasoning history panel");
+    assert_eq!(panel.kind, PanelKind::ReasoningHistory);
+    assert!(panel
+        .selected()
+        .is_some_and(|row| row.key.contains("step 8")));
+    assert!(panel.toggle_detail());
+    assert!(panel.detail_open);
+    assert!(panel
+        .selected()
+        .is_some_and(|row| row.value.contains("second line")));
+
+    panel.query = "thought 4".into();
+    panel.retype();
+    assert_eq!(panel.view.len(), 1);
+    assert!(panel
+        .selected()
+        .is_some_and(|row| row.key.contains("step 4")));
+}
+
+#[test]
+fn matching_audit_history_shortcut_closes_the_current_panel() {
+    let mut reasoning = Ui::default();
+    reasoning.push_chunk(provider::StreamChunk::Reasoning("saved thought".into()));
+    reasoning.commit_live_reasoning(1, 1);
+    assert!(reasoning.open_reasoning_history());
+    assert!(reasoning.toggle_reasoning_or_history());
+    assert!(reasoning.panel.is_none());
+
+    let mut tools = Ui::default();
+    tools.push_tool(ToolBlock::from_lines(vec![("saved tool".into(), Color::Cyan)]).expect("tool"));
+    tools.commit_live_tools();
+    assert!(tools.open_tool_history());
+    assert!(tools.toggle_details_or_history());
+    assert!(tools.panel.is_none());
+}
+
+#[test]
+fn answer_history_is_bounded_searchable_and_expandable() {
+    let mut ui = Ui::default();
+    for index in 0..=MAX_ANSWER_HISTORY {
+        ui.note_markdown(format!(
+            "🤖 answer {index}\nfull conclusion line 1\nfull conclusion line 2"
+        ));
+    }
+
+    assert_eq!(ui.answer_history.len(), MAX_ANSWER_HISTORY);
+    assert!(!ui
+        .answer_history
+        .iter()
+        .any(|entry| entry.text.starts_with("🤖 answer 0")));
+    assert!(ui
+        .answer_history
+        .back()
+        .is_some_and(|entry| entry.text.starts_with("🤖 answer 8")));
+    assert!(ui.open_answer_history());
+
+    let panel = ui.panel.as_mut().expect("answer history panel");
+    assert_eq!(panel.kind, PanelKind::AnswerHistory);
+    assert!(panel
+        .selected()
+        .is_some_and(|row| row.key.contains("ANSWER") && row.key.contains("#1")));
+    assert!(panel.toggle_detail());
+    assert!(panel
+        .selected()
+        .is_some_and(|row| row.value.contains("full conclusion line 2")));
+
+    panel.query = "answer 4".into();
+    panel.retype();
+    assert_eq!(panel.view.len(), 1);
+    assert!(panel
+        .selected()
+        .is_some_and(|row| row.value.starts_with("🤖 answer 4")));
+}
+
+#[test]
+fn answer_history_shortcut_opens_and_closes_without_mutating_input() {
+    let mut ui = Ui::default();
+    ui.input.insert_str("draft intervention");
+    ui.note_markdown("final conclusion");
+
+    assert_eq!(
+        input_action(
+            &KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            false,
+            false
+        ),
+        InputAction::ToggleAnswer
+    );
+    assert!(ui.toggle_answer_or_history());
+    assert_eq!(ui.input.buffer, "draft intervention");
+    assert_eq!(
+        ui.panel.as_ref().map(|panel| panel.kind),
+        Some(PanelKind::AnswerHistory)
+    );
+    assert!(ui.toggle_answer_or_history());
+    assert!(ui.panel.is_none());
+}
+
+#[test]
+fn live_answer_shortcut_focuses_answer_then_returns_to_follow() {
+    let mut ui = Ui {
+        busy: true,
+        ..Ui::default()
+    };
+    ui.push_chunk(provider::StreamChunk::Answer("streaming answer".into()));
+
+    assert!(ui.toggle_answer_or_history());
+    assert!(ui.panel.is_none());
+    assert!(ui.transcript.is_inspecting());
+    assert!(matches!(
+        ui.transcript.focused_block(),
+        Some(LiveBlockFocus::Answer(_))
+    ));
+
+    assert!(ui.toggle_answer_or_history());
+    assert!(!ui.transcript.is_inspecting());
+    assert!(ui.transcript.focused_block().is_none());
+}
+
+#[test]
+fn answer_history_rows_expose_step_elapsed_and_tokens() {
+    let mut ui = Ui::default();
+    ui.note_markdown_with_meta("first conclusion", 2, 4, 11);
+    ui.note_markdown_with_meta("second conclusion", 7, 18, 33);
+    assert!(ui.open_answer_history());
+
+    let panel = ui.panel.as_mut().expect("answer history panel");
+    let newest = panel.selected().expect("newest answer").key.clone();
+    assert!(newest.contains("#1 ANSWER"));
+    assert!(newest.contains("step 7"));
+    assert!(newest.contains("33 tok"));
+    assert!(newest.contains("+18s"));
+
+    panel.move_down();
+    let older = panel.selected().expect("older answer").key.clone();
+    assert!(older.contains("#2 ANSWER"));
+    assert!(older.contains("step 2"));
+    assert!(older.contains("11 tok"));
+    assert!(older.contains("+4s"));
+}
+
+#[test]
+fn answer_history_bounds_large_detail_without_changing_scrollback_commit() {
+    let mut ui = Ui::default();
+    let body = format!(
+        "🤖 HEAD {}\n{}\nTAIL conclusion",
+        "h".repeat(MAX_ANSWER_HISTORY_CHARS),
+        "middle ".repeat(MAX_ANSWER_HISTORY_CHARS)
+    );
+    ui.note_markdown(body.clone());
+
+    let stored = &ui.answer_history.back().expect("answer history").text;
+    assert!(stored.contains("HEAD"));
+    assert!(stored.contains("middle omitted"));
+    assert!(stored.contains("TAIL conclusion"));
+    assert!(stored.chars().count() < body.chars().count());
+    assert!(matches!(
+        ui.commits.as_slice(),
+        [CommitBlock::Markdown { text, .. }] if text == &body
+    ));
+}
+
+#[test]
+fn reasoning_history_bounds_large_detail_without_changing_scrollback_commit() {
+    let mut ui = Ui::default();
+    let body = format!(
+        "THINK HEAD {}\n{}\nTAIL reasoning conclusion",
+        "h".repeat(MAX_REASONING_HISTORY_CHARS + 100),
+        "middle ".repeat(1_000)
+    );
+    ui.push_chunk(provider::StreamChunk::Reasoning(body.clone()));
+    ui.commit_live_reasoning(7, 9);
+
+    let stored = &ui.reasoning_history.back().expect("reasoning history").text;
+    assert!(stored.contains("THINK HEAD"));
+    assert!(stored.contains("middle omitted"));
+    assert!(stored.contains("TAIL reasoning conclusion"));
+    assert!(stored.chars().count() < body.chars().count());
+    assert!(matches!(
+        ui.commits.as_slice(),
+        [CommitBlock::Reasoning { text, .. }] if text == &body
+    ));
+}
+
+#[test]
+fn live_block_inspector_tracks_mixed_stream_and_expands_selected_block() {
+    let mut ui = Ui::default();
+    ui.push_chunk(provider::StreamChunk::Reasoning("plan first".into()));
+    ui.push_tool(
+        ToolBlock::from_lines(vec![
+            ("read_file".into(), Color::Cyan),
+            ("file contents".into(), Color::Gray),
+        ])
+        .expect("tool"),
+    );
+    ui.push_chunk(provider::StreamChunk::Answer("answer now".into()));
+
+    assert!(ui.open_live_history());
+    let panel = ui.panel.as_mut().expect("live inspector");
+    assert_eq!(panel.kind, PanelKind::LiveHistory);
+    assert!(panel
+        .selected()
+        .is_some_and(|row| row.key.contains("Answer")));
+    assert!(panel.toggle_detail());
+    assert!(panel
+        .selected()
+        .is_some_and(|row| row.value == "answer now"));
+
+    panel.move_down();
+    assert!(panel
+        .selected()
+        .is_some_and(|row| row.key.contains("read_file")));
+    assert!(panel.detail_open);
+    assert!(panel
+        .selected()
+        .is_some_and(|row| row.value == "file contents"));
+
+    // Appending a new block refreshes the open panel without closing it.
+    ui.push_chunk(provider::StreamChunk::Reasoning("follow-up".into()));
+    assert!(ui
+        .panel
+        .as_ref()
+        .is_some_and(|panel| panel.kind == PanelKind::LiveHistory));
+    assert!(ui
+        .panel
+        .as_ref()
+        .is_some_and(|panel| panel.rows.iter().any(|row| row.value == "follow-up")));
+}
+
+#[test]
+fn live_inspector_selection_focuses_historical_tool_without_interrupting() {
+    let mut ui = Ui::default();
+    ui.push_tool(
+        ToolBlock::from_lines(vec![
+            ("read_file".into(), Color::Cyan),
+            ("file contents".into(), Color::Gray),
+        ])
+        .expect("tool"),
+    );
+    ui.push_chunk(provider::StreamChunk::Answer("answer".into()));
+    ui.busy = true;
+
+    assert!(ui.open_live_history());
+    {
+        let panel = ui.panel.as_mut().expect("live inspector");
+        assert!(panel
+            .selected()
+            .is_some_and(|row| row.key.contains("Answer")));
+        panel.move_down();
+        assert_eq!(
+            panel.selected_action(),
+            PanelRowAction::FocusLiveBlock(LiveBlockFocus::Tool(0))
+        );
+    }
+    ui.sync_live_panel_focus();
+    assert_eq!(ui.transcript.focused_tool_summary(), Some("read_file"));
+    assert!(ui.toggle_live_panel_detail());
+    assert!(ui
+        .transcript
+        .visible_lines(5)
+        .iter()
+        .any(|line| line.text == "file contents"));
+    assert!(ui.busy, "Inspector focus must not interrupt the model task");
+}
+
+#[test]
+fn live_inspector_search_expands_matching_folded_tool() {
+    let mut ui = Ui::default();
+    ui.push_tool(
+        ToolBlock::from_lines(vec![
+            ("read_file".into(), Color::Cyan),
+            ("needle hidden in folded output".into(), Color::Gray),
+        ])
+        .expect("tool"),
+    );
+
+    assert!(ui.open_live_history());
+    {
+        let panel = ui.panel.as_mut().expect("live inspector");
+        panel.query = "needle".into();
+        panel.retype();
+        assert!(panel.detail_open, "detail search should open its preview");
+        assert_eq!(
+            panel.selected_action(),
+            PanelRowAction::FocusLiveBlock(LiveBlockFocus::Tool(0))
+        );
+    }
+
+    // Searching a folded detail must make the same match visible in the live
+    // projection; users should not have to close the Inspector and expand it
+    // again by hand.
+    ui.sync_live_panel_focus();
+    assert_eq!(ui.transcript.focused_block(), Some(LiveBlockFocus::Tool(0)));
+    assert!(ui
+        .transcript
+        .visible_lines(8)
+        .iter()
+        .any(|line| line.text == "needle hidden in folded output"));
+}
+
+#[test]
+fn ctrl_f_live_search_is_non_blocking_and_penetrates_folded_detail() {
+    let mut ui = Ui {
+        busy: true,
+        ..Ui::default()
+    };
+    ui.push_tool(
+        ToolBlock::from_lines(vec![
+            ("read_file".into(), Color::Cyan),
+            ("needle from folded output".into(), Color::Gray),
+        ])
+        .expect("tool"),
+    );
+    ui.input.insert_str("keep this draft");
+
+    assert!(ui.open_live_search("needle"));
+    let panel = ui.panel.as_ref().expect("live search panel");
+    assert_eq!(panel.kind, PanelKind::LiveHistory);
+    assert_eq!(panel.query, "needle");
+    assert!(panel.detail_open);
+    assert_eq!(ui.input.buffer, "keep this draft");
+    assert!(ui.busy, "live search must not interrupt the running task");
+    assert!(ui
+        .transcript
+        .visible_lines(8)
+        .iter()
+        .any(|line| line.text == "needle from folded output"));
+}
+
+#[test]
+fn live_inspector_exposes_pending_fifo_and_switches_attention_surfaces() {
+    let mut ui = Ui::default();
+    ui.push_chunk(provider::StreamChunk::Answer("answer".into()));
+    ui.queued.push_back("first pending".into());
+    ui.queued.push_back("second pending".into());
+
+    assert!(ui.open_live_history());
+    let panel = ui.panel.as_mut().expect("live inspector");
+    assert!(panel
+        .rows
+        .iter()
+        .any(|row| row.key.contains("pending · next")));
+    panel.query = "second pending".into();
+    panel.retype();
+    assert_eq!(panel.selected_action(), PanelRowAction::RemoveQueued(1));
+
+    assert_eq!(ui.remove_queued(1).as_deref(), Some("second pending"));
+    ui.refresh_live_history_panel();
+    assert!(!ui
+        .panel
+        .as_ref()
+        .expect("live inspector after removal")
+        .rows
+        .iter()
+        .any(|row| row.value == "second pending"));
+
+    assert!(ui.toggle_queue_panel());
+    assert_eq!(
+        ui.panel.as_ref().map(|panel| panel.kind),
+        Some(PanelKind::Queue)
+    );
+    assert!(ui.toggle_live_history());
+    assert_eq!(
+        ui.panel.as_ref().map(|panel| panel.kind),
+        Some(PanelKind::LiveHistory)
+    );
 }
 
 /// iter-28:呈现层折叠 —— 限内不动,超限留头 + `+N` 尾标。
@@ -3082,12 +7500,33 @@ fn panel_titles_are_english() {
         config_panel().title,
         provider_panel().title,
         tools_panel(&[]).title,
-        models_panel(&[], "", "").title,
+        reasoning_history_panel(&std::collections::VecDeque::new()).title,
+        answer_history_panel(&std::collections::VecDeque::new()).title,
+        live_history_panel_with_queue(
+            &LiveTranscript::default(),
+            &std::collections::VecDeque::new(),
+        )
+        .title,
+        models_panel_with_effort(&[], "", "", "medium").title,
         agent_panel(&[]).title,
     ];
     for t in &titles {
         assert!(!has_cjk(t), "panel 标题应为英文: {t}");
     }
+}
+
+#[test]
+fn live_history_is_a_full_frame_transcript_audit_surface() {
+    let area = Rect {
+        x: 2,
+        y: 3,
+        width: 96,
+        height: 24,
+    };
+    assert_eq!(panel_rect_for_kind(area, PanelKind::LiveHistory), area);
+    let modal = panel_rect_for_kind(area, PanelKind::Activity);
+    assert!(modal.width < area.width);
+    assert!(modal.height < area.height);
 }
 
 /// 判断串是否含 CJK(用户可见串英化的验收辅助)。
@@ -3111,4 +7550,182 @@ fn todo_progress_and_block_render() {
     ];
     assert_eq!(todo_progress(&todos), Some((1, 2)));
     assert_eq!(render_todo_block(&todos), "[✓] a\n[~] b");
+}
+
+#[test]
+fn long_live_frames_are_bounded_and_profiled() {
+    let mut ui = Ui::default();
+    for index in 0..64 {
+        ui.push_tool(
+            ToolBlock::from_lines(vec![
+                (format!("tool-{index}"), Color::Cyan),
+                ("bounded detail".into(), Color::Gray),
+            ])
+            .expect("tool block"),
+        );
+    }
+    let answer = (0..500)
+        .map(|index| format!("answer line {index} · let value = {index};"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    ui.push_chunk(provider::StreamChunk::Answer(answer));
+    let meta = ReplMeta {
+        tools: Vec::new(),
+        provider: "test".into(),
+        provider_label: "test".into(),
+        model: "model".into(),
+        base_url: String::new(),
+        status_bar: "{provider} · {model} · {tokens}".into(),
+        ctx_window: 200_000,
+    };
+    let vitals = Vitals {
+        step: 3,
+        elapsed_s: 4,
+        task_tokens: 500,
+        rate: 120,
+        ctx_used: 2_000,
+        queued: 2,
+    };
+
+    let mut cache = LiveOutputCache::default();
+    for width in [18, 40, 80] {
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(width, 24)).expect("profile terminal");
+        let started = std::time::Instant::now();
+        for _ in 0..100 {
+            terminal
+                .draw(|frame| draw_with_cache(frame, &ui, &meta, 500, &vitals, None, &mut cache))
+                .expect("profile draw");
+        }
+        let elapsed = started.elapsed();
+        eprintln!(
+            "long_live_frames width={width} draws=100 elapsed_ms={}",
+            elapsed.as_millis()
+        );
+        assert!(
+            ui.transcript.visible_lines(8).len() <= 8,
+            "visible live tail must remain bounded at width {width}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "bounded draw profile regressed at width {width}: {elapsed:?}"
+        );
+    }
+    assert_eq!(cache.rebuilds(), 3, "each viewport width should build once");
+
+    let mut long_line_ui = Ui::default();
+    long_line_ui.push_chunk(provider::StreamChunk::Answer("x".repeat(32_768)));
+    let mut long_line_terminal =
+        Terminal::new(ratatui::backend::TestBackend::new(40, 24)).expect("long line terminal");
+    let mut long_line_cache = LiveOutputCache::default();
+    let started = std::time::Instant::now();
+    for _ in 0..100 {
+        long_line_terminal
+            .draw(|frame| {
+                draw_with_cache(
+                    frame,
+                    &long_line_ui,
+                    &meta,
+                    500,
+                    &vitals,
+                    None,
+                    &mut long_line_cache,
+                )
+            })
+            .expect("long line draw");
+    }
+    let elapsed = started.elapsed();
+    let symbols = long_line_terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(
+        symbols.contains('…'),
+        "long live line should expose tail marker"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "unbroken long-line draw regressed: {elapsed:?}"
+    );
+    assert_eq!(long_line_cache.rebuilds(), 1);
+}
+
+#[test]
+fn presentation_anchor_survives_live_history_and_static_projection() {
+    let mut ui = Ui::default();
+    ui.push_chunk(provider::StreamChunk::Reasoning("plan".into()));
+    let reasoning_id = match ui.transcript.inspector_rows()[0].focus {
+        LiveBlockFocus::Reasoning(id) => id,
+        focus => panic!("unexpected focus: {focus:?}"),
+    };
+    ui.commit_live_reasoning(3, 2);
+
+    assert_eq!(
+        ui.reasoning_history.back().expect("reasoning archive").id,
+        reasoning_id
+    );
+    assert!(ui.presentation.records().iter().any(|record| {
+        record.id == reasoning_id
+            && record.channel == PresentationChannel::Reasoning
+            && record.status == PresentationStatus::Committed
+    }));
+    assert!(ui.commits.iter().any(|block| {
+        matches!(
+            block,
+            CommitBlock::Reasoning { id, .. } if *id == reasoning_id
+        )
+    }));
+
+    ui.push_tool(ToolBlock::from_lines(vec![("read_file".into(), Color::Cyan)]).expect("tool"));
+    let tool_id = match ui.transcript.inspector_rows()[0].focus {
+        LiveBlockFocus::Tool(id) => id,
+        focus => panic!("unexpected focus: {focus:?}"),
+    };
+    ui.commit_live_tools();
+    assert_eq!(
+        ui.tool_history
+            .back()
+            .expect("tool archive")
+            .presentation_id(),
+        tool_id
+    );
+    assert!(ui.presentation.records().iter().any(|record| {
+        record.id == tool_id
+            && record.channel == PresentationChannel::Tool
+            && record.status == PresentationStatus::Committed
+    }));
+
+    ui.note_markdown_with_meta("final answer", 4, 3, 9);
+    let answer_id = ui.answer_history.back().expect("answer archive").id;
+    assert!(ui
+        .commits
+        .iter()
+        .any(|block| { matches!(block, CommitBlock::Markdown { id, .. } if *id == answer_id) }));
+    assert!(ui.presentation.records().iter().any(|record| {
+        record.id == answer_id
+            && record.channel == PresentationChannel::Answer
+            && record.status == PresentationStatus::Committed
+    }));
+}
+
+#[test]
+fn presentation_ledger_is_bounded_and_keeps_channel_identity() {
+    let mut ui = Ui::default();
+    for index in 0..(MAX_PRESENTATION_RECORDS + 8) {
+        ui.note_markdown(format!("answer {index}"));
+    }
+    assert_eq!(ui.presentation.records().len(), MAX_PRESENTATION_RECORDS);
+    assert!(ui
+        .presentation
+        .records()
+        .iter()
+        .all(|record| record.channel == PresentationChannel::Answer));
+    assert!(ui
+        .presentation
+        .records()
+        .iter()
+        .all(|record| record.status == PresentationStatus::Committed));
 }

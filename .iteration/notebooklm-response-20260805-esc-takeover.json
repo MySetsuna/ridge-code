@@ -1,0 +1,29 @@
+{
+  "status": "PROCEED",
+  "confirmed_facts": [],
+  "contradictions": [],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "A visible phase boundary plus a priority takeover path makes high-frequency live output easier to understand and control.",
+      "support": ["NLM recommends phase-aware borders and a non-blocking action channel for Esc/Ctrl-C intervention."],
+      "against": ["The local TUI already has live-surface borders, phase rails, Markdown alert roles, a bounded render cache, and a biased keyboard branch."],
+      "experiment": "Keep the existing renderer and event channel; add only busy-surface Esc takeover and a width-aware audit hint, then verify routing, discoverability, bounded rendering, and ConPTY takeover."
+    }
+  ],
+  "candidates": [
+    {
+      "core": "Treat plain Esc as immediate takeover only when the model is busy and no popup, approval, or panel owns the key; expose Esc/Ctrl-C in the held Inspector rail at wide-enough widths.",
+      "constraints": ["preserve popup/approval/panel precedence", "preserve Ctrl-C double-press exit", "reuse the existing abort/commit takeover path", "no second renderer or action queue", "keep ordinary idle Esc inert"],
+      "risks": ["Esc must remain a close/reject action on covered surfaces and must not discard an idle draft."],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/input.rs", "crates/agent/src/tui/status.rs", "crates/agent/src/tui/mod.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["input routing and precedence tests", "held audit discoverability tests", "workspace/clippy/build", "Debug/Release ConPTY takeover and resize fixtures"]
+    }
+  ],
+  "recommendation": "Accept the narrow Esc takeover slice; reject a second tokio action channel and a second Markdown/rendering path because the local event priority, abort path, semantic rails, alert roles, and bounded cache already cover those concerns.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Run the focused and workspace gates, then verify Debug/Release ConPTY behavior and retain the single Active Note."
+  },
+  "stop_conditions": ["Do not intercept Esc while popup, approval, or panel precedence is active.", "Do not claim a deep-research report or import without a task id and direct evidence.", "Do not start another Ridge member; only capture notebooklm-mcp-maintainer."]
+}

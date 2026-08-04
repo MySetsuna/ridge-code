@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260806-panel-hint",
+  "at": "2026-08-06",
+  "type": "iteration",
+  "facts": [
+    "The same-session NLM KKP recommendation returned sources_used:[] with empty citations and conflicted with local input evidence: Ctrl+Space HOLD is presentation-only, matched key releases are intentionally filtered, and Windows KKP does not request REPORT_EVENT_TYPES by default; no momentary release protocol was adopted.",
+    "Dev ConPTY exposed a medium AnswerHistory discoverability gap: at 32/40 columns the long hint could clip or hide the actionable Enter expand affordance, while Esc close also needed to remain visible.",
+    "The presentation-only panel hint fix uses a short medium-width Answer/Reasoning/Tool/Activity legend and a tighter Enter expand · Esc close form for the 32-column modal inner width; LiveHistory HOLD/FOLLOW wording remains unchanged.",
+    "The existing Ridge member notebooklm-mcp-maintainer remains the only member; no new member was created and no old research status was queried."
+  ],
+  "evidence": [
+    "notebook_gate.py validate-output on .iteration/notebooklm-response-20260806-kkp-audit.json: valid; response metadata has sources_used:[] and empty citations",
+    "CodeGraph over TerminalGuard KKP setup, decide_key, input_action, live_hold_toggle_action, and transcript hold/follow behavior",
+    "medium_answer_hint_preserves_expand_and_close_actions; cargo test --workspace --locked --offline --quiet: all tests passed (294 TUI tests)",
+    "cargo fmt --all -- --check; cargo clippy --workspace --all-targets --locked --offline -- -D warnings; Debug/Release builds: passed",
+    "windows-pty-e2e.ps1 Debug BusyFixture with Inspector/Queue/Reasoning/HOLD/FOLLOW/Resize/dual Ctrl-C: status=passed; Release StressFixture with Answer inspection and resize: status=passed; Debug CompletionFixture at 32 columns visibly emitted Enter expand · Esc close"
+  ],
+  "paths": [
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260806-kkp-audit.json"
+  ],
+  "symbols": [
+    "panel_hint",
+    "clip_hint_with_close"
+  ],
+  "next": [
+    "Continue with one locally reproduced TUI presentation or intervention gap; reject a new input protocol, virtualizer, sidebar, or renderer rewrite without direct local evidence."
+  ]
+}

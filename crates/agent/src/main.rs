@@ -11,7 +11,7 @@ use agent::{
     PROVIDER_PRESETS,
 };
 use langgraph::{CompiledGraph, StreamEvent};
-use mcp::{McpClient, StdioTransport};
+use mcp::{McpClient, McpError, StdioTransport};
 use provider::{
     AnthropicProvider, Completion, LlmProvider, Message, OpenAiProvider, ScriptedProvider,
     SwapProvider,
@@ -24,7 +24,10 @@ use run::*;
 /// TUI 展示用元信息(`/tools` `/model` 命令用)。
 struct ReplMeta {
     tools: Vec<String>,
+    /// Runtime provider kind used by dispatch (`openai`/`anthropic`).
     provider: String,
+    /// Human-facing provider/profile label; intentionally separate from kind.
+    provider_label: String,
     model: String,
     base_url: String,
     /// 输入框下方自定义状态条模板(iter-31):config `status_bar` 或内置默认。
@@ -56,6 +59,7 @@ fn handle_meta_flags() -> bool {
              ridgecode                      interactive TUI (no key required to open; use /login inside; non-TTY falls back to headless)\n  \
              ridgecode \"task\"               one-shot task\n  \
              ridgecode --resume             resume the last session (continue after kill-9 / reopen)\n\n\
+             ridgecode goal ...             persist and advance one long-running goal\n  \
              Options:\n  \
              --cwd <dir>                    run inside the target project directory\n  \
              --every <30s|5m|1h>            time trigger: re-run the task on an interval (resident; reloads compounding signals each round, Ctrl-C to stop)\n  \
@@ -75,6 +79,69 @@ fn handle_meta_flags() -> bool {
     false
 }
 
+/// 真实终端默认判定不变；仅显式 `RIDGE_FORCE_TUI=1` 供隔离诊断 harness 进入 TUI。
+fn tui_requested() -> bool {
+    (std::env::var("RIDGE_FORCE_TUI").ok().as_deref() == Some("1"))
+        || (std::io::stdin().is_terminal() && std::io::stdout().is_terminal())
+}
+
+/// 隔离 TUI 验收用的无网络 fixture；普通运行与非 TTY 完全不受影响。
+fn tui_fixture_provider(fallback: Arc<dyn LlmProvider>) -> Arc<dyn LlmProvider> {
+    if !tui_requested() {
+        return fallback;
+    }
+    match std::env::var("RIDGE_TUI_FIXTURE").ok().as_deref() {
+        Some("busy") => Arc::new(
+            ScriptedProvider::new(vec![Completion {
+                reasoning:
+                    "fixture reasoning: waiting without network; queue and takeover remain available"
+                        .into(),
+                text: "fixture answer: busy state completed".into(),
+                ..Default::default()
+            }])
+            .with_delay(std::time::Duration::from_secs(30)),
+        ),
+        Some("stress") => {
+            let reasoning = format!(
+                "STRESS_REASONING_BEGIN\n调查窗口：长 Markdown/CJK 流保持可读与可接管。\n{}\n{}",
+                "思考片段：中文宽字符、emoji 🧪、`inline-token` 与窗口重排必须保持边界。 ".repeat(640),
+                (0..160)
+                    .map(|index| format!("- 检查 {index}: 终端宽度变化后仍保留语义轨与上下文。"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\nSTRESS_REASONING_END"
+            );
+            let text = format!(
+                "STRESS_ANSWER_BEGIN\n## 压力夹具结论\n{}\n{}\n\n```rust\nfn cjk_boundary() {{ /* stable */ }}\n```",
+                "回答片段：这是长 Markdown/CJK 内容，用于真实 ConPTY resize 与滚回验证。 ".repeat(640),
+                (0..160)
+                    .map(|index| format!("第 {index} 行：Answer 仍应可从历史与回看入口恢复。"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            let provider = ScriptedProvider::new(vec![Completion {
+                reasoning,
+                text,
+                ..Default::default()
+            }])
+            .with_delay(std::time::Duration::from_millis(1500));
+            let provider = if std::env::var("RIDGE_TUI_INSPECT_ANSWER").ok().as_deref() == Some("1")
+            {
+                provider.with_post_answer_delay(std::time::Duration::from_millis(1200))
+            } else {
+                provider
+            };
+            Arc::new(provider)
+        }
+        Some("complete") => Arc::new(ScriptedProvider::new(vec![Completion {
+            reasoning: "fixture reasoning: completed path remains inspectable".into(),
+            text: "fixture answer: final response reached scrollback".into(),
+            ..Default::default()
+        }])),
+        _ => fallback,
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     if handle_meta_flags() {
@@ -85,6 +152,15 @@ async fn main() -> anyhow::Result<()> {
     if raw.first().map(|s| s.as_str()) == Some("login") {
         apply_config_proxy(&load_config()); // CLI login 的连通校验也走 config 里配的代理
         return run_login(&raw[1..]).await;
+    }
+    if raw.first().map(|s| s.as_str()) == Some("goal") {
+        return match agent::goal_command(&raw[1..]) {
+            Ok(text) => {
+                println!("{text}");
+                Ok(())
+            }
+            Err(error) => Err(anyhow::anyhow!(error)),
+        };
     }
     init_tracing();
     let ParsedArgs {
@@ -103,9 +179,12 @@ async fn main() -> anyhow::Result<()> {
     let auth = load_auth(); // ~/.ridge/auth.json 密钥库(login 存的 key)
 
     // key 优先(env/inline/key_env/providers[]);全无则回退 OAuth 订阅凭据(iter-43:login --claude)。
-    let resolved = match real_provider(&cfg, &auth) {
+    let effort = resolve_reasoning_effort(&cfg);
+    let configured_provider = real_provider(&cfg, &auth);
+    let using_oauth = configured_provider.is_none();
+    let resolved = match configured_provider {
         Some(p) => Some(p),
-        None => resolve_claude_oauth_provider(&cfg).await,
+        None => resolve_claude_oauth_provider(&cfg, &effort).await,
     };
     match resolved {
         Some(p) => {
@@ -131,7 +210,9 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         Vec::new()
                     };
-                    let (provider_kind, model, base_url) = resolve_model_info(&cfg);
+                    let (provider_kind, model, base_url) =
+                        resolve_start_model_info(&cfg, &auth, using_oauth);
+                    let provider_label = resolve_provider_label(&cfg, &provider_kind, &base_url);
                     let mut tools: Vec<String> = builtin_tool_specs()
                         .iter()
                         .map(|s| s.name.clone())
@@ -140,6 +221,7 @@ async fn main() -> anyhow::Result<()> {
                     let meta = ReplMeta {
                         tools,
                         provider: provider_kind,
+                        provider_label,
                         model,
                         base_url,
                         status_bar: cfg
@@ -150,9 +232,9 @@ async fn main() -> anyhow::Result<()> {
                         ctx_window: tui::DEFAULT_CTX_WINDOW,
                     };
                     // 包一层 SwapProvider,让 TUI 的 /model 能热切换底层模型而不重建图。
-                    let swap = Arc::new(SwapProvider::new(p));
+                    let swap = Arc::new(SwapProvider::new(tui_fixture_provider(p)));
                     // 终端采用 TUI；管道/非 TTY 退回 headless，避免破坏脚本/重定向调用。
-                    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                    if tui_requested() {
                         // 自定义斜杠命令(iter-39):从同一 skills 派生(含 skill-as-命令),再移交 skills 给图。
                         let commands = load_configured_commands(&cfg, &skills);
                         tui::run(
@@ -166,6 +248,7 @@ async fn main() -> anyhow::Result<()> {
                             agents,
                             read_only,
                             commands,
+                            effort.clone(),
                         )
                         .await
                     } else {
@@ -176,7 +259,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         None => {
-            if task.is_none() && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+            if task.is_none() && tui_requested() {
                 let mcp = resolve_configured_mcp(&cfg).await;
                 let skills = load_configured_skills(&cfg);
                 let budget = cfg.budget_tokens.unwrap_or(0);
@@ -192,7 +275,8 @@ async fn main() -> anyhow::Result<()> {
                 } else {
                     Vec::new()
                 };
-                let (provider_kind, model, base_url) = resolve_model_info(&cfg);
+                let (provider_kind, model, base_url) = resolve_configured_model_info(&cfg, &auth);
+                let provider_label = resolve_provider_label(&cfg, &provider_kind, &base_url);
                 let mut tools: Vec<String> = builtin_tool_specs()
                     .iter()
                     .map(|s| s.name.clone())
@@ -201,6 +285,7 @@ async fn main() -> anyhow::Result<()> {
                 let meta = ReplMeta {
                     tools,
                     provider: provider_kind,
+                    provider_label,
                     model,
                     base_url,
                     status_bar: cfg
@@ -210,7 +295,9 @@ async fn main() -> anyhow::Result<()> {
                         .unwrap_or_else(|| tui::DEFAULT_STATUS_BAR.to_string()),
                     ctx_window: tui::DEFAULT_CTX_WINDOW,
                 };
-                let swap = Arc::new(SwapProvider::new(missing_key_provider()));
+                let swap = Arc::new(SwapProvider::new(tui_fixture_provider(
+                    missing_key_provider(),
+                )));
                 let commands = load_configured_commands(&cfg, &skills);
                 return tui::run(
                     swap,
@@ -223,6 +310,7 @@ async fn main() -> anyhow::Result<()> {
                     agents,
                     read_only,
                     commands,
+                    effort,
                 )
                 .await;
             }
@@ -370,13 +458,108 @@ fn load_session(path: &str) -> Vec<Message> {
         .unwrap_or_default()
 }
 
+const MAX_PROMPT_HISTORY: usize = 200;
+
+fn global_input_history_path() -> String {
+    std::env::var("RIDGE_INPUT_HISTORY")
+        .unwrap_or_else(|_| format!("{}/input-history.json", ridge_home()))
+}
+
+fn session_input_history_path() -> String {
+    std::env::var("RIDGE_SESSION_INPUT_HISTORY")
+        .unwrap_or_else(|_| format!("{}.inputs.json", session_path()))
+}
+
+fn load_prompt_history(path: &str) -> Vec<String> {
+    let mut values: Vec<String> = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    values.retain(|value| !value.trim().is_empty());
+    if values.len() > MAX_PROMPT_HISTORY {
+        values.drain(..values.len() - MAX_PROMPT_HISTORY);
+    }
+    values
+}
+
+fn save_prompt_history(path: &str, values: &[String]) {
+    if let Some(dir) = std::path::Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let values = values
+        .iter()
+        .filter(|value| !value.trim().is_empty())
+        .rev()
+        .take(MAX_PROMPT_HISTORY)
+        .cloned()
+        .collect::<Vec<_>>();
+    let values = values.into_iter().rev().collect::<Vec<_>>();
+    if let Ok(json) = serde_json::to_string(&values) {
+        if std::fs::write(path, json).is_ok() {
+            secure_file(path);
+        }
+    }
+}
+
+fn load_global_input_history() -> Vec<String> {
+    load_prompt_history(&global_input_history_path())
+}
+
+fn save_global_input_history(values: &[String]) {
+    save_prompt_history(&global_input_history_path(), values);
+}
+
+fn load_session_input_history() -> Vec<String> {
+    load_prompt_history(&session_input_history_path())
+}
+
+fn save_session_input_history(values: &[String]) {
+    save_prompt_history(&session_input_history_path(), values);
+}
+
 /// 接入 MCP 服务器:**config 里的多个 `mcp`** + 兼容旧的单个 env `RIDGE_MCP_CMD`。
 /// 降级不崩:单个起不来 → 跳过;都没有 → 空,agent 只用内置工具。
+fn spawn_mcp_transport(cmd: &str, args: &[String]) -> Result<StdioTransport, McpError> {
+    match StdioTransport::spawn(cmd, args) {
+        Ok(transport) => Ok(transport),
+        Err(original) if cmd.eq_ignore_ascii_case("codegraph-mcp") && args.is_empty() => {
+            // CodeGraph 1.4.x ships one `codegraph` executable; its MCP stdio
+            // entry point is `codegraph serve --mcp`. Keep older user configs
+            // working without rewriting ~/.ridge/config.json.
+            #[cfg(windows)]
+            let (fallback_cmd, fallback_args) = (
+                "cmd.exe",
+                vec![
+                    "/d".to_string(),
+                    "/s".to_string(),
+                    "/c".to_string(),
+                    "codegraph serve --mcp".to_string(),
+                ],
+            );
+            #[cfg(not(windows))]
+            let (fallback_cmd, fallback_args) =
+                ("codegraph", vec!["serve".to_string(), "--mcp".to_string()]);
+            match StdioTransport::spawn(fallback_cmd, &fallback_args) {
+                Ok(transport) => {
+                    eprintln!(
+                        "[ridgecode] MCP fallback: {cmd} unavailable; using codegraph serve --mcp"
+                    );
+                    Ok(transport)
+                }
+                Err(fallback) => Err(McpError::Transport(format!(
+                    "{original}; fallback {fallback_cmd} codegraph serve --mcp failed: {fallback}"
+                ))),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
 async fn resolve_configured_mcp(cfg: &Config) -> McpTools {
     let mut clients = Vec::new();
     // config 声明的多 server。
     for m in &cfg.mcp {
-        match StdioTransport::spawn(&m.cmd, &m.args) {
+        match spawn_mcp_transport(&m.cmd, &m.args) {
             Ok(t) => clients.push(Arc::new(McpClient::new(m.name.clone(), Box::new(t)))),
             Err(e) => eprintln!("[ridgecode] MCP startup failed {} ({}): {e}", m.name, m.cmd),
         }
@@ -385,7 +568,7 @@ async fn resolve_configured_mcp(cfg: &Config) -> McpTools {
     if let Ok(cmd) = std::env::var("RIDGE_MCP_CMD") {
         if !cmd.is_empty() {
             let name = std::env::var("RIDGE_MCP_NAME").unwrap_or_else(|_| "mcp".to_string());
-            match StdioTransport::spawn(&cmd, &[]) {
+            match spawn_mcp_transport(&cmd, &[]) {
                 Ok(t) => clients.push(Arc::new(McpClient::new(name, Box::new(t)))),
                 Err(e) => eprintln!("[ridgecode] MCP startup failed {cmd}: {e}"),
             }
@@ -514,30 +697,128 @@ struct ParsedArgs {
 
 /// 解析实际生效的 `(provider 类型, model, base_url)`:**env > config > 默认**。
 /// provider 装配与 `/model` 命令共用,保证显示的就是真在用的。
+fn configured_profile<'a>(cfg: &'a Config, selector: &str) -> Option<&'a agent::ProviderProfile> {
+    let selector = selector.trim();
+    if selector.is_empty() {
+        return None;
+    }
+    cfg.providers
+        .iter()
+        .find(|profile| profile.name.eq_ignore_ascii_case(selector))
+}
+
+/// Resolve the human-facing provider/profile name without changing the runtime kind.
+/// A Zai profile still uses the OpenAI-compatible wire kind, but the status bar must
+/// say `Zai`; otherwise users see the transport implementation instead of their choice.
+fn resolve_provider_label(cfg: &Config, provider: &str, base_url: &str) -> String {
+    let same_endpoint = |left: &str, right: &str| {
+        left.trim_end_matches('/')
+            .eq_ignore_ascii_case(right.trim_end_matches('/'))
+    };
+    let selected = std::env::var("RIDGE_PROVIDER")
+        .ok()
+        .or_else(|| cfg.provider.clone());
+    if let Some(profile) = selected
+        .as_deref()
+        .and_then(|selector| configured_profile(cfg, selector))
+        .filter(|profile| profile.kind.eq_ignore_ascii_case(provider))
+    {
+        return profile.name.clone();
+    }
+    cfg.providers
+        .iter()
+        .find(|profile| {
+            profile.kind.eq_ignore_ascii_case(provider)
+                && same_endpoint(&profile.base_url, base_url)
+        })
+        .map(|profile| profile.name.clone())
+        .unwrap_or_else(|| provider.to_string())
+}
+
 fn resolve_model_info(cfg: &Config) -> (String, String, String) {
-    let kind = std::env::var("RIDGE_PROVIDER")
+    let selector = std::env::var("RIDGE_PROVIDER")
         .ok()
         .or_else(|| cfg.provider.clone())
         .unwrap_or_else(|| "openai".to_string());
-    let model = std::env::var("RIDGE_MODEL")
-        .ok()
-        .or_else(|| cfg.model.clone());
-    let base = std::env::var("RIDGE_BASE_URL")
-        .ok()
-        .or_else(|| cfg.base_url.clone());
-    let (def_model, def_base) = if kind == "anthropic" {
+    let model = std::env::var("RIDGE_MODEL").ok();
+    let base = std::env::var("RIDGE_BASE_URL").ok();
+    if let Some(profile) = configured_profile(cfg, &selector) {
+        return (
+            profile.kind.clone(),
+            model.unwrap_or_else(|| profile.model.clone()),
+            base.unwrap_or_else(|| profile.base_url.clone()),
+        );
+    }
+    let model = model.or_else(|| cfg.model.clone());
+    let base = base.or_else(|| cfg.base_url.clone());
+    let (def_model, def_base) = if selector == "anthropic" {
         ("claude-sonnet-4-6", "https://api.anthropic.com/v1")
     } else {
         ("gpt-4o", "https://api.openai.com/v1")
     };
     (
-        kind,
+        selector,
         model.unwrap_or_else(|| def_model.to_string()),
         base.unwrap_or_else(|| def_base.to_string()),
     )
 }
 
+fn resolve_configured_model_info(
+    cfg: &Config,
+    auth: &std::collections::BTreeMap<String, String>,
+) -> (String, String, String) {
+    let selector = std::env::var("RIDGE_PROVIDER")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| cfg.provider.clone());
+    if let Some(selector) = selector.as_deref() {
+        if configured_profile(cfg, selector).is_some() {
+            return resolve_model_info(cfg);
+        }
+    }
+    if agent::resolve_top_level_key(cfg, auth).is_none() {
+        if let Some(profile) = cfg
+            .providers
+            .iter()
+            .find(|profile| profile.resolve_key_with(auth).is_some())
+        {
+            return (
+                profile.kind.clone(),
+                cfg.model
+                    .as_deref()
+                    .filter(|model| !model.trim().is_empty())
+                    .unwrap_or(&profile.model)
+                    .to_string(),
+                profile.base_url.clone(),
+            );
+        }
+    }
+    resolve_model_info(cfg)
+}
+
+fn resolve_start_model_info(
+    cfg: &Config,
+    auth: &std::collections::BTreeMap<String, String>,
+    using_oauth: bool,
+) -> (String, String, String) {
+    if using_oauth {
+        if let Some(info) = oauth_model_info(cfg) {
+            return info;
+        }
+    }
+    resolve_configured_model_info(cfg, auth)
+}
+
 /// 从零件造一个真实 provider(供启动装配与 `/model` 热切换共用)。
+fn resolve_reasoning_effort(cfg: &Config) -> String {
+    std::env::var("RIDGE_EFFORT")
+        .ok()
+        .or_else(|| std::env::var("RIDGE_REASONING_EFFORT").ok())
+        .or_else(|| cfg.effort.clone())
+        .and_then(|value| provider::normalize_reasoning_effort(&value).map(str::to_owned))
+        .unwrap_or_else(|| provider::DEFAULT_REASONING_EFFORT.to_string())
+}
+
 fn make_provider(kind: &str, model: &str, base_url: &str, key: String) -> Arc<dyn LlmProvider> {
     match kind {
         "anthropic" => Arc::new(AnthropicProvider::new(base_url, model, key)),
@@ -585,6 +866,33 @@ fn real_provider(
     cfg: &Config,
     auth: &std::collections::BTreeMap<String, String>,
 ) -> Option<Arc<dyn LlmProvider>> {
+    // A named profile is the active selection.  Resolve its credential and
+    // endpoint before the legacy top-level key so switching profiles cannot
+    // send one provider's key to another provider's endpoint.
+    let selector = std::env::var("RIDGE_PROVIDER")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| cfg.provider.clone());
+    if let Some(selector) = selector.as_deref() {
+        if let Some(profile) = configured_profile(cfg, selector) {
+            if profile.use_oauth == Some(true) {
+                return None;
+            }
+            if let Some(key) = profile.resolve_key_with(auth) {
+                eprintln!(
+                    "[ridgecode] starting with config provider profile \"{}\" ({} · {})",
+                    profile.name, profile.kind, profile.model
+                );
+                return Some(make_provider(
+                    &profile.kind,
+                    &profile.model,
+                    &profile.base_url,
+                    key,
+                ));
+            }
+            return None;
+        }
+    }
     // 顶层 key(iter-41 收敛):RIDGE_API_KEY env → 顶层内联 api_key → 顶层 key_env→(env/auth)。
     // 命中即用顶层 provider/model/base_url 身份启动(用户设的默认 model 生效)。
     if let Some(key) = agent::resolve_top_level_key(cfg, auth) {
@@ -593,11 +901,16 @@ fn real_provider(
     }
     for p in &cfg.providers {
         if let Some(key) = p.resolve_key_with(auth) {
+            let model = cfg
+                .model
+                .as_deref()
+                .filter(|model| !model.trim().is_empty())
+                .unwrap_or(&p.model);
             eprintln!(
                 "[ridgecode] starting with config provider profile \"{}\" ({} · {})",
-                p.name, p.kind, p.model
+                p.name, p.kind, model
             );
-            return Some(make_provider(&p.kind, &p.model, &p.base_url, key));
+            return Some(make_provider(&p.kind, model, &p.base_url, key));
         }
     }
     None
@@ -629,6 +942,26 @@ mod tests {
         assert_eq!(parse_duration("abc"), None);
         assert_eq!(parse_duration(""), None);
     }
+
+    #[test]
+    fn provider_label_keeps_named_profile_for_compatible_endpoint() {
+        let cfg = Config::parse(
+            r#"{
+                "provider": "Zai",
+                "providers": [{
+                    "name": "Zai",
+                    "kind": "openai",
+                    "model": "glm-4.6",
+                    "base_url": "https://open.bigmodel.cn/api/paas/v4"
+                }]
+            }"#,
+        );
+        assert_eq!(
+            resolve_provider_label(&cfg, "openai", "https://open.bigmodel.cn/api/paas/v4/"),
+            "Zai"
+        );
+    }
+
     /// 会话持久化:存 history → 读回内容一致(kill-9 后 --resume 的基础)。缺文件 → 空。
     #[test]
     fn session_roundtrips_history() {

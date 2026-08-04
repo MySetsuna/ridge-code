@@ -7,9 +7,14 @@
 //! [`is_dangerous_command`] 拦灾难命令 —— 但 `run_shell` 仍在宿主机直跑,别喂不可信输入。
 //! 真 OS 隔离(Docker/gVisor)是需用户环境/技术选型的重量级件,另议。
 
-use std::io;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 180;
+const SHELL_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// 读文件全文。读到**目录**则不抛裸 OS 错(Windows 报「拒绝访问 (os error 5)」会误导 agent 反复瞎试),
 /// 而是列出该目录条目(子目录带 `/` 后缀)—— agent 读到目录多半就是想看里面有什么,直接给它。
@@ -307,6 +312,33 @@ pub fn default_shell() -> &'static str {
     }
 }
 
+fn shell_probe(program: &str, args: &[&str]) -> bool {
+    let Ok(mut child) = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = Instant::now() + SHELL_PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
 /// 探测宿主**实际可用**的 shell —— 注入 system prompt 的 `host_env` 块,供模型**自主择** shell。
 /// 必装项按 OS 直列(Windows: powershell/cmd;Unix: sh);可选项(pwsh/bash,如 PS7/Git-Bash/WSL)
 /// 靠 `spawn` 探测(程序不存在 → `output()` Err)。一次性调用(装配期),不进热路径。
@@ -320,7 +352,7 @@ pub fn available_shells() -> Vec<String> {
         ("pwsh", ["-NoProfile", "-Command", "$null"].as_slice()),
         ("bash", ["-c", ":"].as_slice()),
     ] {
-        if !v.iter().any(|s| s == prog) && Command::new(prog).args(probe).output().is_ok() {
+        if !v.iter().any(|s| s == prog) && shell_probe(prog, probe) {
             v.push(prog.to_string());
         }
     }
@@ -368,12 +400,15 @@ fn shell_command(shell: Option<&str>, cmd: &str) -> Command {
 
 /// 在**选定 shell**里执行一条命令(模型经 run_shell 的 `shell` 字段自主择;`None` = 宿主默认)。
 pub fn run_shell_in(shell: Option<&str>, cmd: &str) -> io::Result<ShellResult> {
-    let output = shell_command(shell, cmd).output()?;
-    Ok(ShellResult {
-        code: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
+    run_shell_in_with_timeout(shell, cmd, shell_timeout())
+}
+
+pub fn run_shell_in_with_timeout(
+    shell: Option<&str>,
+    cmd: &str,
+    timeout: Duration,
+) -> io::Result<ShellResult> {
+    run_command_with_timeout(shell_command(shell, cmd), timeout)
 }
 
 /// 跨平台执行一条 shell 命令(宿主默认 shell)。见 [`run_shell_in`] 可指定 shell。
@@ -391,11 +426,78 @@ pub fn run_argv(argv: &[String]) -> io::Result<ShellResult> {
             stderr: "sandbox_cmd 为空,无法执行".into(),
         });
     };
-    let output = Command::new(program).args(args).output()?;
+    let mut command = Command::new(program);
+    command.args(args);
+    run_command_with_timeout(command, shell_timeout())
+}
+
+fn shell_timeout() -> Duration {
+    std::env::var("RIDGE_SHELL_TIMEOUT")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(DEFAULT_SHELL_TIMEOUT_SECS))
+}
+
+fn run_command_with_timeout(mut command: Command, timeout: Duration) -> io::Result<ShellResult> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("shell stdout pipe unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("shell stderr pipe unavailable"))?;
+    let stdout_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout
+            .take(8 * 1024 * 1024)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr
+            .take(8 * 1024 * 1024)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
+
+    let started = Instant::now();
+    let (status, timed_out) = loop {
+        match child.try_wait()? {
+            Some(status) => break (status, false),
+            None if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                break (child.wait()?, true);
+            }
+            None => thread::sleep(Duration::from_millis(10)),
+        }
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| io::Error::other("shell stdout reader panicked"))??;
+    let mut stderr = stderr_reader
+        .join()
+        .map_err(|_| io::Error::other("shell stderr reader panicked"))??;
+    if timed_out {
+        stderr.extend_from_slice(
+            format!("\ncommand timed out after {}ms", timeout.as_millis()).as_bytes(),
+        );
+    }
     Ok(ShellResult {
-        code: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        code: if timed_out {
+            -1
+        } else {
+            status.code().unwrap_or(-1)
+        },
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
     })
 }
 
@@ -429,6 +531,24 @@ mod tests {
         let out = run_shell("echo ridge").unwrap();
         assert_eq!(out.code, 0);
         assert!(out.stdout.contains("ridge"));
+    }
+
+    #[test]
+    fn shell_timeout_returns_failure_observation() {
+        let started = Instant::now();
+        #[cfg(windows)]
+        let out = run_shell_in_with_timeout(
+            Some("powershell"),
+            "Start-Sleep -Seconds 1",
+            Duration::from_millis(50),
+        )
+        .unwrap();
+        #[cfg(not(windows))]
+        let out =
+            run_shell_in_with_timeout(Some("sh"), "sleep 1", Duration::from_millis(50)).unwrap();
+        assert_eq!(out.code, -1);
+        assert!(out.stderr.contains("command timed out"), "{}", out.stderr);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     /// 模型自主择 shell:显式指定的 shell 生效(退出码如实带回);未知/空 → 宿主默认,不报程序找不到。

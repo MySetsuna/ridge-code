@@ -1,12 +1,23 @@
 {
   "schema_version": 1,
-  "intake_id": "INTAKE-20260802-05",
+  "intake_id": "INTAKE-20260803-05",
   "classification": "active",
-  "summary": "在已批准 ReRelease 范围内，将稳定 release 二进制替换为本机 PATH 中的旧 RidgeCode 安装并验证。",
-  "requirement_ids": ["REQ-20260802-02"],
+  "summary": "补充 TUI 物理换行、文件/工具输出折叠、Agent 实时活动与可接管交互，并保持队列前插不打断当前模型回合。",
+  "requirement_ids": [
+    "REQ-20260801-01",
+    "REQ-20260803-01",
+    "REQ-20260803-02"
+  ],
   "pending_ids": [],
   "approval_reasons": [],
   "open_questions": [],
   "approval_evidence": "",
-  "notes": "Operational installation step within the approved ReRelease requirement; no new requirement or scope expansion."
+  "request_sha256": "2d95f632a7e0f4639242ad6c7b0effbd4881d300dfbd70dabed1414eb59d174b",
+  "requirements_sha256": "2d7ac09fabbb88323085eb5c4e888ada7ba76d1028b2dbe9d5f76c1331a98237",
+  "pending_sha256": "3b2a1c2d01c1d0e6c33d8e5ec0365873066e4b3b541c2f63d703025b8f44425a",
+  "draft_sha256": "",
+  "previous_intake_sha256": "",
+  "reasons": [],
+  "executable": true,
+  "notes": "承接既有活跃 TUI 需求；本次扩展不新增审批门，仍须经 CodeGraph、确定性测试与真实终端/可复现渲染验收。"
 }

@@ -1,0 +1,41 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "The latest same-session NLM answer proposed viewport-bound incremental syntax highlighting with tree-sitter or syntect, but returned sources_used empty with no citation mapping.",
+      "evidence": "NotebookLM notebook_query using source 8862d715-ffad-4288-b7eb-173260e2dcff; current approved TUI constraints."
+    },
+    {
+      "fact": "The live renderer already bounds the physical tail, tail-clips long content before Markdown spans, and reuses LiveOutputCache between unchanged transcript revisions.",
+      "evidence": "CodeGraph and current crates/agent/src/tui/draw.rs render_live_tail_projection, render_live_line_with_alert_edge, tail_display_cells, and LiveOutputCache."
+    }
+  ],
+  "contradictions": [
+    {
+      "claim": "A new tree-sitter/syntect highlighter or viewport clipper is required.",
+      "local_evidence": "The approved boundary forbids external parsing dependencies and the current presentation path already performs bounded Markdown highlighting and physical-tail projection."
+    }
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "A stable-prefix projection cache may reduce repeated work across stream revisions without adding a second renderer, but no benefit is established yet.",
+      "support": [
+        "LiveOutputCache invalidates its complete prepared Paragraph when transcript render_revision changes."
+      ],
+      "against": [
+        "The logical and physical tail are already bounded, and Markdown fence/alert state can make isolated line reuse unsafe."
+      ],
+      "experiment": "Instrument a deterministic stable-prefix stream fixture to count projection and Markdown-span work per revision, then accept a cache only if it preserves rails, fence/alert state, CJK widths, HOLD/FOLLOW, resize, and takeover."
+    }
+  ],
+  "candidates": [],
+  "recommendation": "Reject the external second highlighter/clipper. Measure the existing bounded projection before considering a presentation-only reuse boundary.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Measure repeated live projection work across stable-prefix stream revisions using the existing LiveOutputCache boundary."
+  },
+  "stop_conditions": [
+    "Do not add tree-sitter, syntect, DECSTBM, a second renderer, a second virtualizer, or fixed CPU/frame thresholds.",
+    "Do not query old Deep Research status or create a NotebookLM Note/source from this response."
+  ]
+}

@@ -2,15 +2,30 @@ use std::collections::VecDeque;
 
 use ratatui::style::Color;
 
+use super::{role_color, PresentationId, Role};
+
 const MAX_LIVE_BLOCKS: usize = 64;
 const MAX_LIVE_TEXT_CHARS: usize = 32_768;
-const MAX_TOOL_DETAIL_LINES: usize = 20;
+const MAX_INSPECT_DETAIL_CHARS: usize = 8_192;
+const MAX_TOOL_DETAIL_LINES: usize = 32;
+const MAX_READ_BATCH_PATHS: usize = 8;
+const MAX_READ_BATCH_PATH_CHARS: usize = 96;
 const TOOL_DETAIL_SCROLL_STEP: usize = 4;
 const LIVE_SCROLL_STEP: usize = 4;
 const MAX_LIVE_INSPECT_OFFSET: usize = 512;
+const MAX_LIVE_PHASE_TRACE: usize = 5;
 pub(crate) const MAX_TOOL_HISTORY: usize = 64;
-/// Answer 已占用 Live 视口时仍保留一行实际 reasoning；纯思考阶段不钳位。
-const LIVE_REASONING_ROWS: usize = 1;
+/// Answer 已占用 Live 视口时仍保留一小段实际 reasoning；纯思考阶段不钳位。
+/// 视口越宽裕，预览越长；Ctrl+R 仍负责完整展开。
+const MAX_LIVE_REASONING_PREVIEW_ROWS: usize = 3;
+
+fn default_reasoning_preview_rows(view_rows: usize) -> usize {
+    match view_rows {
+        0..=6 => 1,
+        7..=9 => 2,
+        _ => MAX_LIVE_REASONING_PREVIEW_ROWS,
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LiveLineKind {
@@ -35,6 +50,12 @@ pub(crate) struct LiveLine<'a> {
     pub(crate) color: Color,
     pub(crate) kind: LiveLineKind,
     pub(crate) marker: Option<&'static str>,
+    /// Stable semantic position used only when a held viewport is reflowed.
+    /// Physical rows are disposable; block identity plus logical line is not.
+    pub(crate) anchor: Option<LiveLineAnchor>,
+    /// The source Answer block contains no Markdown markers.  This lets the
+    /// renderer tail a long unbroken line without rescanning it each frame.
+    pub(crate) answer_plain: bool,
     /// Markdown fenced-code state immediately before this Answer line.
     /// Render-only metadata keeps a clipped tail faithful to the actual stream.
     pub(crate) fence_before: bool,
@@ -50,10 +71,91 @@ impl<'a> LiveLine<'a> {
             color,
             kind,
             marker: None,
+            anchor: None,
+            answer_plain: false,
             fence_before: false,
             continuation_before: false,
         }
     }
+
+    fn with_anchor(mut self, anchor: LiveLineAnchor) -> Self {
+        self.anchor = Some(anchor);
+        self
+    }
+}
+
+/// Incremental byte offsets for logical text lines.  This is render metadata:
+/// it lets a bounded tail query jump to the visible lines without rescanning
+/// the whole Answer/Reasoning buffer on every streamed frame.
+#[derive(Clone, Debug)]
+struct LineIndex {
+    starts: Vec<usize>,
+}
+
+impl Default for LineIndex {
+    fn default() -> Self {
+        Self { starts: vec![0] }
+    }
+}
+
+impl LineIndex {
+    fn append(&mut self, base: usize, text: &str) {
+        self.starts
+            .extend(text.char_indices().filter_map(|(offset, character)| {
+                (character == '\n').then_some(base + offset + 1)
+            }));
+    }
+
+    fn trim_prefix(&mut self, prefix_len: usize) {
+        let mut shifted = Vec::with_capacity(self.starts.len());
+        shifted.push(0);
+        shifted.extend(
+            self.starts
+                .iter()
+                .copied()
+                .filter(|&start| start > prefix_len)
+                .map(|start| start - prefix_len),
+        );
+        self.starts = shifted;
+    }
+
+    fn last_start(&self) -> usize {
+        self.starts.last().copied().unwrap_or(0)
+    }
+
+    fn line_count(&self) -> usize {
+        self.starts.len()
+    }
+
+    fn tail_ranges(&self, text: &str, max_rows: usize) -> Vec<(usize, usize)> {
+        if max_rows == 0 || text.is_empty() {
+            return Vec::new();
+        }
+        let first = self.starts.len().saturating_sub(max_rows);
+        self.starts[first..]
+            .iter()
+            .enumerate()
+            .map(|(offset, &start)| {
+                let start = start.min(text.len());
+                let end = self
+                    .starts
+                    .get(first + offset + 1)
+                    .map(|&next| next.saturating_sub(1))
+                    .unwrap_or(text.len())
+                    .max(start)
+                    .min(text.len());
+                (start, end)
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ToolPhase {
+    #[cfg(test)]
+    Standalone,
+    Call,
+    Observation,
 }
 
 #[derive(Clone, Debug)]
@@ -62,41 +164,145 @@ pub(crate) struct ToolBlock {
     summary: String,
     summary_color: Color,
     details: Vec<(String, Color)>,
+    /// Stable, bounded affordance text for the collapsed projection. Keeping
+    /// it with the block lets live and scrollback renderers share the same
+    /// detail-count signal without borrowing a temporary String.
+    collapsed_hint: String,
     expanded: bool,
     /// Rows scrolled upward from the newest detail tail; zero means latest.
     detail_scroll: usize,
+    phase: ToolPhase,
+    tool_name: Option<String>,
+    /// Number of adjacent completed `read_file` observations represented by this
+    /// presentation block.  Zero means this is not a read batch.
+    read_batch_count: usize,
+    read_batch_error: bool,
+    read_batch_paths: Vec<String>,
 }
 
 impl ToolBlock {
+    #[cfg(test)]
     pub(crate) fn from_lines(lines: Vec<(String, Color)>) -> Option<Self> {
+        Self::from_lines_with_phase(lines, ToolPhase::Standalone, None)
+    }
+
+    pub(crate) fn from_lines_with_phase(
+        lines: Vec<(String, Color)>,
+        phase: ToolPhase,
+        tool_name: Option<String>,
+    ) -> Option<Self> {
         let mut remaining = lines
             .into_iter()
             .map(|(text, color)| (super::render::sanitize_display_text(&text), color));
         let (summary, summary_color) = remaining.next()?;
-        let mut details = remaining
-            .by_ref()
-            .take(MAX_TOOL_DETAIL_LINES)
-            .collect::<Vec<_>>();
-        if remaining.next().is_some() {
-            details.pop();
-            details.push(("  [more details in trace]".to_owned(), Color::DarkGray));
-        }
+        let details = bound_tool_details(remaining.collect());
+        let read_batch =
+            matches!(&phase, ToolPhase::Observation) && tool_name.as_deref() == Some("read_file");
+        let read_call =
+            matches!(&phase, ToolPhase::Call) && tool_name.as_deref() == Some("read_file");
+        let read_batch_paths = if read_call {
+            vec![compact_read_path(&summary)]
+        } else {
+            Vec::new()
+        };
         Some(Self {
             id: 0,
             summary,
             summary_color,
+            collapsed_hint: tool_detail_hint(details.len()),
             details,
             expanded: false,
             detail_scroll: 0,
+            phase,
+            tool_name,
+            read_batch_count: usize::from(read_batch),
+            read_batch_error: read_batch
+                && summary_color == super::render::role_color(super::render::Role::Error),
+            read_batch_paths,
         })
     }
 
+    fn can_merge_observation(&self, incoming: &Self) -> bool {
+        matches!(self.phase, ToolPhase::Call)
+            && matches!(incoming.phase, ToolPhase::Observation)
+            && self.tool_name.is_some()
+            && self.tool_name == incoming.tool_name
+    }
+
+    fn is_completed_read(&self) -> bool {
+        self.read_batch_count > 0
+            && matches!(&self.phase, ToolPhase::Observation)
+            && self.tool_name.as_deref() == Some("read_file")
+    }
+
+    fn can_merge_read_batch(&self, incoming: &Self) -> bool {
+        self.is_completed_read() && incoming.is_completed_read()
+    }
+
+    fn merge_observation(&mut self, mut incoming: Self) {
+        let mut read_batch_paths = std::mem::take(&mut self.read_batch_paths);
+        read_batch_paths.extend(incoming.read_batch_paths);
+        let mut details = Vec::with_capacity(self.details.len() + incoming.details.len() + 1);
+        details.push((self.summary.clone(), self.summary_color));
+        details.append(&mut self.details);
+        details.append(&mut incoming.details);
+        details = bound_tool_details(details);
+        self.summary = incoming.summary;
+        self.summary_color = incoming.summary_color;
+        self.details = details;
+        self.collapsed_hint = tool_detail_hint(self.details.len());
+        self.phase = ToolPhase::Observation;
+        self.tool_name = incoming.tool_name;
+        self.read_batch_count = incoming.read_batch_count;
+        self.read_batch_error = incoming.read_batch_error;
+        self.read_batch_paths = bound_read_batch_paths(read_batch_paths);
+        self.detail_scroll = 0;
+    }
+
+    /// Fold one completed read into the current batch while retaining every
+    /// file's bounded summary/detail payload in arrival order.
+    fn merge_read_batch(&mut self, mut incoming: Self) {
+        let count = self
+            .read_batch_count
+            .saturating_add(incoming.read_batch_count);
+        let has_error = self.read_batch_error || incoming.read_batch_error;
+        let mut read_batch_paths = std::mem::take(&mut self.read_batch_paths);
+        read_batch_paths.extend(incoming.read_batch_paths);
+        let read_batch_paths = bound_read_batch_paths(read_batch_paths);
+        let mut details = Vec::with_capacity(self.details.len() + incoming.details.len() + 2);
+        details.push((self.summary.clone(), self.summary_color));
+        details.append(&mut self.details);
+        details.push((incoming.summary, incoming.summary_color));
+        details.append(&mut incoming.details);
+        self.details = bound_tool_details(details);
+        self.collapsed_hint = tool_detail_hint(self.details.len());
+        self.summary = read_batch_summary(count, &read_batch_paths, has_error);
+        self.summary_color = if has_error {
+            super::render::role_color(super::render::Role::Error)
+        } else {
+            super::render::role_color(super::render::Role::Success)
+        };
+        self.read_batch_count = count;
+        self.read_batch_error = has_error;
+        self.read_batch_paths = read_batch_paths;
+        self.detail_scroll = 0;
+    }
+
     pub(crate) fn toggle(&mut self) -> bool {
-        self.expanded = !self.expanded;
-        if !self.expanded {
+        let expanded = !self.expanded;
+        self.set_expanded(expanded);
+        expanded
+    }
+
+    pub(crate) fn set_expanded(&mut self, expanded: bool) -> bool {
+        if self.expanded == expanded {
+            return false;
+        }
+        self.expanded = expanded;
+        if !expanded {
             self.detail_scroll = 0;
         }
-        self.expanded
+        true
     }
 
     fn scroll_details(&mut self, delta: i8) -> bool {
@@ -123,12 +329,66 @@ impl ToolBlock {
         &self.summary
     }
 
+    /// Static scrollback keeps the same phase vocabulary as the live
+    /// projection; this is presentation metadata, not execution state.
+    pub(crate) fn phase_label(&self) -> &'static str {
+        match self.phase {
+            #[cfg(test)]
+            ToolPhase::Standalone => "TOOL",
+            ToolPhase::Call => "CALL",
+            ToolPhase::Observation => "OUT",
+        }
+    }
+
+    /// One-cell phase token for narrow static scrollback; it replaces the
+    /// decorative glyph instead of consuming another column.
+    pub(crate) fn phase_short_label(&self) -> &'static str {
+        match self.phase {
+            #[cfg(test)]
+            ToolPhase::Standalone => "T",
+            ToolPhase::Call => "C",
+            ToolPhase::Observation => "O",
+        }
+    }
+
+    pub(crate) fn presentation_id(&self) -> PresentationId {
+        self.id
+    }
+
     pub(crate) fn details_text(&self) -> String {
+        if self.details.is_empty() {
+            return if matches!(self.phase, ToolPhase::Observation) {
+                "no output".to_owned()
+            } else {
+                String::new()
+            };
+        }
         self.details
             .iter()
             .map(|(text, _)| text.as_str())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    pub(crate) fn has_details(&self) -> bool {
+        !self.details.is_empty()
+    }
+
+    pub(crate) fn collapsed_hint(&self) -> &str {
+        &self.collapsed_hint
+    }
+
+    pub(crate) fn details_count(&self) -> usize {
+        self.details.len()
+    }
+
+    pub(crate) fn presentation_chars(&self) -> usize {
+        self.summary.chars().count()
+            + self
+                .details
+                .iter()
+                .map(|(text, _)| text.chars().count())
+                .sum::<usize>()
     }
 
     #[cfg(test)]
@@ -144,8 +404,8 @@ impl ToolBlock {
             }));
         } else if !self.details.is_empty() {
             lines.push(LiveLine::new(
-                "  [Ctrl+O details]",
-                Color::DarkGray,
+                self.collapsed_hint(),
+                role_color(Role::Muted),
                 LiveLineKind::ToolDetail,
             ));
         }
@@ -166,7 +426,11 @@ impl ToolBlock {
                 self.summary.as_str(),
                 self.summary_color,
                 LiveLineKind::ToolSummary,
-            );
+            )
+            .with_anchor(LiveLineAnchor {
+                focus: LiveBlockFocus::Tool(self.id),
+                logical_line: 0,
+            });
             summary.marker = Some("▸ ");
             append_tail(target, std::iter::once(summary), max_rows);
             let detail_rows = max_rows.saturating_sub(1);
@@ -184,19 +448,30 @@ impl ToolBlock {
                         .iter()
                         .skip(start)
                         .take(end.saturating_sub(start))
-                        .map(|(text, color)| {
+                        .enumerate()
+                        .map(|(index, (text, color))| {
                             LiveLine::new(text.as_str(), *color, LiveLineKind::ToolDetail)
+                                .with_anchor(LiveLineAnchor {
+                                    focus: LiveBlockFocus::Tool(self.id),
+                                    logical_line: start + index + 1,
+                                })
                         }),
                     max_rows,
                 );
             } else if !self.details.is_empty() {
                 append_tail(
                     target,
-                    std::iter::once(LiveLine::new(
-                        "  [Ctrl+O details]",
-                        Color::DarkGray,
-                        LiveLineKind::ToolDetail,
-                    )),
+                    std::iter::once(
+                        LiveLine::new(
+                            self.collapsed_hint(),
+                            role_color(Role::Muted),
+                            LiveLineKind::ToolDetail,
+                        )
+                        .with_anchor(LiveLineAnchor {
+                            focus: LiveBlockFocus::Tool(self.id),
+                            logical_line: 1,
+                        }),
+                    ),
                     max_rows,
                 );
             }
@@ -209,16 +484,26 @@ impl ToolBlock {
             self.summary.as_str(),
             self.summary_color,
             LiveLineKind::ToolSummary,
-        );
+        )
+        .with_anchor(LiveLineAnchor {
+            focus: LiveBlockFocus::Tool(self.id),
+            logical_line: 0,
+        });
         append_tail(target, std::iter::once(summary), max_rows);
         if !self.details.is_empty() {
             append_tail(
                 target,
-                std::iter::once(LiveLine::new(
-                    "  [Ctrl+O details]",
-                    Color::DarkGray,
-                    LiveLineKind::ToolDetail,
-                )),
+                std::iter::once(
+                    LiveLine::new(
+                        self.collapsed_hint(),
+                        role_color(Role::Muted),
+                        LiveLineKind::ToolDetail,
+                    )
+                    .with_anchor(LiveLineAnchor {
+                        focus: LiveBlockFocus::Tool(self.id),
+                        logical_line: 1,
+                    }),
+                ),
                 max_rows,
             );
         }
@@ -233,123 +518,395 @@ impl ToolBlock {
     }
 }
 
+fn tool_detail_hint(rows: usize) -> String {
+    format!("  [Ctrl+O details · {rows} rows]")
+}
+
+fn compact_read_path(summary: &str) -> String {
+    let label = summary
+        .find("Read ")
+        .map(|index| &summary[index + "Read ".len()..])
+        .unwrap_or(summary)
+        .trim();
+    let mut clipped = label
+        .chars()
+        .take(MAX_READ_BATCH_PATH_CHARS)
+        .collect::<String>();
+    if label.chars().count() > MAX_READ_BATCH_PATH_CHARS {
+        clipped.push('…');
+    }
+    clipped
+}
+
+fn bound_read_batch_paths(mut paths: Vec<String>) -> Vec<String> {
+    paths.truncate(MAX_READ_BATCH_PATHS);
+    paths
+}
+
+fn read_batch_summary(count: usize, paths: &[String], has_error: bool) -> String {
+    let marker = if has_error { '✗' } else { '✓' };
+    let mut summary = format!("  {marker} Read batch · {count} files");
+    let visible = paths.iter().take(3).cloned().collect::<Vec<_>>();
+    if !visible.is_empty() {
+        summary.push_str(" · ");
+        summary.push_str(&visible.join(", "));
+        if count > visible.len() {
+            summary.push_str(&format!(" +{} more", count - visible.len()));
+        }
+    }
+    summary
+}
+
+/// Keep a useful head and tail when a call/result pair or read batch exceeds
+/// the in-memory detail budget. The live row stays collapsed; expansion can
+/// still inspect both the beginning and completion/error tail without growth.
+fn bound_tool_details(mut details: Vec<(String, Color)>) -> Vec<(String, Color)> {
+    if details.len() <= MAX_TOOL_DETAIL_LINES {
+        return details;
+    }
+    let tail_len = (MAX_TOOL_DETAIL_LINES / 3).max(1);
+    let head_len = MAX_TOOL_DETAIL_LINES
+        .saturating_sub(tail_len)
+        .saturating_sub(1);
+    let tail_start = details.len().saturating_sub(tail_len);
+    let tail = details.split_off(tail_start);
+    details.truncate(head_len);
+    details.push((
+        format!(
+            "  … (+{} detail lines folded; full text in trace)",
+            tail_start.saturating_sub(head_len)
+        ),
+        role_color(Role::Muted),
+    ));
+    details.extend(tail);
+    details
+}
+
 #[derive(Clone, Debug)]
 struct AnswerBlock {
+    id: u64,
     text: String,
+    line_index: LineIndex,
     /// Byte offsets of lines whose trimmed content starts a fenced code block.
     /// Keeping these offsets moves fence scanning out of every live redraw.
     fence_starts: Vec<usize>,
     last_line_start: usize,
+    /// Conservative cache for the live renderer.  It may stay true after an
+    /// old marker is trimmed; that only skips the tail fast path temporarily.
+    has_markdown_syntax: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ReasoningBlock {
+    id: u64,
+    text: String,
+    line_index: LineIndex,
 }
 
 #[derive(Clone, Debug)]
 enum LiveBlock {
     Answer(AnswerBlock),
-    Reasoning(String),
+    Reasoning(ReasoningBlock),
     Tool(ToolBlock),
+}
+
+/// Semantic target behind a live Inspector row.  Keeping identity separate
+/// from display text lets navigation focus an older block without parsing
+/// summaries or coupling the execution graph to the panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LiveBlockFocus {
+    Answer(u64),
+    Reasoning(u64),
+    Tool(u64),
+}
+
+/// Logical position of a live line.  Reflow may change its physical height,
+/// but this identity remains stable while the semantic block is retained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LiveLineAnchor {
+    pub(crate) focus: LiveBlockFocus,
+    pub(crate) logical_line: usize,
+}
+
+/// Stable presentation row for the live-block inspector.  The execution
+/// graph never sees this projection; it is bounded so opening the inspector
+/// cannot turn a token redraw into an unbounded copy of the transcript.
+#[derive(Clone, Debug)]
+pub(crate) struct LiveBlockEntry {
+    pub(crate) key: String,
+    pub(crate) detail: String,
+    pub(crate) focus: LiveBlockFocus,
 }
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct LiveTranscript {
     blocks: VecDeque<LiveBlock>,
     splash: Option<String>,
+    next_stream_id: u64,
     next_tool_id: u64,
+    /// 当前 Inspector 选中的语义块；与工具展开焦点分离，令 Answer/Reasoning
+    /// 也能被顶栏与快照明确标识，而不把面板状态泄漏进执行图。
+    focused_block: Option<LiveBlockFocus>,
     focused_tool: Option<u64>,
+    /// Presentation-only anchor for an Inspector-selected Answer/Reasoning
+    /// block.  Follow clears it; model execution never reads it.
+    audit_focus: Option<LiveBlockFocus>,
     /// 用户用 Alt+↑/↓ 选定旧工具后，暂时阻止新工具夺走焦点。
     focus_pinned: bool,
     reasoning_expanded: bool,
     /// Rows behind the newest live tail; zero keeps the default Follow view.
     inspect_offset: usize,
+    /// Explicit user hold state; unlike the offset, this remains visible even
+    /// when the current output is shorter than one scroll step.
+    inspect_mode: bool,
     answer_chars: usize,
     reasoning_chars: usize,
+    /// Presentation revision for the live-line cache.  Execution state never
+    /// reads this; any stream/focus/viewport mutation advances it.
+    render_revision: u64,
 }
 
 impl LiveTranscript {
+    #[allow(dead_code)]
     pub(crate) fn push_answer(&mut self, text: &str) -> Vec<ToolBlock> {
+        let id = self
+            .current_stream_id(LiveChannel::Answer)
+            .unwrap_or_else(|| self.next_stream_id());
+        self.push_answer_with_id(text, id)
+    }
+
+    pub(crate) fn push_answer_with_id(&mut self, text: &str, id: PresentationId) -> Vec<ToolBlock> {
+        self.touch_render();
         self.splash = None;
         let text = super::render::sanitize_display_text(text);
         if text.is_empty() {
             return Vec::new();
         }
+        let starts_new_block = !matches!(self.blocks.back(), Some(LiveBlock::Answer(_)));
+        self.preserve_hold_for_append(&text, starts_new_block);
         match self.blocks.back_mut() {
             Some(LiveBlock::Answer(current)) => {
                 append_answer_bounded(current, &mut self.answer_chars, &text)
             }
             _ => {
-                // A newly opened Answer phase restores the default readable
-                // projection; Ctrl+R remains the explicit inspection escape.
-                self.reasoning_expanded = false;
-                self.inspect_offset = 0;
+                // Preserve an explicit Ctrl+R choice across the Answer phase;
+                // a later token must not silently collapse the user's audit
+                // view.  New tasks still reset this flag in clear_streams.
+                if !self.inspect_mode {
+                    self.inspect_offset = 0;
+                }
                 self.answer_chars = 0;
                 let mut current = AnswerBlock {
+                    id,
                     text: String::new(),
+                    line_index: LineIndex::default(),
                     fence_starts: Vec::new(),
                     last_line_start: 0,
+                    has_markdown_syntax: false,
                 };
                 append_answer_bounded(&mut current, &mut self.answer_chars, &text);
                 self.blocks.push_back(LiveBlock::Answer(current));
+                self.reserve_stream_id(id);
             }
         }
         self.trim_blocks()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn push_reasoning(&mut self, text: &str) -> Vec<ToolBlock> {
+        let id = self
+            .current_stream_id(LiveChannel::Reasoning)
+            .unwrap_or_else(|| self.next_stream_id());
+        self.push_reasoning_with_id(text, id)
+    }
+
+    pub(crate) fn push_reasoning_with_id(
+        &mut self,
+        text: &str,
+        id: PresentationId,
+    ) -> Vec<ToolBlock> {
+        self.touch_render();
         self.splash = None;
         let text = super::render::sanitize_display_text(text);
         if text.is_empty() {
             return Vec::new();
         }
+        let starts_new_block = !matches!(self.blocks.back(), Some(LiveBlock::Reasoning(_)));
+        self.preserve_hold_for_append(&text, starts_new_block);
         match self.blocks.back_mut() {
-            Some(LiveBlock::Reasoning(current)) => {
-                append_bounded(current, &mut self.reasoning_chars, &text)
-            }
+            Some(LiveBlock::Reasoning(current)) => append_bounded(
+                &mut current.text,
+                &mut current.line_index,
+                &mut self.reasoning_chars,
+                &text,
+            ),
             _ => {
                 self.reasoning_chars = 0;
-                let mut current = String::new();
-                append_bounded(&mut current, &mut self.reasoning_chars, &text);
+                let mut current = ReasoningBlock {
+                    id,
+                    text: String::new(),
+                    line_index: LineIndex::default(),
+                };
+                append_bounded(
+                    &mut current.text,
+                    &mut current.line_index,
+                    &mut self.reasoning_chars,
+                    &text,
+                );
                 self.blocks.push_back(LiveBlock::Reasoning(current));
+                self.reserve_stream_id(id);
             }
         }
         self.trim_blocks()
     }
 
-    pub(crate) fn push_tool(&mut self, mut block: ToolBlock) -> Vec<ToolBlock> {
+    #[allow(dead_code)]
+    pub(crate) fn push_tool(&mut self, block: ToolBlock) -> Vec<ToolBlock> {
+        let id = self.next_tool_id;
+        let (evicted, _, _) = self.push_tool_with_id(block, id);
+        evicted
+    }
+
+    pub(crate) fn push_tool_with_id(
+        &mut self,
+        mut block: ToolBlock,
+        id: PresentationId,
+    ) -> (Vec<ToolBlock>, PresentationId, bool) {
+        self.touch_render();
         self.splash = None;
-        block.id = self.next_tool_id;
-        self.next_tool_id = self.next_tool_id.wrapping_add(1);
-        if !self.focus_pinned {
+        // A new or merged tool contributes at least one presentation row. Keep
+        // a held viewport behind the moving tail; the full detail layout still
+        // belongs to the existing focused-tool projection.
+        self.preserve_hold_for_append("", true);
+        let can_merge = self.blocks.back().is_some_and(|current| {
+            matches!(current, LiveBlock::Tool(current) if current.can_merge_observation(&block))
+        });
+        if can_merge {
+            if let Some(LiveBlock::Tool(current)) = self.blocks.back_mut() {
+                current.merge_observation(block);
+            }
+            self.coalesce_read_batch();
+            let id = self
+                .blocks
+                .back()
+                .and_then(|block| match block {
+                    LiveBlock::Tool(tool) => Some(tool.id),
+                    _ => None,
+                })
+                .unwrap_or(id);
+            return (self.trim_blocks(), id, false);
+        }
+        let can_merge_read_batch = self.blocks.back().is_some_and(|current| {
+            matches!(current, LiveBlock::Tool(current) if current.can_merge_read_batch(&block))
+        });
+        if can_merge_read_batch {
+            if let Some(LiveBlock::Tool(current)) = self.blocks.back_mut() {
+                current.merge_read_batch(block);
+            }
+            let id = self
+                .blocks
+                .back()
+                .and_then(|block| match block {
+                    LiveBlock::Tool(tool) => Some(tool.id),
+                    _ => None,
+                })
+                .unwrap_or(id);
+            return (self.trim_blocks(), id, false);
+        }
+        block.id = id;
+        self.next_tool_id = self.next_tool_id.max(id.saturating_add(1));
+        if !self.focus_pinned && self.audit_focus.is_none() {
             self.focused_tool = Some(block.id);
+            self.focused_block = Some(LiveBlockFocus::Tool(block.id));
         }
         self.blocks.push_back(LiveBlock::Tool(block));
-        self.trim_blocks()
+        (self.trim_blocks(), id, true)
+    }
+
+    /// Coalesce the just-completed read with the immediately preceding read.
+    /// The newest block's id is intentionally remapped to the older block so a
+    /// held/expanded Inspector target survives the presentation-only fold.
+    fn coalesce_read_batch(&mut self) {
+        if self.blocks.len() < 2 {
+            return;
+        }
+        let previous_index = self.blocks.len() - 2;
+        let can_merge = matches!(
+            (self.blocks.get(previous_index), self.blocks.back()),
+            (
+                Some(LiveBlock::Tool(previous)),
+                Some(LiveBlock::Tool(current))
+            ) if previous.can_merge_read_batch(current)
+        );
+        if !can_merge {
+            return;
+        }
+
+        let Some(LiveBlock::Tool(current)) = self.blocks.pop_back() else {
+            return;
+        };
+        let Some(LiveBlock::Tool(mut previous)) = self.blocks.pop_back() else {
+            self.blocks.push_back(LiveBlock::Tool(current));
+            return;
+        };
+        let current_id = current.id;
+        let previous_id = previous.id;
+        previous.merge_read_batch(current);
+        self.remap_tool_focus(current_id, previous_id);
+        self.blocks.push_back(LiveBlock::Tool(previous));
+    }
+
+    fn remap_tool_focus(&mut self, from: u64, to: u64) {
+        if self.focused_tool == Some(from) {
+            self.focused_tool = Some(to);
+        }
+        self.focused_block = self.focused_block.map(|focus| match focus {
+            LiveBlockFocus::Tool(id) if id == from => LiveBlockFocus::Tool(to),
+            other => other,
+        });
+        self.audit_focus = self.audit_focus.map(|focus| match focus {
+            LiveBlockFocus::Tool(id) if id == from => LiveBlockFocus::Tool(to),
+            other => other,
+        });
     }
 
     pub(crate) fn clear_streams(&mut self) {
+        self.touch_render();
         self.blocks
             .retain(|block| matches!(block, LiveBlock::Tool(_)));
         self.answer_chars = 0;
         self.reasoning_chars = 0;
         self.reasoning_expanded = false;
         self.inspect_offset = 0;
+        self.inspect_mode = false;
+        self.audit_focus = None;
         self.focus_pinned = false;
         if !self.has_tools() {
             self.focused_tool = None;
+            self.focused_block = None;
+        } else {
+            self.focused_block = self.focused_tool.map(LiveBlockFocus::Tool);
         }
         self.splash = None;
     }
 
     pub(crate) fn set_splash(&mut self, text: String) {
+        self.touch_render();
         self.blocks.clear();
         self.answer_chars = 0;
         self.reasoning_chars = 0;
         self.reasoning_expanded = false;
         self.inspect_offset = 0;
+        self.inspect_mode = false;
         self.focused_tool = None;
+        self.focused_block = None;
         self.focus_pinned = false;
+        self.audit_focus = None;
         self.splash = Some(super::render::sanitize_display_text(&text));
     }
 
     pub(crate) fn drain_tools(&mut self) -> Vec<ToolBlock> {
+        self.touch_render();
         let mut retained = VecDeque::new();
         let mut tools = Vec::new();
         while let Some(block) = self.blocks.pop_front() {
@@ -360,22 +917,80 @@ impl LiveTranscript {
         }
         self.blocks = retained;
         self.focused_tool = None;
+        self.focused_block = None;
         self.focus_pinned = false;
         tools
     }
 
+    #[allow(dead_code)]
     pub(crate) fn drain_reasoning(&mut self) -> Vec<String> {
+        self.drain_reasoning_with_ids()
+            .into_iter()
+            .map(|(_, text)| text)
+            .collect()
+    }
+
+    pub(crate) fn drain_reasoning_with_ids(&mut self) -> Vec<(PresentationId, String)> {
+        self.touch_render();
         let mut retained = VecDeque::new();
         let mut reasoning = Vec::new();
         while let Some(block) = self.blocks.pop_front() {
             match block {
-                LiveBlock::Reasoning(text) => reasoning.push(text),
+                LiveBlock::Reasoning(block) => reasoning.push((block.id, block.text)),
                 other => retained.push_back(other),
             }
         }
         self.blocks = retained;
         self.reasoning_chars = 0;
+        if self
+            .audit_focus
+            .is_some_and(|focus| matches!(focus, LiveBlockFocus::Reasoning(_)))
+        {
+            self.audit_focus = None;
+            self.inspect_mode = false;
+            self.inspect_offset = 0;
+        }
+        if matches!(self.focused_block, Some(LiveBlockFocus::Reasoning(_))) {
+            self.focused_block = self.focused_tool.map(LiveBlockFocus::Tool);
+        }
         reasoning
+    }
+
+    /// Preserve streamed Answer text when a run ends before emitting a final
+    /// graph message. The caller decides how to label the partial output;
+    /// execution never reads this presentation-only drain.
+    #[allow(dead_code)]
+    pub(crate) fn drain_answers(&mut self) -> Vec<String> {
+        self.drain_answers_with_ids()
+            .into_iter()
+            .map(|(_, text)| text)
+            .collect()
+    }
+
+    pub(crate) fn drain_answers_with_ids(&mut self) -> Vec<(PresentationId, String)> {
+        self.touch_render();
+        let mut retained = VecDeque::new();
+        let mut answers = Vec::new();
+        while let Some(block) = self.blocks.pop_front() {
+            match block {
+                LiveBlock::Answer(block) => answers.push((block.id, block.text)),
+                other => retained.push_back(other),
+            }
+        }
+        self.blocks = retained;
+        self.answer_chars = 0;
+        if self
+            .audit_focus
+            .is_some_and(|focus| matches!(focus, LiveBlockFocus::Answer(_)))
+        {
+            self.audit_focus = None;
+            self.inspect_mode = false;
+            self.inspect_offset = 0;
+        }
+        if matches!(self.focused_block, Some(LiveBlockFocus::Answer(_))) {
+            self.focused_block = self.focused_tool.map(LiveBlockFocus::Tool);
+        }
+        answers
     }
 
     pub(crate) fn has_tools(&self) -> bool {
@@ -384,16 +999,203 @@ impl LiveTranscript {
             .any(|block| matches!(block, LiveBlock::Tool(_)))
     }
 
+    pub(crate) fn current_stream_id(&self, channel: LiveChannel) -> Option<PresentationId> {
+        match (channel, self.blocks.back()) {
+            (LiveChannel::Answer, Some(LiveBlock::Answer(block))) => Some(block.id),
+            (LiveChannel::Reasoning, Some(LiveBlock::Reasoning(block))) => Some(block.id),
+            (LiveChannel::Tool, Some(LiveBlock::Tool(block))) => Some(block.id),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn current_stream_chars(&self, channel: LiveChannel) -> Option<usize> {
+        match (channel, self.blocks.back()) {
+            (LiveChannel::Answer, Some(LiveBlock::Answer(block))) => {
+                Some(block.text.chars().count())
+            }
+            (LiveChannel::Reasoning, Some(LiveBlock::Reasoning(block))) => {
+                Some(block.text.chars().count())
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn live_block_chars(&self, focus: LiveBlockFocus) -> Option<usize> {
+        self.blocks.iter().find_map(|block| match (focus, block) {
+            (LiveBlockFocus::Answer(id), LiveBlock::Answer(block)) if block.id == id => {
+                Some(block.text.chars().count())
+            }
+            (LiveBlockFocus::Reasoning(id), LiveBlock::Reasoning(block)) if block.id == id => {
+                Some(block.text.chars().count())
+            }
+            (LiveBlockFocus::Tool(id), LiveBlock::Tool(block)) if block.id == id => {
+                Some(block.presentation_chars())
+            }
+            _ => None,
+        })
+    }
+
+    pub(crate) fn live_tool_chars(&self, id: PresentationId) -> Option<usize> {
+        self.blocks.iter().find_map(|block| match block {
+            LiveBlock::Tool(tool) if tool.id == id => Some(tool.presentation_chars()),
+            _ => None,
+        })
+    }
+
+    fn reserve_stream_id(&mut self, id: PresentationId) {
+        self.next_stream_id = self.next_stream_id.max(id.saturating_add(1));
+    }
+
     pub(crate) fn has_reasoning(&self) -> bool {
         self.blocks
             .iter()
             .any(|block| matches!(block, LiveBlock::Reasoning(_)))
     }
 
+    pub(crate) fn has_answer(&self) -> bool {
+        self.blocks
+            .iter()
+            .any(|block| matches!(block, LiveBlock::Answer(_)))
+    }
+
+    /// Focus the newest block for a channel without copying its text.  This
+    /// is the live audit bridge used by contextual shortcuts such as Ctrl+A.
+    pub(crate) fn focus_latest(&mut self, channel: LiveChannel) -> bool {
+        let focus = self
+            .blocks
+            .iter()
+            .rev()
+            .find_map(|block| match (channel, block) {
+                (LiveChannel::Answer, LiveBlock::Answer(answer)) => {
+                    Some(LiveBlockFocus::Answer(answer.id))
+                }
+                (LiveChannel::Reasoning, LiveBlock::Reasoning(reasoning)) => {
+                    Some(LiveBlockFocus::Reasoning(reasoning.id))
+                }
+                (LiveChannel::Tool, LiveBlock::Tool(tool)) => Some(LiveBlockFocus::Tool(tool.id)),
+                _ => None,
+            });
+        let Some(focus) = focus else {
+            return false;
+        };
+        self.focus_live_block(focus);
+        true
+    }
+
     pub(crate) fn has_inspectable_output(&self) -> bool {
         self.blocks
             .iter()
             .any(|block| matches!(block, LiveBlock::Answer(_) | LiveBlock::Reasoning(_)))
+    }
+
+    pub(crate) fn has_history(&self) -> bool {
+        !self.blocks.is_empty()
+    }
+
+    /// Snapshot the current mixed stream for the modal inspector.  Newest
+    /// block appears first; large answer/reasoning bodies receive a bounded
+    /// head/tail preview while the live viewport remains the full display.
+    pub(crate) fn inspector_rows(&self) -> Vec<LiveBlockEntry> {
+        self.blocks
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(index, block)| match block {
+                LiveBlock::Answer(answer) => LiveBlockEntry {
+                    key: format!(
+                        "#{} 🤖 Answer · {} chars · p#{}",
+                        index + 1,
+                        answer.text.chars().count(),
+                        answer.id
+                    ),
+                    detail: inspector_detail(&answer.text),
+                    focus: LiveBlockFocus::Answer(answer.id),
+                },
+                LiveBlock::Reasoning(text) => LiveBlockEntry {
+                    key: format!(
+                        "#{} 💭 Reasoning · {} chars · p#{}",
+                        index + 1,
+                        text.text.chars().count(),
+                        text.id
+                    ),
+                    detail: inspector_detail(&text.text),
+                    focus: LiveBlockFocus::Reasoning(text.id),
+                },
+                LiveBlock::Tool(tool) => LiveBlockEntry {
+                    key: format!(
+                        "#{} ⚙ {} · p#{}",
+                        index + 1,
+                        tool.summary(),
+                        tool.presentation_id()
+                    ),
+                    detail: tool.details_text(),
+                    focus: LiveBlockFocus::Tool(tool.id),
+                },
+            })
+            .collect()
+    }
+
+    /// Move render focus to the semantic block selected in the Inspector.
+    /// This only changes the presentation projection; the running model task
+    /// and pending queue remain untouched.
+    pub(crate) fn focus_live_block(&mut self, focus: LiveBlockFocus) -> bool {
+        let present = self.contains_focus(focus);
+        if !present {
+            return false;
+        }
+        let next_tool = match focus {
+            LiveBlockFocus::Tool(id) => Some(id),
+            LiveBlockFocus::Answer(_) | LiveBlockFocus::Reasoning(_) => None,
+        };
+        let next_pinned = matches!(focus, LiveBlockFocus::Tool(_)) && next_tool.is_some();
+        let audit = matches!(
+            focus,
+            LiveBlockFocus::Answer(_) | LiveBlockFocus::Reasoning(_)
+        );
+        let before_audit = (self.audit_focus, self.inspect_mode, self.inspect_offset);
+        let changed = self.focused_block != Some(focus)
+            || self.focused_tool != next_tool
+            || self.focus_pinned != next_pinned
+            || (audit && before_audit != (Some(focus), true, 0))
+            || (!audit && self.audit_focus.is_some());
+        self.focused_block = Some(focus);
+        self.focused_tool = next_tool;
+        self.focus_pinned = next_pinned;
+        if audit {
+            // Selecting a semantic block is an explicit non-blocking audit:
+            // keep that block visible while tokens continue arriving.
+            self.audit_focus = Some(focus);
+            self.inspect_mode = true;
+            self.inspect_offset = 0;
+        } else {
+            self.audit_focus = None;
+        }
+        if changed {
+            self.touch_render();
+        }
+        changed
+    }
+
+    /// Align an underlying tool's live expansion with the Inspector detail
+    /// toggle.  The panel remains presentation-only, but closing it preserves
+    /// the user's chosen tool view in the live viewport.
+    pub(crate) fn set_tool_expanded(&mut self, id: u64, expanded: bool) -> bool {
+        let changed = self
+            .blocks
+            .iter_mut()
+            .find_map(|block| match block {
+                LiveBlock::Tool(tool) if tool.id == id => Some(tool.set_expanded(expanded)),
+                _ => None,
+            })
+            .unwrap_or(false);
+        if changed {
+            self.audit_focus = None;
+            self.focused_tool = Some(id);
+            self.focused_block = Some(LiveBlockFocus::Tool(id));
+            self.focus_pinned = true;
+            self.touch_render();
+        }
+        changed
     }
 
     pub(crate) fn scroll_live(&mut self, delta: i8) -> bool {
@@ -409,17 +1211,76 @@ impl LiveTranscript {
         } else if delta < 0 {
             self.inspect_offset = self.inspect_offset.saturating_sub(LIVE_SCROLL_STEP);
         }
-        self.inspect_offset != before
+        let changed = self.inspect_offset != before;
+        if changed {
+            self.inspect_mode = true;
+            self.touch_render();
+        }
+        changed
+    }
+
+    pub(crate) fn scroll_live_page(&mut self, direction: i8, page_rows: usize) -> bool {
+        if !self.has_inspectable_output() {
+            return false;
+        }
+        let before = self.inspect_offset;
+        let step = page_rows.saturating_sub(1).max(1);
+        if direction > 0 {
+            self.inspect_offset = self
+                .inspect_offset
+                .saturating_add(step)
+                .min(MAX_LIVE_INSPECT_OFFSET);
+        } else if direction < 0 {
+            self.inspect_offset = self.inspect_offset.saturating_sub(step);
+        }
+        let changed = self.inspect_offset != before;
+        if changed {
+            self.inspect_mode = true;
+            self.touch_render();
+        }
+        changed
+    }
+
+    /// Hold the live viewport without cancelling the running model task.
+    pub(crate) fn hold_live(&mut self) -> bool {
+        if !self.has_inspectable_output() {
+            return false;
+        }
+        let before = (self.inspect_mode, self.inspect_offset);
+        self.inspect_mode = true;
+        if self.inspect_offset == 0 {
+            self.inspect_offset = LIVE_SCROLL_STEP.min(MAX_LIVE_INSPECT_OFFSET);
+        }
+        let changed = (self.inspect_mode, self.inspect_offset) != before;
+        if changed {
+            self.touch_render();
+        }
+        changed
     }
 
     pub(crate) fn follow_live(&mut self) -> bool {
-        let changed = self.inspect_offset != 0;
+        let audit_focus = self.audit_focus.take();
+        let clear_semantic_focus = matches!(
+            self.focused_block,
+            Some(LiveBlockFocus::Answer(_) | LiveBlockFocus::Reasoning(_))
+        );
+        let changed = audit_focus.is_some()
+            || clear_semantic_focus
+            || self.inspect_mode
+            || self.inspect_offset != 0;
+        self.inspect_mode = false;
         self.inspect_offset = 0;
+        if clear_semantic_focus {
+            self.focused_block = self.focused_tool.map(LiveBlockFocus::Tool);
+        }
+        if changed {
+            self.touch_render();
+        }
         changed
     }
 
     pub(crate) fn is_inspecting(&self) -> bool {
-        self.inspect_offset != 0
+        self.inspect_mode || self.inspect_offset != 0
     }
 
     /// 顶栏焦点 chip 只读取当前已净化的工具摘要，不复制工具详情或引入新状态。
@@ -431,6 +1292,10 @@ impl LiveTranscript {
         })
     }
 
+    pub(crate) fn focused_block(&self) -> Option<LiveBlockFocus> {
+        self.focused_block
+    }
+
     /// 顶部 chrome 的真实通道 badge：只看最后一个 LiveBlock，不推断模型隐藏状态。
     pub(crate) fn active_channel(&self) -> Option<LiveChannel> {
         self.blocks.back().map(|block| match block {
@@ -438,6 +1303,28 @@ impl LiveTranscript {
             LiveBlock::Reasoning(_) => LiveChannel::Reasoning,
             LiveBlock::Tool(_) => LiveChannel::Tool,
         })
+    }
+
+    /// Derive a compact phase trace from the existing mixed live blocks.
+    /// Consecutive chunks of one channel collapse into one token; only the
+    /// latest bounded transitions survive block eviction.  This is a
+    /// presentation projection, never a second execution timeline.
+    pub(crate) fn phase_trace(&self) -> Vec<LiveChannel> {
+        let mut trace = Vec::new();
+        for block in &self.blocks {
+            let channel = match block {
+                LiveBlock::Answer(_) => LiveChannel::Answer,
+                LiveBlock::Reasoning(_) => LiveChannel::Reasoning,
+                LiveBlock::Tool(_) => LiveChannel::Tool,
+            };
+            if trace.last().copied() != Some(channel) {
+                trace.push(channel);
+            }
+        }
+        if trace.len() > MAX_LIVE_PHASE_TRACE {
+            trace.drain(..trace.len() - MAX_LIVE_PHASE_TRACE);
+        }
+        trace
     }
 
     pub(crate) fn move_tool_focus(&mut self, delta: i8) -> bool {
@@ -463,21 +1350,53 @@ impl LiveTranscript {
         };
         let changed = self.focused_tool != Some(ids[next]);
         self.focused_tool = Some(ids[next]);
+        self.focused_block = Some(LiveBlockFocus::Tool(ids[next]));
         self.focus_pinned = next + 1 < ids.len();
+        if changed {
+            self.touch_render();
+        }
         changed
+    }
+
+    /// Move the held live projection across Answer/Reasoning/Tool blocks.
+    /// This reuses `focused_block`; it does not add a second focus state.
+    pub(crate) fn move_semantic_focus(&mut self, delta: i8) -> bool {
+        let focuses = self
+            .inspector_rows()
+            .into_iter()
+            .map(|entry| entry.focus)
+            .collect::<Vec<_>>();
+        if focuses.is_empty() {
+            return false;
+        }
+        let current = self
+            .focused_block
+            .and_then(|focus| focuses.iter().position(|candidate| *candidate == focus));
+        let next = match (current, delta < 0) {
+            (Some(index), true) => index.saturating_sub(1),
+            (Some(index), false) => index.saturating_add(1).min(focuses.len() - 1),
+            (None, true) => focuses.len() - 1,
+            (None, false) => 0,
+        };
+        self.focus_live_block(focuses[next])
     }
 
     pub(crate) fn scroll_tool_details(&mut self, delta: i8) -> bool {
         let Some(focused_id) = self.focused_tool else {
             return false;
         };
-        self.blocks
+        let changed = self
+            .blocks
             .iter_mut()
             .find_map(|block| match block {
                 LiveBlock::Tool(tool) if tool.id == focused_id => Some(tool.scroll_details(delta)),
                 _ => None,
             })
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if changed {
+            self.touch_render();
+        }
+        changed
     }
 
     pub(crate) fn has_scrollable_tool_details(&self) -> bool {
@@ -499,15 +1418,22 @@ impl LiveTranscript {
         let Some(target) = target else {
             return false;
         };
+        let mut changed = false;
+        let mut expanded = false;
         for block in &mut self.blocks {
             if let LiveBlock::Tool(tool) = block {
                 if tool.id == target {
                     self.focused_tool = Some(target);
-                    return tool.toggle();
+                    expanded = tool.toggle();
+                    changed = true;
+                    break;
                 }
             }
         }
-        false
+        if changed {
+            self.touch_render();
+        }
+        expanded
     }
 
     pub(crate) fn toggle_reasoning(&mut self) -> bool {
@@ -515,11 +1441,119 @@ impl LiveTranscript {
             return false;
         }
         self.reasoning_expanded = !self.reasoning_expanded;
+        self.touch_render();
         self.reasoning_expanded
+    }
+
+    /// Activate the currently inspected semantic block without creating a
+    /// second expansion state or touching execution data.
+    pub(crate) fn toggle_focused_semantic(&mut self) -> bool {
+        match self.focused_block {
+            Some(LiveBlockFocus::Tool(_)) => {
+                self.toggle_details();
+                true
+            }
+            Some(LiveBlockFocus::Reasoning(_)) => self.toggle_reasoning() || self.has_reasoning(),
+            Some(LiveBlockFocus::Answer(_)) | None if self.has_tools() => {
+                self.toggle_details();
+                true
+            }
+            Some(LiveBlockFocus::Answer(_)) | None => {
+                self.toggle_reasoning() || self.has_reasoning()
+            }
+        }
     }
 
     pub(crate) fn is_reasoning_expanded(&self) -> bool {
         self.reasoning_expanded
+    }
+
+    pub(crate) fn render_revision(&self) -> u64 {
+        self.render_revision
+    }
+
+    #[allow(dead_code)]
+    fn next_stream_id(&mut self) -> u64 {
+        let id = self.next_stream_id;
+        self.next_stream_id = self.next_stream_id.wrapping_add(1);
+        id
+    }
+
+    fn contains_focus(&self, focus: LiveBlockFocus) -> bool {
+        self.blocks.iter().any(|block| match (focus, block) {
+            (LiveBlockFocus::Answer(id), LiveBlock::Answer(answer)) => answer.id == id,
+            (LiveBlockFocus::Reasoning(id), LiveBlock::Reasoning(reasoning)) => reasoning.id == id,
+            (LiveBlockFocus::Tool(id), LiveBlock::Tool(tool)) => tool.id == id,
+            _ => false,
+        })
+    }
+
+    fn touch_render(&mut self) {
+        self.render_revision = self.render_revision.wrapping_add(1);
+    }
+
+    /// Keep an explicit live hold stable while the producer appends rows.
+    /// `inspect_offset` is measured in bounded logical rows, so advancing it
+    /// by the appended newline count prevents the held view drifting toward
+    /// the tail on every streamed token. Inspector focus has its own semantic
+    /// projection and must not be shifted here.
+    fn preserve_hold_for_append(&mut self, text: &str, starts_new_block: bool) {
+        if !self.inspect_mode || self.audit_focus.is_some() {
+            return;
+        }
+        let added_rows = text.matches('\n').count() + usize::from(starts_new_block);
+        if added_rows > 0 {
+            self.inspect_offset = self
+                .inspect_offset
+                .saturating_add(added_rows)
+                .min(MAX_LIVE_INSPECT_OFFSET);
+        }
+    }
+
+    fn audit_lines<'a>(
+        &'a self,
+        focus: LiveBlockFocus,
+        max_rows: usize,
+    ) -> Option<(VecDeque<LiveLine<'a>>, bool)> {
+        let mut lines = VecDeque::with_capacity(max_rows);
+        let truncated = match focus {
+            LiveBlockFocus::Answer(id) => {
+                let LiveBlock::Answer(answer) = self
+                    .blocks
+                    .iter()
+                    .find(|block| matches!(block, LiveBlock::Answer(answer) if answer.id == id))?
+                else {
+                    return None;
+                };
+                append_answer_tail(
+                    &mut lines,
+                    answer,
+                    role_color(Role::Answer),
+                    Some("🤖 "),
+                    false,
+                    max_rows,
+                )
+            }
+            LiveBlockFocus::Reasoning(id) => {
+                let LiveBlock::Reasoning(reasoning) = self.blocks.iter().find(
+                    |block| matches!(block, LiveBlock::Reasoning(reasoning) if reasoning.id == id),
+                )?
+                else {
+                    return None;
+                };
+                append_text_tail(
+                    &mut lines,
+                    &reasoning.text,
+                    &reasoning.line_index,
+                    role_color(Role::Reasoning),
+                    Some("💭 "),
+                    LiveBlockFocus::Reasoning(reasoning.id),
+                    max_rows,
+                )
+            }
+            LiveBlockFocus::Tool(_) => return None,
+        };
+        Some((lines, truncated))
     }
 
     pub(crate) fn visible_lines<'a>(&'a self, max_rows: usize) -> Vec<LiveLine<'a>> {
@@ -531,9 +1565,34 @@ impl LiveTranscript {
         let max_rows = requested_rows.saturating_add(inspect_offset);
         if let Some(splash) = &self.splash {
             return tail_lines(
-                text_lines(splash, Color::White, LiveLineKind::Splash),
+                text_lines(splash, role_color(Role::Answer), LiveLineKind::Splash),
                 max_rows,
             );
+        }
+
+        // Inspector selection can pin one historical Answer/Reasoning block
+        // without stopping the producer.  Render that bounded block directly;
+        // normal Follow projection below remains unchanged after Alt+End.
+        if let Some(focus) = self.audit_focus {
+            if let Some((lines, mut truncated)) = self.audit_lines(focus, max_rows) {
+                let mut visible = into_tail(lines, max_rows);
+                let effective_offset =
+                    inspect_offset.min(visible.len().saturating_sub(requested_rows));
+                if effective_offset > 0 {
+                    let end = visible.len().saturating_sub(effective_offset);
+                    let start = end.saturating_sub(requested_rows);
+                    visible = visible
+                        .into_iter()
+                        .skip(start)
+                        .take(end.saturating_sub(start))
+                        .collect();
+                    truncated = true;
+                }
+                mark_reasoning_continuation(&mut visible, truncated);
+                ensure_marker(&mut visible, LiveLineKind::Reasoning, "💭 ");
+                ensure_marker(&mut visible, LiveLineKind::Answer, "🤖 ");
+                return visible;
+            }
         }
 
         // Keep only rows that can reach this frame.  A long-running task may
@@ -566,13 +1625,13 @@ impl LiveTranscript {
                     answer_fence = append_answer_tail(
                         &mut answers,
                         answer,
-                        Color::White,
+                        role_color(Role::Answer),
                         Some("🤖 "),
                         answer_fence,
                         max_rows,
                     );
                 }
-                LiveBlock::Reasoning(text) => {
+                LiveBlock::Reasoning(reasoning_block) => {
                     // Before the first Answer, keep the actual Reasoning/Tool
                     // block order; once Answer exists, the dedicated lanes
                     // intentionally enforce Answer-first budgeting.
@@ -583,10 +1642,11 @@ impl LiveTranscript {
                     };
                     reasoning_truncated |= append_text_tail(
                         target,
-                        text,
-                        Color::DarkGray,
-                        LiveLineKind::Reasoning,
+                        &reasoning_block.text,
+                        &reasoning_block.line_index,
+                        role_color(Role::Reasoning),
                         Some("💭 "),
+                        LiveBlockFocus::Reasoning(reasoning_block.id),
                         max_rows,
                     );
                 }
@@ -598,19 +1658,26 @@ impl LiveTranscript {
             }
         }
 
-        // Default view keeps Answer readable and leaves one actual reasoning row.
-        // Ctrl+R opts into an inspection view: reasoning gets the remaining rows,
-        // while Answer keeps one row and a focused tool keeps its summary.
+        // Default view keeps Answer readable while reserving an adaptive reasoning
+        // preview. Ctrl+R opts into an inspection view: reasoning gets the
+        // remaining rows, while Answer keeps one row and a focused tool keeps its
+        // summary.
+        let reasoning_preview_rows = default_reasoning_preview_rows(max_rows);
         let reserve_reasoning = !self.reasoning_expanded
             && !answers.is_empty()
             && !focused_tool_expanded
             && !reasoning.is_empty()
-            && max_rows > LIVE_REASONING_ROWS + usize::from(focused_id.is_some());
+            && max_rows > reasoning_preview_rows + usize::from(focused_id.is_some());
         let answer_budget = if self.reasoning_expanded {
             let focus_reservation = usize::from(focused_id.is_some() && max_rows > 1);
             usize::from(!answers.is_empty()).min(max_rows.saturating_sub(focus_reservation))
         } else {
-            let reserved = usize::from(focused_id.is_some()) + usize::from(reserve_reasoning);
+            let reserved = usize::from(focused_id.is_some())
+                + if reserve_reasoning {
+                    reasoning_preview_rows
+                } else {
+                    0
+                };
             max_rows.saturating_sub(reserved)
         };
         let answers = pin_answer_header(
@@ -642,7 +1709,11 @@ impl LiveTranscript {
                 } else {
                     max_rows
                         .saturating_sub(answers.len())
-                        .saturating_sub(usize::from(reserve_reasoning))
+                        .saturating_sub(if reserve_reasoning {
+                            reasoning_preview_rows
+                        } else {
+                            0
+                        })
                         .max(1)
                 };
                 tool.append_live_tail(&mut focused, focus_budget, true);
@@ -654,7 +1725,7 @@ impl LiveTranscript {
         let mut visible = if self.reasoning_expanded && !reasoning.is_empty() {
             into_tail(reasoning, remaining)
         } else if reserve_reasoning {
-            let reasoning = into_tail(reasoning, remaining.min(LIVE_REASONING_ROWS));
+            let reasoning = into_tail(reasoning, remaining.min(reasoning_preview_rows));
             let mut visible = into_tail(other, remaining.saturating_sub(reasoning.len()));
             visible.extend(reasoning);
             visible
@@ -714,14 +1785,66 @@ impl LiveTranscript {
                 LiveBlock::Tool(tool) => Some(tool.id),
                 _ => None,
             });
+            self.focused_block = self.focused_tool.map(LiveBlockFocus::Tool);
             self.focus_pinned = false;
+        }
+        if let Some(focus) = self.focused_block {
+            let still_present = match focus {
+                LiveBlockFocus::Answer(id) => self
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, LiveBlock::Answer(answer) if answer.id == id)),
+                LiveBlockFocus::Reasoning(id) => self.blocks.iter().any(
+                    |block| matches!(block, LiveBlock::Reasoning(reasoning) if reasoning.id == id),
+                ),
+                LiveBlockFocus::Tool(id) => self
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, LiveBlock::Tool(tool) if tool.id == id)),
+            };
+            if !still_present {
+                self.focused_block = self.focused_tool.map(LiveBlockFocus::Tool);
+            }
+        }
+        if self
+            .audit_focus
+            .is_some_and(|focus| !self.contains_focus(focus))
+        {
+            self.audit_focus = None;
+            self.inspect_mode = false;
+            self.inspect_offset = 0;
         }
         evicted
     }
 }
 
-fn append_bounded(target: &mut String, char_count: &mut usize, text: &str) {
+fn inspector_detail(text: &str) -> String {
+    let count = text.chars().count();
+    if count <= MAX_INSPECT_DETAIL_CHARS {
+        return text.to_owned();
+    }
+    let half = MAX_INSPECT_DETAIL_CHARS / 2;
+    let head = text.chars().take(half).collect::<String>();
+    let tail = text
+        .chars()
+        .rev()
+        .take(half)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("{head}\n… [{count} chars; middle omitted]\n{tail}")
+}
+
+fn append_bounded(
+    target: &mut String,
+    line_index: &mut LineIndex,
+    char_count: &mut usize,
+    text: &str,
+) {
+    let old_len = target.len();
     target.push_str(text);
+    line_index.append(old_len, text);
     *char_count += text.chars().count();
     if *char_count > MAX_LIVE_TEXT_CHARS {
         let skip = *char_count - MAX_LIVE_TEXT_CHARS;
@@ -731,6 +1854,7 @@ fn append_bounded(target: &mut String, char_count: &mut usize, text: &str) {
             .map(|(index, _)| index)
             .unwrap_or(0);
         target.drain(..start);
+        line_index.trim_prefix(start);
         *char_count = MAX_LIVE_TEXT_CHARS;
     }
 }
@@ -739,6 +1863,8 @@ fn append_answer_bounded(target: &mut AnswerBlock, char_count: &mut usize, text:
     let old_len = target.text.len();
     let old_last_line_start = target.last_line_start;
     target.text.push_str(text);
+    target.line_index.append(old_len, text);
+    target.has_markdown_syntax |= contains_markdown_syntax(text);
     *char_count += text.chars().count();
 
     if *char_count > MAX_LIVE_TEXT_CHARS {
@@ -750,18 +1876,23 @@ fn append_answer_bounded(target: &mut AnswerBlock, char_count: &mut usize, text:
             .map(|(index, _)| index)
             .unwrap_or(0);
         target.text.drain(..start);
+        target.line_index.trim_prefix(start);
         target.fence_starts.clear();
         *char_count = MAX_LIVE_TEXT_CHARS;
         rebuild_fence_starts(target);
+        target.has_markdown_syntax = contains_markdown_syntax(&target.text);
     } else {
         target
             .fence_starts
             .retain(|&start| start < old_last_line_start);
         append_fence_starts(target, old_last_line_start, old_len);
-        target.last_line_start = target.text[old_len..]
-            .rfind('\n')
-            .map_or(old_last_line_start, |index| old_len + index + 1);
+        target.last_line_start = target.line_index.last_start();
     }
+}
+
+fn contains_markdown_syntax(text: &str) -> bool {
+    text.bytes()
+        .any(|byte| matches!(byte, b'`' | b'*' | b'_' | b'[' | b']' | b'#' | b'<' | b'>'))
 }
 
 fn append_fence_starts(target: &mut AnswerBlock, line_start: usize, appended_start: usize) {
@@ -811,20 +1942,27 @@ fn text_lines<'a>(text: &'a str, color: Color, kind: LiveLineKind) -> Vec<LiveLi
 fn append_text_tail<'a>(
     target: &mut VecDeque<LiveLine<'a>>,
     text: &'a str,
+    line_index: &LineIndex,
     color: Color,
-    kind: LiveLineKind,
     marker: Option<&'static str>,
+    focus: LiveBlockFocus,
     max_rows: usize,
 ) -> bool {
     if max_rows == 0 {
         return false;
     }
-    let mut tail = VecDeque::with_capacity(max_rows);
-    let mut lines = text.split('\n').rev();
-    for line in lines.by_ref().take(max_rows) {
-        tail.push_front(LiveLine::new(line, color, kind));
+    let ranges = line_index.tail_ranges(text, max_rows);
+    let text_truncated = line_index.line_count() > ranges.len();
+    let mut tail = VecDeque::with_capacity(ranges.len());
+    let first_line = line_index.line_count().saturating_sub(ranges.len());
+    for (index, (start, end)) in ranges.into_iter().enumerate() {
+        let mut line = LiveLine::new(&text[start..end], color, LiveLineKind::Reasoning);
+        line.anchor = Some(LiveLineAnchor {
+            focus,
+            logical_line: first_line + index,
+        });
+        tail.push_back(line);
     }
-    let text_truncated = lines.next().is_some();
     let target_truncated = target.len() + tail.len() > max_rows;
     if let (Some(marker), Some(first)) = (marker, tail.front_mut()) {
         first.marker = Some(marker);
@@ -847,12 +1985,19 @@ fn append_answer_tail<'a>(
         return fence_before;
     }
     let mut tail = VecDeque::with_capacity(max_rows);
-    for (start, end) in tail_ranges(&answer.text, max_rows) {
+    let ranges = answer_tail_ranges(answer, max_rows);
+    let first_line = answer.line_index.line_count().saturating_sub(ranges.len());
+    for (index, (start, end)) in ranges.into_iter().enumerate() {
         let line = &answer.text[start..end];
         let fence_count = answer
             .fence_starts
             .partition_point(|&fence_start| fence_start < start);
         let mut rendered = LiveLine::new(line, color, LiveLineKind::Answer);
+        rendered.anchor = Some(LiveLineAnchor {
+            focus: LiveBlockFocus::Answer(answer.id),
+            logical_line: first_line + index,
+        });
+        rendered.answer_plain = !answer.has_markdown_syntax;
         rendered.fence_before = fence_before ^ (fence_count % 2 != 0);
         if tail.len() == max_rows {
             tail.pop_front();
@@ -866,25 +2011,17 @@ fn append_answer_tail<'a>(
     fence_before ^ !answer.fence_starts.len().is_multiple_of(2)
 }
 
-fn tail_ranges(text: &str, max_rows: usize) -> Vec<(usize, usize)> {
-    if max_rows == 0 {
+fn answer_tail_ranges(answer: &AnswerBlock, max_rows: usize) -> Vec<(usize, usize)> {
+    if max_rows == 0 || answer.text.is_empty() {
         return Vec::new();
     }
-    let mut ranges = VecDeque::with_capacity(max_rows);
-    let mut end = text.len();
-    for (index, character) in text.char_indices().rev() {
-        if character == '\n' {
-            ranges.push_front((index + 1, end));
-            end = index;
-            if ranges.len() == max_rows {
-                break;
-            }
-        }
+    // `last_line_start == 0` is maintained by append/rebuild and means the
+    // bounded Answer has no newline.  Avoid walking a 32K token tail just to
+    // discover that it is one logical line.
+    if answer.last_line_start == 0 {
+        return vec![(0, answer.text.len())];
     }
-    if ranges.len() < max_rows {
-        ranges.push_front((0, end));
-    }
-    ranges.into_iter().collect()
+    answer.line_index.tail_ranges(&answer.text, max_rows)
 }
 
 fn pin_answer_header<'a>(
@@ -905,6 +2042,15 @@ fn pin_answer_header<'a>(
         return answers;
     }
 
+    let answer_plain = answers.first().is_some_and(|line| line.answer_plain);
+    let answer_anchor = answers.first().and_then(|line| line.anchor);
+    // The pinned header is a real logical line zero; it must not inherit the
+    // tail row's anchor or a width change would resolve every held Answer view
+    // back to the header.
+    let header_anchor = answer_anchor.map(|anchor| LiveLineAnchor {
+        focus: anchor.focus,
+        logical_line: 0,
+    });
     let header_fence_before = answers
         .first()
         .map(|line| line.fence_before)
@@ -916,13 +2062,15 @@ fn pin_answer_header<'a>(
         .collect::<Vec<_>>();
     tail.reverse();
     let mut anchored = Vec::with_capacity(max_rows);
-    let mut first = LiveLine::new(header, Color::White, LiveLineKind::Answer);
+    let mut first = LiveLine::new(header, role_color(Role::Answer), LiveLineKind::Answer);
+    first.answer_plain = answer_plain;
     first.fence_before = header_fence_before;
     first.marker = Some("🤖 ");
+    first.anchor = header_anchor;
     anchored.push(first);
     let mut continuation = LiveLine::new(
         "  … answer continues",
-        Color::DarkGray,
+        role_color(Role::Muted),
         LiveLineKind::Answer,
     );
     continuation.fence_before = if header.trim_start().starts_with("```") {
@@ -930,6 +2078,7 @@ fn pin_answer_header<'a>(
     } else {
         header_fence_before
     };
+    continuation.anchor = answer_anchor;
     anchored.push(continuation);
     anchored.extend(tail);
     anchored
@@ -1000,11 +2149,172 @@ mod tests {
         assert!(tool
             .live_lines()
             .iter()
-            .any(|line| line.text.contains("[Ctrl+O details]")));
+            .any(|line| line.text.contains("[Ctrl+O details")));
         assert!(tool.toggle());
         let expanded = tool.live_lines();
         assert!(expanded.iter().any(|line| line.text == "- old"));
         assert!(expanded.iter().any(|line| line.text == "+ new"));
+    }
+
+    #[test]
+    fn inspector_rows_are_newest_first_and_bounded() {
+        let mut transcript = LiveTranscript::default();
+        transcript.push_reasoning("thinking");
+        transcript.push_tool(
+            ToolBlock::from_lines(vec![
+                ("read_file".into(), Color::Cyan),
+                ("detail".into(), Color::Gray),
+            ])
+            .expect("tool"),
+        );
+        transcript.push_answer("answer");
+
+        let rows = transcript.inspector_rows();
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].key.contains("Answer"));
+        assert!(rows[1].key.contains("read_file"));
+        assert!(rows[2].key.contains("Reasoning"));
+        assert_eq!(rows[1].detail, "detail");
+
+        let long = "x".repeat(MAX_INSPECT_DETAIL_CHARS + 100);
+        let mut long_transcript = LiveTranscript::default();
+        long_transcript.push_answer(&long);
+        let detail = &long_transcript.inspector_rows()[0].detail;
+        assert!(detail.contains("middle omitted"));
+        assert!(detail.chars().count() < long.chars().count());
+    }
+
+    #[test]
+    fn inspector_rows_keep_semantic_tool_identity_for_focus() {
+        let mut transcript = LiveTranscript::default();
+        transcript.push_tool(
+            ToolBlock::from_lines(vec![
+                ("read_file".into(), Color::Cyan),
+                ("file contents".into(), Color::Gray),
+            ])
+            .expect("tool"),
+        );
+        transcript.push_answer("answer");
+
+        let rows = transcript.inspector_rows();
+        let LiveBlockFocus::Tool(id) = rows[1].focus else {
+            panic!("tool row must retain tool identity");
+        };
+        assert!(transcript.focus_live_block(LiveBlockFocus::Tool(id)));
+        assert_eq!(transcript.focused_tool, Some(id));
+        assert!(transcript.focus_pinned);
+        assert!(transcript.set_tool_expanded(id, true));
+        assert!(transcript
+            .visible_lines(4)
+            .iter()
+            .any(|line| line.text == "file contents"));
+    }
+
+    #[test]
+    fn inspector_focus_tracks_answer_and_reasoning_semantics() {
+        let mut transcript = LiveTranscript::default();
+        transcript.push_reasoning("inspect plan");
+        transcript.push_answer("final answer");
+
+        let answer_id = transcript
+            .inspector_rows()
+            .iter()
+            .find_map(|row| match row.focus {
+                LiveBlockFocus::Answer(id) => Some(id),
+                _ => None,
+            })
+            .expect("answer focus");
+        assert!(transcript.focus_live_block(LiveBlockFocus::Answer(answer_id)));
+        assert_eq!(
+            transcript.focused_block(),
+            Some(LiveBlockFocus::Answer(answer_id))
+        );
+        assert_eq!(transcript.focused_tool, None);
+
+        let reasoning_id = transcript
+            .inspector_rows()
+            .iter()
+            .find_map(|row| match row.focus {
+                LiveBlockFocus::Reasoning(id) => Some(id),
+                _ => None,
+            })
+            .expect("reasoning focus");
+        assert!(transcript.focus_live_block(LiveBlockFocus::Reasoning(reasoning_id)));
+        assert_eq!(
+            transcript.focused_block(),
+            Some(LiveBlockFocus::Reasoning(reasoning_id))
+        );
+        assert!(!transcript.focus_live_block(LiveBlockFocus::Tool(999)));
+    }
+
+    #[test]
+    fn phase_trace_deduplicates_and_preserves_order() {
+        let mut transcript = LiveTranscript::default();
+        transcript.push_reasoning("plan");
+        transcript.push_reasoning(" more plan");
+        transcript.push_answer("answer");
+        transcript
+            .push_tool(ToolBlock::from_lines(vec![("search".into(), Color::Cyan)]).expect("tool"));
+        transcript
+            .push_tool(ToolBlock::from_lines(vec![("read".into(), Color::Cyan)]).expect("tool"));
+        transcript.push_answer("follow-up");
+
+        assert_eq!(
+            transcript.phase_trace(),
+            vec![
+                LiveChannel::Reasoning,
+                LiveChannel::Answer,
+                LiveChannel::Tool,
+                LiveChannel::Answer,
+            ]
+        );
+    }
+
+    #[test]
+    fn inspector_audit_focus_projects_selected_block_until_follow() {
+        let mut transcript = LiveTranscript::default();
+        transcript.push_reasoning("first plan");
+        transcript.push_answer("first answer");
+        transcript.push_tool(
+            ToolBlock::from_lines(vec![("tool boundary".into(), Color::Cyan)])
+                .expect("tool boundary"),
+        );
+        transcript.push_reasoning("latest plan");
+        transcript.push_answer("latest answer");
+
+        let first_answer = transcript
+            .inspector_rows()
+            .iter()
+            .find(|row| row.detail == "first answer")
+            .map(|row| row.focus)
+            .expect("first answer row");
+        assert!(transcript.focus_live_block(first_answer));
+        assert!(transcript.is_inspecting());
+        let audited = transcript.visible_lines(4);
+        assert!(audited.iter().any(|line| line.text == "first answer"));
+        assert!(!audited.iter().any(|line| line.text == "latest answer"));
+
+        let first_reasoning = transcript
+            .inspector_rows()
+            .iter()
+            .find(|row| row.detail == "first plan")
+            .map(|row| row.focus)
+            .expect("first reasoning row");
+        assert!(transcript.focus_live_block(first_reasoning));
+        let audited_reasoning = transcript.visible_lines(4);
+        assert!(audited_reasoning
+            .iter()
+            .any(|line| line.text == "first plan"));
+        assert!(!audited_reasoning
+            .iter()
+            .any(|line| line.text == "latest plan"));
+
+        assert!(transcript.follow_live());
+        assert!(!transcript.is_inspecting());
+        assert!(transcript
+            .visible_lines(4)
+            .iter()
+            .any(|line| line.text == "latest answer"));
     }
 
     #[test]
@@ -1059,11 +2369,11 @@ mod tests {
         assert!(lines.iter().any(|line| line.text == "a1"));
         assert!(!lines
             .iter()
-            .any(|line| line.text.contains("[Ctrl+O details]")));
+            .any(|line| line.text.contains("[Ctrl+O details")));
     }
 
     #[test]
-    fn answer_keeps_one_actual_reasoning_row_visible() {
+    fn answer_keeps_adaptive_reasoning_preview_visible() {
         let mut transcript = LiveTranscript::default();
         transcript.push_reasoning("r0\nr1\nr2");
         transcript.push_answer("a0\na1\na2");
@@ -1075,7 +2385,7 @@ mod tests {
                 .iter()
                 .filter(|line| line.kind == LiveLineKind::Reasoning)
                 .count(),
-            LIVE_REASONING_ROWS
+            default_reasoning_preview_rows(3)
         );
         assert!(lines.iter().any(|line| line.text == "r2"));
         assert!(lines.iter().any(|line| line.text == "a1"));
@@ -1085,23 +2395,42 @@ mod tests {
     }
 
     #[test]
-    fn answer_arrival_collapses_reasoning_inspection() {
+    fn answer_preview_uses_extra_height_for_more_reasoning() {
+        let mut transcript = LiveTranscript::default();
+        transcript.push_reasoning("r0\nr1\nr2\nr3\nr4");
+        transcript.push_answer("answer");
+
+        let lines = transcript.visible_lines(12);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.kind == LiveLineKind::Reasoning)
+                .count(),
+            MAX_LIVE_REASONING_PREVIEW_ROWS
+        );
+        assert!(lines.iter().any(|line| line.text == "r2"));
+        assert_eq!(lines.last().map(|line| line.text), Some("answer"));
+    }
+
+    #[test]
+    fn answer_arrival_preserves_explicit_reasoning_inspection() {
         let mut transcript = LiveTranscript::default();
         transcript.push_reasoning("r0\nr1\nr2");
         assert!(transcript.toggle_reasoning());
         transcript.push_answer("answer");
 
-        assert!(!transcript.is_reasoning_expanded());
+        assert!(transcript.is_reasoning_expanded());
         let lines = transcript.visible_lines(4);
         assert_eq!(
             lines
                 .iter()
                 .filter(|line| line.kind == LiveLineKind::Reasoning)
                 .count(),
-            LIVE_REASONING_ROWS
+            3
         );
         assert_eq!(lines.last().map(|line| line.text), Some("answer"));
-        assert!(transcript.toggle_reasoning());
+        assert!(lines.iter().any(|line| line.text == "r0"));
+        assert!(!transcript.toggle_reasoning());
     }
 
     #[test]
@@ -1271,7 +2600,9 @@ mod tests {
             .map(|index| format!("line {index}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let ranges = tail_ranges(&text, 3);
+        let mut index = LineIndex::default();
+        index.append(0, &text);
+        let ranges = index.tail_ranges(&text, 3);
         assert_eq!(ranges.len(), 3);
         assert!(ranges[0].0 > 0);
         assert_eq!(
@@ -1281,6 +2612,59 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["line 125", "line 126", "line 127"]
         );
+    }
+
+    #[test]
+    fn incremental_line_index_tracks_utf8_appends_and_trimmed_prefix() {
+        let chunks = ["头\n中", "\n尾"];
+        let mut text = String::new();
+        let mut index = LineIndex::default();
+        for chunk in chunks {
+            let base = text.len();
+            text.push_str(chunk);
+            index.append(base, chunk);
+        }
+        let ranges = index.tail_ranges(&text, 8);
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|&(start, end)| &text[start..end])
+                .collect::<Vec<_>>(),
+            vec!["头", "中", "尾"]
+        );
+
+        let prefix = "头\n".len();
+        text.drain(..prefix);
+        index.trim_prefix(prefix);
+        let ranges = index.tail_ranges(&text, 8);
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|&(start, end)| &text[start..end])
+                .collect::<Vec<_>>(),
+            vec!["中", "尾"]
+        );
+    }
+
+    #[test]
+    fn unbroken_answer_uses_cached_single_line_tail_metadata() {
+        let text = "x".repeat(MAX_LIVE_TEXT_CHARS);
+        let mut line_index = LineIndex::default();
+        line_index.append(0, &text);
+        let answer = AnswerBlock {
+            id: 0,
+            text: text.clone(),
+            line_index,
+            fence_starts: Vec::new(),
+            last_line_start: 0,
+            has_markdown_syntax: false,
+        };
+        assert_eq!(answer_tail_ranges(&answer, 8), vec![(0, text.len())]);
+
+        let mut transcript = LiveTranscript::default();
+        transcript.push_answer(&text);
+        let visible = transcript.visible_lines(8);
+        assert!(visible.iter().all(|line| line.answer_plain));
     }
 
     #[test]
@@ -1308,6 +2692,30 @@ mod tests {
             .iter()
             .any(|line| line.text == "tool 0" && line.marker == Some("▸ ")));
         assert!(!lines.iter().any(|line| line.text == "detail 1"));
+    }
+
+    #[test]
+    fn semantic_focus_moves_across_reasoning_answer_and_tool_blocks() {
+        let mut transcript = LiveTranscript::default();
+        transcript.push_reasoning("think");
+        transcript.push_answer("answer");
+        transcript
+            .push_tool(ToolBlock::from_lines(vec![("tool".into(), Color::Cyan)]).expect("tool"));
+        let focuses = transcript
+            .inspector_rows()
+            .into_iter()
+            .map(|entry| entry.focus)
+            .collect::<Vec<_>>();
+        assert_eq!(focuses.len(), 3);
+
+        assert!(transcript.focus_live_block(focuses[0]));
+        assert!(transcript.move_semantic_focus(1));
+        assert_eq!(transcript.focused_block(), Some(focuses[1]));
+        assert!(transcript.move_semantic_focus(1));
+        assert_eq!(transcript.focused_block(), Some(focuses[2]));
+        assert!(!transcript.move_semantic_focus(1));
+        assert!(transcript.move_semantic_focus(-1));
+        assert_eq!(transcript.focused_block(), Some(focuses[1]));
     }
 
     #[test]

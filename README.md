@@ -67,6 +67,24 @@ ridgecode login ...                    接入内置 provider 或 OAuth 订阅
 printf "检查编译\n检查测试\n" | ridgecode --read-only
 ~~~
 
+## Goal 长任务收敛
+
+goal 是本地持久化的单目标生命周期；模型自述不会自动把目标标记为完成。状态文件默认写入 .ridge/goal.json，可用 RIDGE_GOAL_FILE 覆盖。
+
+~~~bash
+ridgecode goal create "ship stable release"
+ridgecode goal start
+ridgecode goal advance verify "workspace tests passed" --next "run PTY smoke"
+ridgecode goal block "PTY harness unavailable" --next "install a PTY harness"
+ridgecode goal resume
+ridgecode goal complete "PTY smoke passed"
+ridgecode goal status
+~~~
+
+状态包含 active、blocked、completed、cancelled、phase、evidence、failure、next、running、revision；每次更新先写临时文件并原子替换，重启后可直接执行 goal status 回读。TUI 内使用 /goal、/goal create ...、/goal status 等同一组命令；/goal help 查看完整语法。
+
+外部调用有界：shell 默认 RIDGE_SHELL_TIMEOUT=180 秒，MCP 工具默认 RIDGE_TOOL_TIMEOUT=180 秒；超时会返回失败观测并显示 waiting/timeout，不再无限停留在调查阶段。
+
 ## Provider 与登录
 
 ### API Key 登录
@@ -104,6 +122,8 @@ ridgecode login --codex
 ridgecode login --codex --device-auth
 ~~~
 
+ChatGPT/Codex 启动时会用 OAuth 账号目录校验当前模型；若配置中的 `gpt-5` 不在账号可用列表，自动切换到目录首个可用模型（例如 `gpt-5.6-sol`），避免把公共 API 模型名误发到订阅端点。`RIDGE_PROVIDER` 优先于配置中的 provider，可用它临时选择 `chatgpt-plus`；`/model` 目录加载后切换会持久化默认模型。
+
 程序打开授权流程，用户在浏览器完成授权。凭据独立保存到 ~/.ridge/oauth.json；不把 access token 打进日志、配置或任务内容。OAuth 端点、账号权限和 provider wire 仍以实际账号与服务端结果为准。
 
 `ridgecode login --codex` 使用 ChatGPT/Codex 订阅通道：授权成功后保存 `id_token` 与 `chatgpt_account_id`，补全请求发往 `https://chatgpt.com/backend-api/codex/responses`，并带 `ChatGPT-Account-Id`。已有旧版 `oauth.json` 若缺少账号标识，需重新执行 `ridgecode login --codex`；可用 `RIDGE_CHATGPT_BASE_URL` 覆盖后端地址。API Key 路径仍使用 `RIDGE_BASE_URL` 与 OpenAI 兼容的 Chat Completions。
@@ -120,11 +140,15 @@ ridgecode login --codex --device-auth
 
 - Answer 展示模型实际回答；收到的 reasoning_content 单独作为 Reasoning 展示，不生成或伪造隐藏思考。
 - Answer 支持有界行级 Markdown 展示：标题、粗体、行内 code、代码围栏与 ANSI 16 色语义角色。
+- Markdown 告警（`NOTE`/`TIP`/`IMPORTANT`/`WARNING`/`CAUTION`）及其后续引用行共享语义侧轨；正文仍按普通 Markdown 折行，不额外挤占输出槽。
 - fenced code 的 Live 可见行与落入终端历史的 Answer 都按有限词法规则区分关键字、类型、字符串、数字、字面量和注释；未知文本保持普通 Muted 色，不猜测跨行语法。
 - 工具调用默认显示摘要；Ctrl+O 展开当前工具详情。Alt+↑/↓ 选择旧工具并锁定焦点；详情展开且可滚动时，Alt+PageUp/PageDown 查看旧/新详情位置。
-- Ctrl+R 展开或收起实际 Reasoning；Answer 到达时默认回到 Answer 优先视图。
+- Ctrl+I（部分终端用 Alt+I）或 `/inspect` 打开 Live Block Inspector：按当前流顺序聚合 Answer/Reasoning/Tool，并在同一面板底部显示 pending FIFO；↑↓/PgUp/PgDn 聚焦历史块，Enter 或 Space 展开详情，Delete 删除选中的待执行消息，Ctrl+Q 切到完整队列，筛选与检视均不暂停模型；大段文本仅保留头尾有界预览，避免拖慢重绘。
+- Ctrl+R 展开或收起当前实际 Reasoning；当前回合结束后自动保留最近 8 段 reasoning，可再次按 Ctrl+R 或 `/reasoning` 检索、筛选、展开与滚动，不再因进入终端历史而失去入口。
+- 顶部状态条显示当前阶段及该阶段已持续时间（`+ms`/`+s`）；Ctrl+T 或 `/activity` 打开最近 5 个真实 Agent 活动，最新阶段置顶，窄终端自动折行。
+- 宽屏顶部以低饱和 `⟦SYS›THK›TLS›CHK›SUM›ANS⟧` breadcrumb 显示最近观测相位；`THK` 表示调查/思考，`ANS` 表示回答，`TLS` 表示工具，`CHK` 表示验证，`SUM` 表示结论收束，`WAIT` 表示等待；窄屏保留当前阶段与等待/工具目标，并以 `⏭N` 标出队首待执行数，Ctrl+T 可展开完整活动链。
 - Live Answer/Reasoning 默认跟随最新尾部；`Alt+PageUp/PageDown` 暂停并检视较早/较新内容，`Alt+End` 回到最新尾部。检视状态会在顶栏显示。
-- 长任务中可继续编辑输入；任务忙时按 Enter 会排队，当前任务结束后继续执行。
+- 长任务中可继续编辑输入；任务忙时按 Enter 会排队，输入框上方显示 `⏭ next` 与有界 FIFO 预览；Ctrl+Enter 将消息插入队首且不打断当前模型思考，当前任务结束后继续执行。
 
 ### 输入与快捷键
 
@@ -133,9 +157,14 @@ ridgecode login --codex --device-auth
 | Enter | 空闲时提交；忙时排队 |
 | Ctrl+J | 插入换行 |
 | Shift+Enter | 支持 CSI-u 的终端插入换行；Windows Terminal 可用 Alt+Enter 或 Ctrl+J |
-| Ctrl+C | 中断当前任务；不退出整个会话 |
-| Ctrl+R | 切换 Reasoning 视图 |
+| Ctrl+C | 首次中断当前任务并进入 takeover；2 秒内再次按下退出整个会话 |
+| Ctrl+R | 切换当前 Reasoning；无 live reasoning 时打开 Reasoning History |
 | Ctrl+O | 切换工具详情；无 live 工具时打开 Tool History |
+| Ctrl+I / Alt+I | 打开/关闭 Live Block Inspector；可检视/删除 pending，不暂停当前任务 |
+| Ctrl+T | 打开/关闭最近 Agent 活动 |
+| Ctrl+Q | 打开/关闭待执行队列面板 |
+| Ctrl+Space | 保持/跟随实时 Answer/Reasoning 视口，不暂停模型任务 |
+| Ctrl+Enter | 忙时将当前输入插入队首，不打断当前任务 |
 | Alt+↑/↓ | 选择 live 工具焦点 |
 | Alt+PageUp/PageDown | 优先滚动工具详情；否则检视 Live Answer/Reasoning 或 Tool History 详情 |
 | Alt+End | Live Answer/Reasoning 回到最新尾部 |
@@ -149,6 +178,14 @@ ridgecode login --codex --device-auth
 
 面板通用操作：输入字符即时过滤 key/value，Backspace 删除过滤词，Home/End 跳到首尾，PageUp/PageDown 翻页，Enter 执行动作或展开详情，Esc 关闭。Tool History 展开详情后，Alt+PageUp/PageDown 在搜索命中位置附近滚动；配置面板的 Enter 进入编辑，再按 Enter 写回；Esc 取消编辑。
 
+### 队列干预与接管
+
+任务忙时，普通 `Enter` 将当前输入追加到 FIFO；`Ctrl+Enter` 直接插入队首，均不打断当前模型思考。输入框上方持续显示队首与有界预览。Live Inspector 也显示 pending 行：选中后 `Delete` 可直接移除；`Ctrl+Q` 或 `/queue` 切到完整队列，`Ctrl+I` 可从队列返回 Inspector。删除只作用于尚未执行的队列，不影响当前回合。面板可实时观察队列变化，模型仍继续输出。
+
+实时状态位于顶部活动条与底部状态条：阶段、阶段耗时、工具/思考/回答通道、输入/输出 token、速率、上下文占用、effort 与队列深度均分开显示。长回答与工具输出按终端宽度换行；文件读取默认折叠为一个工具块，`Ctrl+O` 展开当前工具详情，详情保留首尾并折叠中段，`Alt+↑/↓` 切换工具，`Alt+PageUp/PageDown` 查看详情，`/history` 搜索已完成工具记录。`Ctrl+I`/`Alt+I` 或 `/inspect` 检视当前 Answer/Reasoning/Tool 混合块，Enter/Space 展开选中块而不打断模型。`Ctrl+R` 或 `/reasoning` 搜索最近 8 段已完成 reasoning，Enter 展开全文，Alt+PageUp/PageDown 滚动详情。`Ctrl+Space` 将实时视口置为 `HOLD`，用户可阅读旧内容而不打断模型；再按一次或 `Alt+End` 回到 `FOLLOW`。`Ctrl+C` 第一次请求接管并保留输入，2 秒内第二次才退出。
+
+启用 `RIDGE_TUI_SNAPSHOT` 时，诊断 JSON 还会记录当前面板、筛选词、选中项、详情展开/滚动位置、可见行数、`state.live_view`（`hold`/`follow`）、`state.reasoning_expanded`、`state.live_focus`（`answer`/`reasoning`/`tool:<id>`）、`state.activity_kind`、有界 `state.activity_history`、`state.live_blocks` 与 `state.reasoning_history` 数量，便于外部终端/测试工具实时判断用户正在查看什么。
+
 ### Windows Terminal 实机验收
 
 发布包使用 inline TUI，不进入备用屏；已提交的 Answer、Reasoning 与工具记录应进入终端原生历史。可按以下顺序验收：
@@ -160,6 +197,45 @@ ridgecode login --codex --device-auth
 
 不同终端可自定义搜索、复制和鼠标选择快捷键；记录终端名称、版本、窗口尺寸及失败文本，勿将终端原生绑定差异误判为模型或工具协议错误。
 
+需要避开 Windows Terminal/UIA 焦点层、直接验收 ConPTY 字节链路时，可运行仓库内 harness：
+
+~~~powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows-pty-e2e.ps1
+~~~
+
+脚本使用独立临时 `RIDGE_CONFIG`，以仅供诊断的 `RIDGE_FORCE_TUI=1` 进入 TUI，直接拉起 `target\debug\ridgecode.exe`；向 ConPTY 写入 `/help`、Enter、两次 Ctrl+C，并输出 JSON 验收摘要。它不读取或改写用户配置、Cookie、Chrome 状态。默认模式验证首帧、输入/输出管道与双 Ctrl+C 退出；忙态夹具可再验证真实队列行为：
+
+~~~powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows-pty-e2e.ps1 -BusyFixture -KeepDiagnostics
+~~~
+
+`-BusyFixture` 使用无网络、延迟 30 秒的 `ScriptedProvider`，自动进入思考态，再发送 Enter 队列与 Ctrl+Enter 队首插入；夹具先写入 Kitty CSI-u `ESC[13;5u`，若 Windows ConPTY/`INPUT_RECORD` 不向 `crossterm` 暴露该序列，则回退写入物理 `LF`，应用层仍把 CR/LF/Ctrl-M 统一归一为 `Enter`。摘要中的 `snapshot_mid_queued=2`、`snapshot_mid_queue[0]="/front"`、`busy_fixture_front_observed=true` 与 `snapshot_has_next_queue=true` 表示内部队首和最终帧 `⏭ next` affordance 均已被应用接收/显示；`snapshot_live_focus`/`snapshot_inspector_live_focus` 会报告当前 Inspector 所选的 `answer`、`reasoning` 或 `tool:<id>`；忙态结束后的 `snapshot_has_reasoning_history=true` 表示已提交思考仍可检索；`busy_fixture_front_transport` 会记录采用 `csi-u` 或 `csi-u→legacy-crlf`，末尾仍验证双 Ctrl+C 接管退出。Windows `crossterm` 键事件未由原始字节管道复现时会明确报告 `status=partial`。
+
+需验证无网络完成态的完整收束链路，可使用 `-CompletionFixture`（与 `-BusyFixture` 互斥）：
+
+~~~powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows-pty-e2e.ps1 -CompletionFixture -TimeoutMs 10000 -KeepDiagnostics
+~~~
+
+该夹具使用即时 `ScriptedProvider`，自动提交一条任务，要求 Snapshot 同时出现 `busy=false`、`snapshot_has_reasoning_history=true`、`snapshot_has_answer_history=true`，并在 ConPTY 原始滚屏中出现 fixture reasoning 与最终 Answer 文本；随后仍验证两次 Ctrl+C 退出。`completion_evidence_satisfied=true` 才表示思考→回答→历史归档→滚屏完成态均已走通。`-KeepDiagnostics` 还会保留 `pty-output.bin`、`frame.json` 与 `tui-trace.log` 路径，便于复核原始字节与最终帧。
+
+需验证流式块聚焦时追加 `-InspectLive`：夹具用 ConPTY 发送 Alt+I，再发送 Space，要求 `live_inspector_observed=true` 与 `live_inspector_expanded_observed=true`；Ctrl+I 仍是交互终端主快捷键。
+
+需验证 Inspector 内的 pending 干预与面板互切时再追加 `-InspectQueue`（须同时带 `-BusyFixture -InspectLive`）：夹具选中末条 pending、发送 Delete，再用 Ctrl+Q 切到完整队列、Alt+I 返回 Inspector；要求 `live_inspector_queue_removed_observed=true`、`attention_queue_observed=true` 与 `attention_live_return_observed=true`。
+
+需验证物理控制字节时，可追加 `-InspectReasoning` 或 `-InspectHold`（均须带 `-BusyFixture`）：前者发送真实 Ctrl+R 并要求 `reasoning_observed=true`；后者发送真实 Ctrl+Space 两次并要求 `hold_observed=true`、`follow_observed=true`。可与 `-InspectLive -InspectQueue` 组合。
+
+需验证运行中动态重排时追加 `-ResizeProbe`（可与上述 BusyFixture 探针组合）：脚本调用 Windows `ResizePseudoConsole`，在运行中于 `96×24 ↔ 40×12` 间切换，并要求 `resize_observed=true`、Snapshot `rect.width/height` 更新。RidgeCode 内联视口高度有意封顶为 14 行，因此目标高度超过 14 时，`resize_expected_frame_rows=14` 属正常；宽度仍必须精确切换。
+
+若终端宿主无法读出字符画面，可显式开启应用帧快照（默认关闭，不产生文件 I/O）：
+
+~~~powershell
+$env:RIDGE_TUI_SNAPSHOT = "$pwd\ridgecode-frame.json"
+.\target\debug\ridgecode.exe
+~~~
+
+快照为最后一次已绘制的 JSON 帧，`version=2`，含 `format`、`rect`、`render_us`、`state`、`telemetry`、按行排列的 `rows` 文本与压缩后的 `styled_rows` 样式 runs；`state` 提供 `busy`、`waiting`、`phase`、`activity`、`activity_kind`、有界 `activity_history`、`live_view`、`reasoning_expanded`、`live_focus`、`queued`/`queue`、输入/输出/流式 token、`rate`、`effort` 等诊断字段；`telemetry` 提供 `phase_duration_ms`、`token_velocity` 与 `last_render_us`。`styled_rows` 保留每段的 cell 起点、宽度、文本、前景/背景色、修饰符及候选语义角色，便于外部渲染器或 harness 复现“虚拟视网膜”。仅用于诊断/自动验收，路径由用户指定，文件会被下一帧覆盖。
+
 ### 斜杠命令
 
 | 命令 | 用法 |
@@ -170,9 +246,14 @@ ridgecode login --codex --device-auth
 | /compact | 压缩历史消息，保留最近上下文 |
 | /cost | 查看本会话 token 与任务数 |
 | /tools | 查看当前内置/MCP 工具 |
+| /activity | 查看最近 5 个 Agent 活动阶段 |
+| /reasoning | 检索最近 8 段已完成 reasoning；↑↓ 选择、Enter 展开 |
+| /inspect | 检视当前流式 Answer/Reasoning/Tool 与 pending；↑↓ 选择、Enter/Space 展开、Delete 删除待执行项 |
+| /queue | 查看 FIFO 队列；↑↓ 选择，Delete/Ctrl+Backspace 删除待执行项 |
 | /history | 搜索已完成工具调用；Enter 展开详情 |
 | /model | 打开跨 provider 模型选择器 |
 | /model <name> | 沿用当前 provider 热切换模型 |
+| /goal [status|create|start|advance|resume|complete|block|cancel] | 查看或推进持久化长任务目标 |
 | /provider、/provider list | 查看 provider 档案 |
 | /provider add <name> <kind> <model> <base_url> [key_env] | 新增档案并写回配置 |
 | /provider use <name> | 热切换到指定档案 |
@@ -355,6 +436,9 @@ read_file、search、web_search、fetch_url、todo_write、signal_write 与 disp
 | RIDGE_READ_ONLY | 默认只读模式 | 1/true 开启 |
 | RIDGE_EXTRACT_SIGNALS | 任务结束后额外抽取跨会话信号 | 默认关闭，避免额外 token |
 | RIDGE_HTTP_TIMEOUT | HTTP 超时秒数 | 默认 180 |
+| RIDGE_SHELL_TIMEOUT | shell/run_argv 超时秒数 | 默认 180；超时返回失败观测 |
+| RIDGE_TOOL_TIMEOUT | MCP 工具调用超时秒数 | 默认 180；超时返回失败观测 |
+| RIDGE_GOAL_FILE | goal 状态文件 | 默认 .ridge/goal.json |
 | RUST_LOG | tracing 过滤器 | 默认只显示 warn |
 | RIDGE_KEYLOG | TUI 按键诊断 | 输出到 ~/.ridge/keylog.txt |
 

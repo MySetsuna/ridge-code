@@ -1,5 +1,5 @@
 use langgraph::{GraphState, RunConfig};
-use provider::{Message, ToolCall};
+use provider::{Message, ToolCall, Usage};
 use std::collections::BTreeSet;
 
 /// 回合上限 —— **防跑飞的后备护栏**,非正常终止手段。真正的停机主力是:`approved`(目标达成)、
@@ -39,6 +39,10 @@ pub struct AgentState {
     pub pending_call: Option<ToolCall>,
     /// 累计消耗的 token(成本记账)。
     pub total_tokens: usize,
+    /// provider 回传的输入 token 累计，用于 TUI 成本分栏。
+    pub input_tokens: usize,
+    /// provider 回传的输出 token 累计，用于 TUI 成本分栏。
+    pub output_tokens: usize,
     /// token 预算(0 = 不限)。超了就熔断停机。
     pub budget_tokens: usize,
     /// 连续「无进展」轮数(工具输出与上一轮相同)。到 [`MAX_STALL`] 就熔断。
@@ -101,6 +105,7 @@ pub enum Patch {
     Issues(Vec<String>),
     PendingCall(Option<ToolCall>),
     AddTokens(usize),
+    AddUsage(Usage),
     SetStall(usize),
     SetErrStreak(usize),
     PushHistory(Message),
@@ -122,6 +127,11 @@ impl GraphState for AgentState {
             Patch::Issues(v) => self.issues = v,
             Patch::PendingCall(c) => self.pending_call = c,
             Patch::AddTokens(n) => self.total_tokens += n,
+            Patch::AddUsage(usage) => {
+                self.input_tokens += usage.prompt_tokens as usize;
+                self.output_tokens += usage.completion_tokens as usize;
+                self.total_tokens += usage.total() as usize;
+            }
             Patch::SetStall(n) => self.stall = n,
             Patch::SetErrStreak(n) => self.err_streak = n,
             Patch::PushHistory(m) => self.history.push(m),

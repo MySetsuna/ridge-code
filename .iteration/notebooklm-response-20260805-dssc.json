@@ -1,0 +1,33 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [],
+  "contradictions": [
+    "NLM's Dynamic Semantic Status Container proposal overlaps the existing state-derived live surface, AlertEdge rails, lifecycle anchors, bounded caches, and answer/reasoning projections.",
+    "The proposed Tab focus and Enter confirmation do not fit RidgeCode's existing Tab completion/selection and Enter submission contract; no key remap is accepted.",
+    "NLM's fixed high-frequency CPU claim is not an acceptance criterion without a local benchmark and is not used as a fact."
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "A retained lifecycle entry can mask the currently streaming Answer or Reasoning phase at the live-surface title boundary when the two projections are updated out of order.",
+      "support": ["CodeGraph shows live_surface_state reads activity_history before active_channel."],
+      "against": ["The normal token event path updates activity before appending each stream chunk."],
+      "experiment": "Add a deterministic stale-lifecycle/current-stream regression and make the presentation projection prefer the current live channel while preserving WAIT and lifecycle fallback."
+    }
+  ],
+  "candidates": [
+    {
+      "core": "Make the busy live-surface state projection phase-aware: WAIT remains highest priority; a present live Answer/Reasoning/Tool block outranks stale lifecycle activity; lifecycle tags remain the fallback when no live block exists.",
+      "constraints": ["presentation-only", "reuse LiveTranscript::active_channel and existing live_surface title/border", "no new container rows, parser, renderer, cache, execution state, or key mapping", "preserve folded tools, Answer/Reasoning separation, queue/takeover/HOLD/FOLLOW, ANSI16 and CJK width behavior"],
+      "risks": ["an approval/error event must remain visible when no live block remains; ordering must not hide WAIT or modal-owned intervention state", "a title-only change must not alter the existing channel breadcrumb or body projection"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/draw.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["stale lifecycle/current Answer regression plus existing live-surface tests", "workspace tests/fmt/clippy/Debug/Release builds", "Debug/Release ConPTY with reasoning, answer, tools, waiting, resize, takeover, and double Ctrl-C"]
+    }
+  ],
+  "recommendation": "Reject generic DSSC as local overlap. Accept only the narrow state-precedence correction at the existing live-surface boundary, then validate the same title/border projection across current stream, WAIT, lifecycle-only, narrow, and resized frames.",
+  "next_step": {
+    "type": "implementation",
+    "value": "Complete the stale-lifecycle/current-live-channel regression and run the bounded TUI/PTY quality gates."
+  },
+  "stop_conditions": ["Do not add a second Markdown parser, renderer, virtualizer, or execution state machine.", "Do not add physical container rows or unbounded per-token storage.", "Do not remap Tab/Enter or query excluded user-owned deep-research status.", "Do not delete the sole Active Note."]
+}

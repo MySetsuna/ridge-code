@@ -1,0 +1,2137 @@
+{
+  "status": "PROCEED",
+  "confirmed_facts": [
+    {
+      "fact": "NLM 建议优先补齐统一的交互式视口聚焦与历史块干预；本地已有 Tool History、实时工具聚焦、语义告警轨、HOLD/FOLLOW 与 FIFO 队列。",
+      "evidence": "NotebookLM conversation 68791fb7-659a-4ad6-a86c-beb7ac694781 follow-up 2026-08-03；本轮实现 Live Block Inspector。"
+    },
+    {
+      "fact": "Live Block Inspector 将 Answer、Reasoning、Tool 混合为最新优先的有界列表，可筛选、选中、展开、滚动详情，且不暂停模型任务。",
+      "evidence": "crates/agent/src/tui/transcript.rs、panel.rs、app.rs、mod.rs；TUI 单测覆盖混合流、详情展开与有界头尾预览。"
+    },
+    {
+      "fact": "输入输出已保持换行与显示单元宽度适配；长文件读取按连续工具事件聚合并可折叠；队列支持 FIFO、Ctrl+Enter 前插与面板删除。",
+      "evidence": "crates/agent/src/tui/transcript.rs、draw.rs、command.rs、input.rs；既有队列、文件读取折叠与响应式绘制测试通过。"
+    },
+    {
+      "fact": "忙碌期间用户可观察 phase、activity、token、effort、队列、HOLD/FOLLOW、live block 数量与接管提示；Ctrl+C 双击退出和 Enter/Ctrl+Enter 事件链路均有 PTY 证据。",
+      "evidence": "RIDGE_TUI_SNAPSHOT v2 与 scripts/windows-pty-e2e.ps1；normal/BusyFixture ConPTY 均 passed。"
+    },
+    {
+      "fact": "本轮质量闸通过：agent TUI 181 tests、workspace tests、clippy -D warnings、fmt 与 workspace debug build；Activity 时间线现可展开详情并在实时刷新时保留审计焦点。",
+      "evidence": "cargo test -p agent --bin ridgecode --locked --offline；cargo test --workspace --locked --offline；cargo clippy --workspace --all-targets --locked --offline -- -D warnings；cargo build --workspace --locked --offline。"
+    },
+    {
+      "fact": "Provider selection now persists named profile, model and base_url as one active selection; startup resolves the active profile before the legacy top-level key.",
+      "evidence": "crates/agent/src/config.rs, main.rs, login.rs and tui/command.rs; real Dev request selected Zai · glm-4.6 and reached the provider, which returned HTTP 429 balance exhaustion rather than a model/endpoint mismatch."
+    },
+    {
+      "fact": "Status presentation now separates transport kind from human-facing provider label; the TUI also keeps telemetry on the terminal surface and clears the idle splash after real interaction.",
+      "evidence": "crates/agent/src/main.rs, tui/command.rs, tui/draw.rs and tui/render.rs; provider-label and named-profile hot-apply tests, 181 TUI tests, and BusyFixture PTY 96x24/40x12 passed."
+    },
+    {
+      "fact": "The configured legacy codegraph-mcp entry now falls back to the installed CodeGraph 1.4.1 command without rewriting user configuration.",
+      "evidence": "RidgeCode Dev binary logged MCP fallback: codegraph-mcp unavailable; using codegraph serve --mcp, then connected 2 MCP server(s). Direct stdio smoke returned MCP initialize, tools/list, and tools/call result from codegraph 1.4.1."
+    },
+    {
+      "fact": "The real stdio MCP transport now runs through the RidgeCode graph: resolve_mcp discovers the tool, a scripted provider emits a namespaced call, act invokes codegraph_explore, and the result is persisted as role=tool history.",
+      "evidence": "cargo run -p agent --example stdio_mcp_chain --locked --offline -- C:\\Windows\\System32\\cmd.exe /d /s /c codegraph serve --mcp passed; result_chars=8046, history=5."
+    },
+    {
+      "fact": "Real ChatGPT/Codex OAuth now selects an account-visible model before execution; configured gpt-5 was rejected by the subscription endpoint, then the runtime selected gpt-5.6-sol and completed a short request.",
+      "evidence": "Dev ridgecode with RIDGE_PROVIDER=chatgpt-plus logged the catalog correction and exited 0 with approved, steps=1, tokens=4784."
+    },
+    {
+      "fact": "Real OAuth Provider plus real CodeGraph stdio MCP completes the full tool loop: reasoning emits codegraph__codegraph_explore, RidgeCode receives the tool result, the model continues with a final answer, and deterministic verify passes.",
+      "evidence": "Dev ridgecode exited 0; visible tool_call/tool result/final answer/verify PASS, steps=2, tokens=25308."
+    },
+    {
+      "fact": "Activity presentation now classifies investigation/reasoning, verification and conclusion explicitly as THK/CHK/SUM, and Snapshot v2 exposes activity_kind, sequence and bounded activity_history for external takeover tooling.",
+      "evidence": "crates/agent/src/tui/app.rs, draw.rs and tests.rs; agent TUI 181 tests pass, including node · reason/node · verify/settling result and snapshot assertions."
+    },
+    {
+      "fact": "Expanded tool previews now retain both head and tail with a folded middle; read_file stays one collapsed call/result block while Ctrl+O can inspect more useful completion/error context.",
+      "evidence": "crates/agent/src/tui/eventfmt.rs and transcript.rs; head/tail preview and bounded 32-line merged detail tests pass."
+    },
+    {
+      "fact": "Windows ConPTY 的原始 Ctrl+Space 可能以 Ctrl+Shift+2 事件抵达；输入层已兼容该别名。Dev PTY 在 96x24 与 40x12 均实际观测到 Ctrl+R 思考展开、Ctrl+Space HOLD 与 FOLLOW 回切。",
+      "evidence": "crates/agent/src/tui/input.rs、scripts/windows-pty-e2e.ps1；两种尺寸组合 BusyFixture 均 status=passed，reasoning_observed/hold_observed/follow_observed=true。"
+    },
+    {
+      "fact": "运行中 ConPTY resize/reflow 已通过双向探针：96x24→40x12 与 40x12→96x24 均更新 Snapshot rect 宽度；内联视口高度按设计封顶 14 行，resize 后仍保留 Inspector、思考、HOLD/FOLLOW、队列与双 Ctrl-C 链路。",
+      "evidence": "scripts/windows-pty-e2e.ps1 -ResizeProbe；最终构建产物两种起始尺寸组合 BusyFixture 均 status=passed，resize_observed=true，resize_expected_frame_rows=12/14；resize frame render_us=3219/603，均低于 16ms。"
+    },
+    {
+      "fact": "Live Inspector 选中 Answer/Reasoning 后，语义焦点现与 Tool 统一保存；顶栏显示 ANSWER/THINK，Snapshot v2 输出 state.live_focus，外部验收器可确认当前审计对象。",
+      "evidence": "crates/agent/src/tui/transcript.rs、draw.rs、tests.rs、README.md 与 scripts/windows-pty-e2e.ps1；新增焦点切换/快照断言，181 TUI tests 与两档 ConPTY Inspector E2E 通过。"
+    },
+    {
+      "fact": "折叠穿透检索已闭环：LiveHistory 查询命中 Tool 详情时，Inspector detail_open 与底层 LiveTranscript 的 Tool expanded 状态同步，匹配详情进入 live visible lines。",
+      "evidence": "CodeGraph: crates/agent/src/tui/panel.rs::retype、app.rs::sync_live_panel_focus；crates/agent/src/tui/tests.rs::live_inspector_search_expands_matching_folded_tool；新增回归与两档最终二进制 ConPTY E2E 通过。"
+    },
+    {
+      "fact": "最终回答静态提交现与 live Answer/Reasoning 保持语义层级：Markdown 仍由既有 parser 着色，并在 terminal scrollback 加 Primary 色 `╰ `/`│ ` 轨；高度测量同步计入前缀，窄端不因装饰截断。",
+      "evidence": "crates/agent/src/tui/render.rs::answer_commit_measure/answer_commit_lines、app.rs::insert_commit、tests.rs::committed_answer_keeps_a_semantic_rail_after_leaving_live_view；workspace 191 TUI tests 与两档 ConPTY E2E 通过。"
+    }
+  ],
+  "contradictions": [
+    "旧的 partial/snapshot_bytes=0 诊断帧发生于启动阻塞与采集未完成阶段，不代表当前队列或渲染链路失败。",
+    "真实 OAuth→RidgeCode→CodeGraph MCP→后续回答链已通过；剩余未闭环项是更长的多轮/中断接管与用户物理终端按键验收。",
+    "本轮真实长回合实验受外部 Provider 状态影响：Zai 返回 HTTP 429 余额/资源不足，ChatGPT/Codex profile 244s 无输出超时；不把这两项归因于 TUI。"
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "真实 provider 的更长多轮工具调用、流式中断与接管仍需人工端到端验证活动流、折叠详情与队列行为。",
+      "support": ["真实 OAuth→CodeGraph MCP→后续回答已通过；Activity kind/ledger snapshot、ScriptedProvider busy fixture、TUI 状态快照、PTY 输入链路已通过。"],
+      "against": ["真实 OAuth 短请求与单工具 MCP 请求均已通过；尚未以真实网络长回合覆盖多轮/中断组合。"],
+      "experiment": "用户登录后运行 Dev ridgecode，观察 SYS/THK/ANS/TLS 活动、Ctrl+I Inspector、Ctrl+O 工具详情、Ctrl+R 思考历史、Enter 排队与 Ctrl+Enter 前插。"
+    }
+  ],
+  "candidates": [
+    {
+    "core": "保留有界 Snapshot v2 与无网络 BusyFixture，作为 TUI 外部验收边界；以 Live Block Inspector 汇聚实时回答、思考与工具块，并在渲染层缓存稳定 live tail。",
+      "constraints": ["默认不做快照 I/O", "不改变 shell 选择与图执行语义", "Inspector 不打断当前模型回合"],
+      "risks": ["真实 provider/MCP 的事件频率与错误形态仍需人工确认", "大回答详情不能无界复制"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/transcript.rs", "crates/agent/src/tui/panel.rs", "crates/agent/src/tui/draw.rs", "scripts/windows-pty-e2e.ps1"],
+    "validation": ["181 TUI tests", "workspace tests/clippy/fmt", "ConPTY 96x24 and 40x12", "runtime ConPTY resize 96x24↔40x12", "snapshot live_blocks/panel/detail/live_focus fields", "render cache hit/miss and 500-line profile", "Activity detail expand/scroll path, Enter routing, and live refresh focus preservation"]
+    },
+    {
+      "core": "继续以真实 provider 的长回合与用户物理终端作为下一验收边界，不以 TestBackend、NLM 描述或单元测试替代端到端证据。",
+      "constraints": ["不读取或写出用户凭据", "先用已登录环境人工运行", "保留队列与接管语义"],
+      "risks": ["网络代理、模型事件格式与多轮工具返回可能改变活动流", "物理终端按键仍需用户环境验证"],
+      "reversibility": "high",
+      "scope": ["crates/provider", "crates/mcp", "crates/agent/src/tui", "Dev binary"],
+      "validation": ["真实长回答与多轮 MCP", "中断后继续/接管", "Ctrl+I/Ctrl+O/Ctrl+R", "Enter/Ctrl+Enter/Ctrl+C"]
+    }
+  ],
+  "recommendation": "采用 Live Block Inspector 作为统一实时视口，并把静态 live-tail 缓存留在渲染层：Ctrl+I/Alt+I 或 /inspect 打开；↑↓/PgUp/PgDn 选 Answer/Reasoning/Tool 或 pending，输入筛选，Enter/Space 展开，Delete 移除选中待执行消息，Ctrl+Q 切完整队列，Alt+方向键滚动详情。Answer/Reasoning 使用最多 8KiB 的头尾预览，Tool 复用已有详情；只读检视与队列干预均不暂停思考，Esc 返回输入。Tab 保持补全选择语义。",
+  "nlm_follow_up": {
+    "recommendation": "NLM 本轮建议增量视口语法高亮与语义轨；CodeGraph 证实实时 Answer 的代码 token roles、Markdown alert rails、live_code_rail、live_rail 与缓存均已存在。故将唯一真实缺口收敛为静态最终回答的 Answer 语义轨；复用既有 Markdown parser，O(k/n)、2ms 与高亮 5ms 数字无本地证据，不作为事实或硬目标。",
+    "already_present_locally": ["Markdown alert rails", "live tool Alt+Up/Down focus", "Tool History panel", "Ctrl+Space HOLD/FOLLOW", "FIFO queue and Ctrl+Enter front insertion", "Reasoning History panel"],
+    "selected_slice": "Completed unified Live Inspector + pending FIFO rail, render-boundary cache, activity semantics, bounded snapshot telemetry, tool head/tail previews, native ConPTY controls, runtime resize/reflow, semantic Answer/Reasoning focus telemetry, folded-detail search expansion, and static Answer scrollback rails without changing execution semantics.",
+    "acceptance": ["newest-first mixed live rows", "pending rows carry typed RemoveQueued actions", "8KiB head/tail bound", "tool previews retain head and tail around a folded middle", "Enter/Space detail expansion without task interruption", "query hit in folded Tool detail expands the live projection", "static Markdown Answer keeps a Primary ╰/│ rail after leaving live view", "static Answer height measurement includes the rail prefix", "Delete pending changes queued_count while busy", "Ctrl+Q queue and Alt+I return are observed", "activity_kind and bounded activity_history are present in Snapshot v2", "state.live_focus reports answer/reasoning/tool focus", "PTY 96x24 and 40x12", "runtime ConPTY resize 96x24↔40x12 with inline height cap", "same revision/geometry cache hit", "stream/resize cache invalidation", "physical Dev PTY Ctrl+R reasoning expansion", "physical Dev PTY Ctrl+Space HOLD/FOLLOW", "Tab remains completion selection"]
+  },
+  "next_step": {
+    "type": "experiment",
+    "value": "真实 OAuth→MCP→后续回答链与 Dev ConPTY 96x24/40x12 运行中 resize/reflow 已通过；本轮长回合实验分别受 Zai HTTP 429 与 ChatGPT/Codex 244s 无输出超时阻断，下一边界仍为真实 provider 更长多轮/中断接管，以及用户自有终端原生搜索/复制/resize 的人工验收。暂不新增无 profile 依据的虚拟化布局缓存，不重复查询用户指定的深研状态。"
+  },
+  "stop_conditions": [
+    "不以 TestBackend、UI acknowledgement 或 NLM 描述替代真实 PTY/frame evidence。",
+    "若渲染预算超过 16ms，停止扩展快照字段并回退到诊断开关。",
+    "BusyFixture 不读取 Cookie、API key、OAuth token，也不访问网络。"
+  ],
+  "iteration_update": {
+    "code_change": "LiveTranscript 新增有界 mixed inspector rows、语义 LiveBlockFocus 与 presentation render_revision；LiveHistory panel 增加 typed pending FIFO rail，历史块上下/分页选中同步主视口工具焦点，Enter/Space 同步工具展开状态，查询命中折叠 Tool 详情时同步展开底层 live projection，选中行显示低噪厚侧轨，Delete 只移除待执行项；HOLD/滚动时输出视口内增加有界 phase/activity 粘性锚行，并在既有锚行内自适应展示 THK›TLS›ANS/T›L›A，避免审计旧内容时丢失当前 Agent 阶段上下文；Ctrl+I/Alt+I 与 Ctrl+Q 可在只读 Inspector/Queue 间切换；新增 Ctrl+F 与 /find [query] 非阻塞进入现有 LiveHistory 检索，保留输入草稿并穿透展开匹配折叠 Tool；draw_with_cache 在渲染层复用稳定 live tail，blinking cursor 不进入缓存；LiveOutputCacheKey 仅依赖 transcript revision、几何与 busy 状态，telemetry-only tick 保持布局缓存命中；最终回答静态提交复用 markdown_lines 并增加 Primary 色 ╰/│ 语义轨，insert_commit 的 markdown 高度测量同步计入前缀；render.rs 新增零增行 fence_line_spans，合法代码围栏 language token 使用 Info+BOLD，静态/实时 Markdown 共用既有 validator 与 lexer；Activity 面板纳入同一详情渲染路径，Enter 展开、Alt+PgUp/PgDn 滚动，窄屏仍保留摘要时间线；面板实时刷新且不改变当前回合；/inspect、/live、Enter/Space 展开、详情滚动与 snapshot v2 均保留；scripts/windows-pty-e2e.ps1 新增 ResizePseudoConsole 双向 reflow 探针，Ctrl+R/Ctrl+Space 顺序按真实 panel 模态校正；Snapshot 测试清除 wall-clock 依赖；render_live_tail_lines 现对已选逻辑窗口再施加物理行尾上限，避免多条长行换行形成无界 O(k²) 行集合；新增 presentation-only phase_trace，将 Reasoning→Tool→Answer 显式压缩到宽屏 chrome 与 Snapshot state.live_trace，不占窄屏输出行；新增无增行自适应 live phase markers：宽屏 THINK/TOOL/ANSWER、中屏 THK/TLS/ANS、窄屏保留稳定 glyph，不重复逐帧变化的 reasoning telemetry；新增 presentation-only activity rail：顶部忙碌栏仅显示 phase、safe tool intent、elapsed/rate、todo 与 queued，底部状态栏独占 provider/model/context/input-output token/effort；新增 truthful multiline shortcut affordance：Windows legacy 默认显示 Alt+Enter/Ctrl+J，KKP-capable 分支显示 Shift/Alt+Enter；既有换行、文件读取折叠、实时 activity/phase/token/effort、HOLD/FOLLOW、FIFO/前插、接管与双 Ctrl-C 保留。",
+    "tui_tests": "201 passed",
+    "workspace_tests": "passed (agent 104, TUI 201, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest langgraph 1)",
+    "clippy": "passed",
+    "fmt": "passed",
+    "diff_check": "passed with known CRLF warnings in existing .iteration/docs files",
+    "conpty": "Serial Dev PTY: final-binary combined BusyFixture -InspectLive -InspectQueue -InspectReasoning -InspectHold -ResizeProbe passed at 96x24 (initial snapshot_render_us=312, inspector_render_us=1206, resize rect=40x12/render_us=3100, pending Delete/Queue↔Live/reasoning/HOLD/FOLLOW/resize/double Ctrl-C=true); reverse probe passed at 40x12 (initial render_us=724, inspector=2524, resize rect=96x14/render_us=1110; 14 is the intentional inline viewport cap). Both preserved queue/front insertion, adaptive phase-anchor width safety, observed phase labels and raw Ctrl+Space alias; every observed frame stayed below 16ms.",
+    "latest_busy_render_us": 3184,
+    "normal_render_us": 658,
+    "narrow_terminal": "Latest final-binary combined BusyFixture -InspectLive -InspectQueue -InspectReasoning -InspectHold -ResizeProbe passed in both directions: 96x24→40x12 (resize rect 40x12, render_us=3100) and 40x12→96x24 (resize rect 96x14, render_us=1110 because inline viewport cap=14); responsive wrapping, phase/activity visibility, wide THINK/TOOL/ANSWER markers, medium THK/TLS/ANS policy, narrow glyph fallback, phase/activity visibility, adaptive THK›TLS›ANS trace, narrow-safe T›L›A audit anchor, sticky HOLD anchor, front-queue feedback, pending Delete, Queue↔Live switching, reasoning expansion, HOLD/FOLLOW, physical-tail cap and double Ctrl-C remained covered; top busy rail no longer duplicates input/output/effort telemetry, bottom status keeps those fields, and Windows idle affordance no longer advertises unavailable Shift+Enter; direct audit-search behavior is covered by deterministic TUI tests.",
+    "nlm_note": "NLM 本轮推荐先验证虚拟化行高缓存，其次窄端自适应与 KKP；缓存 O(k/n)、2ms 等指标无本地证据，窄端隐藏 token/effort 与已批准需求冲突，故拒绝盲加。结合 CodeGraph，本轮修复更直接的交互缺口：Windows legacy 默认显示 Alt+Enter/Ctrl+J，KKP-capable 分支显示 Shift/Alt+Enter；既有 activity rail、phase markers、Ctrl+F /find 审计入口、物理尾部上限、工具折叠、read_file 单块收起、Answer/Reasoning 焦点与 state.live_focus 保持。唯一 Active Note 已更新；无过期/完成 Note 可清理。"
+  },
+  "detail_layout_cache_evidence": {
+    "code_change": "Panel assigns a monotonic content_revision when a live/detail snapshot is rebuilt. Production draw_with_cache routes expanded modal detail through a single-entry DetailLayoutCache keyed by panel revision, selected row, and cell width; it retains styled Markdown text and wrapped-row count only for the current detail.",
+    "behavior": "Repeated telemetry redraws of the same expanded detail reuse the cached layout; selecting another row, rebuilding the live panel, or resizing invalidates it. Cache is presentation-only and bounded to one detail; execution, queue, focus, and Tab completion semantics are unchanged.",
+    "tests": "detail_layout_cache_reuses_same_snapshot_and_invalidates_on_width_or_panel plus panel_items_cache_reuses_wrapped_snapshot_and_invalidates_on_view_changes passed; workspace TUI total is 201, fmt/clippy/build passed.",
+    "pty": "Final binary focused Inspector/Reasoning/Queue/HOLD/FOLLOW probes passed at 96x24 and 40x12; ResizeProbe passed 96x24→40x12 with resize_observed=true. Modal cache is not exposed as execution state in snapshot output."
+  },
+  "queue_panel_evidence": {
+    "code_change": "Queue panel, /queue, Ctrl+Q toggle, selection, Delete/Ctrl+Backspace removal, truthful refresh, Ctrl+Enter front insertion, and snapshot panel selection metadata.",
+    "behavior": "Removing or front-inserting pending items only mutates the pending FIFO; current model turn and live stream remain untouched.",
+    "tests": "Queue FIFO/removal, typed pending-row action, keyboard routing, snapshot selection, HOLD/FOLLOW routing, sticky phase anchor, Reasoning History, Live Inspector regression, Activity detail expansion/refresh and Enter routing, semantic Answer/Reasoning/Tool focus synchronization, folded-detail search expansion, activity snapshot telemetry, head/tail tool preview, render cache hit/miss, adaptive phase marker policy and 191 agent TUI tests passed.",
+    "pty": "Latest final-binary combined BusyFixture -InspectLive -InspectQueue -InspectReasoning -InspectHold -ResizeProbe passed at 96x24→40x12 and 40x12→96x24; Inspector Delete removal, Ctrl+Q queue switch, Alt+I return, Ctrl+R reasoning expansion, Ctrl+Space HOLD/FOLLOW, runtime reflow, crossterm events and double Ctrl-C passed. User-owned terminal remains a separate manual boundary."
+  },
+  "live_hold_evidence": {
+    "code_change": "LiveTranscript.inspect_mode, Ui hold/follow methods, Ctrl+Space routing, narrow HOLD chrome, snapshot state.live_view=hold/follow.",
+    "behavior": "HOLD changes only the rendered live viewport; model task, token stream, pending FIFO, tool calls and Ctrl-C takeover continue unchanged. FOLLOW returns to the live tail.",
+    "tests": "Hold persistence, key routing, sticky phase anchor, status prioritization, top chrome, snapshot hold state, responsive draw, Live Inspector routing and adaptive phase marker width policy; 191 agent TUI tests total.",
+    "pty": "Final-binary combined BusyFixture PTY with runtime ResizeProbe passed at 96x24 and 40x12; raw Ctrl+Space produced HOLD then FOLLOW before Inspector entry in both sizes, while reflow, Enter/Ctrl+Enter/Ctrl-C, Inspector Alt+I/Space, pending Delete and observer switching were exercised. User-owned terminal remains a separate manual-key boundary."
+  },
+  "reasoning_history_evidence": {
+    "code_change": "Bounded MAX_REASONING_HISTORY=8 index stores reasoning content with step, elapsed seconds and task token metadata after commit; panel is searchable, expandable and detail-scrollable.",
+    "behavior": "Ctrl+R expands live reasoning; after drain it opens Reasoning History instead of no-op. /reasoning and /thinking provide direct entry; reset clears the index.",
+    "tests": "Bounded eviction, selection, search, Enter expansion, detail scrolling, status hint, snapshot state, responsive draw and phase-label regression tests passed; 191 agent TUI tests total.",
+    "pty": "BusyFixture snapshots expose reasoning_history=1 at 96x24 and 40x12; combined Dev PTY physically observed Ctrl+R reasoning expansion in both sizes. User-owned terminal and real-provider long history remain manual boundaries."
+  },
+  "live_block_inspector_evidence": {
+    "code_change": "Unified mixed Answer/Reasoning/Tool live-block inspector with newest-first selection, query filtering, bounded 8KiB head/tail previews, Enter/Space expansion, folded Tool-detail search expansion into the live projection, Alt-arrow detail scrolling, typed pending FIFO rows with Delete actions, Ctrl+Q/Alt+I observer switching, /inspect and Ctrl+I/Alt+I entry; semantic focus now covers Answer/Reasoning/Tool and projects to top chrome plus Snapshot state.live_focus.",
+    "behavior": "Inspector updates during streaming and never pauses or interrupts the model. Delete only removes a selected pending message; current turn and live stream remain untouched. Tab remains completion selection; Esc returns to normal input.",
+    "tests": "LiveBlockEntry semantic identity, mixed ordering, pending action mapping, Activity detail expansion/refresh and Enter routing, Answer/Reasoning/Tool focus synchronization, folded-detail search expansion, sticky phase anchor, activity_kind/activity_history/live_focus snapshot metadata, head/tail tool detail, shortcut routing, panel rendering, responsive chrome and adaptive phase marker projection covered; agent TUI 191 passed.",
+    "pty": "Latest final-binary combined BusyFixture -InspectLive -InspectQueue -InspectReasoning -InspectHold -ResizeProbe 96x24: inspector_render_us=1212, resize frame=40x12/render_us=417, pending Delete changed queued 2→1; reverse 40x12: inspector_render_us=1865, resize frame=96x14/render_us=3374 (inline cap); both passed with the same intervention plus Ctrl+R/Ctrl+Space/reflow evidence, all below 16ms."
+  },
+  "answer_commit_evidence": {
+    "code_change": "Static final Answer scrollback now uses answer_commit_lines over the existing markdown_lines parser, adding a Primary-colored ╰ rail on the first logical line and │ on subsequent lines; answer_commit_measure feeds the same prefix into insert_before height calculation.",
+    "behavior": "A completed answer remains Markdown-rendered and selectable in native scrollback, while its semantic channel remains visually distinct from generic notes and committed reasoning; no execution or live-state mutation occurs.",
+    "tests": "committed_answer_keeps_a_semantic_rail_after_leaving_live_view plus markdown_commit_renders_through_inline_scrollback passed; workspace TUI count is 191."
+  },
+  "render_cache_evidence": {
+    "code_change": "LiveTranscript.render_revision invalidates presentation state; LiveOutputCache in draw.rs keys stable live rows only by revision, width/height and busy state. LineIndex now records UTF-8-safe logical line starts incrementally for Answer/Reasoning tail queries, and render_live_line bounds long fenced-code text through the existing tail_display_cells path before code lexing. No provider or execution state changes.",
+    "behavior": "Production run loop uses draw_with_cache; unchanged frames reuse semantic-to-physical rows, telemetry-only ticks keep the layout cache hot, while stream/focus/fold/HOLD/resize changes rebuild deterministically; actual reasoning text, THINK marker, code-token roles and authoritative input/output/effort telemetry remain visible; execution state remains cache-free.",
+    "tests": "Cache hit/miss test covers telemetry-only changes plus transcript/geometry invalidation; incremental UTF-8 line-index append/trim and long-code viewport-tail tests pass; long_live_frames_are_bounded_and_profiled uses 64 tools and 500 answer lines through draw_with_cache (width 18/40/80, 100 draws: 78/166/231ms); semantic THINK/ANSWER rail, detail-anchor, alert-aware Markdown-detail and narrow-legend tests, physical-tail cap, phase-trace Snapshot/chrome/narrow-width, adaptive phase-marker, audit-search, DetailLayoutCache and PanelItemsCache invalidation tests pass; explicit reasoning expansion persists across Answer arrival; 201 agent TUI tests and workspace quality gates pass."
+  },
+  "phase_trace_evidence": {
+    "code_change": "LiveTranscript::phase_trace derives a deduplicated, capped Reasoning/Tool/Answer sequence from existing live blocks; Snapshot adds state.live_trace; wide top chrome renders a compact ⟪THK›TLS›ANS⟫ chip when width permits.",
+    "behavior": "The trace makes the current Agent phase sequence visible without changing provider, execution, queue, or MCP state. It is presentation-only; narrow terminals omit the chip and keep the existing output-row budget.",
+                                 "tests": "phase_trace_deduplicates_and_preserves_order, snapshot_and_chrome_surfaces_answer_reasoning_focus, top_chrome_surfaces_live_phase_trace, live_phase_anchor_adapts_trace_to_terminal_width, live_phase_markers_adapt_without_adding_rows, live_rows_surface_observed_phase_labels_in_one_projection, and live_projection_caps_physical_tail_after_many_wrapped_lines pass; agent binary 191 passed.",
+    "pty": "Final-binary BusyFixture combined controls passed at 96x24 and 40x12; wide/narrow chrome remained within bounds and all observed frames stayed below 16ms.",
+    "rollback": "Remove phase_trace, state.live_trace, the wide chip, and the focused tests; existing logical/physical tail and LiveOutputCache paths remain."
+  },
+  "audit_search_evidence": {
+    "code_change": "InputAction::OpenLiveSearch maps Ctrl+F to Ui::open_live_search; /find [query] uses the same method. The method seeds the existing LiveHistory query, runs Panel::retype, syncs semantic focus, and expands a matching folded Tool detail.",
+    "behavior": "Search opens while the model is busy, leaves the input draft and pending queue unchanged, and does not cancel or pause execution. Existing bounded mixed Answer/Reasoning/Tool rows remain the sole search source.",
+    "tests": "input_action_routes_keys and ctrl_f_live_search_is_non_blocking_and_penetrates_folded_detail passed; the pre-existing live_inspector_search_expands_matching_folded_tool regression plus adaptive phase marker tests also passed; agent binary 191 passed.",
+    "narrow_boundary": "No output-row or chrome layout change; the existing 96x24 and 40x12 ConPTY reflow/inspection probes remain green.",
+    "rollback": "Remove OpenLiveSearch, open_live_search, /find and their tests; preserve the existing manually entered Inspector query path."
+  },
+  "adaptive_anchor_evidence": {
+    "code_change": "draw.rs adds phase_trace_text: the existing bounded phase trace renders full THK›TLS›ANS at wide widths and compact T›L›A below 60 columns; live_phase_anchor includes it in the already reserved HOLD row.",
+    "behavior": "When auditing older live rows, the current Agent phase chain remains visible without adding a row or changing HOLD/FOLLOW, output ordering, queue controls or execution. Cell-width clipping remains the final safety boundary.",
+    "tests": "live_phase_anchor_keeps_activity_inside_held_viewport and live_phase_anchor_adapts_trace_to_terminal_width passed; agent binary 191 passed.",
+    "pty": "Final-binary BusyFixture combined controls passed at 96x24 and 40x12; initial/Inspector/resize were 361/904/451us and 521/4495/2522us respectively, all below 16ms.",
+    "rollback": "Remove phase_trace_text usage from live_phase_anchor and the adaptive-anchor test; keep the existing HOLD/activity anchor and wide top-chrome trace."
+  },
+  "phase_marker_evidence": {
+    "code_change": "draw.rs adds presentation-only live_phase_marker and feeds it through the existing render_live_line marker path. Observed Answer/Reasoning/Tool opener lines use ANSWER/THINK/TOOL at wide widths, ANS/THK/TLS at medium widths, and retain compact glyphs below 48 columns; live reasoning telemetry now remains in the top/bottom chrome rather than invalidating the layout cache; no transcript row or execution state changes.",
+    "behavior": "The live body exposes the same observed phase semantics as the top chrome without inventing hidden reasoning. Actual reasoning remains visible and inspectable; dynamic step/time/token telemetry has one authoritative chrome surface. Tool detail remains collapsed by default; labels are bounded by the existing cell-width clipping and wrap path.",
+    "tests": "live_phase_markers_adapt_without_adding_rows, live_rows_surface_observed_phase_labels_in_one_projection and fenced_language_token_has_display_only_semantic_style passed; agent binary 194 passed; workspace passed.",
+    "pty": "Final-binary BusyFixture combined controls passed at 96x24 (initial/Inspector/resize 361/904/451us, resize 40x12) and 40x12 (521/4495/2522us, resize 96x14); output preview visibly contained THINK and all observed frames stayed below 16ms.",
+    "adjudication": "NLM's virtualized-height-cache proposal was not adopted: its complexity/2ms claims lack local evidence and LiveOutputCache already covers the stable presentation tail."
+  },
+  "activity_rail_evidence": {
+    "code_change": "status.rs replaces the top busy bar's duplicate usage formatter with presentation-only fmt_busy_signal; draw.rs feeds it observed phase, safe tool intent, elapsed/rate, todo progress and queued count. compact_status_line remains the bottom provider/model/context/input-output token/effort contract.",
+    "behavior": "Top busy chrome communicates what the Agent is doing without repeating input/output token or effort telemetry. Bottom status remains the authoritative telemetry surface; no provider, graph, MCP, queue, cancellation or execution state changed.",
+    "tests": "busy_signal_keeps_activity_rail_free_of_duplicate_token_telemetry and top_chrome_keeps_token_telemetry_in_the_bottom_status_contract passed; agent TUI 193 passed; workspace tests, clippy, fmt and build passed.",
+    "pty": "Final-binary BusyFixture combined controls passed at 96x24 (initial/Inspector/resize 439/1863/1251us, resize 40x12) and 40x12 (822/2680/3782us, resize 96x14); all observed frames stayed below 16ms.",
+    "rollback": "Restore fmt_busy_bar_with_usage and its focused tests; keep the existing phase markers, activity trace, HOLD/FOLLOW, rendering cache and physical-tail cap."
+  },
+  "keyboard_affordance_evidence": {
+    "code_change": "status.rs adds multiline_shortcut_label and derives the idle input hint from the same RIDGE_TUI_KITTY capability boundary as TerminalGuard. Windows legacy displays Alt+Enter/Ctrl+J; non-Windows or opt-in KKP displays Shift/Alt+Enter.",
+    "behavior": "The input chrome no longer advertises a Shift+Enter action that Windows legacy input cannot distinguish from submit. Existing input_action routing still accepts the precise KKP event and legacy Alt+Enter/Ctrl+J fallback; submit, queue and Ctrl+Enter front insertion are unchanged.",
+    "tests": "input_chrome_exposes_submit_or_queue_mode now asserts the platform-accurate wide hint and both deterministic label branches; input_action_routes_keys and decide_key release filtering remain green; agent TUI 193 passed.",
+    "pty": "Dev ConPTY normal 120x24 passed with readable inline startup affordances; BusyFixture combined controls passed at 96x24 (312/1206/3100us) and 40x12 (724/2524/1110us), all observed frames below 16ms.",
+    "rollback": "Remove multiline_shortcut_label and restore the old literal hint; preserve KKP/legacy input routing and all execution semantics."
+  },
+  "nlm_next_plan": {
+    "recommendation": "NLM 本轮推荐增量视口语法高亮；CodeGraph 证实 RidgeCode 已有实时 bounded code lexer，故不接入 syntect/tree-sitter。实际落地为零新增字符的 fence-language semantic cue：recognized `rust/python…` token 在静态、实时与窄端 fallback 中获 Info+BOLD，正文、工具折叠、换行与状态语义不变。",
+    "validated_locally": ["194 TUI tests and workspace quality gates pass", "Provider 52 tests include orphan function_call repair", "Dev startup connects 2 MCP servers through CodeGraph fallback", "real stdio MCP→RidgeCode graph→role=tool smoke passes with result_chars=8046 and history=5", "real OAuth short request passes with account model gpt-5.6-sol", "real OAuth + CodeGraph MCP task passes: exit=0, steps=2, tokens=25308", "activity_kind/activity_history/live_focus/live_trace snapshot assertions pass", "Ctrl+F audit entry preserves input draft and busy state", "folded Tool-detail search expands the live projection and reveals the matching line", "wide audit anchor shows THK›TLS›ANS; narrow anchor shows T›L›A within cell width", "live body shows wide THINK/TOOL/ANSWER, medium THK/TLS/ANS and narrow glyph fallback without adding rows", "top busy activity rail omits duplicate input/output/effort telemetry while preserving phase, tool intent, elapsed/rate and queue signals", "bottom compact status contract keeps provider/model/context/input-output token/effort visible", "Windows default wide idle hint selects Alt+Enter/Ctrl+J; KKP-capable branch selects Shift/Alt+Enter", "static Answer scrollback uses Primary ╰/│ rail and measures its prefix for wrapping", "recognized fence language keeps exact text/cell count and receives Info+BOLD without changing height", "head/tail tool preview and bounded 32-line merged detail pass", "goal lifecycle CLI smoke passes", "telemetry-only Vitals changes no longer rebuild the live layout cache; transcript and geometry changes still do", "long live profile width 18/40/80 over 100 draws measured 111/205/274ms", "Dev PTY normal 120x24 and serial BusyFixture 96x24/40x12 both passed; inspector focus reports reasoning, resize/queue/HOLD/FOLLOW/double Ctrl-C observed, all frames below 16ms"],
+    "not_adopted": ["NLM-specific model names and citation references without local evidence", "unmeasured O(k/n), 2ms, 5ms and 60 FPS performance claims", "hiding token/effort telemetry below a narrow-width threshold because REQ-20260801-01 requires those affordances remain visible", "syntect/tree-sitter or another syntax-highlighting dependency because bounded code token coloring already exists", "a second whole-document virtualized layout layer because current transcript/live tail is bounded and PTY/profile evidence is already sub-16ms", "reimplementation of already-verified Answer/Reasoning split, CSI-u mapping, or bounded block model"],
+    "manual_boundary": ["real Provider long multi-turn/interruption run", "physical Ctrl+R and Ctrl+Space in the user's own terminal", "Windows Terminal native search/copy/resize and scrollback semantics"],
+    "note_reconciled": "The only Active Note was updated with keyboard-affordance, activity-rail, phase-marker, adaptive-anchor, audit-search, phase-trace, physical-tail and telemetry-cache evidence; no expired or completed Note existed to delete."
+  },
+  "narrow_hint_evidence": {
+    "code_change": "draw.rs adds a panel-kind-specific micro legend below 14 columns: navigation remains visible, Live keeps Space/Delete/Esc semantics, Queue keeps Delete/Esc, and history/activity keeps Enter/Esc. Tab is untouched and remains completion selection.",
+    "behavior": "Narrow panels no longer degrade to an unexplained Esc-only footer; the legend is clipped by display-cell width and remains presentation-only.",
+    "tests": "responsive_panel_chrome_keeps_actions_visible_in_narrow_frames passed for Tools/History/Reasoning/Live at 18, 12 and 8 columns.",
+    "pty": "The existing narrow PTY path remains bounded; this change affects only modal footer text and does not alter input routing."
+  },
+  "markdown_detail_evidence": {
+    "code_change": "draw_history_detail_panel now projects the selected bounded detail through the existing alert-aware md_line_spans_with_alert/code lexer, while preserving the semantic THINK/ANSWER/TOOL/PENDING rail and the width reserved for that rail. No new parser or dependency is added.",
+    "behavior": "Expanded Reasoning/Answer/Tool detail retains observed text and fence state while headings, inline emphasis and code receive the same ANSI16 semantic styles as the live stream. Search, detail scroll, Enter/Space, collapse and takeover remain unchanged.",
+    "tests": "audit_detail_reuses_markdown_heading_style, detail_layout_cache_reuses_same_snapshot_and_invalidates_on_width_or_panel, plus the two semantic detail-anchor tests passed; agent TUI total is 200.",
+    "pty": "New binary BusyFixture passed at 96x24 and 40x12 with Inspector detail open, reasoning focus, HOLD/FOLLOW, queue actions and double Ctrl-C; focused Inspector render measured 5108us and 9539us in the combined probes, while separate reasoning and queue probes passed."
+  },
+  "semantic_panel_evidence": {
+    "code_change": "draw.rs now classifies the existing presentation keys into THINK/ANSWER/TOOL/PENDING/EVENT channels. Reasoning history rows receive a cell-reserved │/┃ rail; expanded history and Live Inspector detail use a matching colored left rail and channel title, while detail wrapping measures the inset width.",
+    "behavior": "Static reasoning history and live audit detail now expose the same semantic distinction as the streaming body. Enter/Space expansion, search, detail scroll, pending FIFO actions and running-task focus remain unchanged; no hidden reasoning is invented.",
+    "tests": "reasoning_history_panel_exposes_think_rail_and_detail_anchor, live_inspector_detail_anchor_tracks_answer_and_thinking_focus and audit_detail_reuses_markdown_heading_style passed; agent TUI total is 199.",
+    "pty": "BusyFixture at 40x12 visibly rendered THINK in the Inspector detail; 96x24 and 40x12 Inspector/resize probes, queue controls, HOLD/FOLLOW and double Ctrl-C passed."
+  },
+  "semantic_audit_evidence": {
+    "code_change": "LiveBlockFocus now carries stable Answer/Reasoning block ids. Inspector selection sets a presentation-only audit_focus, renders the selected bounded block while tokens continue, and FOLLOW clears the audit anchor back to the newest live tail. Tool focus and Tool folding remain independent.",
+    "behavior": "Selecting an older Answer or Reasoning row no longer changes only the header chip: the live viewport shows the selected semantic block, HOLD remains visible, and the running model, tool calls, pending FIFO and Ctrl-C takeover are untouched.",
+    "tests": "inspector_audit_focus_projects_selected_block_until_follow plus physical-tail cap, existing Inspector, snapshot, fold-search, Answer/Reasoning focus and scrollback tests pass; workspace tests, clippy, fmt and build pass.",
+    "pty": "Final binary BusyFixture combined controls passed at 96x24 and 40x12. Observed inspector focus=reasoning, HOLD/FOLLOW, pending Delete, Queue/Live switching, resize and double Ctrl-C; observed render_us remained below 16ms (96x24 initial=654, inspector=886, resize=552; 40x12 initial=779, inspector=3902, resize=931).",
+    "rollback": "No new Ratatui unstable feature, syntax-highlighting dependency, execution state or unprofiled hard latency target was introduced.",
+    "tui_tests": "198 passed"
+  },
+  "nlm_current_follow_up": {
+    "recommendation": "NLM 本轮改推增量视口语法高亮；其“缺少实时高亮”前提与本地 CodeGraph 不符：已有 code_line_spans/code_token_role。拒绝新增高亮依赖与第二套 lexer，改补 recognized fence language token 的零增行语义着色。",
+    "local_adjudication": "render.rs 新增 fence_line_spans，复用 fence_language 校验；ticks/suffix 保持 Border，合法 language token 使用 Info+BOLD。静态 markdown、最终 Answer scrollback、live markdown 与窄端 fallback 共用路径；字符数、cell 宽、换行、高度、代码状态与执行语义不变。194 TUI、workspace、clippy/fmt/build 与串行 Dev PTY 96x24/40x12 通过。",
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "ongoing_research_status": "not queried per user instruction",
+    "note_cleanup": "Note list contained one Active baseline only; no expired or completed Note existed to delete.",
+    "next_slice_applied": "NLM's virtualized-layout and Tab-focus direction was locally narrowed with measured evidence: the bounded live path remains unchanged, Tab stays completion selection, expanded detail uses the existing alert-aware Markdown parser, sub-14-column panels expose a truthful micro action legend, production modal detail uses a one-entry revision/selection/width layout cache, panel lists use a one-panel snapshot cache, and explicit Ctrl+R reasoning expansion persists across Answer chunks.",
+    "next_slice_evidence": [
+      "201 agent TUI tests and workspace tests passed",
+      "long_live_frames width 18/40/80 over 100 draws measured 78/166/231ms after the cache slice",
+      "serial BusyFixture final binary 96x24 and 40x12 passed in focused Inspector/Reasoning/HOLD/FOLLOW/queue/double Ctrl-C runs; reasoning expansion observed in both sizes and ResizeProbe passed 96x24 to 40x12",
+      "DetailLayoutCache and PanelItemsCache regressions prove same-snapshot reuse plus deterministic width/query/selection/detail/rebuilt-panel invalidation",
+      "explicit Ctrl+R reasoning inspection remained expanded after Answer arrival; new-task clear boundary remained intact",
+      "no new dependency, lexer, whole-document layout state machine, or execution semantic"
+    ]
+  },
+  "panel_items_cache_evidence": {
+    "code_change": "draw.rs extracts standard/detail panel item projection into PanelItemsCache and folds it into PanelLayoutCache. One active panel snapshot is reused across telemetry-only redraws; revision, query, selected row, detail state, kind, width, and rebuilt live panel invalidate it.",
+    "behavior": "Static Models/Tools/Activity/History modal lists no longer rebuild every wrapped ListItem on each frame. The cache is presentation-only, bounded to one panel, and does not change selection, queue actions, Tab completion, or execution state.",
+    "tests": "panel_items_cache_reuses_wrapped_snapshot_and_invalidates_on_view_changes passed; workspace agent TUI total is 201.",
+    "rollback": "Remove PanelItemsCache and route draw_panel_with_cache back to direct standard_panel_items/detail_panel_items construction; retain DetailLayoutCache and live tail bounds."
+  },
+  "reasoning_persistence_evidence": {
+    "code_change": "LiveTranscript::push_answer no longer resets reasoning_expanded when the first Answer chunk arrives; clear_streams remains the new-task reset boundary.",
+    "behavior": "After Ctrl+R, later Answer chunks cannot silently collapse the user's explicit reasoning audit view. Ctrl+R still toggles it, and new tasks still start clean.",
+    "tests": "answer_arrival_preserves_explicit_reasoning_inspection passed; serial final-binary PTY reasoning probes passed at 96x24 and 40x12 with reasoning_observed=true.",
+    "rollback": "Restore the former Answer-phase reset only if the product intentionally changes the explicit audit-view contract."
+  },
+  "latest_nlm_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "建议自适应遥测堆栈与布局高度缓存：窄端将底部遥测垂直重排，并按可见窗口缓存高度。",
+    "answer_summary": "NLM 认为窄端水平遥测可能压缩思考区，并建议先做长任务 Resize 压力测量；回答声称的复杂度/毫秒阈值未作本地事实。",
+    "local_adjudication": "本次回答返回 sources_used=[]、citations={}，只能作未引证方向建议。CodeGraph 与本地 32/40 列 frame 证明底栏已有 32 列 ctx+I/O+effort、20 列 I/O+effort 的紧凑策略；垂直堆叠会额外占高度，暂否决。真实缺口为 32 列 idle 顶栏将 TAKE 结果裁成 `ready · takeover re…`，改做 ActivityKind + 完整关键结果压缩。",
+    "acceptance": ["32/40 列 idle 顶栏完整显示 TAKE 与 takeover ready，cell width 不溢出", "底栏仍完整显示输入 token、输出 token、effort；不增加遥测行高", "THK/ANS/TLS/WAIT/ASK/SUM/TAKE/DONE/ERR 等活动事实不进入执行或队列状态", "工具折叠、思考检视、HOLD/FOLLOW、队列、双 Ctrl-C 路由不变", "无本地测量前不引入垂直遥测或全局高度缓存"],
+    "evidence": ["32 列旧 frame rows 显示 `RidgeCode  ready · takeover re…`，state.activity_kind=TAKE 且 ledger 文本为 takeover ready", "CodeGraph: top_chrome/push_chrome_clipped/ActivityKind::tag；底栏 compact_status_line 已按宽度保留 token/effort", "新增 narrow_idle_chrome_keeps_activity_kind_and_full_takeover_outcome，agent TUI 205 tests 全通过", "重链 target/debug/ridgecode 后 32 列 frame 显示 `RidgeCode  TAKE takeover ready` 与 `C0% · I~4 O0 · Emed`", "32 列 ConPTY status=passed：Inspector、HOLD/FOLLOW、队列与双 Ctrl-C 均通过；snapshot render_us=375", "workspace tests、clippy -D warnings、fmt、build、git diff --check 全通过"],
+    "rollback": "若窄端标签造成关键输入/模型状态遮挡，仅移除 compact_idle_status 分支，恢复原 status_text；不回滚 Activity ledger、底部 token/effort 或 LiveLineAnchor。",
+    "response_metadata": {"status": "success", "sources_used": [], "citations": {}, "references": [], "interpretation": "un-cited directional suggestion; local CodeGraph, frame snapshots and approved requirements override it"},
+    "ongoing_research_status": "not queried per user instruction"
+  },
+  "adaptive_inspector_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "NLM 推荐虚拟化视口/按宽度缓存高度，并在窄端自适应拆分；其性能阈值与‘数千行全量重排’前提需本地验证。",
+    "answer_summary": "回答把 O(k/n) 虚拟化、W<80 窄端拆分、32/40/80/96 列与 CJK/长回答/HOLD/FOLLOW/resize 列为验收项；同时要求保持 Tab 选择、Enter 提交契约。",
+    "local_adjudication": "响应返回 sources_used=[]、citations={}，仅作未引证方向建议。CodeGraph 证实 LiveTranscript 已限 MAX_LIVE_BLOCKS=64，visible_lines/append_* 只取有界逻辑尾部，render_live_tail_projection 再限物理尾，LiveOutputCache 按 revision/width/rows/busy 复用；故不新增第二套全局虚拟化/HashMap 高度层。真实可见缺口是宽屏 Live Inspector 详情上下堆叠，列表与 Answer/Reasoning 不能同时审阅；采用 presentation-only 自适应分栏：inner width>=72 且 height>=8 时左右显示列表/详情，窄端保留上下堆叠。",
+    "acceptance": ["32/40 列保留可读的上下 Inspector 与原有折叠/提示", "80/96 列列表与 THINK/ANSWER/TOOL 详情同屏且不越界", "CJK/长回答详情按现有 Markdown 与 cell-width 口径换行", "HOLD/FOLLOW、resize、队列、双 Ctrl-C、Tab/Enter 路由不变", "缓存仍限单面板，不引入未测硬延迟或全量 transcript layout 状态"],
+    "implementation": "draw_history_detail_panel 新增 draw_history_detail_split：宽屏按 40/60 水平分栏，详情仍复用 DetailLayoutCache、Markdown lexer 与 detail_scroll_position_with_total_rows；窄屏走原垂直布局。",
+    "response_metadata": {"status": "success", "sources_used": [], "citations": {}, "references": [], "interpretation": "un-cited directional suggestion; runtime, CodeGraph and approved requirements override unsupported performance claims"},
+    "ongoing_research_status": "not queried per user instruction"
+  },
+  "adaptive_panel_culling_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "NLM 再建议窄端剔除 Inspector 与增量视口语法高亮，并称窄端信息过载、实时代码缺少高亮。",
+    "answer_summary": "回答要求 32/40 列隐藏面板、80/96 列恢复分栏，并建议 syntect/tree-sitter；性能与‘200 行以上无延迟’均属待验证表述。",
+    "local_adjudication": "响应仍返回 sources_used=[]、citations={}，仅作未引证建议。当前 Inspector 是覆盖式 modal，不占主 live 四槽高度，32/40/80/96 PTY 已观测 detail_open、reasoning focus、HOLD/FOLLOW 与接管；窄端自动剔除会削弱用户实时展开/接管能力，故不做。CodeGraph 已证实 live_markdown_spans_with_alert→md_line_spans_with_alert→code_line_spans/code_token_role，实时 Markdown/代码 token 着色及可见尾限制均已存在；不新增 syntect/tree-sitter。",
+    "evidence": ["draw_with_cache/responsive_live_layout：Inspector 非常驻侧栏，不挤压 live 输出", "live_markdown_spans_with_alert、code_line_spans、code_token_role：现有 ANSI16 代码 token 高亮链路", "32/40/80/96 Windows ConPTY status=passed，detail_open=true、live_focus=reasoning、HOLD/FOLLOW/resize/双 Ctrl-C 均观测", "live_code_highlighting_is_bounded_to_visible_tail 与 CJK rendered-height regressions passed"],
+    "next_action": "保留当前分栏与高亮基线；继续从本地 frame/PTY 找真实模型思考/回答展示缺口，不为未测性能主张引入面板剔除或新高亮依赖。",
+    "response_metadata": {"status": "success", "sources_used": [], "citations": {}, "references": [], "interpretation": "un-cited proposal rejected where it conflicts with local modal geometry and existing highlighter"},
+    "ongoing_research_status": "not queried per user instruction"
+  },
+  "semantic_phase_rails_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "NLM 建议以语义阶段导轨（Semantic Phase Rails）和非阻塞接管信标标识 THINK/ANSWER/TOOL，并在 HOLD 时持续显示安全区与 FOLLOW 操作；保持 Tab 选择、Enter 提交、工具折叠与 32/40/80/96 列适配。",
+    "answer_summary": "回答指出窄屏若仅靠文本标题，用户可能无法确认当前处于思考、回答或接管暂停；建议一格色轨、阶段 glyph/label 与 HOLD beacon。",
+    "local_adjudication": "该回答确有 sources_used=[8862d715-ffad-4288-b7eb-173260e2dcff] 且 citations 1..14 均指向手工源，故纳入裁决。CodeGraph 证实 RidgeCode 已有 live_rail、ANSWER/THINK/TOOL marker、HOLD phase anchor、HOLD chip 与宽端 FOLLOW 提示；未重复造 rail。实测发现真实缺口仅在窄屏 busy chrome：compact_busy_phase 将 HOLD 放在尾部，右裁剪会丢失；窄端 input chrome 也未暴露 FOLLOW。故将 HOLD 前置，并在窄端保留现有 Ctrl+Space 的紧凑 `^Space` 提示；presentation-only，不新增快捷键或执行状态。",
+    "acceptance": [
+      "18/24/32/40/47 列 busy HOLD 顶栏持续出现 HOLD，cell width 不溢出",
+      "18/24/32/40/47 列忙碌输入栏保留 ^C takeover，并在 HOLD 时显示 ^Space follow",
+      "宽端既有 ANSWER/THINK/TOOL rails、HOLD/FOLLOW 与工具折叠不变",
+      "Tab 仍为选择不提交，Enter/Ctrl+Enter/Ctrl-C 路由不变",
+      "不新增 PhaseRole、lexer、依赖、布局状态机或执行语义"
+    ],
+    "implementation": "draw.rs 将 compact_busy_phase 的 HOLD 标记从尾部移至前缀；status.rs 将 live_inspecting 传入 compact_busy_actions，在窄端 ^C 后追加现有 FOLLOW 的紧凑 `^Space` token。",
+    "evidence": [
+      "CodeGraph: live_rail、live_phase_marker、live_phase_anchor、live_inspection_chip、input_chrome、compact_busy_phase",
+      "新增 narrow_busy_chrome_keeps_hold_beacon_visible：18/24/32/40/47 列均通过，且输入栏 ^Space 可见",
+      "ridgecode TUI binary tests: 207 passed",
+      "workspace tests: agent 104、TUI 207、eval 1、langgraph 9、mcp 2、provider 52、tools 18、doctest 1 全通过",
+      "Dev ConPTY BusyFixture 32/40/80/96 列 status=passed；HOLD/FOLLOW、Inspector、队列、resize/双 Ctrl-C 观测保持通过",
+      "cargo fmt --all -- --check、clippy -D warnings、workspace build、git diff --check 通过"
+    ],
+    "response_metadata": {
+      "status": "success",
+      "sources_used": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+      "citations": {"1": "8862d715-ffad-4288-b7eb-173260e2dcff", "14": "8862d715-ffad-4288-b7eb-173260e2dcff"},
+      "references": ["manual source excerpts on semantic phase rails and takeover signaling"],
+      "interpretation": "cited manual-source recommendation; overlapping local rails retained, measured narrow HOLD beacon gap implemented"
+    },
+    "ongoing_research_status": "not queried per user instruction"
+  },
+  "live_inspector_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "NLM 建议窄端自适应剔除 Inspector、转录区优先重流，并在宽端恢复 40/60 分栏。",
+    "answer_summary": "回答假设 32/40 列低高度下 Inspector 上下堆叠会把 live 视口压缩到近零，建议窄端隐藏列表、仅显式切换时覆盖展示。",
+    "local_adjudication": "本次回答返回 sources_used=[]、citations={}，仅作未引证建议。CodeGraph 证明 draw_with_cache 先用 responsive_live_layout 固定输出/顶部 chrome/输入/底栏四槽，再以 draw_panel_with_cache 的 modal_rect 覆盖绘制 Inspector；Inspector 不参与四槽高度分配，故 NLM 的‘挤压 live 视口’前提不成立，且自动剔除会削弱用户审阅与接管。实测真实缺口是覆盖式 Live Inspector 的 panel_hint 未提示 HOLD/FOLLOW：24 列失败输出仅剩 `↑↓ · Enter/Space … Esc`。故保留 modal，补充宽端 `Ctrl+Space hold/follow` 与窄端分层 `^Space` 提示；不改变面板或执行语义。",
+    "acceptance": [
+      "24/32 列 Live Inspector 提示显示 ^Space，且 Enter/Space、Delete、Esc 等原操作仍可发现",
+      "40/80 列 Live Inspector 提示显示 Ctrl+Space hold/follow，长提示按 cell width 裁剪不溢出",
+      "32/40/80/96 列 Inspector 详情、Answer/Reasoning focus、HOLD/FOLLOW、队列与双 Ctrl-C 保持",
+      "CJK/长 Answer/Reasoning、resize、工具折叠、Tab=选择/Enter=提交不变",
+      "不引入面板剔除、新依赖、第二布局状态机或新的快捷键"
+    ],
+    "implementation": "draw.rs 的 LiveHistory panel_hint 将 HOLD/FOLLOW 操作置于提示前缀；宽提示使用 `Ctrl+Space hold/follow`，24 列以下使用 `^Space` 紧凑形式，18 列仍保留 Enter 可见。",
+    "evidence": [
+      "CodeGraph: responsive_live_layout、draw_with_cache、draw_panel_with_cache、modal_rect、panel_hint",
+      "新增 live_inspector_panel_exposes_hold_follow_controls：24/32/40/80 列通过；先复现 24 列无 FOLLOW 的失败帧，再修复",
+      "ridgecode TUI binary tests: 208 passed",
+      "workspace tests: agent 104、TUI 208、eval 1、langgraph 9、mcp 2、provider 52、tools 18、doctest 1 全通过",
+      "Dev ConPTY BusyFixture 32/40/80/96 列（TimeoutMs=7000）均 status=passed，HOLD/FOLLOW、Inspector 展开、队列删除、双 Ctrl-C 均观测",
+      "cargo fmt --all -- --check、clippy -D warnings、workspace build、git diff --check 通过"
+    ],
+    "response_metadata": {
+      "status": "success",
+      "sources_used": [],
+      "citations": {},
+      "references": [],
+      "interpretation": "uncited proposal rejected at its modal-geometry premise; local measured panel-hint gap implemented"
+    },
+    "ongoing_research_status": "not queried per user instruction"
+  },
+  "nlm_rate_limit_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "",
+    "answer_summary": "本轮已登录 NLM 查询仍两次返回 RESOURCE_EXHAUSTED（error code 8）；未取得新研究结论。",
+    "local_adjudication": "上一轮 `nlm login --check` 已确认 Authentication valid；本轮不重取 Cookie、不把账户侧限流当作代码结论，继续使用手工导入源与本地证据。",
+    "response_metadata": {
+      "status": "error",
+      "sources_used": [],
+      "citations": {},
+      "references": [],
+      "error_code": "RESOURCE_EXHAUSTED"
+    },
+    "ongoing_research_status": "not queried per user instruction"
+  },
+  "static_reasoning_rail_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "NLM 本轮限流，未给出新建议；本地目标为保持思考在离开 Live 后仍可辨识。",
+    "answer_summary": "静态 scrollback 的多行 reasoning 旧路径仅首行有 `┊` 与元数据，后续逻辑行无连续侧轨；Answer 已有 `╰/│` rail，Live reasoning 已有 `THINK`/rail。",
+    "local_adjudication": "接受该本地可证缺口，做 presentation-only 最小修复：首行保持既有 `┊` 与真实 step/耗时/token，后续 reasoning 逻辑行补 `│`；不改执行、历史、快捷键、工具折叠或布局预算。",
+    "implementation": "app.rs 新增 reasoning_commit_text；flush_commits 的 CommitBlock::Reasoning 复用该格式化；inline scrollback 回归测试覆盖多行 rail。",
+    "evidence": [
+      "CodeGraph: flush_commits/insert_commit 的 reasoning 分支原仅拼接一次 `┊`；answer_commit_lines 已对每个逻辑行保留 `╰/│`",
+      "CodeGraph: live_rail 对 reasoning 首行/续行分别提供 `┌/│`，静态提交路径此前无对应续行证据",
+      "reasoning_commit_renders_in_inline_scrollback：208 TUI tests 中通过多行思考、`┊`、`│`、元数据与 DIM/ITALIC 检查",
+      "workspace tests：agent 104、TUI 208、eval 1、langgraph 9、mcp 2、provider 52、tools 18、doctest 1 全通过",
+      "fmt、clippy -D warnings、workspace build、git diff --check 全通过",
+      "串行 Windows ConPTY BusyFixture 32/40/80/96 列（TimeoutMs=7000）均 status=passed；Inspector detail、Reasoning focus、HOLD/FOLLOW、队列删除、双 Ctrl-C 均观测"
+    ],
+    "rollback": "仅移除 reasoning_commit_text 并恢复原有一次性 `┊` 拼接及新增 `│` 断言；不回滚既有 Live rail、Reasoning history 或工具折叠。"
+  },
+  "nlm_rate_limit_follow_up_20260804": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "",
+    "answer_summary": "本轮已登录 NLM 同会话查询再次返回 RESOURCE_EXHAUSTED（error code 8）；未取得新方案。",
+    "local_adjudication": "NLM 登录态此前已校验有效；按用户边界不重认证、不查询进行中深研，继续以本地 CodeGraph/PTY 为准。",
+    "response_metadata": {
+      "status": "error",
+      "sources_used": [],
+      "citations": {},
+      "references": [],
+      "error_code": "RESOURCE_EXHAUSTED"
+    },
+    "ongoing_research_status": "not queried per user instruction"
+  },
+  "busy_follow_rail_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "NLM 限流；本地验证发现 HOLD 状态需把 FOLLOW 与接管动作置于忙碌输入 rail 左侧。",
+    "answer_summary": "48–95 列处于 live_inspecting 时，原 input_chrome 将 `Alt+End follow` 放在长队列/工具文案尾部，右裁剪可能隐藏 FOLLOW；顶栏仅保留 HOLD 不足以发现回 FOLLOW。",
+    "local_adjudication": "接受本地可复现缺口，新增 presentation-only busy_live_inspection_actions：优先显示 HOLD、Alt+End follow、^C takeover、队列；宽度足够再追加队首/工具/思考/Inspector/Activity 动作。低于 48 列保留既有紧凑 `^Space` 路径；不改按键路由、执行状态或工具语义。",
+    "implementation": "status.rs 在 busy + live_inspecting + live output 且 width>=48 时切换优先级动作 rail；tests.rs 覆盖 48/56/64/72/80/88/96 列 cell-width 与关键动作可见性。",
+    "acceptance": [
+      "48–96 列同时显示 Alt+End follow 与 ^C takeover，且不越界",
+      "队列信息在可用宽度内保留，宽端再渐进显示 ^Enter front、^O、^R、^I、Ctrl+T",
+      "32/40 列既有 ^Space/HOLD/FOLLOW 路径不变",
+      "工具折叠、Reasoning/Answer Inspector、Tab/Enter/Ctrl+Enter/Ctrl-C 路由不变"
+    ],
+    "evidence": [
+      "CodeGraph: input_chrome 的 56/72/96 列 busy 分支把 live_hint 放于长文案末尾；clip_display_cells 从右侧裁剪",
+      "新增 busy_live_inspection_prioritizes_follow_and_takeover：48/56/64/72/80/88/96 列通过，关键动作与 cell width 均验证",
+      "ridgecode binary TUI：209 tests passed；workspace agent 104、TUI 209、eval 1、langgraph 9、mcp 2、provider 52、tools 18、doctest 1 全通过",
+      "fmt、clippy -D warnings、workspace build、git diff --check 通过",
+      "串行 Windows ConPTY BusyFixture 32/40/80/96 列（TimeoutMs=7000）均 status=passed：Inspector detail、Reasoning focus、HOLD/FOLLOW、队列删除、双 Ctrl-C 均观测"
+    ],
+    "rollback": "仅移除 busy_live_inspection_actions 及其调用/测试，恢复原 busy input_chrome 分支；保留窄端 HOLD 前置、^Space 与 LiveHistory hint 修复。"
+  },
+  "static_answer_think_channel_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "NLM 本轮仍限流；本地应让提交态 Answer/Reasoning 与 live 语义通道保持同一可发现标签，并为窄屏保留真实元数据。",
+    "answer_summary": "静态 Answer 原仅有 `╰/│` rail，缺少与 live `[ANSWER]` 对齐的显式首行通道；静态 reasoning 的真实元数据使用 emoji 前缀，在窄屏不如紧凑 ASCII 通道稳定。",
+    "local_adjudication": "接受本地渲染证据：Answer 首行改为 `╭ ANSWER`，续行仍为 `│`；reasoning 首行改为窄屏友好的 `┊ THK[...]`，保留 step、耗时、task token、续行 rail 与 DIM/ITALIC；不改变执行、工具折叠、快捷键或第二状态机。",
+    "implementation": "render.rs 新增 answer_commit_rail，并让 answer_commit_measure/answer_commit_lines 共用；status.rs 将 reasoning 元数据改为 `THK[...]`，app.rs 的静态 reasoning 与测试 drain 共用 reasoning_commit_text。",
+    "acceptance": [
+      "提交态 Answer 首行可见 ANSWER，Markdown span、代码围栏与 cell-width 测量保持",
+      "提交态多行 reasoning 首行可见 THK 与真实 step/耗时/token，续行可见 │",
+      "40 列静态 reasoning 元数据不因标签增长而丢失，ANSI-free",
+      "工具默认折叠、live Inspector、队列、HOLD/FOLLOW 与执行/输入语义不变"
+    ],
+    "evidence": [
+      "CodeGraph: answer_commit_lines/answer_commit_measure 原共用 `╰/│` 但无显式 ANSWER；reasoning_commit_text 是静态 reasoning 唯一提交投影",
+      "committed_answer_keeps_a_semantic_rail_after_leaving_live_view 与 reasoning_commit_renders_in_inline_scrollback 通过",
+      "reasoning_meta_omits_unobserved_step_and_keeps_real_measurements 更新并通过，THK chip 在 step=0 时仍不伪造 step",
+      "ridgecode binary TUI 209 tests passed；workspace tests、fmt、clippy -D warnings、build passed",
+      "40/80/96 列 Dev ConPTY Inspector/Reasoning/HOLD/FOLLOW 通过；32 列单项长时限复跑通过，短时限偶发 partial 已记录为时序采样风险"
+    ],
+    "rollback": "仅移除 answer_commit_rail 与 THK 元数据改动，恢复原静态 rail/emoji 元数据；保留 Live Answer/Reasoning rails、Inspector、工具折叠与缓存。"
+  },
+  "nlm_rate_limit_follow_up_20260804_retry": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "No new NLM recommendation; preserve the manually imported source as the only theory basis.",
+    "answer_summary": "The same-conversation NLM query was attempted after the local answer-history gap was identified, but Google returned RESOURCE_EXHAUSTED (error code 8).",
+    "local_adjudication": "Login remains valid. Per user instruction, no re-authentication and no research_status query; local CodeGraph, tests, and PTY evidence remain authoritative.",
+    "response_metadata": {
+      "status": "error",
+      "sources_used": [],
+      "citations": {},
+      "references": [],
+      "error_code": "RESOURCE_EXHAUSTED"
+    },
+    "ongoing_research_status": "not queried per user instruction"
+  },
+  "answer_history_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "Keep completed Answer bodies bounded but recoverable: retain full text in a searchable history surface and use a modal detail view for expansion.",
+    "answer_summary": "Long Markdown answers were folded to 20 lines in scrollback and then discarded from the commit queue, leaving no user-accessible expansion path. The new bounded Answer history preserves full sanitized bodies and exposes /answer and /answers with filter, selection, and Enter expansion.",
+    "local_adjudication": "Accepted as the next presentation-only TUI slice. It does not alter execution, routing, queue semantics, tool folding, or live transcript behavior.",
+    "implementation": "Ui.answer_history stores the latest eight completed Markdown answers; answer_history_panel provides recent-first rows with character counts; PanelKind::AnswerHistory participates in detail rendering and attention switching; /answer and /answers are documented and statically completable.",
+    "acceptance": [
+      "Answer history is bounded at eight and evicts the oldest entry.",
+      "The selected row retains full multi-line answer text after scrollback folding.",
+      "Panel filtering and Enter detail expansion work; /reset clears answer history.",
+      "TUI target tests pass with the new bounded/searchable/expandable coverage."
+    ],
+    "evidence": [
+      "answer_history_is_bounded_searchable_and_expandable passed",
+      "cargo test -p agent --bin ridgecode --locked --offline: 210 passed",
+      "CodeGraph confirmed PanelKind, panel detail, command dispatch, and snapshot blast radius before editing"
+    ],
+    "rollback": "Remove AnswerEntry/answer_history_panel, AnswerHistory command/panel branches, and the corresponding test; existing scrollback fold and live/tool/reasoning history remain unchanged."
+  },
+  "nlm_rate_limit_follow_up_20260804_iteration": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "No new recommendation: the same-session query was rejected by NotebookLM account-level rate limiting.",
+    "answer_summary": "Asked for the next bounded TUI plan focused on Answer/Reasoning visibility, expandable long content, folded tools, live activity, takeover, performance, and terminal adaptation; NLM returned RESOURCE_EXHAUSTED (error code 8).",
+    "local_adjudication": "Do not re-authenticate blindly and do not query ongoing research status. Continue from the manually imported source and local CodeGraph/runtime evidence.",
+    "response_metadata": {
+      "status": "error",
+      "sources_used": [],
+      "citations": {},
+      "references": [],
+      "error_code": "RESOURCE_EXHAUSTED"
+    },
+    "ongoing_research_status": "not queried per user instruction"
+  },
+  "bounded_answer_detail_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "Keep long Answer detail bounded with a head/tail projection and an explicit omission marker; preserve the source only for the transient native scrollback commit.",
+    "answer_summary": "Answer history was bounded by entry count but not by per-entry size. A very large final response could remain resident indefinitely and make modal detail expensive.",
+    "local_adjudication": "Accepted as a presentation/performance fix. Answer history now caps each retained detail at 8192 characters, keeps the head and completion tail, and marks the omitted middle; CommitBlock::Markdown still receives the original text so native scrollback behavior is unchanged.",
+    "implementation": "app.rs adds MAX_ANSWER_HISTORY_CHARS and bound_answer_history_text; only AnswerEntry receives the bounded projection. Tests assert head/tail/omission and exact original CommitBlock text.",
+    "acceptance": [
+      "Large retained Answer detail is strictly smaller than the source and contains head, tail, and middle-omitted marker.",
+      "Normal Answer history remains searchable and Enter-expandable.",
+      "Transient scrollback commit retains the original Answer text for existing fold/wrap rendering.",
+      "Workspace quality gates and Dev ConPTY remain green."
+    ],
+    "evidence": [
+      "answer_history_bounds_large_detail_without_changing_scrollback_commit passed",
+      "cargo test --workspace --locked --offline: agent 104, TUI 211, eval 1, langgraph 9, mcp 2, provider 52, tools 18 and doctest passed",
+      "cargo fmt --all -- --check, clippy -D warnings, workspace build and git diff --check passed",
+      "Dev ConPTY BusyFixture TimeoutMs=20000 status=passed; Inspector detail, Reasoning, HOLD/FOLLOW, queue affordance, and double Ctrl-C observed"
+    ],
+    "rollback": "Remove MAX_ANSWER_HISTORY_CHARS and bound_answer_history_text, restore direct AnswerEntry text storage, and remove the bounded-detail regression test."
+  },
+  "nlm_rate_limit_follow_up_20260804_activity": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "No new recommendation: the same-session query was rejected by NotebookLM account-level rate limiting.",
+    "answer_summary": "Asked for the next compact semantic activity signal for medium-width busy TUI frames; NLM returned RESOURCE_EXHAUSTED (error code 8).",
+    "local_adjudication": "Do not re-authenticate and do not query ongoing research status. Use the manually imported source plus local CodeGraph, tests, and runtime evidence.",
+    "response_metadata": {
+      "status": "error",
+      "sources_used": [],
+      "citations": {},
+      "references": [],
+      "error_code": "RESOURCE_EXHAUSTED"
+    },
+    "ongoing_research_status": "not queried per user instruction"
+  },
+  "activity_signal_chip_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "Expose one latest semantic activity chip in the medium busy chrome, keep it bounded and suppress duplicate live-channel labels; never displace HOLD/FOLLOW/takeover affordances.",
+    "answer_summary": "Wide frames already had an activity breadcrumb and narrow frames had compact phase/queue signals, but medium 48-63 column frames could clip the latest verification, conclusion, waiting, or takeover meaning.",
+    "local_adjudication": "Accepted as a measured presentation-only slice. The chip is derived from existing ActivityKind history, uses stable semantic tags, fits by display-cell width, and yields to live-channel duplication and HOLD priority.",
+    "implementation": "draw.rs adds activity_signal_chip for medium busy widths: THK/ANS/TLS/CHK/SUM/WAIT/ASK/QUE/TAKE/DONE/ERR. top_chrome inserts it only when no live inspection is active and the tag fits; existing wide breadcrumb, narrow phase rail, input action rail, queue semantics, and bottom token/effort status remain unchanged.",
+    "acceptance": [
+      "Verification and conclusion activity expose CHK and SUM in 48/56/63-column busy chrome within the cell budget.",
+      "The latest activity signal does not duplicate an already visible live Answer/Reasoning/Tool channel.",
+      "HOLD remains visible and has priority over the optional activity chip.",
+      "NLM rate-limit response, local decision, tests, and runtime evidence are recorded without querying research status."
+    ],
+    "evidence": [
+      "CodeGraph: activity_breadcrumb is wide-only (width >=64); medium top_chrome had no stable semantic latest-activity chip.",
+      "medium_busy_chrome_exposes_semantic_activity_chip_without_live_channel passed for CHK/SUM at 48/56/63 columns.",
+      "medium_busy_chrome_keeps_hold_priority_over_activity_chip passed with bounded HOLD output.",
+      "cargo test -p agent --bin ridgecode --locked --offline: 213 passed",
+      "cargo test --workspace --locked --offline, cargo fmt --all -- --check, clippy -D warnings, workspace build and git diff --check passed",
+      "Dev ConPTY recheck exercised BusyFixture Inspector/queue/HOLD/FOLLOW/resize/double Ctrl-C; core interaction snapshots remained valid, while this sample's optional reasoning/follow observation fields were not captured before the timing window."
+    ],
+    "rollback": "Remove activity_signal_chip and its medium-width tests; retain bounded Answer history, existing activity ledger, wide breadcrumb, narrow phase rail, and all execution/key semantics."
+  },
+  "nlm_rate_limit_follow_up_20260804_attention": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "No new recommendation: the same-session query was rejected by NotebookLM account-level rate limiting.",
+    "answer_summary": "Asked for the next measurable TUI plan with emphasis on model-thinking/answer visibility and global audit shortcuts; NLM returned RESOURCE_EXHAUSTED (error code 8).",
+    "local_adjudication": "Do not re-authenticate and do not query ongoing research status. Continue from the manually imported source and local CodeGraph/runtime evidence.",
+    "response_metadata": {
+      "status": "error",
+      "sources_used": [],
+      "citations": {},
+      "references": [],
+      "error_code": "RESOURCE_EXHAUSTED"
+    },
+    "ongoing_research_status": "not queried per user instruction"
+  },
+  "panel_attention_shortcut_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "Keep Ctrl+R/Ctrl+O/Ctrl+T as global attention switches in read-only audit panels; do not let them mutate search/editor text, and preserve panel/edit/popup precedence.",
+    "answer_summary": "Panel routing previously sent Ctrl+R/Ctrl+O into the panel query path, so the advertised thinking/tool inspection shortcuts became context-dependent exactly when a modal audit surface was open.",
+    "local_adjudication": "Accepted as a presentation/input-boundary fix. The new pure panel_attention_action dispatches only semantic attention keys while allowed observer panels are browsed; matching history panels close, live focus changes become visible, and edit fields/completion popups remain untouched.",
+    "implementation": "input.rs adds panel_attention_action; tui/mod.rs handles it before PanelAction; app.rs makes toggle_details_or_history/toggle_reasoning_or_history close covering audit panels after switching the live projection or matching history. draw.rs reserves a 64+ cell panel-hint suffix: compact ^R/^O/^T audit at 64-95 and labeled ^R think/^O tools/^T activity at 96+.",
+    "acceptance": [
+      "Ctrl+R/Ctrl+O/Ctrl+T classify as attention actions while browsing an observer panel.",
+      "The same keys are ignored by the bridge in panel edit fields and completion popups.",
+      "Matching Reasoning/Tool history panels close on their corresponding shortcut instead of trapping the key as query text.",
+      "64-95 column observer hints expose a compact audit rail and 96+ column hints expose labeled switches, all within the cell budget."
+    ],
+    "evidence": [
+      "CodeGraph and source inspection: tui/mod.rs processed PanelAction before input_action, so Ctrl+R/Ctrl+O became query characters; Panel::allows_attention_switch identifies safe observer panels.",
+      "panel_attention_shortcuts_remain_global_while_browsing passed for R/O/T; panel_attention_shortcuts_ignore_editor_and_popup passed for edit/popup precedence.",
+      "matching_audit_history_shortcut_closes_the_current_panel passed for ReasoningHistory and ToolHistory.",
+      "wide_audit_panel_hint_exposes_global_attention_switches passed with compact 72-cell and labeled 96-cell hints within budget.",
+      "ridgecode binary TUI 217 tests passed; workspace tests, fmt, clippy -D warnings, build and git diff --check passed.",
+      "Dev ConPTY BusyFixture TimeoutMs=20000 final-binary recheck status=passed: Inspector/detail, queue removal/switching, reasoning expansion, HOLD/FOLLOW, resize, and double Ctrl-C all observed."
+    ],
+    "rollback": "Remove panel_attention_action, the pre-panel attention dispatch, matching-history close behavior, the wide hint suffix, and their regressions; retain existing panel query/editor routing and live audit surfaces."
+  },
+  "read_file_batch_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "Keep file-heavy tool output compact by grouping only adjacent completed read_file observations; preserve ordered, bounded per-file detail and make the group break at a different tool.",
+    "answer_summary": "The local tool transcript paired each read_file call with its result but left consecutive files as separate live/history blocks, consuming rows during investigation and scattering the detail surface.",
+    "local_adjudication": "Accepted as a presentation-only TUI slice. No new NLM conclusion was accepted because the same-session query is rate-limited; the manually imported source remains the theory basis and CodeGraph/runtime evidence controls the implementation.",
+    "implementation": "transcript.rs tracks completed read_file blocks, folds adjacent blocks after call/result pairing, preserves focus identity, includes a bounded path index in the batch summary, retains ordered detail head/tail under the existing 32-line bound, and does not cross a non-read tool. Live and committed/history views receive the same ToolBlock.",
+    "acceptance": [
+      "Two adjacent completed read_file pairs render one collapsed Read batch with Ctrl+O detail affordance.",
+      "Expansion exposes both file paths and result previews while retaining <=32 detail lines for a four-read batch.",
+      "An intervening run_shell keeps the surrounding reads as separate summaries.",
+      "Tool execution, queue order, search, focus identity, and non-read folding semantics remain unchanged."
+    ],
+    "evidence": [
+      "CodeGraph: LiveTranscript::push_tool only merged call->observation; adjacent completed read_file ToolBlocks had no merge path.",
+      "consecutive_read_file_results_group_into_one_collapsed_batch passed.",
+      "read_file_batch_preserves_detail_order_and_bound passed with four files, ordered path index, head/tail preview and <=32 detail lines.",
+      "read_file_batch_does_not_cross_other_tools passed with a run_shell boundary.",
+      "cargo test -p agent --bin ridgecode --locked --offline: 220 passed; cargo test --workspace, fmt, clippy -D warnings, build and git diff --check passed.",
+      "Dev ConPTY BusyFixture TimeoutMs=20000 final-binary status=passed after the slice; reasoning, Inspector/detail, queue, HOLD/FOLLOW, resize and double Ctrl-C remained observed."
+    ],
+    "rollback": "Remove read_batch_count/read_batch_paths fields, ToolBlock read-batch helpers, LiveTranscript::coalesce_read_batch and the three regression tests; restore one ToolBlock per completed read while retaining the existing call/result merge and collapsed detail behavior."
+  },
+  "reasoning_history_bound_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "Bound retained Reasoning history per entry with the same head/tail omission contract as AnswerHistory, while preserving the exact observed reasoning text for transient static commit.",
+    "answer_summary": "Reasoning history was capped at eight entries but each entry could retain the full live 32K-character cap, creating avoidable long-session memory and expensive detail rendering.",
+    "local_adjudication": "Accepted as a presentation-only memory/recoverability fix. The NLM next-plan query was rate-limited, so no new NLM conclusion was accepted; manual source plus CodeGraph/runtime evidence remains authoritative.",
+    "implementation": "app.rs adds MAX_REASONING_HISTORY_CHARS=8192 and reuses a bounded head/tail helper; ReasoningEntry stores the bounded projection while CommitBlock::Reasoning keeps the exact observed text, so reasoning history search/expand remains useful without changing execution or scrollback semantics.",
+    "acceptance": [
+      "Large retained reasoning detail exposes head, tail, and an explicit middle-omitted marker.",
+      "Stored ReasoningEntry detail is smaller than the observed text and bounded to the 8192-character policy.",
+      "CommitBlock::Reasoning retains the exact observed text used by transient native scrollback.",
+      "Existing reasoning count/search/expand behavior, queue/control routing, and ConPTY interaction remain unchanged."
+    ],
+    "evidence": [
+      "CodeGraph: ReasoningEntry had only MAX_REASONING_HISTORY=8; LiveTranscript was bounded at ~32768 chars, while AnswerHistory already capped each entry at 8192.",
+      "reasoning_history_bounds_large_detail_without_changing_scrollback_commit passed.",
+      "cargo test -p agent --bin ridgecode --locked --offline: 221 passed; cargo test --workspace, fmt, clippy -D warnings, build and git diff --check passed.",
+      "Dev ConPTY BusyFixture TimeoutMs=20000 final-binary status=passed: reasoning/Inspector/detail, queue, HOLD/FOLLOW, resize and double Ctrl-C observed."
+    ],
+    "rollback": "Remove MAX_REASONING_HISTORY_CHARS/bound_reasoning_history_text and the regression test; restore direct ReasoningEntry text storage while leaving CommitBlock::Reasoning and existing AnswerHistory unchanged."
+  },
+  "answer_history_shortcut_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "Expose bounded completed Answer history through a global, non-destructive attention shortcut while preserving the existing searchable/expandable panel and command path.",
+    "answer_summary": "Completed Answer history was already retained and searchable through /answers, but users had no global keyboard path symmetrical with reasoning, tool, and activity inspection.",
+    "local_adjudication": "Accepted as a presentation/input-boundary fix. The NLM next-plan query remained rate-limited, so no new NLM conclusion was accepted; the manually imported source plus CodeGraph/runtime evidence remains authoritative.",
+    "implementation": "input.rs maps Ctrl+A to ToggleAnswer outside completion popups; panel_attention_action exposes it only for non-editing observer panels; app.rs toggles AnswerHistory without changing the draft, queue, busy state, or execution; mod.rs handles it before PanelAction; draw/status/help expose ^A/ Ctrl+A answers within bounded hints.",
+    "acceptance": [
+      "Ctrl+A opens AnswerHistory when completed answers exist and closes the matching panel on a second press.",
+      "The shortcut leaves the input draft unchanged and does not interrupt a running task or alter queue order.",
+      "Ctrl+A does not mutate completion-popup input or panel editor/query text; the existing /answers command remains available.",
+      "Wide and compact observer hints advertise the answer switch without exceeding the terminal cell budget."
+    ],
+    "evidence": [
+      "CodeGraph: Ui::note_markdown already retained bounded AnswerEntry values and open_answer_history, but no global keyboard path existed.",
+      "answer_history_shortcut_opens_and_closes_without_mutating_input passed; panel open/close leaves draft input unchanged.",
+      "panel_attention_shortcuts_remain_global_while_browsing and panel_attention_shortcuts_ignore_editor_and_popup passed with the added answer switch; popup Ctrl+A returns Ignore.",
+      "wide_audit_panel_hint_exposes_global_attention_switches passed with ^A answers at 96 columns and compact ^A/^R/^O/^T audit at 72 columns.",
+      "cargo test -p agent --bin ridgecode --locked --offline: 222 passed; targeted answer/panel/input/popup tests: 7 passed.",
+      "cargo test --workspace --locked --offline, fmt, clippy -D warnings, workspace build and git diff --check passed; latest Dev ConPTY BusyFixture TimeoutMs=20000 final-binary status=passed with Inspector/detail, queue switching/removal, reasoning expansion, HOLD/FOLLOW, resize and double Ctrl-C observed."
+    ],
+    "rollback": "Remove ToggleAnswer, Ui::toggle_answer_or_history, the Ctrl+A input/panel dispatch, answer shortcut hints/help text and the answer shortcut regressions; leave AnswerHistory and /answers intact."
+  },
+  "answer_history_metadata_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "Keep completed Answer history body bounded, but add small scalar step/elapsed/token context to each row so multiple long-running conclusions remain distinguishable without replaying execution state.",
+    "answer_summary": "AnswerHistory rows previously showed only ordinal and character count; after several investigation turns, users could not tie a conclusion to its observed superstep, elapsed time, or token telemetry.",
+    "local_adjudication": "Accepted as a bounded presentation-only metadata projection. The NLM next-plan query remained rate-limited, so no new NLM conclusion was accepted; manual source plus CodeGraph/runtime evidence remains authoritative.",
+    "implementation": "AnswerEntry stores step, elapsed seconds, and token estimate beside the bounded body; note_markdown_with_meta is fed by the existing Superstep presentation path, while the native CommitBlock::Markdown retains the exact answer body. AnswerHistory rows render the metadata in their summary key and keep existing filtering/Enter expansion.",
+    "acceptance": [
+      "Newest and older Answer rows expose distinct step, elapsed-second, and token context.",
+      "Answer body bound, filtering, detail expansion, Ctrl+A access, and scrollback text remain unchanged.",
+      "Metadata is presentation-only and does not enter provider history, queue routing, or execution state.",
+      "Zero/default metadata remains valid for direct local note_markdown callers and deterministic tests."
+    ],
+    "evidence": [
+      "CodeGraph: final_answer_text returns the complete final Markdown body as one event; AnswerEntry previously exposed only text/char count.",
+      "answer_history_rows_expose_step_elapsed_and_tokens passed for newest/older rows; existing bounded/searchable/expandable Answer tests remained green.",
+      "note_markdown_with_meta is called from the Superstep path with observed step, task elapsed seconds, and stream token estimate; CommitBlock::Markdown remains exact.",
+      "cargo test -p agent --bin ridgecode --locked --offline --quiet -- --test-threads=1 answer_history: 4 passed."
+    ],
+    "rollback": "Remove AnswerEntry step/elapsed/token fields, note_markdown_with_meta, the Superstep metadata arguments, row metadata formatting, and the metadata regression; restore text-only AnswerHistory."
+  },
+  "activity_retention_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "No new NLM recommendation: the logged-in same-session query remained rate-limited.",
+    "answer_summary": "The local Activity ledger was limited to five rows, so long node chatter could evict WAIT/SUM/DONE/ERR evidence before the user opened the audit panel.",
+    "local_adjudication": "Accepted as a presentation-only repair. The ledger remains bounded at 12 entries and preferentially evicts transient node chatter while retaining actionable waiting, approval, conclusion, takeover, completion, and error signals. Sequence numbers preserve chronology; no execution state or queue semantics were added.",
+    "implementation": "ActivityKind::is_retained_signal plus bounded prioritized eviction in Ui::record_activity; Activity panel title now identifies the surface as an audit ledger.",
+    "acceptance": [
+      "Activity history remains bounded at MAX_ACTIVITY_HISTORY=12.",
+      "WAIT/SUM/DONE signals survive MAX_ACTIVITY_HISTORY+ transient reasoning events.",
+      "All retained rows remain selectable and expandable through the existing Activity panel.",
+      "Execution, queue, provider, scrollback and shortcut semantics remain unchanged."
+    ],
+    "evidence": [
+      "activity_history_retains_actionable_boundaries_during_node_chatter passed",
+      "activity_history_is_bounded_deduplicated_and_newest_first passed",
+      "cargo test --workspace --locked --offline: agent 104, TUI 224, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest 1",
+      "cargo fmt --all -- --check, cargo clippy --workspace --all-targets --locked --offline -- -D warnings, cargo build --workspace --locked --offline, git diff --check passed",
+      "Dev ConPTY BusyFixture TimeoutMs=20000 status=passed with Inspector/detail, reasoning, HOLD/FOLLOW, queue, resize and double Ctrl-C observed"
+    ],
+    "rollback": "Restore MAX_ACTIVITY_HISTORY=5, remove the retained-signal classifier and prioritized eviction, and restore the Activity panel recent label."
+  },
+  "partial_answer_retention_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "No new NLM recommendation: the logged-in same-session query remained rate-limited.",
+    "answer_summary": "The local audit found that clear_streams dropped streamed Answer text on Ctrl-C or run error when no `(final)` graph message had arrived; Reasoning and Tool had existing retention paths.",
+      "local_adjudication": "Accepted as a presentation-only repair. Drain Answer blocks only on the two interrupt paths and done_rx errors, commit exact text with a visible partial-answer note, and retain it in the existing bounded Answer archive as PARTIAL so long output remains searchable/expandable. The normal successful final path is untouched, preventing duplicate answers.",
+    "implementation": "LiveTranscript::drain_answers plus Ui::commit_live_answers; AnswerEntry.partial distinguishes PARTIAL from ANSWER; both Ctrl-C branches call it before clear_streams, while done_rx gates it on Result::Err.",
+    "acceptance": [
+      "Interrupted partial Answer remains in static Markdown after stream cleanup.",
+      "Partial Answer creates only a PARTIAL archive row and never a completed ANSWER semantic.",
+      "Exact body text is preserved and the user sees an explicit partial marker.",
+      "Successful `(final)` output remains the only completed AnswerHistory path."
+    ],
+    "evidence": [
+      "interrupted_live_answer_is_retained_without_faking_completion passed",
+      "partial_answer_archive_bounds_and_expands_long_detail passed",
+      "cargo test --workspace --locked --offline: agent 104, TUI 228, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest 1",
+      "cargo fmt --all -- --check, cargo clippy --workspace --all-targets --locked --offline -- -D warnings, cargo build --workspace --locked --offline, git diff --check passed",
+      "Dev ConPTY BusyFixture TimeoutMs=20000 status=passed with Inspector/detail, reasoning, HOLD/FOLLOW, queue, resize and double Ctrl-C observed"
+    ],
+    "rollback": "Remove drain_answers/commit_live_answers, their interrupt/error call sites, and the partial-answer regression."
+  },
+  "partial_answer_archive_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "No new NLM recommendation: the logged-in same-session query remained rate-limited.",
+    "answer_summary": "After partial Answer retention was added, local audit found that static scrollback still folds long partial output without a detail/search surface.",
+    "local_adjudication": "Accepted as the smallest presentation-only repair: reuse AnswerHistory for both final and partial bodies, add one bounded partial flag, label rows PARTIAL, and keep completed ANSWER semantics distinct.",
+    "implementation": "AnswerEntry.partial plus retain_answer_history; answer_history_panel shows PARTIAL/ANSWER; the existing Ctrl+A and /answers filter/Enter detail paths serve both variants. When full, retain_answer_history evicts an older PARTIAL row before falling back to the oldest row. The 8192-character head/tail bound remains shared.",
+    "acceptance": [
+      "A long interrupted Answer is retained within the existing bounded archive.",
+      "The row is visibly PARTIAL and remains searchable/expandable.",
+      "The exact static Markdown body and the completed ANSWER path remain unchanged.",
+      "When capacity is reached, a completed conclusion survives while an older PARTIAL row is preferentially evicted.",
+      "No second execution or history state machine is introduced."
+    ],
+    "evidence": [
+      "partial_answer_archive_bounds_and_expands_long_detail passed",
+      "answer_archive_evicts_partial_before_completed_conclusions passed",
+      "answer_history_is_bounded_searchable_and_expandable and answer_history_rows_expose_step_elapsed_and_tokens passed",
+      "cargo test --workspace --locked --offline: agent 104, TUI 228, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest 1",
+      "Dev ConPTY BusyFixture TimeoutMs=20000 status=passed with Inspector/detail, reasoning, HOLD/FOLLOW, queue, resize and double Ctrl-C observed"
+    ],
+    "rollback": "Remove AnswerEntry.partial, PARTIAL row rendering, partial-priority eviction, archive wording, and the long partial archive/eviction regressions; keep the prior partial static retention if needed."
+  },
+  "partial_answer_archive_priority_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "No new NLM recommendation: the logged-in same-session query remained rate-limited.",
+    "answer_summary": "A bounded unified archive now retains both completed and interrupted Answers; local saturation audit checked whether recoverable PARTIAL rows could displace completed conclusions.",
+    "local_adjudication": "Accepted the smallest deterministic presentation-only policy: when AnswerHistory reaches MAX_ANSWER_HISTORY, remove the oldest PARTIAL row if one exists, otherwise preserve FIFO eviction. This protects completed conclusions without adding task state or changing successful final routing.",
+    "implementation": "Ui::retain_answer_history scans only the bounded deque for the first PARTIAL row and removes it before appending; completed ANSWER rows retain their existing order otherwise.",
+    "acceptance": [
+      "The archive remains bounded at MAX_ANSWER_HISTORY.",
+      "A completed conclusion survives saturation when PARTIAL rows are present.",
+      "PARTIAL and ANSWER labels, filtering, and Enter expansion remain unchanged.",
+      "No provider, graph, queue, cancellation, or execution semantics change."
+    ],
+    "evidence": [
+      "answer_archive_evicts_partial_before_completed_conclusions passed",
+      "cargo test --workspace --locked --offline: agent 104, TUI 227, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest 1",
+      "cargo fmt --all -- --check, cargo clippy --workspace --all-targets --locked --offline -- -D warnings, cargo build --workspace --locked --offline, git diff --check passed"
+    ],
+    "rollback": "Remove the PARTIAL-first scan and its regression; retain the bounded unified archive with FIFO eviction if the priority policy proves undesirable."
+  },
+  "reasoning_visibility_with_tools_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "No new NLM recommendation: the logged-in same-session query remained rate-limited.",
+    "answer_summary": "Local audit found that the top chrome hid the only explicit THINKING/Ctrl+R affordance as soon as a live Tool block coexisted with a later Answer, even though reasoning remained inspectable.",
+    "local_adjudication": "Accepted the smallest presentation-only repair: keep the existing reasoning visibility chip whenever busy Answer output follows recorded Reasoning, regardless of whether folded Tool blocks also exist; mirror that affordance in the 72–95-cell busy input rail with compact key tokens so Alt+↑/↓ focus remains intact.",
+    "implementation": "Removed only the `!ui.has_live_tools()` condition around reasoning_visibility_chip. The medium busy+tools input tier now uses `^Enter`, `^C`, `^R`, and `^O` tokens before the full Alt+↑/↓ focus label; the >=96 tier keeps full Ctrl labels. Existing chip fitting and tool folding/focus paths remain unchanged.",
+    "acceptance": [
+      "Mixed Reasoning+Tool+Answer turns expose THINKING/Ctrl+R at widths >=48 when the chip fits its existing bounded slot.",
+      "Busy tool rails at 72–95 cells expose ^R while preserving ^C, ^O, and complete Alt+↑/↓; >=96 cells retain full labels.",
+      "Tool calls remain folded by default and independently expandable/focusable.",
+      "The chip and all chrome stay within cell width; no telemetry or execution state moves into the top bar.",
+      "No provider, graph, queue, cancellation, or MCP semantics change."
+    ],
+    "evidence": [
+      "top_chrome_surfaces_reasoning_visibility_alongside_tools passed at 120/96/80/64/48 cells",
+      "busy_tool_action_rail_preserves_reasoning_and_focus_at_medium_widths passed at 72/80/88/95 and 96 cells",
+      "cargo test --workspace --locked --offline: agent 104, TUI 229, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest 1",
+      "cargo fmt --all -- --check, cargo clippy --workspace --all-targets --locked --offline -- -D warnings, cargo build --workspace --locked --offline, git diff --check passed",
+      "Dev ConPTY BusyFixture TimeoutMs=20000 final-binary status=passed with Inspector/detail, reasoning, HOLD/FOLLOW, queue, resize and double Ctrl-C observed"
+    ],
+    "rollback": "Restore the `!ui.has_live_tools()` guard and remove the mixed-tool visibility regression if the chip creates measured chrome contention; retain the prior reasoning and tool inspection paths."
+  },
+  "sticky_queue_viewport_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "No new NLM recommendation: the logged-in same-session query remained rate-limited; the local slice is adjudicated from the approved requirement and CodeGraph/runtime evidence.",
+    "answer_summary": "A long wrapped draft consumed all available input rows before queue preview allocation, so pending intent could disappear and the cursor could remain outside the painted editor viewport.",
+    "local_adjudication": "Accepted a presentation-only viewport repair. Queue preview reserves rows before the editor, while input_viewport keeps the cursor-near draft tail visible; when a tiny frame has only one inner row, editable input remains primary and the existing top-chrome queue count is the truthful compact fallback.",
+    "implementation": "draw_with_cache computes pending preview from usable short frames, reserves one input row before queue rows, and offsets the cursor by queue rows plus its local viewport row. input_viewport selects an already-wrapped bounded window; queue/input state and Ctrl+Enter routing remain unchanged.",
+    "acceptance": [
+      "A pending message remains above a multi-row wrapped draft.",
+      "The cursor-near tail of the current draft remains visible after queue rows consume space.",
+      "The existing short-frame queue preview remains visible at 40x7.",
+      "Queue ordering, immediate front insertion, input text, and execution semantics remain unchanged.",
+      "No extra transcript copy, provider state, or second queue state machine is introduced."
+    ],
+    "evidence": [
+      "pending_queue_stays_visible_in_short_live_frame passed at 40x7",
+      "pending_queue_stays_above_wrapped_draft_and_cursor_tail passed at 40x8 with a 160-character wrapped draft and visible tail",
+      "cargo test --workspace --locked --offline: agent 104, TUI 230, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest 1",
+      "cargo fmt --all -- --check, clippy --workspace --all-targets --locked --offline -- -D warnings, workspace build and git diff --check passed",
+      "Dev ConPTY `windows-pty-e2e.ps1 -TimeoutMs 20000 -BusyFixture -InspectLive -InspectQueue -InspectReasoning -InspectHold -ResizeProbe` returned status=passed with Inspector/detail, queue removal/switching, reasoning expansion, HOLD/FOLLOW, resize and double Ctrl-C; snapshot render_us=204, inspector=717, resize=403"
+    ],
+    "rollback": "Restore queue allocation from unused input rows and remove input_viewport/cursor-window projection; retain all queue routing and prior mixed-tool reasoning visibility behavior."
+  },
+  "bounded_queue_preview_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "No new NLM recommendation: the CLI/MCP path is currently unavailable or rate-limited; local CodeGraph and deterministic evidence control this presentation-only slice.",
+    "answer_summary": "Pending queue output was capped, but oversized pasted messages were still fully scanned and wrapped on every redraw; a single message could also make the overflow affordance exceed the row cap.",
+    "local_adjudication": "Accepted a bounded preprocessing repair without changing the full queued intent. The renderer previews only a bounded prefix, reserves the overflow row for every queue, and retains the full string for later execution/front insertion.",
+    "implementation": "Added MAX_PENDING_PREVIEW_CHARS=2048. pending_queue_lines probes and wraps only the bounded prefix, marks clipped text for the existing overflow affordance, and keeps the total preview within MAX_PENDING_PREVIEW_ROWS.",
+    "acceptance": [
+      "A huge pasted pending message does not require full-message wrapping during a frame redraw.",
+      "Preview remains within MAX_PENDING_PREVIEW_ROWS and retains an overflow indication.",
+      "The full queue string and FIFO/Ctrl+Enter semantics remain unchanged.",
+      "No provider, graph, MCP, or execution state changes."
+    ],
+    "evidence": [
+      "pending_queue_preview_bounds_large_pasted_message passed with a message 8x MAX_PENDING_PREVIEW_CHARS",
+      "pending_queue_preview_wraps_and_remains_bounded, pending_queue_stays_visible_in_short_live_frame, and pending_queue_stays_above_wrapped_draft_and_cursor_tail passed",
+      "cargo test --workspace --locked --offline: agent 104, TUI 231, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest 1",
+      "Dev ConPTY `windows-pty-e2e.ps1 -TimeoutMs 20000 -BusyFixture -InspectLive -InspectQueue -InspectReasoning -InspectHold -ResizeProbe` returned status=passed with Inspector/detail, queue switching/removal, reasoning, HOLD/FOLLOW, resize and double Ctrl-C observed"
+    ],
+    "rollback": "Remove MAX_PENDING_PREVIEW_CHARS and restore full-message wrap_input in pending_queue_lines; retain the prior sticky queue/editor viewport repair."
+  },
+  "static_tool_fold_affordance_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "The latest retrievable existing NLM turn recommended transcript-first narrow-panel culling. Local CodeGraph shows Inspector is already a covering modal and the measured remaining gap is different: static committed Tool summaries do not reveal that folded details remain available.",
+    "query_status": "chat_get succeeded for the existing conversation; a new notebook_query returned RESOURCE_EXHAUSTED (error code 8), so no new NLM conclusion was accepted.",
+    "answer_summary": "A user auditing native scrollback sees only a bare Tool summary after flush_commits, while Live/History views already expose Ctrl+O details. The expansion path exists but is not discoverable from static output.",
+    "local_adjudication": "Accepted a presentation-only affordance at the static commit boundary. Append a compact folded marker only when a Tool has hidden details; keep commit_lines, bounded history/Inspector expansion, queue routing, execution state, and all key semantics unchanged.",
+    "implementation": "Added ToolBlock::has_details and static_tool_lines now appends `[folded · Ctrl+O details]` to collapsed summaries with details. Expanded static Tool commits are unchanged.",
+    "acceptance": [
+      "Collapsed static Tool scrollback exposes folded, Ctrl+O, and details affordance at narrow width without exposing hidden detail text.",
+      "Existing history expansion still reveals detail one and the panel remains bounded/wrapped.",
+      "No provider, graph, MCP, queue, execution, or key-routing changes."
+    ],
+    "evidence": [
+      "tool_history_is_collapsed_and_expandable_after_static_commit passed at 40-column scrollback and verified folded/Ctrl+O/details text separately because the hint wraps.",
+      "cargo test --workspace --locked --offline: agent 104, TUI 231, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest 1",
+      "cargo fmt --all -- --check, cargo clippy --workspace --all-targets --locked --offline -- -D warnings, workspace build and git diff --check passed",
+      "Dev ConPTY `windows-pty-e2e.ps1 -TimeoutMs 20000 -BusyFixture -InspectLive -InspectQueue -InspectReasoning -InspectHold -ResizeProbe` returned status=passed with Inspector/detail, queue switching/removal, reasoning expansion, HOLD/FOLLOW, resize and double Ctrl-C"
+    ],
+    "rollback": "Remove ToolBlock::has_details and the static folded suffix in static_tool_lines; retain commit_lines, history expansion, bounded details, and all execution/queue semantics."
+  },
+  "static_reasoning_history_affordance_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "The retrievable NLM conversation emphasizes persistent semantic phase visibility and user-controllable audit. Local CodeGraph shows the actual remaining gap is narrower: static THK output has metadata and rails but no visible Ctrl+R history entry point.",
+    "query_status": "No new notebook_query was issued after the prior RESOURCE_EXHAUSTED response; existing chat_get transcript was used only as advisory context and research_status was not queried.",
+    "answer_summary": "After reasoning leaves the Live viewport, native scrollback shows THK step/time/token metadata but a user cannot discover that the same bounded reasoning entry remains searchable and expandable via Ctrl+R.",
+    "local_adjudication": "Accepted a presentation-only first-line hint. Keep actual reasoning_content separate from Answer, preserve exact transient scrollback text and continuation rails, and reuse the existing bounded reasoning history panel.",
+    "implementation": "reasoning_commit_text now appends `  [Ctrl+R history]` to the first committed THK line. No new state machine, parser, provider, graph, or shortcut was added.",
+    "acceptance": [
+      "Static reasoning retains THK metadata, continuation rail, DIM/ITALIC styling, and exposes Ctrl+R history affordance.",
+      "Actual reasoning remains separate from the final Answer and existing reasoning history expansion/search behavior is unchanged.",
+      "No provider, graph, MCP, queue, execution, or key-routing changes."
+    ],
+    "evidence": [
+      "actual_reasoning_is_committed_separately_from_answer and reasoning_commit_renders_in_inline_scrollback passed.",
+      "cargo test --workspace --locked --offline: agent 104, TUI 231, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest 1",
+      "cargo fmt --all -- --check, cargo clippy --workspace --all-targets --locked --offline -- -D warnings, workspace build and git diff check passed",
+      "Dev ConPTY `windows-pty-e2e.ps1 -TimeoutMs 20000 -BusyFixture -InspectLive -InspectQueue -InspectReasoning -InspectHold -ResizeProbe` returned status=passed with reasoning expansion, Inspector/detail, queue switching/removal, HOLD/FOLLOW, resize and double Ctrl-C"
+    ],
+    "rollback": "Remove the `[Ctrl+R history]` suffix from reasoning_commit_text and restore the prior exact first-line string; retain reasoning history, Answer separation, rails, and execution semantics."
+  },
+  "static_answer_history_affordance_follow_up": {
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "recommendation": "The existing NLM conversation stresses persistent readable phase output and recoverable audit. Local CodeGraph found the remaining symmetric gap in static Answer output: the ANSWER rail is visible, but the existing Ctrl+A AnswerHistory path is not discoverable from long/folded scrollback.",
+    "query_status": "No new notebook_query was issued after RESOURCE_EXHAUSTED; existing conversation context remained advisory and research_status was not queried.",
+    "answer_summary": "Final Answer text is visible and Markdown-styled, but native scrollback gives no hint that Ctrl+A opens bounded searchable/expandable AnswerHistory after long output folds.",
+    "local_adjudication": "Accepted a presentation-only muted hint Span on the first committed Answer line. Include the same hint in answer_commit_measure so wrapping and static height remain consistent; do not mutate Markdown source text or add a second history surface.",
+    "implementation": "Added answer_commit_hint(index), rendered `  [Ctrl+A answers]` on the first ANSWER line, and included it in answer_commit_measure. Existing Markdown roles, rail, history, and key semantics remain unchanged.",
+    "acceptance": [
+      "Static Answer retains the ANSWER rail and exposes Ctrl+A answers on the first line.",
+      "Measured text includes the hint, so narrow wrapping uses the same content as rendering.",
+      "No provider, graph, MCP, queue, execution, or key-routing changes."
+    ],
+    "evidence": [
+      "committed_answer_keeps_a_semantic_rail_after_leaving_live_view passed and verifies the hint Span plus measured output.",
+      "cargo test --workspace --locked --offline: agent 104, TUI 231, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest 1",
+      "cargo fmt --all -- --check, cargo clippy --workspace --all-targets --locked --offline -- -D warnings, workspace build and git diff check passed",
+      "Dev ConPTY BusyFixture status=passed with Inspector/detail, reasoning expansion, HOLD/FOLLOW, queue switching/removal, resize and double Ctrl-C"
+    ],
+    "rollback": "Remove answer_commit_hint and restore the prior answer_commit_lines/answer_commit_measure projection; retain ANSWER rail, Markdown roles, AnswerHistory, and execution semantics."
+  },
+  "deep_research_20260804_tui_consistency": {
+    "task_id": "23fa9459-ecef-4925-b039-d8b002f53f00",
+    "status": "completed",
+    "report_title": "System Architecture for Semantically Coherent, Non-Redundant Terminal User Interfaces in Cross-Platform Autonomous Agents",
+    "report_chars": 43709,
+    "sources_found": 104,
+    "imported_cited_sources": 11,
+    "imported_source_ids": [
+      "409426ec-cc48-4b28-ae03-5e12de2d77e9",
+      "e792555d-08f3-45df-a195-38a7d9d8aa01",
+      "498d8928-dc2a-4c95-bd29-680923a4d2ce",
+      "0cd9e2b3-ae4d-4386-8af7-466a67661bab",
+      "47dd6272-317f-45bd-b302-0b3ad7a51a21",
+      "c2a3c04d-5285-4c75-8348-1524b35afd9e",
+      "287d6c11-bfcc-4f67-b136-bdabc4ea27ce",
+      "dde386b0-0023-4fd5-bd89-ee0253f2e2ba",
+      "721eb5f9-807c-4086-a31d-3cb68162b5ce",
+      "347ff710-98f9-4fc1-ba36-0517ca86f3b9",
+      "4e5ecec3-6d12-45ce-ac44-0cceea449cee"
+    ],
+    "source_cleanup": {
+      "before": 94,
+      "after": 49,
+      "deleted": 45,
+      "policy": "删除本次深研产生的重复/零散检索 URL 碎片；保留项目基线、历史 OAuth/MCP 依据及 11 条引证来源。"
+    },
+    "report_findings": [
+      "证据支持把执行事实与呈现投影分离；统一锚点、有限布局缓存、按可见窗口投影可降低 live/static/history/resize 语义漂移。",
+      "Windows ConPTY 的滚动区与自动重排存在宿主限制；报告中的 ResizePseudoConsole 细节属待实测假设，不能直接当作应用层契约。",
+      "32/40/80/96 列、CJK/Markdown、HOLD/FOLLOW、工具折叠、Ctrl-C、中断、resize、零工具输出应成为验收矩阵。"
+    ],
+    "local_adjudication": {
+      "deferred": [
+        "不直接引入新的执行状态机。",
+        "不采纳未经本机 ConPTY 证据支持的全局虚拟化或 ZWJ 宽度硬裁剪。",
+      "不采纳执行层 Fact Ledger、全局虚拟化或第二状态机；仅接受其 presentation-only 的有界语义锚点建议。"
+      ],
+      "accepted_slice": "空工具回执统一呈现为单行 no output；live、静态 scrollback、Inspector、Tool History 复用同一摘要/详情语义。",
+    "implementation": "eventfmt.rs 为空 act 回执生成 no output；transcript.rs 仅对 Observation 空详情提供 no output 详情，Call/Standalone 不误报。随后以 presentation.rs 建立 192 条元数据上限的 PresentationLedger，使 live、history、static 共用 channel-qualified id/status/metrics；不复制正文、不改变执行。",
+    "cross_projection_anchor": {
+      "status": "accepted",
+      "reason": "CodeGraph 证实 drain_reasoning/drain_answers 原先丢弃 live block id，历史行与 CommitBlock 无稳定锚点。",
+      "validation": [
+        "presentation_anchor_survives_live_history_and_static_projection",
+        "presentation_ledger_is_bounded_and_keeps_channel_identity",
+        "snapshot_and_chrome_surface_answer_reasoning_focus"
+      ]
+    },
+      "acceptance": [
+        "空 run_shell 回执仍生成可折叠 ToolBlock。",
+        "live 与 static commit 各为一行可见摘要。",
+        "Inspector/Tool History 详情明确显示 no output。",
+        "不改变 provider、graph、MCP、队列、取消或快捷键语义。"
+      ]
+    }
+  },
+  "query_meta": {
+    "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+    "sources_used": [],
+    "citations": {},
+    "references": [],
+    "retry_note": "Earlier NotebookLM follow-ups returned no sources_used/citations and were retained as advisory only; the semantic-phase follow-up cited the manually imported source, while later narrow-Inspector, activity, attention, read-batch, reasoning-history, answer-shortcut, answer-metadata, activity-retention, partial-answer, partial-archive, and reasoning-visibility follow-ups were local adjudications without a new accepted NLM conclusion. After direct `nlm login` again reported Authentication valid, the same-session query still returned RESOURCE_EXHAUSTED (error code 8), so no new NLM conclusion was accepted. Local frame/CodeGraph evidence rejected unmeasured global virtualization, panel culling and duplicate syntax-highlighting dependencies; adaptive Inspector, narrow HOLD beacon, Live Inspector hint, static reasoning rail, busy FOLLOW action-rail, medium activity chip, panel attention routing, bounded read batching, bounded reasoning history, bounded AnswerHistory shortcut, AnswerHistory metadata, prioritized Activity retention, partial Answer retention, unified PARTIAL archive, and mixed-tool THINKING affordance slices were measured. Ongoing deep-research status was not queried."
+  },
+  "auth_query_update": {
+    "status": "authenticated_but_rate_limited",
+    "login_check": "valid",
+    "notebook_source_count": 49,
+    "query_id": "4fb1f7d4e0d1",
+    "query_status": "error",
+    "error": "RESOURCE_EXHAUSTED (error code 8)",
+    "accepted_recommendation": false
+  },
+  "follow_up_research": {
+    "task_id": "ChA2NzNlNmE4MTNlN2NkZGZkEAgaBDkyYWEqA3Vzdw",
+    "poll_task_id": "b578cfd6-26b3-49f3-af59-1282376d7a9f",
+    "status": "in_progress",
+    "sources_found": 10,
+    "report_ready": false,
+    "imported": false,
+    "source_quality_note": "当前候选来源主要为泛多 Agent 架构链接，尚非 TUI 证据；报告完成前不导入、不采纳。",
+    "query_scope": "Persistent reasoning/answer/conclusion/waiting/approval/takeover presentation, folded tools, wrapping, narrow widths, resize, and presentation-only architecture.",
+    "local_adjudication_before_report": "Project retained WAIT/ASK/SUM/TAKE/DONE/ERR signals into one static scrollback anchor with Ctrl+T activity affordance, added presentation-only compact C/I/O/E/T HUD styling, unified input/device-auth surfaces with rounded borders, carried channel roles into audit panel titles, centralized top-chrome width accounting in ChromeRail, and split live measurement into immutable LiveFramePlan; await report before importing any new source."
+  },
+  "latest_nlm_attempt": {
+    "timestamp": "2026-08-04T05:00:00+00:00",
+    "query_id": "03b7a339de55",
+    "query_status": "error",
+    "error": "RESOURCE_EXHAUSTED (error code 8)",
+    "source_scope": [
+      "8862d715-ffad-4288-b7eb-173260e2dcff",
+      "331fd708-cc49-43a2-b34f-73cc3e9fd1b3",
+      "b5c05ff3-308a-4952-80fc-048e2e779d59"
+    ],
+    "accepted_recommendation": false,
+    "research_poll": {
+      "task_id": "b578cfd6-26b3-49f3-af59-1282376d7a9f",
+      "status": "in_progress",
+      "sources_found": 10,
+      "report_ready": false,
+      "imported": false,
+      "candidate_quality": "generic multi-agent architecture; not TUI evidence"
+    },
+    "local_validation": "TUI 240 passed; workspace fmt/clippy/build passed; Dev Windows ConPTY status=passed with Inspector, reasoning, queue, HOLD/FOLLOW, resize, effort, and double Ctrl-C.",
+    "live_frame_plan": {
+      "status": "accepted_local_presentation_slice",
+      "scope": "LiveFramePlan measures bounded queue preview, input/output token and effort status, wrapped status height, and responsive four-slot geometry; draw_with_cache only paints the resulting plan.",
+      "test": "live_frame_plan_keeps_queue_status_and_slots_in_one_projection",
+      "execution_semantics_changed": false
+    },
+    "input_surface": {
+      "status": "accepted_local_presentation_slice",
+      "scope": "draw_input_surface owns wrapped draft, sticky pending queue preview, rounded editor frame, and CJK/emoji cursor placement; it consumes planned Line rows without mutating input or queue state.",
+      "validation": "workspace 240 TUI tests and Dev ConPTY BusyFixture passed",
+      "execution_semantics_changed": false
+    },
+    "live_output_and_audit_overlays": {
+      "status": "accepted_local_presentation_slice",
+      "scope": "draw_live_output owns cached tail plus transient anchor/cursor decoration; draw_audit_overlays owns panel/device-auth painting; both remain read-only projections.",
+      "validation": "workspace 240 TUI tests, fmt/clippy/build, and Dev ConPTY BusyFixture passed",
+      "execution_semantics_changed": false
+    }
+  },
+  "latest_iteration_update": {
+    "timestamp": "2026-08-04T06:30:00+00:00",
+    "source_cleanup": {
+      "current_source_count": 46,
+      "removed_generic_or_duplicate_sources": [
+        "OpenAI leverages Hydra to support over 900M weekly active users - Ory",
+        "OAuth Providers - nanobot",
+        "OpenAI | Promptfoo"
+      ],
+      "delete_api_failures": [
+        "OpenAI OAuth2 Server Open Source - Ory"
+      ],
+      "confirmed_absent_after_refresh": false,
+      "retained_basis": [
+        "manual TUI theory",
+        "PROJECT-STATE",
+        "REQUIREMENTS-SPEC.md",
+        "Ratatui/ConPTY evidence",
+        "issue-level OAuth/MCP evidence"
+      ]
+    },
+    "existing_source_query": {
+      "query_id": "2ac448ea4657",
+      "status": "error",
+      "error": "RESOURCE_EXHAUSTED (error code 8)",
+      "accepted_recommendation": false
+    },
+    "follow_up_query": {
+      "query_id": "537103c56057",
+      "status": "error",
+      "error": "RESOURCE_EXHAUSTED (error code 8)",
+      "accepted_recommendation": false,
+      "advisory_plan_from_existing_chat": "narrow transcript-first; locally adjudicated as narrow expanded-detail priority because audit panels already cover the live frame"
+    },
+    "adaptive_reasoning_preview": {
+      "status": "accepted_local_presentation_slice",
+      "scope": "Default LiveTranscript reserves 1 reasoning row for short frames, 2 for medium frames, and up to 3 when the viewport has room; Ctrl+R remains the full reasoning view.",
+      "execution_semantics_changed": false,
+      "validation": "TUI 242 passed; legacy long-reasoning assertion now checks semantic Answer tail and input-slot preservation"
+    },
+    "nlm_plan_performance_adjudication": {
+      "chat_get_plan": "whole-document virtualization plus narrow panel splitting",
+      "local_evidence": "Existing bounded live/physical tail and layout caches already constrain the projection; no second virtualization layer or new dependency accepted.",
+      "probe": "long_live_frames_are_bounded_and_profiled: 64 tools + 500 Answer lines, 100 TestBackend draws per width; local Debug observations were approximately 69ms (18 columns), 132ms (40), 182ms (80).",
+      "interpretation": "Observational profile only, not a hard latency target; bounded guard passed.",
+      "accepted": false
+    },
+    "latest_chat_plan_adjudication": {
+      "chat_get_plan": "adaptive narrow-terminal panel culling and transcript-first reflow",
+      "local_finding": "Panel/detail is already an explicit audit surface; bounded transcript/physical tail, DetailLayoutCache, CJK reflow coverage, and 32/40-column PTY checks are present. Broad auto-culling or a second virtualization layer is not accepted.",
+      "accepted_local_slice": "empty live viewport intent projection: READY / QUEUE HOLD / LIVE",
+      "execution_semantics_changed": false
+    },
+    "localized_activity_semantics": {
+      "status": "accepted_local_presentation_slice",
+      "scope": "ActivityKind classification now preserves Chinese and common English lifecycle markers for reasoning, waiting, verification, conclusion, takeover, completion, failure, approval, queue, and tool displays.",
+      "execution_semantics_changed": false,
+      "validation": "TUI 243, workspace tests, Clippy, build, and Windows ConPTY 96x24/40x12 plus 32x12 passed"
+    },
+    "cjk_reflow_acceptance": {
+      "status": "accepted_local_presentation_regression",
+      "scope": "Long mixed CJK Reasoning/Answer at 32/40 columns retains the final Answer tail and semantic rail; every rendered line remains within display-cell width.",
+      "new_layout_or_dependency": false,
+      "validation": "TUI 244 passed"
+    },
+    "static_activity_hierarchy": {
+      "status": "accepted_local_presentation_slice",
+      "scope": "Static Activity anchors now render the lifecycle tag with semantic role color and bold weight, observed text with dim lifecycle color, and Ctrl+T recovery hint in muted styling; text, measurement, folding, and interaction semantics remain unchanged.",
+      "execution_semantics_changed": false,
+      "validation": "TUI 245, workspace tests, Clippy, build, and Windows ConPTY 96x24/40x12 plus 32x12 passed"
+    },
+    "live_empty_state": {
+      "status": "accepted_local_presentation_slice",
+      "scope": "An otherwise empty live viewport now surfaces READY, QUEUE HOLD, or LIVE intent with bounded action hints; existing transcript projection, queue execution, and interaction semantics remain unchanged.",
+      "execution_semantics_changed": false,
+      "validation": "TUI 246, workspace tests, Clippy, build, and Windows ConPTY idle/busy wide+narrow probes passed"
+    },
+    "active_reasoning_body_focus": {
+      "status": "accepted_local_presentation_slice",
+      "scope": "The currently streaming Reasoning tail now uses the active focus role for body text as well as its rail/marker; historical/non-active Reasoning remains muted, while Answer/Tool styling and execution semantics remain unchanged.",
+      "execution_semantics_changed": false,
+      "validation": "TUI 247, workspace tests, Clippy, build, and Windows ConPTY 96x24/40x12 plus 32x12 passed"
+    },
+    "answer_body_typography": {
+      "status": "accepted_local_presentation_slice",
+      "scope": "Long Answer prose now uses regular weight while channel rails/markers and Markdown emphasis remain bold; this reduces visual fatigue without changing text, wrapping, history, or interaction semantics.",
+      "execution_semantics_changed": false,
+      "validation": "TUI 248, workspace tests, Clippy, build, and Windows ConPTY 96x24/40x12 plus 32x12 passed"
+    },
+    "focused_tool_detail_readability": {
+      "status": "accepted_local_presentation_slice",
+      "scope": "Default collapsed/unfocused Tool details remain dim; explicitly focused Ctrl+O detail body uses readable weight while semantic rails and all execution/interaction semantics remain unchanged.",
+      "execution_semantics_changed": false,
+      "validation": "TUI 249, workspace tests, Clippy, build, and Windows ConPTY 96x24/40x12 plus 32x12 passed"
+    },
+    "tool_detail_count_affordance": {
+      "status": "accepted_local_presentation_slice",
+      "scope": "Collapsed live and static Tool projections now expose the bounded hidden-detail row count beside the existing Ctrl+O affordance; focused details remain readable and default folding is unchanged.",
+      "execution_semantics_changed": false,
+      "validation": "TUI 249, workspace tests, Clippy, build, and Windows ConPTY 96x24/40x12 plus 32x12 passed"
+    },
+    "narrow_history_entrypoints": {
+      "status": "accepted_local_presentation_slice",
+      "scope": "Idle narrow Input chrome now keeps compact answer-history (^A) and reasoning-history (^R) entrypoints discoverable even when no tool or live block exists; answer/reasoning priority precedes tool/live tokens within the bounded cell budget.",
+      "execution_semantics_changed": false,
+      "validation": "TUI 250, workspace tests, Clippy, build, and Windows ConPTY 96x24/40x12 plus 32x12 passed"
+    },
+    "source_hygiene_refresh": {
+      "auth": "external CDP auth refreshed; nlm login --check and NotebookLM access passed",
+      "source_count": 46,
+      "active_note_count": 1,
+      "labels": "5 thematic labels cover all 46 sources: ChatGPT/Codex, terminal/UI rendering, project docs/spec, model providers, OAuth authentication",
+      "query_status": "RESOURCE_EXHAUSTED; no new deletion recommendation accepted",
+      "accepted_cleanup": "prior deterministic cleanup only; three generic/duplicate sources removed; Ory source 6813a166-52a1-4017-9664-e0168e554bcb remains after exact deletion failure",
+      "current_decision": "Do not delete further sources: inventory has no exact duplicate title and each remaining item is covered by a current thematic label or project baseline; keep the single Active Note as the consolidated summary."
+    },
+    "current_tui_deep_query": {
+      "query_id": "1cd6bc4236c1",
+      "status": "RESOURCE_EXHAUSTED",
+      "accepted_recommendation": false,
+      "fallback": "Continue only local evidence-backed presentation slices; do not start a second deep task while b578cfd6-26b3-49f3-af59-1282376d7a9f is active."
+    },
+    "research_poll": {
+      "task_id": "b578cfd6-26b3-49f3-af59-1282376d7a9f",
+      "status": "in_progress",
+      "sources_found": 10,
+      "report_ready": false,
+      "imported": false,
+      "candidate_quality": "generic multi-agent architecture; not TUI evidence"
+    },
+    "nlm_live_check_20260804": {
+      "notebook_get": "success",
+      "chat_get": "success; 10 turns",
+      "label_list": "success; 5 thematic labels cover all 46 sources",
+      "active_note_count": 1,
+      "focused_query": {
+        "status": "error",
+        "error": "RESOURCE_EXHAUSTED (error code 8)",
+        "accepted_recommendation": false
+      },
+      "source_cleanup_decision": "No further deletion without reliable stale/duplicate evidence; retain the single Active Note and current label groups.",
+      "deep_research": {
+        "task_id": "b578cfd6-26b3-49f3-af59-1282376d7a9f",
+        "status": "in_progress",
+        "report_ready": false,
+        "imported": false,
+        "second_task_started": false
+      }
+    },
+    "auth_refresh_20260804": {
+      "status": "success",
+      "proxy": "http://127.0.0.1:51081",
+      "cdp": "healthy; target NotebookLM page present",
+      "extractor": "isolated external CDP profile refreshed; credential values not exposed",
+      "cli_verify": "nlm_auth_flow.py verify passed; 20 notebooks",
+      "mcp_refresh_auth": "success",
+      "focused_query_after_refresh": {
+        "status": "error",
+        "error": "RESOURCE_EXHAUSTED (error code 8)",
+        "accepted_recommendation": false
+      },
+      "source_hygiene": "46 sources, 1 Active Note; no further deletion without exact stale/duplicate evidence",
+      "note_chars": 46492,
+      "gate_closure": "state snapshot, requirements, iteration, cold-loop, JSON, fmt and diff checks passed"
+    },
+    "active_note_update_20260804": {
+      "status": "success",
+      "note_id": "aeb2c29a-3d94-4190-a458-aaa2c642abd5",
+      "chars": 46492,
+      "content": "Recorded source hygiene, rate-limit outcome, deep-research status, and ConPTY completion/scrollback evidence; local evidence remains authoritative."
+    },
+    "research_poll_20260804_latest": {
+      "task_id": "b578cfd6-26b3-49f3-af59-1282376d7a9f",
+      "status": "in_progress",
+      "sources_found": 10,
+      "report_ready": false,
+      "imported": false,
+      "candidate_quality": "generic multi-agent architecture; not TUI evidence",
+      "accepted_recommendation": false,
+      "second_task_started": false,
+      "active_note_chars": 46492,
+      "latest_poll": "in_progress; report empty; imported null; no recommendation accepted"
+    },
+    "idle_conclusion_visibility_20260804": {
+      "status": "passed",
+      "gap": "DONE summary hid the preceding observed SUM conclusion in the final frame",
+      "implementation": "bounded idle summary retains latest ActivityKind::Conclusion text before Answer recovery rail",
+      "frame": "32x12 rows: DONE, SUM settling result, ANS Ctrl+A expand, ^A/^R/^T; all within 32 cells",
+      "telemetry_preserved": "C0% · I~17 O0 · Emed",
+      "execution_semantics_changed": false
+    },
+    "nlm_follow_up_after_idle_summary_20260804": {
+      "status": "error",
+      "conversation_turn_count": 10,
+      "error": "RESOURCE_EXHAUSTED (error code 8)",
+      "accepted_recommendation": false,
+      "deep_research_task": {
+        "task_id": "b578cfd6-26b3-49f3-af59-1282376d7a9f",
+        "status": "in_progress",
+        "report_ready": false,
+        "imported": false
+      }
+    },
+    "idle_completion_summary_20260804": {
+      "status": "passed",
+      "gap": "final 32x12 frame showed READY/DONE while Answer/Reasoning remained in native scrollback; recovery existed but lacked a central expandable summary",
+      "implementation": "presentation-only idle_result_summary plus width-aware idle_history_actions",
+      "narrow": "DONE/SUM/ERR + ANS recovery + ^A/^R/^T rail; no Ctrl+A advertised when archive empty",
+      "wide": "full Ctrl+A answers / Ctrl+R reasoning / Ctrl+T activity labels",
+      "tests": "completed idle recovery and empty conclusion archive regressions",
+      "execution_semantics_changed": false,
+      "validation": "TUI 252, workspace, fmt, clippy, build, diff check, CompletionFixture 32x12/96x24 and BusyFixture passed"
+    },
+    "completion_pty_evidence_20260804": {
+      "status": "passed",
+      "fixture": "CompletionFixture",
+      "wide": "96x24 passed",
+      "narrow": "32x12 passed",
+      "observed": [
+        "final Answer and Reasoning in raw cursor-addressed ConPTY stream",
+        "busy=false",
+        "answer_history=1",
+        "reasoning_history=1",
+        "double Ctrl-C exit"
+      ],
+      "busy_regression": "wide full Inspector/queue/reasoning/HOLD-FOLLOW/resize/takeover passed; narrow reasoning/HOLD-FOLLOW/Inspector/takeover passed",
+      "ratatui_fix": "enabled official scrolling-regions feature for full-screen inline scrollback",
+      "execution_semantics_changed": false,
+      "deep_research_task": {
+        "task_id": "b578cfd6-26b3-49f3-af59-1282376d7a9f",
+        "status": "in_progress",
+        "report_ready": false,
+        "imported": false,
+        "accepted_recommendation": false
+      }
+    },
+    "extreme_width_semantic_labels_20260804": {
+      "status": "passed",
+      "gap": "18x10 and 24x12 generic clipping cut semantic completion and recovery labels",
+      "implementation": "width-tiered whole semantic candidates for DONE/SUM/ANS and recovery actions; exact conclusion text when it fits, SUM result fallback otherwise",
+      "frames": {
+        "18x10": [
+          "◇ DONE · answer",
+          "SUM · result",
+          "ANS · ^A expand",
+          "^A ans · ^R"
+        ],
+        "24x12": "SUM · settling result retained"
+      },
+      "semantic_ellipsis": false,
+      "tests": "TUI 253 passed",
+      "pty": "CompletionFixture 18x10, 24x12, 32x12 and 96x24 passed; raw Answer/Reasoning, busy=false, histories=1, double Ctrl-C",
+      "quality_gates": "workspace tests, clippy -D warnings, fmt, build, diff check, state snapshot, requirements, iteration, cold-loop and NotebookLM output gates passed",
+      "execution_semantics_changed": false
+    },
+    "nlm_follow_up_after_extreme_width_20260804": {
+      "status": "error",
+      "error": "RESOURCE_EXHAUSTED (error code 8)",
+      "accepted_recommendation": false,
+      "active_note_chars": 48264,
+      "deep_research_task": {
+        "task_id": "b578cfd6-26b3-49f3-af59-1282376d7a9f",
+        "status": "in_progress",
+        "sources_found": 10,
+        "report_ready": false,
+        "imported": false,
+        "candidate_quality": "generic multi-agent architecture; not TUI evidence",
+        "second_task_started": false
+      }
+    },
+    "release_validation_20260804": {
+      "status": "passed",
+      "binary": "target/release/ridgecode.exe",
+      "completion": "18x10, 32x12 and 96x24 passed with raw Answer/Reasoning, histories=1, busy=false, double Ctrl-C",
+      "busy": "96x24 BusyFixture passed with Inspector/detail, queue, reasoning, HOLD/FOLLOW, resize, takeover and double Ctrl-C",
+      "release_workspace_tests": "release TUI 254 passed; prior release workspace suite agent 104, TUI 253, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest passed",
+      "render_us": "post-slice 18-column 62; 32-column 79; prior 96-column 88; prior Busy final 106; prior Inspector 180",
+      "execution_semantics_changed": false
+    },
+    "empty_state_action_rail_20260804": {
+      "status": "passed",
+      "gap": "narrow empty LIVE/QUEUE/READY states used generic clipping and could hide intervention controls",
+      "implementation": "width-tiered whole-line semantic candidates for hold, inspect, front-queue, takeover, send and activity actions",
+      "narrow_examples": {
+        "live_18": "^Space · ^I",
+        "queue_18": "^Enter front",
+        "ready_18": "Enter · ^T"
+      },
+      "tests": "TUI 254 passed; Dev BusyFixture 32x12 and CompletionFixture 18x10 passed",
+      "execution_semantics_changed": false
+    },
+    "nlm_follow_up_after_empty_state_20260804": {
+      "status": "error",
+      "error": "RESOURCE_EXHAUSTED (error code 8)",
+      "accepted_recommendation": false,
+      "source_get_content": "manual TUI source 8862d715-ffad-4288-b7eb-173260e2dcff retrieved successfully; 40374 chars",
+      "active_note_chars": 49635,
+      "deep_research_task": {
+        "task_id": "b578cfd6-26b3-49f3-af59-1282376d7a9f",
+        "status": "in_progress",
+        "sources_found": 10,
+        "report_ready": false,
+        "imported": false,
+        "second_task_started": false
+      }
+    },
+    "nlm_source_hygiene_and_focused_query_20260804": {
+      "notebook_get": "success; 46 sources",
+      "active_note": "one note; updated successfully to 50830 chars",
+      "exact_normalized_title_duplicates": 0,
+      "overlap_checks": "Claude fullscreen Playbook/official Docs, Ory Hydra product/OpenAI-Ory article, and ConPTY/Ratatui sources differ in indexed content or failure scope; no additional deletion justified",
+      "focused_existing_source_query": {
+        "status": "error",
+        "error": "RESOURCE_EXHAUSTED (error code 8)",
+        "accepted_recommendation": false
+      },
+      "new_deep_research": {
+        "requested_task_id": "ChA4YzU3MTVlM2UyMzRlYTVkEAgaBGU2MDEqA3Vzdw",
+        "first_poll_task_id": "dc1460c0-ca93-439d-86fa-2ed3b389a638",
+        "status": "in_progress",
+        "sources_found": 0,
+        "report_ready": false,
+        "imported": false,
+        "scope": "Windows ConPTY + ratatui inline TUI; scrollback correctness, reflow/CJK, foldable Tool details, narrow priority, bounded performance",
+        "old_task_queried": false
+      }
+    },
+    "focused_deep_research_result_20260804": {
+      "task_id": "dc1460c0-ca93-439d-86fa-2ed3b389a638",
+      "status": "completed",
+      "sources_found": 61,
+      "cited_only_import": {
+        "status": "success",
+        "count": 4,
+        "titles": [
+          "Scrolling within regions that include the top of the screen doesn't push lines into scrollback · Issue #3673 · microsoft/terminal - GitHub",
+          "I built a proxy that fixes Claude Code's scroll-jumping on Windows : r/ClaudeAI",
+          "[Bug] Agent view uses stale terminal width after window resize on Windows (ConPTY) · Issue #80123 · anthropics/claude-code - GitHub",
+          "v0.29.0 - Ratatui"
+        ]
+      },
+      "report_import": "index 0 import failed: Failed to import sources — no confirmation from API; report retained as local evidence",
+      "accepted_findings": [
+        "ConPTY non-top scrolling regions can lose native scrollback",
+        "resize can expose stale width or duplicate fragments",
+        "immutable native scrollback needs a separate reader for expandable Tool details",
+        "narrow layout priority and bounded state/frame work require explicit tests"
+      ],
+      "rejected_as_unverified_or_conflicting": [
+        "blanket Windows disable of ratatui scrolling-regions",
+        "direct stdout transport replacing the proven single ratatui writer",
+        "12ms/1000-lines as hard local targets without RidgeCode measurement"
+      ],
+      "next_gate": "real ConPTY stress matrix: repeated resize + long Markdown/CJK stream + folded Tool recovery; raw scrollback, width sync, render time, bounded memory",
+      "no_new_gpu_or_terminal_emulator": true
+    },
+    "conpty_stress_and_bounded_static_commit_20260804": {
+      "initial_failure": "Dev StressFixture reproduced missing long Reasoning marker in raw ConPTY despite answer_history=1; long logical static lines caused oversized scroll/commit work",
+      "root_cause": "insert_commit and activity/tool commit paths delegated long logical lines to one large insert_before operation; archive remained intact while raw ConPTY history was incomplete",
+      "implementation": [
+        "pre-wrap committed styled spans by display cells before insertion",
+        "insert committed rows in bounded batches of 8 physical rows",
+        "static Answer and Reasoning scrollback uses existing bounded head/tail archive projection; full recoverable content remains in Answer/Reasoning history",
+        "opt-in StressFixture emits long Markdown/CJK Reasoning + Answer and performs three resize transitions"
+      ],
+      "deterministic_tests": "TUI 255; long_static_answer_keeps_head_tail_archive_and_bounded_commit_work",
+      "dev_conpty": {
+        "stress_96x24": "passed; 3 resize events, raw STRESS_REASONING_END/STRESS_ANSWER_BEGIN, completion snapshot, double Ctrl-C",
+        "stress_32x12": "passed; 3 resize events, raw markers, completion snapshot, double Ctrl-C",
+        "completion_18x10": "passed",
+        "completion_96x24": "passed",
+        "busy_32x12": "passed; reasoning/HOLD/FOLLOW/queue/resize/double Ctrl-C"
+      },
+      "release_conpty": {
+        "stress_96x24": "passed; render_us=69 final and 111 resize snapshot",
+        "stress_32x12": "passed; render_us=74 final and 166 resize snapshot",
+        "completion_18x10": "passed"
+      },
+      "workspace_semantics_changed": false,
+      "production_default_changed": false
+    },
+    "nlm_recovery_source_cleanup_and_next_plan_20260804": {
+      "auth": "external CDP profile refreshed through http://127.0.0.1:19222; nlm login --check passed; 20 notebooks visible",
+      "notebook_get": "success; 75 sources before cleanup, one Active Note",
+      "exact_duplicate": {
+        "source_a": "0cd9e2b3-ae4d-4386-8af7-466a67661bab",
+        "source_b": "b0a78f3d-d473-43f4-bd66-0a56a666316f",
+        "content_lengths": [26711, 26711],
+        "content_hashes": ["8f54e383", "8f54e383"],
+        "action": "deleted source_a; retained cited-only imported source_b",
+        "result": "success; 74 sources remain"
+      },
+      "next_plan_query": {
+        "status": "completed",
+        "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+        "query_id": "a84c66e41843",
+        "sources_used": [],
+        "citations": {},
+        "accepted_recommendation": false,
+        "reason": "NLM returned an answer but no sources_used/citations; existing HOLD/cache behavior must be adjudicated by local CodeGraph/tests"
+      }
+    },
+    "held_live_stream_growth_slice_20260804": {
+      "local_gap": "inspect_offset kept a held live viewport a fixed distance behind the moving tail; appended lines could drift the user's view during ongoing Answer/Reasoning output",
+      "implementation": "crates/agent/src/tui/transcript.rs preserves bounded hold offset by appended logical rows; Inspector semantic focus remains independent",
+      "test": "live_hold_keeps_the_same_logical_rows_as_stream_grows; targeted test passed",
+      "semantics": "presentation-only; Follow, queue, takeover, provider, MCP, and execution unchanged",
+      "dev": {
+        "tui_tests": 256,
+        "workspace_tests": "passed",
+        "fmt": "passed",
+        "clippy": "passed",
+        "build": "passed",
+        "conpty_stress_96x24": "passed; render_us=362 final, 411 resize",
+        "conpty_stress_32x12": "passed; render_us=690 final, 888 resize",
+        "conpty_busy_32x12": "passed; Inspector, reasoning, HOLD/FOLLOW, queue, resize, double Ctrl-C"
+      },
+      "release": {
+        "build": "passed",
+        "tui_tests": 256,
+        "conpty_stress_96x24": "passed; render_us=66 final, 113 resize",
+        "conpty_stress_32x12": "passed; render_us=57 final, 127 resize",
+        "conpty_busy_32x12": "passed; Inspector, reasoning, HOLD/FOLLOW, queue, resize, double Ctrl-C"
+      }
+    },
+    "nlm_query_cleanup_and_grapheme_width_slice_20260804": {
+      "notebook": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+      "source_cleanup": {
+        "before": 73,
+        "deleted": 4,
+        "deleted_sources": [
+          "1devtool features",
+          "HN generic 10x Engineer search",
+          "PyPI ratatui",
+          "Ratatui Ruby rich moments example"
+        ],
+        "reason": "raw content empty and unrelated to the current TUI/ConPTY problem",
+        "after": 69,
+        "remaining_duplicate_policy": "retain unless exact content or stale ownership is proven"
+      },
+      "focused_query": {
+        "status": "completed",
+        "query_id": "cbfd4c6a0188",
+        "sources_used": [
+          "3d036e90-766e-4a65-bb24-309ea0605d36",
+          "8862d715-ffad-4288-b7eb-173260e2dcff",
+          "f1b27dba-5173-475a-acc3-8cb74ea37626",
+          "2cb7c9f6-393d-4c8d-9ac2-b7c7847926e8",
+          "b0a78f3d-d473-43f4-bd66-0a56a666316f"
+        ],
+        "citation_count": 18,
+        "accepted_findings": [
+          "unicode-width must be treated consistently for CJK, emoji, and ZWJ sequences",
+          "Windows redraw/scroll-region behavior can reset or lose a held native scrollback view",
+          "missed or delayed ConPTY resize can leave stale width and damaged reflow",
+          "bounded visible-row work and width-keyed caching are appropriate constraints"
+        ],
+        "unsupported_findings": [
+          "insert_lines_before as a complete Windows scroll-jump remedy",
+          "a concrete 32-column CJK alignment algorithm from the selected sources"
+        ]
+      },
+      "deep_research_attempt": {
+        "status": "failed_to_start",
+        "mode": "deep",
+        "error": "Google API error code 8 (UserDisplayableError); retry and fallback both failed",
+        "old_research_status_queried": false,
+        "accepted_recommendation": false
+      },
+      "local_gap": "str_cells uses sequence-aware UnicodeWidthStr, while live wrapping, tail clipping, and input row accounting previously iterated scalar chars; a ZWJ emoji could be split and measured inconsistently",
+      "implementation": [
+        "add direct unicode-segmentation 1.13 workspace dependency already present in Cargo.lock",
+        "use grapheme clusters plus UnicodeWidthStr width in live wrap and bounded live tail",
+        "keep ZWJ clusters intact in clip_display_cells, tail_display_cells, line_visual_rows, and wrap_input",
+        "preserve presentation-only scope; execution, provider, MCP, queue, HOLD/FOLLOW state semantics unchanged"
+      ],
+      "regression": [
+        "zwj_emoji_stays_one_display_cluster_when_wrapped",
+        "zwj_emoji_tail_and_input_share_cluster_width"
+      ],
+      "validation": {
+        "agent_tui_tests": 258,
+        "workspace_tests": "passed with --locked --offline",
+        "fmt": "passed",
+        "clippy": "passed with -D warnings",
+        "build": "Debug and Release workspace builds passed",
+        "dev_conpty": "Stress 96x24 and 32x12; Busy 32x12 with Inspector/Reasoning/HOLD/FOLLOW/queue/resize/double Ctrl-C passed",
+        "release_conpty": "Stress 96x24 and 32x12; Busy 32x12 with Inspector/Reasoning/HOLD/FOLLOW/queue/resize/double Ctrl-C passed",
+        "evidence_boundary": "TestBackend and raw ConPTY remain the acceptance boundary; no global virtualization or transport change accepted"
+      }
+    },
+    "nlm_cleanup_and_deep_query_20260804": {
+      "notebook": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+      "source_count_before": 69,
+      "source_cleanup": {
+        "deleted_count": 21,
+        "criteria": "type=unknown and status=3; source_describe failed; invalid/scattered URL fragments",
+        "source_count_after": 48
+      },
+      "active_note": {
+        "count": 1,
+        "updated": true,
+        "note_id": "aeb2c29a-3d94-4190-a458-aaa2c642abd5"
+      },
+      "focused_query": {
+        "status": "completed",
+        "query_id": "04011caf9c05",
+        "sources_used": [],
+        "citations": {},
+        "accepted_recommendation": false,
+        "reason": "NLM returned a no-citation answer; local CodeGraph/TestBackend/ConPTY evidence remains authoritative"
+      },
+      "deep_research": {
+        "status": "failed_to_start",
+        "mode": "deep",
+        "error": "Google API error code 8 (UserDisplayableError)",
+        "old_research_status_queried": false,
+        "report_ready": false,
+        "imported": false
+      },
+      "local_adjudication": {
+        "modal": "audit panels are already explicit full-frame modal projections; no local evidence justifies automatic culling",
+        "cache": "LiveOutputCache and panel detail caches are already width/revision keyed; blanket resize invalidation is unsupported",
+        "next": "reproduce a concrete narrow/ConPTY visibility defect before changing layout policy"
+      }
+    },
+    "nlm_cited_adjudication_20260804": {
+      "status": "completed",
+      "query_id": "synchronous_notebook_query",
+      "sources_used": [
+        "8862d715-ffad-4288-b7eb-173260e2dcff",
+        "2cb7c9f6-393d-4c8d-9ac2-b7c7847926e8",
+        "3d036e90-766e-4a65-bb24-309ea0605d36",
+        "498d8928-dc2a-4c95-bd29-680923a4d2ce"
+      ],
+      "citations": 8,
+      "accepted_as_already_present": [
+        "Windows Press/Release filtering with IME character-release recovery",
+        "width/revision-keyed render/detail caches and Paragraph::line_count",
+        "Ratatui scrolling-regions feature"
+      ],
+      "rejected_without_local_defect": [
+        "automatic narrow audit-panel culling",
+        "blanket resize invalidation beyond existing width/revision keys"
+      ],
+      "local_evidence": [
+        "crates/agent/src/tui/input.rs::decide_key",
+        "crates/agent/src/tui/draw.rs::LiveOutputCache",
+        "crates/agent/src/tui/draw.rs::DetailLayoutCache",
+        "crates/agent/src/tui/tests.rs::decide_key_filters_windows_release_without_losing_ime_characters"
+      ]
+    },
+    "nlm_source_consolidation_focus_query_20260804": {
+      "notebook": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+      "source_count_before": 48,
+      "source_cleanup": {
+        "deleted_count": 31,
+        "criteria": "completed OAuth/MCP/model-provider branch sources outside the current TUI iteration",
+        "source_count_after": 17,
+        "labels_reorganized": [
+          "Windows ConPTY",
+          "文本换行与宽度",
+          "项目文档与代码",
+          "滚动与缓冲区",
+          "终端渲染与UI"
+        ]
+      },
+      "active_note": {
+        "count": 1,
+        "updated": true,
+        "note_id": "aeb2c29a-3d94-4190-a458-aaa2c642abd5"
+      },
+      "focused_query": {
+        "status": "completed",
+        "query_id": "57f8fd9d74ca",
+        "sources_used": [],
+        "citations": {},
+        "references": [],
+        "accepted_recommendation": false,
+        "reason": "answer contained generic Focus View text but structured source metadata was empty"
+      },
+      "deep_research": {
+        "deep_start": {
+          "status": "failed_to_start",
+          "error": "Google API error code 8 (UserDisplayableError)",
+          "report_ready": false,
+          "imported": false
+        },
+        "fast_fallback": {
+          "task_id": "2bbeb375-70fd-4910-9ccb-4b0c3f74fe47",
+          "status": "started; MCP status poll remained pending/hanging",
+          "report_ready": false,
+          "imported": false
+        }
+      },
+      "local_adjudication": {
+        "codegraph": "audit panels are full-frame modal projections; LiveOutputCache and detail caches are width/revision keyed",
+        "pty": "CompletionFixture 18x10 and BusyFixture 32x12 with Inspector/detail, reasoning, HOLD/FOLLOW, queue, resize, takeover, and double Ctrl-C passed",
+        "decision": "do not implement unsupported /focus, automatic panel culling, or a second state machine without a new reproducible gap"
+      }
+    },
+    "extreme_width_stress_adjudication_20260804": {
+      "dev": {
+        "stress_18x10": "passed; long Markdown/CJK, three resizes, raw completion markers, answer/reasoning history, valid snapshot, double Ctrl-C",
+        "busy_18x10": "passed; Inspector/detail, reasoning, HOLD/FOLLOW, queue head/tail/removal, takeover, resize, valid snapshots, double Ctrl-C"
+      },
+      "release": {
+        "stress_18x10": "passed; render_us=56 final, 145 resize",
+        "busy_18x10": "passed; render_us=71 final, 124 resize"
+      },
+      "evidence_boundary": "raw ConPTY is cursor-addressed and linear decoding fragments visual text, but semantic snapshots and marker checks pass",
+      "new_local_gap": false,
+      "production_changed": false,
+      "decision": "retain current bounded live/Inspector/Activity architecture; reject uncited Focus View as implementation authority"
+    },
+    "nlm_next_plan_live_styling_adjudication_20260804": {
+      "query_id": "021f20de887a",
+      "status": "completed",
+      "sources_used": [
+        "8862d715-ffad-4288-b7eb-173260e2dcff",
+        "4e5ecec3-6d12-45ce-ac44-0cceea449cee",
+        "331fd708-cc49-43a2-b34f-73cc3e9fd1b3",
+        "3d036e90-766e-4a65-bb24-309ea0605d36",
+        "2cb7c9f6-393d-4c8d-9ac2-b7c7847926e8",
+        "498d8928-dc2a-4c95-bd29-680923a4d2ce"
+      ],
+      "citation_count": 22,
+      "recommendation": "viewport-bound incremental Markdown/fenced-code styling for live output",
+      "codegraph_adjudication": {
+        "current_path": "render_live_line -> live_markdown_spans_with_alert -> md_line_spans_with_alert -> code_line_spans -> code_token_role",
+        "existing_regressions": [
+          "live_answer_uses_bounded_markdown_roles_and_fence_state",
+          "live_markdown_structure_stays_within_narrow_cell_bound"
+        ],
+        "status": "already implemented at the visible behavior boundary"
+      },
+      "validation": {
+        "dev_release_stress_18x10": "passed",
+        "dev_release_busy_18x10": "passed",
+        "render_samples": "sub-millisecond observations; not performance targets"
+      },
+      "accepted": false,
+      "reason": "NLM's static-only premise is stale; no duplicate parser, second virtualizer, or unmeasured cache added"
+    },
+    "nlm_followup_non_duplicate_plan_20260804": {
+      "query_id": "29f569ea9edc",
+      "status": "completed",
+      "sources_used": [],
+      "citations": {},
+      "accepted": false,
+      "recommendation": "hardware scrolling regions / flicker-free FOLLOW-Audit",
+      "reason": "no structured citations; root Cargo.toml already enables ratatui scrolling-regions and local ConPTY acceptance passes"
+    },
+    "verification_continuation_20260804": {
+      "preflight": "passed; blockers empty; Rust, CodeGraph ready, nlm CLI available",
+      "workspace_tests": {
+        "agent": 104,
+        "tui": 258,
+        "eval": 1,
+        "langgraph": 9,
+        "mcp": 2,
+        "provider": 52,
+        "tools": 18,
+        "doctest": 1
+      },
+      "quality_gates": [
+        "cargo fmt --all -- --check",
+        "cargo clippy --workspace --all-targets --locked --offline -- -D warnings",
+        "cargo build --workspace --locked --offline",
+        "requirements executable",
+        "iteration gate",
+        "state snapshot check",
+        "cold-loop gate",
+        "NotebookLM output validation"
+      ],
+      "conpty": {
+        "stress_32x12": "passed; long Markdown/CJK, Answer/Reasoning markers, resize, histories, double Ctrl-C",
+        "busy_32x12": "passed; Inspector/detail, reasoning, HOLD/FOLLOW, queue head/tail/removal, takeover, resize, double Ctrl-C"
+      },
+      "new_user_visible_gap": false,
+      "fast_research": {
+        "task_id": "2bbeb375-70fd-4910-9ccb-4b0c3f74fe47",
+        "status": "poll hung again and was terminated",
+        "report_ready": false,
+        "imported": false,
+        "old_task_queried": false
+      }
+    },
+    "bounded_answer_excerpt_slice_20260804": {
+      "local_gap": "completed idle output exposed only the Answer archive shortcut and no answer body excerpt",
+      "implementation": {
+        "file": "crates/agent/src/tui/draw.rs",
+        "helper": "idle_answer_excerpt",
+        "behavior": "at width >= 28 and rows >= 5, sanitize the newest Answer entry, select its first non-empty line, collapse whitespace, and clip it by terminal display cells",
+        "narrow_fallback": "widths 18/24 omit the excerpt and retain semantic ANS/Ctrl+A recovery controls"
+      },
+      "semantics_unchanged": [
+        "answer archive and history",
+        "execution/provider/MCP/queue/key routing",
+        "Markdown/static commit body"
+      ],
+      "tests": {
+        "tui": 258,
+        "workspace": "agent 104, TUI 258, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest 1"
+      },
+      "quality": [
+        "cargo fmt --all -- --check",
+        "cargo clippy --workspace --all-targets --locked --offline -- -D warnings",
+        "cargo build --workspace --locked --offline",
+        "cargo build --workspace --release --locked --offline"
+      ],
+      "conpty": {
+        "dev": "StressFixture and BusyFixture 32x12 passed with completion/history, Inspector/detail, queue, HOLD/FOLLOW, takeover and double Ctrl-C",
+        "release": "StressFixture 32x12 passed; raw output included direct ANS answer excerpt and snapshots were valid"
+      },
+      "nlm": {
+        "planning_query_id": "f514e5d8e87b",
+        "planning_query_status": "completed; sources_used=[]; rejected as uncited hypothesis",
+        "fast_research_task_id": "2bbeb375-70fd-4910-9ccb-4b0c3f74fe47",
+        "notebook_source_count": 17,
+        "active_note_count": 1,
+        "research_poll": "max_wait=0 exceeded 22s; no report returned",
+        "report_ready": false,
+        "imported": false,
+        "old_task_queried": false
+      }
+    },
+    "nlm_next_plan_query_adjudication_20260804": {
+      "query_id": "f514e5d8e87b",
+      "status": "completed",
+      "sources_used": [],
+      "citations": {},
+      "references": [],
+      "recommendation": "semantic viewport anchoring across resize and HOLD",
+      "accepted": false,
+      "reason": "structured metadata has no sources or citations; treat as hypothesis only",
+      "local_gate": "require a reproducible physical-drift or stale-width defect before adding BlockID anchors or blanket resize invalidation"
+    },
+    "hold_resize_semantic_anchor_correction_20260804": {
+      "reproduction": "12-column HOLD long Answer tail jumped to line 0 after cache reflow at 24 columns",
+      "root_cause_hypothesis": "pin_answer_header reused the tail anchor for synthetic header and continuation; first matching anchor resolved to header",
+      "fix": {
+        "file": "crates/agent/src/tui/transcript.rs",
+        "header_anchor": "Answer block logical line 0",
+        "continuation_anchor": "real tail anchor"
+      },
+      "semantics_unchanged": [
+        "execution/provider/MCP/queue",
+        "HOLD/FOLLOW commands",
+        "answer content"
+      ],
+      "regression": "held_cache_reflow_preserves_synthetic_continuation_anchor",
+      "tests": {
+        "tui": 207,
+        "workspace_tui": 259
+      },
+      "quality": [
+        "cargo fmt --all -- --check",
+        "cargo clippy --workspace --all-targets --locked --offline -- -D warnings",
+        "cargo build --workspace --locked --offline",
+        "cargo build --workspace --release --locked --offline"
+      ],
+      "conpty": {
+        "dev": "Stress/Busy 32x12 passed with resize, Inspector/detail, queue, HOLD/FOLLOW, takeover, histories and double Ctrl-C",
+        "release": "Stress/Busy 32x12 passed with valid snapshots and double Ctrl-C"
+      }
+    },
+    "ridge_codex_maintainer_launch_audit_20260804": {
+      "workspace_id": "7172d8e2-8751-4528-a48e-aca5bfd76385",
+      "requested_mode": "Ridge split-pane Codex member",
+      "generic_multi_agent_worker": "shut down; no changes accepted",
+      "fresh_pane": {
+        "pane_id": "741e118e-0a06-4392-bbf0-b779ec3bb4c0",
+        "role": "notebooklm-mcp-maintainer-live",
+        "terminal_accepted": true,
+        "first_command_output": false,
+        "failure": "codex_apps/UserPromptSubmit reconnect and host startup error"
+      },
+      "fallback_attempts": [
+        "interactive resubmission and bounded interrupt",
+        "codex exec model refresh: timeout waiting for child process to exit",
+        "stdin/argv batch: host command parsing or missing prompt"
+      ],
+      "result": "blocked_before_clone",
+      "fork": false,
+      "commit": false,
+      "installed": false,
+      "credentials_read": false,
+      "next_gate": "resume the same Ridge-pane workflow after Codex member startup produces clone/git output",
+      "latest_attempts": [
+        {
+          "pane_id": "975302f8-edfb-4cd3-9f96-e6f720e2788f",
+          "mode": "interactive_codex",
+          "result": "prompt_text_stuck; agentAcknowledged_false",
+          "evidence": "codex v0.146.0 reached prompt after codex_apps timeout, Ridge submit did not commit input"
+        },
+        {
+          "pane_id": "d7917140-2a67-4a6e-85ab-b3b1567a027f",
+          "mode": "codex_exec",
+          "result": "host_mcp_request_failed",
+          "evidence": "error sending request for url https://chatgpt.com/backend-api/ps/mcp"
+        },
+        {
+          "pane_id": "07a8ee26-a78b-4065-a91b-1cd9a989ba96",
+          "mode": "codex_exec_ignore_user_config",
+          "result": "host_mcp_request_failed",
+          "evidence": "--ignore-user-config still reached the same /ps/mcp failure"
+        },
+        {
+          "pane_id": "fe23d6e5-0299-4738-9865-657f97a3ac83",
+          "mode": "codex_exec_disable_injected_mcp",
+          "result": "invalid_transport_override",
+          "evidence": "mcp_servers.codex_apps.enabled=false alone is rejected as invalid transport"
+        }
+      ],
+      "maintainer_directory": "absent",
+      "temporary_launcher": "removed",
+      "credentials_read": false
+    },
+    "nlm_next_plan_20260804": {
+      "query_id": "94dba5335830",
+      "status": "completed",
+      "sources_used": [],
+      "citations": {},
+      "accepted": false,
+      "reason": "structured metadata is empty despite inline references; retain as hypothesis only",
+      "hypothesis": "semantic virtualized reflow, width-keyed height cache, and narrow-side-panel adaptation",
+      "local_adjudication": "existing bounded LiveOutputCache, width/revision keys, full-frame audit overlays, and 18/32-column ConPTY evidence do not justify a second virtualizer or inline sidebar culling"
+    },
+    "reasoning_visual_role_slice_20260804": {
+      "files": [
+        "crates/agent/src/tui/render.rs",
+        "crates/agent/src/tui/status.rs",
+        "crates/agent/src/tui/draw.rs",
+        "crates/agent/src/tui/transcript.rs",
+        "crates/agent/src/tui/app.rs",
+        "crates/agent/src/tui/tests.rs"
+      ],
+      "user_visible": "Reasoning uses an explicit subdued LightBlue semantic role; completed SUM/ANS/THK idle details retain distinct tag/body hierarchy; tools remain folded",
+      "semantics_unchanged": true,
+      "tests": {
+        "agent_tui": 262,
+        "workspace": "passed"
+      },
+      "quality": [
+        "cargo fmt --all",
+        "cargo clippy --workspace --all-targets --locked --offline -- -D warnings",
+        "cargo build --workspace --locked --offline",
+        "cargo build --workspace --release --locked --offline"
+      ],
+      "conpty": {
+        "dev_busy": "passed; reasoning Inspector/HOLD/FOLLOW/queue/resize/double Ctrl-C",
+        "dev_stress": "passed; reasoning/answer/conclusion and resize",
+        "release_stress_32x12": "passed; CJK/emoji/resize, valid completion snapshot, double Ctrl-C"
+      }
+    },
+    "deep_research_start_20260804": {
+      "mode": "deep",
+      "source": "web",
+      "status": "error",
+      "error": "Google API error code 8 (UserDisplayableError)",
+      "task_id": null,
+      "imported": false,
+      "next_action": "retain cited local baseline; retry only under a later bounded cold-loop turn"
+    },
+    "idle_result_card_slice_20260804": {
+      "file": "crates/agent/src/tui/draw.rs",
+      "user_visible": "wide completed/conclusion output gets a bounded SUM/ANS/THK result card; narrow and low-height surfaces retain the linear recovery-first projection",
+      "threshold": "width >= 48 and enough rows for the card",
+      "semantics_unchanged": true,
+      "regression": "wide_completed_idle_surface_uses_bounded_result_card",
+      "tests": {
+        "agent_tui": 262,
+        "workspace": "passed"
+      },
+      "quality": [
+        "cargo fmt --all",
+        "cargo clippy --workspace --all-targets --locked --offline -- -D warnings",
+        "cargo build --workspace --release --locked --offline"
+      ],
+      "conpty": {
+        "release_stress_96x24": "passed; valid completion and resize snapshots",
+        "release_busy_32x12": "passed; reasoning Inspector, queue, resize and double Ctrl-C"
+      }
+    },
+    "semantic_static_reflow_slice_20260804": {
+      "nlm_next_plan": {
+        "query_id": "d6dc1e15f193",
+        "status": "completed",
+        "sources_used": [],
+        "citations": {},
+        "accepted": false,
+        "hypothesis": "structured semantic indentation and reflow engine"
+      },
+      "local_gap": "live render_live_line already indents wrapped continuations; static app::wrap_commit_lines previously wrapped Answer/Reasoning/Tool scrollback rows from column zero",
+      "implementation": {
+        "file": "crates/agent/src/tui/app.rs",
+        "behavior": "semantic commit prefixes preserve Answer, Reasoning, and Tool rails on wrapped physical rows; display-cell/grapheme accounting and safe narrow fallback retained",
+        "semantics_unchanged": true
+      },
+      "regression": "committed_semantic_prefixes_survive_narrow_reflow",
+      "tests": {
+        "agent_tui": 263,
+        "workspace": "passed",
+        "clippy": "passed",
+        "debug_build": "passed",
+        "release_build": "passed"
+      },
+      "conpty": {
+        "dev_stress_18x10": "passed; long Markdown/CJK, answer/reasoning history, resize and double Ctrl-C",
+        "dev_busy_32x12": "passed; Inspector/detail, reasoning, queue, resize and double Ctrl-C",
+        "release_stress_18x10": "passed; completion/result card, answer/reasoning history, resize and double Ctrl-C",
+        "release_busy_32x12": "passed; Inspector/detail, reasoning, queue, resize and double Ctrl-C"
+      },
+      "deep_research": {
+        "report_ready": false,
+        "imported": false,
+        "status": "no new report in this slice"
+      }
+    },
+    "deep_research_retry_after_static_reflow_20260804": {
+      "mode": "deep",
+      "source": "web",
+      "status": "failed_to_start",
+      "error": "Google API error code 8 (UserDisplayableError)",
+      "task_id": null,
+      "report_ready": false,
+      "imported": false,
+      "old_research_status_queried": false,
+      "next_action": "retry only in a later bounded cold-loop turn"
+    },
+    "cited_transcript_audit_surface_slice_20260804": {
+      "nlm_next_plan": {
+        "query_id": "5499da70d757",
+        "status": "completed",
+        "sources_used": 4,
+        "citations": 13,
+        "recommendation": "full-frame transcript audit/search bridge with native-scrollback handoff"
+      },
+      "local_adjudication": {
+        "already_present": "/find and bounded LiveHistory Inspector filtering/detail",
+        "accepted": "full-frame LiveHistory audit surface plus /transcript and /audit aliases",
+        "deferred": "alternate-screen lifecycle, native export bridge, and blanket ForceReflowGuard; inline TerminalGuard preserves native scrollback and no stale-width defect reproduced",
+        "ctrl_o": "retained for folded Tool detail; no shortcut conflict"
+      },
+      "files": [
+        "crates/agent/src/tui/draw.rs",
+        "crates/agent/src/tui/panel.rs",
+        "crates/agent/src/tui/command.rs",
+        "crates/agent/src/tui/tests.rs"
+      ],
+      "regression": "live_history_is_a_full_frame_transcript_audit_surface",
+      "semantics_unchanged": true
+    },
+    "cited_transcript_audit_surface_verification_20260804": {
+      "quality": {
+        "workspace_tests": "passed; agent 104, TUI 264, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest",
+        "fmt": "passed",
+        "clippy": "passed",
+        "debug_build": "passed",
+        "release_build": "passed",
+        "git_diff_check": "passed; existing CRLF normalization warnings only"
+      },
+      "conpty": {
+        "dev_stress_18x10": "passed",
+        "dev_busy_32x12_inspect_reasoning_resize": "passed; Audit panel, detail expansion, reasoning, resize, takeover and double Ctrl-C",
+        "dev_busy_40x14_inspect_queue_resize": "passed; Audit panel, pending deletion, queue switch/return, resize and double Ctrl-C",
+        "release_stress_96x24": "passed",
+        "release_busy_40x14_inspect_queue_resize": "passed; Audit panel, pending deletion, queue switch/return, resize and double Ctrl-C"
+      },
+      "harness_compatibility": "windows-pty-e2e.ps1 accepts intentional Live→Audit snapshot label transition",
+      "deterministic_gates": "state snapshot/check, requirements executable, iteration, JSON and NotebookLM output validation passed",
+      "deep_research": {
+        "report_ready": false,
+        "imported": false,
+        "status": "deep start failed before task creation with Google API error code 8"
+      }
+    },
+    "ridge_split_member_execution_20260804": {
+      "workspace_id": "7172d8e2-8751-4528-a48e-aca5bfd76385",
+      "interactive_pane": {
+        "pane_id": "2562c49c-0622-4f61-9bd7-de80ad334265",
+        "status": "terminalAccepted_but_agentAcknowledged_false",
+        "evidence": "Codex editor retained the task text; no repository execution"
+      },
+      "exec_pane": {
+        "pane_id": "7e51a198-f415-460c-8987-e6b5a25687ab",
+        "status": "blocked_before_repository_work",
+        "workdir": "C:\\tmp\\notebooklm-mcp-work",
+        "session_id": "019fcd22-9003-7dd0-b602-701248e7321a",
+        "model": "gpt-5.6-sol",
+        "codex_version": "0.146.0",
+        "error": "model refresh timeout; repeated reconnects to https://chatgpt.com/backend-api/ps/mcp",
+        "approval": "never",
+        "sandbox": "danger-full-access"
+      },
+      "repository": {
+        "upstream": "https://github.com/jacob-bd/notebooklm-mcp-cli.git",
+        "branch": "main",
+        "head": "054f871",
+        "business_commit": false,
+        "ready": false
+      },
+      "proxy_probe": {
+        "127.0.0.1:51081": "reachable; target HTTP 451",
+        "127.0.0.1:51080": "CONNECT aborted"
+      },
+      "main_environment_installed": false,
+      "explicit_model_retry": {
+        "pane_id": "afcf3534-ef3b-4b37-aab8-5a96c5b8d4ed",
+        "model": "gpt-5.6-luna",
+        "session_id": "019fcd28-f013-7670-9b37-056b017c34cc",
+        "result": "same model-refresh timeout at https://chatgpt.com/backend-api/ps/mcp"
+      },
+      "note_writeback": "blocked by NotebookLM MCP Authentication expired; local JSON remains validated"
+    },
+    "ridge_split_member_retry_20260804": {
+      "workspace_id": "7172d8e2-8751-4528-a48e-aca5bfd76385",
+      "launch_profile_attempt": {
+        "pane_id": "4354dcca-7bc4-4017-9d82-5e664c188979",
+        "status": "created_then_failed_before_execution",
+        "evidence": "Windows host rendered C:\\DevKit\\nodejs\\codex.cmd as an invalid command"
+      },
+      "recovery_pane": {
+        "pane_id": "9e62077d-766c-46d7-82a5-78c457e0dd34",
+        "command": "cmd /c codex",
+        "status": "Codex v0.146.0 visible; codex_apps startup timeout; task remained unacknowledged"
+      },
+      "task_receipt": "7956ca6e-0b46-4112-a0ac-fba3c0acfc6d",
+      "workdir": "C:\\tmp\\notebooklm-mcp-work",
+      "scope": "independent fork/work branch; reliable deep-research start/status/report/import flow with tests and docs; no main repository or approval workflow",
+      "agent_acknowledged": false,
+      "repository_result": "blocked_before_repository_work",
+      "exec_pane": {
+        "pane_id": "d882fd38-4ae1-4f56-80fc-5683c447e024",
+        "session_id": "019fcd39-4f58-7a91-ac7c-c250666e12a7",
+        "workdir_confirmed": true,
+        "status": "blocked_before_repository_work",
+        "host_error": "rmcp transport failed sending request to https://chatgpt.com/backend-api/ps/mcp",
+        "reconnect_attempts": 5
+      }
+    },
+    "panel_items_cache_adjudication_20260804": {
+      "nlm_query_id": "dcd3d3ce1914",
+      "nlm_sources_used": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+      "nlm_citations": 14,
+      "local_adjudication": {
+        "already_present": [
+          "bounded live projection",
+          "width/revision-keyed detail cache",
+          "physical panel viewport projection"
+        ],
+        "verified_gap": "PanelItemsKey invalidated standard list rows on selection/detail changes although ListState paints selection and standard item content is selection-independent",
+        "accepted_slice": "standard panels omit selection/detail from cache identity; detail panels retain both fields"
+      },
+      "regressions": [
+        "standard_panel_selection_reuses_wrapped_items",
+        "detail_panel_selection_still_rebuilds_semantic_markers"
+      ],
+      "scope": "presentation-only; execution, queue, provider, MCP and key semantics unchanged"
+    },
+    "panel_items_cache_verification_20260804": {
+      "tests": "cargo test --workspace --locked --offline --quiet passed; agent 104, TUI 266, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest",
+      "targeted_tests": "standard_panel_selection_reuses_wrapped_items and detail_panel_selection_still_rebuilds_semantic_markers passed",
+      "fmt": "passed",
+      "clippy": "passed",
+      "debug_build": "passed",
+      "release_build": "passed",
+      "pty": {
+        "dev_busy_32x12_inspect_reasoning_resize": "passed; Audit/detail, reasoning, resize and double Ctrl-C",
+        "dev_busy_32x12_inspect_queue_resize": "passed; Audit/detail, queue removal/switch/return, resize and double Ctrl-C",
+        "release_stress_96x24": "passed; Answer/Reasoning/DONE, resize, snapshot and double Ctrl-C",
+        "release_busy_32x12_inspect_queue_resize": "passed; Audit/detail, queue removal/switch/return, resize and double Ctrl-C"
+      },
+      "gates": "state snapshot/check, requirements executable, iteration, cold-loop permission, JSON and NotebookLM output validation passed; git diff check only existing CRLF warnings"
+    },
+    "nlm_next_plan_lifecycle_anchor_20260804": {
+      "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+      "sources_used": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+      "citations": 16,
+      "recommendation": "width-aware semantic reflow plus bounded lifecycle markers; preserve collapsible tools and avoid a second execution state machine",
+      "local_adjudication": {
+        "already_present": [
+          "ActivityKind/static anchors for WAIT/ASK/SUM/TAKE/DONE/ERR",
+          "top chrome current waiting/activity status",
+          "bounded width/row/revision-keyed LiveOutputCache and HOLD anchor"
+        ],
+        "verified_gap": "non-channel lifecycle transitions were absent from the live viewport when a prior stream tail remained visible, unless HOLD/Inspector was opened",
+        "rejected": [
+          "literal O(k/n) complexity claim",
+          "persistent sidebar removal below 80 columns",
+          "new parser/global state machine/whole-document virtualizer"
+        ]
+      },
+      "accepted_slice": "one width-clipped live lifecycle anchor for busy WAIT/CHK/ASK/SUM/ERR; HOLD takes precedence and ordinary THK/ANS/TLS rails are not duplicated",
+      "scope": "presentation-only; no execution, queue, provider, MCP, native scrollback or key semantics changed"
+    },
+    "lifecycle_anchor_verification_20260804": {
+      "tests": "cargo test --workspace --locked --offline --quiet passed; agent 104, TUI 268, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest",
+      "targeted": [
+        "live_lifecycle_anchor_keeps_waiting_visible_beside_existing_stream",
+        "live_lifecycle_anchor_is_bounded_and_omits_channel_chatter"
+      ],
+      "quality": "fmt, Clippy -D warnings, Debug/Release builds passed",
+      "pty": {
+        "dev_busy_40x12_waiting_resize": "passed; raw output visibly contained WAIT, two Ctrl-C exit",
+        "release_busy_40x12_waiting_resize": "passed; raw output visibly contained WAIT, two Ctrl-C exit",
+        "release_stress_96x24": "passed; CHK/SUM/DONE, answer/reasoning, resize, valid snapshots, two Ctrl-C",
+        "dev_busy_inspector_reasoning_resize": "passed; Audit/detail, reasoning, resize, takeover, two Ctrl-C",
+        "release_busy_queue_resize": "passed; Audit/detail, queue removal/switch/return, resize, two Ctrl-C"
+      },
+      "gates": "state snapshot/check, requirements executable, iteration, cold-loop permission, JSON and NotebookLM output validation passed; git diff check only existing CRLF warnings"
+    },
+    "deep_research_industry_retry_20260804": {
+      "mode": "deep",
+      "source": "web",
+      "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+      "task_id": null,
+      "report_ready": false,
+      "imported": false,
+      "status": "failed_before_task_creation",
+      "error": "Google API error code 8 (UserDisplayableError)",
+      "status_poll": "not performed because no task id was returned",
+      "old_task_status": "not inspected"
+    }
+  }
+}

@@ -13,6 +13,16 @@ pub(crate) enum PanelKind {
     Tools,
     /// 已提交工具历史:摘要默认收起,Enter 在预览窗展开详情。
     ToolHistory,
+    /// 已提交 reasoning 历史:保留原生 scrollback，同时提供检索与展开详情。
+    ReasoningHistory,
+    /// Recoverable Answer archive remains searchable after scrollback folding.
+    AnswerHistory,
+    /// 当前流式 Answer/Reasoning/Tool 混合块:只读聚焦与按需展开。
+    LiveHistory,
+    /// Agent 最近阶段/事件:只读 bounded 时间线。
+    Activity,
+    /// 忙碌任务的 FIFO 队列：可观察并删除尚未执行的单条意图。
+    Queue,
     /// 模型页:Enter 热切换到选中模型 + 缓存 ctx_window。
     Models,
     /// Sub-agent 页:只读浏览 + 搜索。
@@ -32,6 +42,15 @@ pub(crate) struct PanelRow {
     pub(crate) ctx: Option<u64>,
 }
 
+/// Presentation-only action attached to a filtered row. Keeping this out of
+/// the row text avoids brittle prefix parsing for pending-message controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PanelRowAction {
+    None,
+    RemoveQueued(usize),
+    FocusLiveBlock(LiveBlockFocus),
+}
+
 /// 模态交互页(iter-35):标题 + 搜索框(随打随滤)+ 过滤列表(选中高亮)+ 选中动作。
 /// `view` 是 `rows` 的过滤下标,`sel` 是 `view` 内位次;`editing=Some` = 配置页正编辑选中键值。
 pub(crate) struct Panel {
@@ -39,6 +58,7 @@ pub(crate) struct Panel {
     pub(crate) title: String,
     pub(crate) query: String,
     pub(crate) rows: Vec<PanelRow>,
+    pub(crate) row_actions: Vec<PanelRowAction>,
     pub(crate) view: Vec<usize>,
     pub(crate) sel: usize,
     pub(crate) editing: Option<String>,
@@ -48,6 +68,9 @@ pub(crate) struct Panel {
     pub(crate) detail_open: bool,
     /// Manual visual-row adjustment around an automatic search hit.
     pub(crate) detail_scroll: i16,
+    /// Monotonic presentation identity for the current row/detail snapshot.
+    /// Rebuilt live panels get a new identity; selection/query changes do not.
+    pub(crate) content_revision: u64,
 }
 
 /// 过滤:key/value 不分大小写子串命中;空 query = 全含。有序稳态(保 rows 原序)。纯函数。
@@ -65,11 +88,14 @@ pub(crate) fn panel_filter(rows: &[PanelRow], query: &str) -> Vec<usize> {
 impl Panel {
     pub(crate) fn new(kind: PanelKind, title: String, rows: Vec<PanelRow>) -> Self {
         let view = panel_filter(&rows, "");
+        static NEXT_CONTENT_REVISION: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
         Panel {
             kind,
             title,
             query: String::new(),
             rows,
+            row_actions: vec![PanelRowAction::None; view.len()],
             view,
             sel: 0,
             editing: None,
@@ -78,6 +104,8 @@ impl Panel {
             oauth_redirect_uri: None,
             detail_open: false,
             detail_scroll: 0,
+            content_revision: NEXT_CONTENT_REVISION
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
     /// query 变更后重算 view 并把 sel 钳回范围内。
@@ -87,7 +115,7 @@ impl Panel {
         if self.sel >= self.view.len() {
             self.sel = self.view.len().saturating_sub(1);
         }
-        if self.kind == PanelKind::ToolHistory && !self.query.is_empty() {
+        if self.supports_detail() && !self.query.is_empty() {
             let query = self.query.to_lowercase();
             if let Some(detail_sel) = self
                 .view
@@ -130,7 +158,7 @@ impl Panel {
         self.sel = self.view.len().saturating_sub(1);
     }
     pub(crate) fn toggle_detail(&mut self) -> bool {
-        if self.kind != PanelKind::ToolHistory {
+        if !self.supports_detail() {
             return false;
         }
         self.detail_scroll = 0;
@@ -139,7 +167,7 @@ impl Panel {
     }
     /// Move the expanded detail view around its search anchor.
     pub(crate) fn scroll_detail(&mut self, delta: i8) -> bool {
-        if self.kind != PanelKind::ToolHistory || !self.detail_open {
+        if !self.supports_detail() || !self.detail_open {
             return false;
         }
         let before = self.detail_scroll;
@@ -150,8 +178,51 @@ impl Panel {
         }
         self.detail_scroll != before
     }
+
+    pub(crate) fn supports_detail(&self) -> bool {
+        matches!(
+            self.kind,
+            PanelKind::Activity
+                | PanelKind::ToolHistory
+                | PanelKind::ReasoningHistory
+                | PanelKind::AnswerHistory
+                | PanelKind::LiveHistory
+        )
+    }
     pub(crate) fn selected(&self) -> Option<&PanelRow> {
         self.view.get(self.sel).map(|&i| &self.rows[i])
+    }
+
+    pub(crate) fn selected_index(&self) -> Option<usize> {
+        self.view.get(self.sel).copied()
+    }
+
+    pub(crate) fn selected_action(&self) -> PanelRowAction {
+        self.selected_index()
+            .and_then(|index| self.row_actions.get(index).copied())
+            .unwrap_or(PanelRowAction::None)
+    }
+
+    pub(crate) fn with_row_actions(mut self, actions: Vec<PanelRowAction>) -> Self {
+        debug_assert_eq!(self.rows.len(), actions.len());
+        if self.rows.len() == actions.len() {
+            self.row_actions = actions;
+        }
+        self
+    }
+
+    /// Only observer panels may replace one another without discarding an edit.
+    pub(crate) fn allows_attention_switch(&self) -> bool {
+        self.editing.is_none()
+            && matches!(
+                self.kind,
+                PanelKind::ToolHistory
+                    | PanelKind::ReasoningHistory
+                    | PanelKind::AnswerHistory
+                    | PanelKind::LiveHistory
+                    | PanelKind::Activity
+                    | PanelKind::Queue
+            )
     }
 }
 
@@ -160,6 +231,7 @@ pub(crate) fn config_value(cfg: &Config, key: &str) -> String {
     match key {
         "provider" => cfg.provider.clone().unwrap_or_default(),
         "model" => cfg.model.clone().unwrap_or_default(),
+        "effort" => cfg.effort.clone().unwrap_or_default(),
         "base_url" => cfg.base_url.clone().unwrap_or_default(),
         "budget_tokens" => cfg.budget_tokens.map(|n| n.to_string()).unwrap_or_default(),
         "skills_dir" => cfg.skills_dir.clone().unwrap_or_default(),
@@ -243,7 +315,12 @@ pub(crate) fn tool_history_panel(history: &std::collections::VecDeque<ToolBlock>
         .rev()
         .enumerate()
         .map(|(index, tool)| PanelRow {
-            key: format!("#{} {}", index + 1, tool.summary()),
+            key: format!(
+                "#{} {} · p#{}",
+                index + 1,
+                tool.summary(),
+                tool.presentation_id()
+            ),
             value: tool.details_text(),
             ctx: None,
         })
@@ -255,11 +332,172 @@ pub(crate) fn tool_history_panel(history: &std::collections::VecDeque<ToolBlock>
     )
 }
 
+/// 已提交 reasoning 历史:摘要展示 step/token，Enter 展开完整思考文本。
+pub(crate) fn reasoning_history_panel(
+    history: &std::collections::VecDeque<ReasoningEntry>,
+) -> Panel {
+    let rows = history
+        .iter()
+        .rev()
+        .enumerate()
+        .map(|(index, reasoning)| PanelRow {
+            key: format!(
+                "#{} step {} · {} tok · +{}s · p#{}",
+                index + 1,
+                reasoning.step,
+                reasoning.tokens,
+                reasoning.elapsed_s,
+                reasoning.id
+            ),
+            value: reasoning.text.clone(),
+            ctx: None,
+        })
+        .collect();
+    Panel::new(
+        PanelKind::ReasoningHistory,
+        "Reasoning history · ↑↓/PgUp/PgDn select · Enter expand · type to filter · Esc close"
+            .into(),
+        rows,
+    )
+}
+
+/// Recoverable Answer archive: newest first, full body available on Enter;
+/// interrupted streams are visibly marked PARTIAL.
+pub(crate) fn answer_history_panel(history: &std::collections::VecDeque<AnswerEntry>) -> Panel {
+    let rows = history
+        .iter()
+        .rev()
+        .enumerate()
+        .map(|(index, answer)| PanelRow {
+            key: format!(
+                "#{} {} · step {} · {} tok · +{}s · {} chars · p#{}",
+                index + 1,
+                if answer.partial { "PARTIAL" } else { "ANSWER" },
+                answer.step,
+                answer.tokens,
+                answer.elapsed_s,
+                answer.text.chars().count(),
+                answer.id
+            ),
+            value: answer.text.clone(),
+            ctx: None,
+        })
+        .collect();
+    Panel::new(
+        PanelKind::AnswerHistory,
+        "Answer archive · completed + partial · ↑↓/PgUp/PgDn select · Enter expand · type to filter · Esc close".into(),
+        rows,
+    )
+}
+
+/// 当前流式混合块:模型输出不离开 LiveTranscript,只在 Inspector 中聚焦/展开。
+/// Live inspector plus an actionable pending FIFO rail. Queue rows remain
+/// presentation-only; the main loop performs the actual removal.
+pub(crate) fn live_history_panel_with_queue(
+    transcript: &LiveTranscript,
+    queue: &std::collections::VecDeque<String>,
+) -> Panel {
+    let entries = transcript.inspector_rows();
+    let mut rows = Vec::with_capacity(entries.len() + queue.len());
+    let mut actions = Vec::with_capacity(entries.len() + queue.len());
+    for entry in entries {
+        rows.push(PanelRow {
+            key: entry.key,
+            value: entry.detail,
+            ctx: None,
+        });
+        actions.push(PanelRowAction::FocusLiveBlock(entry.focus));
+    }
+    for (index, message) in queue.iter().enumerate() {
+        rows.push(PanelRow {
+            key: if index == 0 {
+                "⏭ pending · next".into()
+            } else {
+                format!("⏳ pending · #{}", index + 1)
+            },
+            value: message.clone(),
+            ctx: None,
+        });
+        actions.push(PanelRowAction::RemoveQueued(index));
+    }
+    Panel::new(
+        PanelKind::LiveHistory,
+        "TRANSCRIPT AUDIT · Live blocks + pending · ↑↓/PgUp/PgDn select · Enter/Space expand · Delete pending · Ctrl+Q queue · Esc close".into(),
+        rows,
+    )
+    .with_row_actions(actions)
+}
+
+/// Agent 活动时间线:只保留最近五个真实状态转移，最新项置顶，详情仍可通过正文/工具面板查看。
+pub(crate) fn activity_panel(history: &std::collections::VecDeque<ActivityEntry>) -> Panel {
+    let rows = if history.is_empty() {
+        vec![PanelRow {
+            key: "—".into(),
+            value: "no activity observed yet".into(),
+            ctx: None,
+        }]
+    } else {
+        history
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(index, entry)| PanelRow {
+                key: if index == 0 {
+                    format!("{} now", entry.kind.tag())
+                } else {
+                    format!("{} #{}", entry.kind.tag(), entry.sequence)
+                },
+                value: entry.text.clone(),
+                ctx: None,
+            })
+            .collect()
+    };
+    Panel::new(
+        PanelKind::Activity,
+        format!(
+            "Activity · audit {} · ↑↓ select · Enter expand · Alt+PgUp/PgDn detail · Esc close",
+            history.len()
+        ),
+        rows,
+    )
+}
+
+/// 忙碌任务队列：显示真实 FIFO 顺序，删除只影响尚未启动的意图。
+pub(crate) fn queue_panel(queue: &std::collections::VecDeque<String>) -> Panel {
+    let rows = if queue.is_empty() {
+        vec![PanelRow {
+            key: "—".into(),
+            value: "queue empty".into(),
+            ctx: None,
+        }]
+    } else {
+        queue
+            .iter()
+            .enumerate()
+            .map(|(index, message)| PanelRow {
+                key: if index == 0 {
+                    "⏭ next".into()
+                } else {
+                    format!("⏳ #{}", index + 1)
+                },
+                value: message.clone(),
+                ctx: None,
+            })
+            .collect()
+    };
+    Panel::new(
+        PanelKind::Queue,
+        "Queue · ↑↓ select · Delete remove · Esc close".into(),
+        rows,
+    )
+}
+
 /// 模型页:跨 provider 列实时模型(`provider · id` → ctx),`sel` 落当前 provider+模型。
-pub(crate) fn models_panel(
+pub(crate) fn models_panel_with_effort(
     grouped: &[(String, Vec<provider::models::ModelInfo>)],
     current_provider: &str,
     current_model: &str,
+    current_effort: &str,
 ) -> Panel {
     let rows: Vec<PanelRow> = grouped
         .iter()
@@ -274,10 +512,22 @@ pub(crate) fn models_panel(
             })
         })
         .collect();
+    let mut rows = rows;
+    rows.extend(provider::REASONING_EFFORTS.iter().map(|effort| PanelRow {
+        key: format!("{} · {}", EFFORT_MODEL_GROUP, effort),
+        value: if *effort == current_effort {
+            "current".into()
+        } else {
+            "set reasoning effort".into()
+        },
+        ctx: None,
+    }));
     let target = format!("{} · {}", current_provider, current_model);
     let mut p = Panel::new(
         PanelKind::Models,
-        "Models · ↑↓ select · Enter switch · type to filter · Esc close".into(),
+        format!(
+            "Models · effort {current_effort} · ↑↓ select · Enter switch · type to filter · Esc close"
+        ),
         rows,
     );
     if let Some(pos) = p.view.iter().position(|&i| p.rows[i].key == target) {
@@ -387,6 +637,7 @@ pub(crate) enum PanelAction {
     Last,
     Enter,
     Esc,
+    Remove,
     Char(char),
     Backspace,
     Ignore,
@@ -412,6 +663,8 @@ pub(crate) fn panel_action(key: &KeyEvent) -> PanelAction {
         KeyCode::End => PanelAction::Last,
         KeyCode::Enter => PanelAction::Enter,
         KeyCode::Esc => PanelAction::Esc,
+        KeyCode::Delete => PanelAction::Remove,
+        KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) => PanelAction::Remove,
         KeyCode::Backspace => PanelAction::Backspace,
         KeyCode::Char(c) => PanelAction::Char(c),
         _ => PanelAction::Ignore,

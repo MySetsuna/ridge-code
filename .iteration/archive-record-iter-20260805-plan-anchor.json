@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-plan-anchor",
+  "at": "2026-08-05",
+  "type": "iteration",
+  "facts": [
+    "NLM next-plan response proposed a duplicate DECSTBM hardware-scroll layer; local CodeGraph confirmed Viewport::Inline and Terminal::insert_before already exist, so it was rejected.",
+    "Model TODO snapshots previously entered ordinary Text commits; changed snapshots now use the bounded PLAN Activity anchor and existing Ctrl+T detail surface.",
+    "No stale or completed NotebookLM Note was present; the single Active Note remains useful and was retained."
+  ],
+  "evidence": [
+    "notebook_gate.py validate-output: valid",
+    "cargo test --workspace --locked --offline --quiet: passed (agent 104, TUI 289, remaining workspace crates/doctests passed)",
+    "cargo fmt --all -- --check; cargo clippy --workspace --all-targets --locked --offline -- -D warnings; Debug/Release build: passed",
+    "windows-pty-e2e.ps1 Debug BusyFixture and Release StressFixture: status=passed",
+    "state_snapshot.py check; requirements_gate.py assert-task-executable; notebook_gate.py assert-allowed; iteration_gate.py; iteration_budget.py check: passed"
+  ],
+  "paths": [
+    "crates/agent/src/tui/app.rs",
+    "crates/agent/src/tui/mod.rs",
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260805-hardware-scroll-followup.json"
+  ],
+  "symbols": [
+    "ActivityKind::Plan",
+    "Ui::record_plan",
+    "activity_commit_lines",
+    "activity_signal_chip"
+  ],
+  "next": [
+    "Continue with one locally reproduced presentation gap; do not add DECSTBM or a second renderer/virtualizer without evidence."
+  ]
+}

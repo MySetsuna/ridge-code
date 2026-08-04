@@ -1,4 +1,7 @@
+use std::borrow::Cow;
+
 use super::*;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// 要不要画这一帧:有状态变更(dirty)或显式动画需求才画;业务 busy 不直接拥有渲染决策。
 pub(crate) fn should_draw(dirty: bool, animation_due: bool) -> bool {
@@ -31,19 +34,53 @@ pub(crate) fn clip_display_cells(text: &str, width: u16) -> String {
     let limit = width - 1;
     let mut out = String::new();
     let mut cells = 0;
-    for c in text.chars() {
-        if matches!(c, '\n' | '\r') {
+    for grapheme in text.graphemes(true) {
+        if matches!(grapheme, "\n" | "\r") {
             break;
         }
-        let used = char_cells(c);
+        let used = str_cells(grapheme);
         if cells + used > limit {
             break;
         }
-        out.push(c);
+        out.push_str(grapheme);
         cells += used;
     }
     out.push('…');
     out
+}
+
+/// Return a bounded tail for a single logical live line. Reverse UTF-8
+/// traversal avoids scanning/materializing an unbroken 32K token line before
+/// the viewport's small physical-row budget is known.
+pub(crate) fn tail_display_cells(text: &str, width: u16, max_rows: usize) -> String {
+    let width = width.max(1) as usize;
+    let limit = width.saturating_mul(max_rows.max(1));
+    let exact_check_limit = limit.saturating_mul(4);
+    if text.len() <= exact_check_limit && str_cells(text) <= limit {
+        return text.to_owned();
+    }
+    if limit == 1 {
+        return "…".to_owned();
+    }
+    let body_limit = limit - 1;
+    let mut reversed = String::new();
+    let mut cells = 0usize;
+    let mut tail = Vec::new();
+    for grapheme in text.graphemes(true).rev() {
+        let used = str_cells(grapheme);
+        if cells.saturating_add(used) > body_limit {
+            break;
+        }
+        tail.push(grapheme);
+        cells = cells.saturating_add(used);
+    }
+    for grapheme in tail.into_iter().rev() {
+        reversed.push_str(grapheme);
+    }
+    let mut result = String::with_capacity(reversed.len() + 1);
+    result.push('…');
+    result.push_str(&reversed);
+    result
 }
 
 /// 折行行数(iter-26 抽取,`input_height`/`commit_height` 共用):按**显示单元格宽**折行
@@ -58,8 +95,8 @@ pub(crate) fn wrapped_rows(content: &str, width: u16) -> usize {
 pub(crate) fn line_visual_rows(line: &str, w: usize) -> usize {
     let mut rows = 1usize;
     let mut cells = 0usize;
-    for c in line.chars() {
-        let cw = char_cells(c);
+    for grapheme in line.graphemes(true) {
+        let cw = str_cells(grapheme);
         if cells + cw > w && cells > 0 {
             rows += 1;
             cells = 0;
@@ -78,24 +115,32 @@ pub(crate) fn wrap_input(buffer: &str, cursor: usize, width: u16) -> (Vec<String
     let mut cells = 0usize;
     let (mut crow, mut ccol) = (0u16, 0u16);
     let mut recorded = false;
-    for (i, c) in buffer.chars().enumerate() {
-        if i == cursor {
+    let mut char_index = 0usize;
+    for grapheme in buffer.graphemes(true) {
+        let next_char_index = char_index + grapheme.chars().count();
+        if !recorded && cursor <= char_index {
             crow = lines.len() as u16;
             ccol = cells as u16;
             recorded = true;
         }
-        if c == '\n' {
+        if !recorded && cursor < next_char_index {
+            crow = lines.len() as u16;
+            ccol = cells as u16;
+            recorded = true;
+        }
+        if grapheme == "\n" {
             lines.push(std::mem::take(&mut line));
             cells = 0;
         } else {
-            let cw = char_cells(c);
+            let cw = str_cells(grapheme);
             if cells + cw > w && cells > 0 {
                 lines.push(std::mem::take(&mut line));
                 cells = 0;
             }
-            line.push(c);
+            line.push_str(grapheme);
             cells += cw;
         }
+        char_index = next_char_index;
     }
     if !recorded {
         crow = lines.len() as u16; // 光标在末尾
@@ -106,6 +151,7 @@ pub(crate) fn wrap_input(buffer: &str, cursor: usize, width: u16) -> (Vec<String
 }
 
 /// 静态提交一段文本需占的终端行数(供 `insert_before`)。
+#[cfg(test)]
 pub(crate) fn commit_height(text: &str, width: u16) -> u16 {
     wrapped_rows(text, width).min(u16::MAX as usize).max(1) as u16
 }
@@ -229,6 +275,10 @@ pub(crate) enum Role {
     Primary,
     /// 用户命令回显(`›`)。
     Command,
+    /// 完成的模型回答与回答通道正文。
+    Answer,
+    /// 模型思考/推理通道。与通用次要文本分离，避免思考被压成不可读的暗灰。
+    Reasoning,
     /// 系统信息、事件默认色。
     Info,
     Success,
@@ -238,23 +288,49 @@ pub(crate) enum Role {
     Border,
     /// 次要文本、代码块内文。
     Muted,
+    /// 紧凑遥测的数值，不代表用户输入命令。
+    Metric,
+    /// 紧凑遥测的字段标签与分隔语义。
+    Label,
     DiffAdd,
     DiffDel,
 }
 
 pub(crate) fn role_color(r: Role) -> Color {
     match r {
+        // Calm base palette: neutral text carries the screen; cyan is the
+        // single product/focus accent. Warning colors remain exceptional.
         Role::Primary => Color::Cyan,
-        Role::Command => Color::LightGreen,
-        Role::Info => Color::LightBlue,
+        Role::Command => Color::White,
+        Role::Answer => Color::White,
+        Role::Reasoning => Color::LightBlue,
+        Role::Info => Color::Gray,
         Role::Success => Color::Green,
         Role::Error => Color::Red,
         Role::Warn => Color::Yellow,
         Role::Border => Color::DarkGray,
-        Role::Muted => Color::Gray,
+        Role::Muted => Color::DarkGray,
+        Role::Metric => Color::White,
+        Role::Label => Color::DarkGray,
         Role::DiffAdd => Color::Green,
         Role::DiffDel => Color::Red,
     }
+}
+
+/// Telemetry chrome uses the terminal surface instead of painting a full
+/// gray band.  This keeps muted context text readable on both dark and light
+/// terminal themes and leaves the cyan rail as the single focus accent.
+pub(crate) fn telemetry_surface() -> Style {
+    Style::default().bg(Color::Reset)
+}
+
+/// Quiet selection affordance: retain a background only for focus, with no
+/// high-contrast neon block competing with the transcript.
+pub(crate) fn selection_style() -> Style {
+    Style::default()
+        .fg(role_color(Role::Primary))
+        .bg(Color::DarkGray)
+        .add_modifier(Modifier::BOLD)
 }
 
 /// 行内 md 扫描:`` `code` ``(Warn 色)与 `**bold**`(加粗);未闭合记号按字面。纯函数。
@@ -400,6 +476,161 @@ fn markdown_structure_spans(line: &str) -> Option<Vec<Span<'static>>> {
         ));
         body = &body[end..];
     }
+    spans.extend(inline_md_spans(body));
+    Some(spans)
+}
+
+/// 告警块只改变呈现层的左边界，不增物理行、不改正文。
+/// `Single` 用于尚未形成多行块的流式片段；静态/可见尾部有完整上下文时，
+/// `Top`/`Middle`/`Bottom` 组成稳定的 ANSI16 容器边界。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AlertEdge {
+    Single,
+    Top,
+    Middle,
+    Bottom,
+}
+
+fn alert_body(line: &str) -> &str {
+    line.strip_prefix("🤖 ").unwrap_or(line)
+}
+
+fn is_alert_continuation(line: &str) -> bool {
+    let line = alert_body(line);
+    markdown_quote_prefix(line).is_some() && markdown_alert_role(line).is_none()
+}
+
+/// Produce one bounded edge marker per logical line. The caller supplies only
+/// the visible/tail lines, so this helper never turns the live renderer into a
+/// whole-document scan.
+pub(crate) fn alert_edges<'a, I>(lines: I) -> Vec<Option<AlertEdge>>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let lines = lines.into_iter().collect::<Vec<_>>();
+    let mut edges = vec![None; lines.len()];
+    let mut index = 0;
+    while index < lines.len() {
+        if markdown_alert_role(alert_body(lines[index])).is_none() {
+            index += 1;
+            continue;
+        }
+        let mut end = index;
+        while end + 1 < lines.len() && is_alert_continuation(lines[end + 1]) {
+            end += 1;
+        }
+        if end == index {
+            edges[index] = Some(AlertEdge::Single);
+        } else {
+            edges[index] = Some(AlertEdge::Top);
+            for (offset, edge) in edges[index + 1..=end].iter_mut().enumerate() {
+                *edge = Some(if index + 1 + offset == end {
+                    AlertEdge::Bottom
+                } else {
+                    AlertEdge::Middle
+                });
+            }
+        }
+        index = end + 1;
+    }
+    edges
+}
+
+fn alert_edge_glyph(edge: AlertEdge) -> &'static str {
+    match edge {
+        AlertEdge::Single => "│",
+        AlertEdge::Top => "┌",
+        AlertEdge::Middle => "│",
+        AlertEdge::Bottom => "└",
+    }
+}
+
+pub(crate) fn apply_alert_edge(spans: &mut [Span<'static>], edge: AlertEdge) {
+    let Some(first) = spans.first_mut() else {
+        return;
+    };
+    let Some(index) = first.content.rfind('│') else {
+        return;
+    };
+    let mut content = first.content.to_string();
+    content.replace_range(index..index + '│'.len_utf8(), alert_edge_glyph(edge));
+    first.content = Cow::Owned(content);
+}
+
+/// Markdown alert/callout 的展示投影：保留正文语义，给标记加 ANSI16 角色色与侧栏。
+/// 仅识别标准 `> [!NOTE]` 等行级标记，避免把普通引用误判为告警块。
+fn markdown_alert_spans(line: &str) -> Option<Vec<Span<'static>>> {
+    let (quote, body) = markdown_quote_prefix(line)?;
+    let marker = body.trim_start();
+    let (label, role, rest) = [
+        ("[!NOTE]", "NOTE", Role::Info),
+        ("[!TIP]", "TIP", Role::Success),
+        ("[!IMPORTANT]", "IMPORTANT", Role::Primary),
+        ("[!WARNING]", "WARNING", Role::Warn),
+        ("[!CAUTION]", "CAUTION", Role::Error),
+    ]
+    .into_iter()
+    .find_map(|(marker_text, label, role)| {
+        let rest = marker.strip_prefix(marker_text)?;
+        if rest
+            .chars()
+            .next()
+            .is_some_and(|c| !matches!(c, ' ' | '\t'))
+        {
+            return None;
+        }
+        Some((label, role, rest.trim_start_matches([' ', '\t'])))
+    })?;
+
+    let color = role_color(role);
+    let mut spans = vec![
+        Span::styled(quote, Style::default().fg(color)),
+        Span::styled(
+            label.to_owned(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if !rest.is_empty() {
+        spans.push(Span::styled(" ┃ ".to_owned(), Style::default().fg(color)));
+        spans.extend(inline_md_spans(rest));
+    }
+    Some(spans)
+}
+
+fn markdown_alert_role(line: &str) -> Option<Role> {
+    let (_, body) = markdown_quote_prefix(line)?;
+    let marker = body.trim_start();
+    [
+        ("[!NOTE]", Role::Info),
+        ("[!TIP]", Role::Success),
+        ("[!IMPORTANT]", Role::Primary),
+        ("[!WARNING]", Role::Warn),
+        ("[!CAUTION]", Role::Error),
+    ]
+    .into_iter()
+    .find_map(|(marker_text, role)| {
+        let rest = marker.strip_prefix(marker_text)?;
+        if rest
+            .chars()
+            .next()
+            .is_some_and(|c| !matches!(c, ' ' | '\t'))
+        {
+            None
+        } else {
+            Some(role)
+        }
+    })
+}
+
+/// Keep the semantic rail on subsequent quoted lines of one alert block.
+/// The body stays normal Markdown; only the structural rail inherits the
+/// alert role, so long conclusions remain readable without adding layout rows.
+fn markdown_alert_continuation_spans(line: &str, role: Role) -> Option<Vec<Span<'static>>> {
+    let (quote, body) = markdown_quote_prefix(line)?;
+    if body.trim_start().starts_with("[!") {
+        return None;
+    }
+    let mut spans = vec![Span::styled(quote, Style::default().fg(role_color(role)))];
     spans.extend(inline_md_spans(body));
     Some(spans)
 }
@@ -605,21 +836,28 @@ fn code_line_spans(text: &str) -> Vec<Span<'static>> {
 
 /// 行级 md 轻渲染(iter-28):静态提交与 Live Answer 共用；样式仅存在呈现层。
 /// ``` 围栏切态(围栏行 Border 色)、块内 bounded code roles、`#` 标题加粗 Primary、引用/列表有结构侧栏、余走行内扫描。
+#[cfg(test)]
 pub(crate) fn md_line_spans(line: &str, in_code: bool) -> (Vec<Span<'static>>, bool) {
+    let mut alert_role = None;
+    md_line_spans_with_alert(line, in_code, &mut alert_role)
+}
+
+pub(crate) fn md_line_spans_with_alert(
+    line: &str,
+    in_code: bool,
+    alert_role: &mut Option<Role>,
+) -> (Vec<Span<'static>>, bool) {
     let trimmed = line.trim_start();
     if trimmed.starts_with("```") {
-        return (
-            vec![Span::styled(
-                line.to_owned(),
-                Style::default().fg(role_color(Role::Border)),
-            )],
-            next_fence_state(trimmed, in_code),
-        );
+        *alert_role = None;
+        return (fence_line_spans(line), next_fence_state(trimmed, in_code));
     }
     if in_code {
+        *alert_role = None;
         return (code_line_spans(line), true);
     }
     if trimmed.starts_with('#') {
+        *alert_role = None;
         return (
             vec![Span::styled(
                 line.to_owned(),
@@ -630,10 +868,50 @@ pub(crate) fn md_line_spans(line: &str, in_code: bool) -> (Vec<Span<'static>>, b
             false,
         );
     }
+    if let Some(spans) = markdown_alert_spans(line) {
+        *alert_role = markdown_alert_role(line);
+        return (spans, false);
+    }
+    if let Some(role) = *alert_role {
+        if let Some(spans) = markdown_alert_continuation_spans(line, role) {
+            return (spans, false);
+        }
+        *alert_role = None;
+    }
     if let Some(spans) = markdown_structure_spans(line) {
         return (spans, false);
     }
     (inline_md_spans(line), false)
+}
+
+/// Keep the fence text byte-for-byte unchanged while giving a recognized
+/// language token its own semantic role.  This is a display-only cue: no
+/// cells are added, so static scrollback and the live narrow fallback keep
+/// their existing wrap/height behavior.
+fn fence_line_spans(line: &str) -> Vec<Span<'static>> {
+    let Some(language) = fence_language(line) else {
+        return vec![Span::styled(
+            line.to_owned(),
+            Style::default().fg(role_color(Role::Border)),
+        )];
+    };
+    let trimmed = line.trim_start();
+    let leading_bytes = line.len() - trimmed.len();
+    let language_start = leading_bytes + 3;
+    let language_end = language_start + language.len();
+    let border = Style::default().fg(role_color(Role::Border));
+    let language_style = Style::default()
+        .fg(role_color(Role::Info))
+        .add_modifier(Modifier::BOLD);
+    let mut spans = vec![Span::styled(line[..language_start].to_owned(), border)];
+    spans.push(Span::styled(
+        line[language_start..language_end].to_owned(),
+        language_style,
+    ));
+    if language_end < line.len() {
+        spans.push(Span::styled(line[language_end..].to_owned(), border));
+    }
+    spans
 }
 
 fn next_fence_state(trimmed: &str, in_code: bool) -> bool {
@@ -646,6 +924,45 @@ fn next_fence_state(trimmed: &str, in_code: bool) -> bool {
 
 /// Live Answer 的有界 Markdown 投影：先按完整行推进围栏状态，再按 cell 宽裁切可见文本。
 /// 未闭合标记保持字面；每帧只处理已进入视口的行，不把解析状态写回 transcript。
+pub(crate) fn live_markdown_spans_with_alert(
+    text: &str,
+    in_code: &mut bool,
+    base_color: Color,
+    modifier: Modifier,
+    alert_role: &mut Option<Role>,
+) -> Vec<Span<'static>> {
+    let start_code = *in_code;
+    let next_code = next_fence_state(text.trim_start(), start_code);
+    let (mut spans, _) = md_line_spans_with_alert(text, start_code, alert_role);
+    *in_code = next_code;
+
+    for span in &mut spans {
+        let color = span.style.fg.unwrap_or(base_color);
+        span.style = Style::default()
+            .fg(color)
+            .add_modifier(modifier)
+            .add_modifier(span.style.add_modifier);
+    }
+    spans
+}
+
+pub(crate) fn live_markdown_spans_with_alert_edge(
+    text: &str,
+    in_code: &mut bool,
+    base_color: Color,
+    modifier: Modifier,
+    alert_role: &mut Option<Role>,
+    alert_edge: Option<AlertEdge>,
+) -> Vec<Span<'static>> {
+    let mut spans = live_markdown_spans_with_alert(text, in_code, base_color, modifier, alert_role);
+    if let Some(edge) = alert_edge {
+        apply_alert_edge(&mut spans, edge);
+    }
+    spans
+}
+
+/// Live Answer 的兼容单行投影：保留旧的 cell 裁切口径，供纯逻辑测试与窄徽标使用。
+#[cfg(test)]
 pub(crate) fn live_markdown_line(
     text: &str,
     width: u16,
@@ -701,18 +1018,100 @@ pub(crate) fn fence_without_language(text: &str) -> String {
 /// 代码围栏状态跨行传递，故不会因中间换行把代码块误当普通回答。
 pub(crate) fn markdown_lines(text: &str) -> Vec<Line<'static>> {
     let mut in_code = false;
-    text.lines()
-        .map(|line| {
-            let (spans, next) = answer_line_spans(line, in_code);
+    let mut alert_role = None;
+    let source_lines = text.lines().collect::<Vec<_>>();
+    let edges = alert_edges(source_lines.iter().copied());
+    source_lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let (spans, next) = answer_line_spans(
+                line,
+                in_code,
+                &mut alert_role,
+                edges.get(index).copied().flatten(),
+            );
             in_code = next;
             Line::from(spans)
         })
         .collect()
 }
 
-fn answer_line_spans(line: &str, in_code: bool) -> (Vec<Span<'static>>, bool) {
+/// Stable presentation rail for an answer that has left the live viewport.
+/// The live renderer already exposes the same semantic channel; keeping this
+/// prefix in committed scrollback prevents the final answer from becoming
+/// indistinguishable from an untyped Markdown note.
+fn answer_commit_rail(index: usize) -> &'static str {
+    if index == 0 {
+        "╭ ANSWER "
+    } else {
+        "│ "
+    }
+}
+
+fn answer_commit_hint(index: usize, partial: bool) -> &'static str {
+    match (index, partial) {
+        (0, true) => "  [PARTIAL · Ctrl+A answers]",
+        (0, false) => "  [Ctrl+A answers]",
+        _ => "",
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn answer_commit_measure(text: &str) -> String {
+    text.lines()
+        .enumerate()
+        .map(|(index, line)| {
+            format!(
+                "{}{line}{}",
+                answer_commit_rail(index),
+                answer_commit_hint(index, false)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(crate) fn answer_commit_lines(text: &str) -> Vec<Line<'static>> {
+    answer_commit_lines_with_status(text, false)
+}
+
+pub(crate) fn answer_commit_lines_with_status(text: &str, partial: bool) -> Vec<Line<'static>> {
+    markdown_lines(text)
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let rail = answer_commit_rail(index);
+            let mut spans = Vec::with_capacity(line.spans.len() + 1);
+            spans.push(Span::styled(
+                rail,
+                Style::default().fg(role_color(Role::Primary)),
+            ));
+            spans.extend(line.spans);
+            let hint = answer_commit_hint(index, partial);
+            if !hint.is_empty() {
+                spans.push(Span::styled(
+                    hint,
+                    Style::default().fg(role_color(if partial { Role::Warn } else { Role::Muted })),
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn answer_line_spans(
+    line: &str,
+    in_code: bool,
+    alert_role: &mut Option<Role>,
+    alert_edge: Option<AlertEdge>,
+) -> (Vec<Span<'static>>, bool) {
     let Some(body) = line.strip_prefix("🤖 ") else {
-        return md_line_spans(line, in_code);
+        let (mut spans, next) = md_line_spans_with_alert(line, in_code, alert_role);
+        if let Some(edge) = alert_edge {
+            apply_alert_edge(&mut spans, edge);
+        }
+        return (spans, next);
     };
     let mut spans = vec![Span::styled(
         "🤖 ".to_owned(),
@@ -720,7 +1119,10 @@ fn answer_line_spans(line: &str, in_code: bool) -> (Vec<Span<'static>>, bool) {
             .fg(role_color(Role::Primary))
             .add_modifier(Modifier::BOLD),
     )];
-    let (mut body_spans, next) = md_line_spans(body, in_code);
+    let (mut body_spans, next) = md_line_spans_with_alert(body, in_code, alert_role);
+    if let Some(edge) = alert_edge {
+        apply_alert_edge(&mut body_spans, edge);
+    }
     spans.append(&mut body_spans);
     (spans, next)
 }

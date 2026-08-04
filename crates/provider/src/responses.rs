@@ -6,10 +6,20 @@ use std::collections::HashMap;
 
 /// Build the Responses API body used by the ChatGPT subscription backend.
 pub fn build_request(model: &str, req: &CompletionRequest) -> Value {
+    build_request_with_effort(model, req, crate::DEFAULT_REASONING_EFFORT)
+}
+
+/// Build a Responses API body with the requested reasoning effort.
+pub fn build_request_with_effort(
+    model: &str,
+    req: &CompletionRequest,
+    reasoning_effort: &str,
+) -> Value {
     let mut instructions = Vec::new();
     let mut input = Vec::new();
 
-    for message in &req.messages {
+    let messages = crate::repair_tool_history(&req.messages);
+    for message in &messages {
         match &message.role {
             Role::System => instructions.push(message.content.clone()),
             Role::User => input.push(json!({
@@ -51,7 +61,7 @@ pub fn build_request(model: &str, req: &CompletionRequest) -> Value {
         "input": input,
         "tool_choice": "auto",
         "parallel_tool_calls": true,
-        "reasoning": {"effort": "medium", "summary": "auto"},
+        "reasoning": {"effort": reasoning_effort, "summary": "auto"},
         "store": false,
         "stream": true,
         "include": ["reasoning.encrypted_content"],

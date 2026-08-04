@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260803-04",
+  "classification": "active",
+  "summary": "核验 RidgeCode ready、长任务有界执行与 goal/MCP/TUI 现状，修正调查阶段可见性、任务收敛边界与迭代治理记录。",
+  "requirement_ids": [
+    "REQ-20260801-01",
+    "REQ-20260803-01",
+    "REQ-20260803-02"
+  ],
+  "pending_ids": [],
+  "approval_reasons": [],
+  "open_questions": [],
+  "approval_evidence": "",
+  "request_sha256": "9b4aa57c157449560b2cffb0e6e81e9db326f6526490b0b30b1cd810e631f82e",
+  "requirements_sha256": "381592cd830da4a1f5db33291674690070ff81066de7d05c3d9d6f16fa4411c9",
+  "pending_sha256": "3b2a1c2d01c1d0e6c33d8e5ec0365873066e4b3b541c2f63d703025b8f44425a",
+  "draft_sha256": "",
+  "previous_intake_sha256": "",
+  "executable": true,
+  "reasons": []
+}

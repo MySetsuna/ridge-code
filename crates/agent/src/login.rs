@@ -210,6 +210,53 @@ pub(crate) fn oauth_defaults(provider_id: &str) -> (&'static str, &'static str) 
     }
 }
 
+fn oauth_model_and_base(cfg: &Config, provider_id: &str) -> (String, String) {
+    let (default_model, default_base) = oauth_defaults(provider_id);
+    let model_from_config = if provider_id == "openai" {
+        let active_chatgpt_profile = cfg
+            .provider
+            .as_deref()
+            .is_some_and(|provider| provider.eq_ignore_ascii_case("chatgpt-plus"));
+        let active_chatgpt_base = cfg
+            .base_url
+            .as_deref()
+            .is_some_and(|base| base.trim_end_matches('/') == default_base);
+        (active_chatgpt_profile || active_chatgpt_base)
+            .then_some(cfg.model.clone())
+            .flatten()
+    } else {
+        cfg.model.clone()
+    };
+    let model = std::env::var("RIDGE_MODEL")
+        .ok()
+        .or(model_from_config)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_model.to_string());
+    let base = if provider_id == "openai" {
+        std::env::var("RIDGE_CHATGPT_BASE_URL").unwrap_or_else(|_| default_base.to_string())
+    } else {
+        std::env::var("RIDGE_BASE_URL")
+            .ok()
+            .or_else(|| cfg.base_url.clone())
+            .unwrap_or_else(|| default_base.to_string())
+    };
+    (model, base)
+}
+
+/// Return the active-looking model identity for a stored OAuth credential.
+/// This keeps the TUI metadata aligned with the provider selected at startup,
+/// even when config.json still contains an unrelated API provider.
+pub(crate) fn oauth_model_info(cfg: &Config) -> Option<(String, String, String)> {
+    let text = std::fs::read_to_string(oauth_path()).ok()?;
+    for ocfg in [&provider::oauth::ANTHROPIC, &provider::oauth::OPENAI] {
+        if agent::oauth_get(&text, ocfg.provider).is_some() {
+            let (model, base) = oauth_model_and_base(cfg, ocfg.provider);
+            return Some((ocfg.provider.to_string(), model, base));
+        }
+    }
+    None
+}
+
 /// 据订阅凭据构造 bearer-mode provider(anthropic 走专用 OAuth wire,其余走 OpenAI bearer)。
 fn oauth_provider(
     provider_id: &str,
@@ -217,13 +264,15 @@ fn oauth_provider(
     model: String,
     access: String,
     account_id: Option<String>,
+    effort: &str,
 ) -> Arc<dyn LlmProvider> {
     if provider_id == "anthropic" {
         Arc::new(AnthropicProvider::new_oauth(base, model, access))
     } else {
-        Arc::new(provider::ChatGptProvider::new(
-            base, model, access, account_id,
-        ))
+        Arc::new(
+            provider::ChatGptProvider::new(base, model, access, account_id)
+                .with_reasoning_effort(effort),
+        )
     }
 }
 
@@ -313,12 +362,14 @@ pub(crate) async fn run_login_oauth(
 pub(crate) async fn run_login_device_auth(no_verify: bool) -> anyhow::Result<()> {
     use provider::oauth;
 
+    println!("\n== ridgecode login --codex --device-auth ==\n");
+    println!("Requesting device code…");
+    std::io::stdout().flush().ok();
     let http = provider::http::ReqwestClient::new();
     let device = oauth::request_device_code(&http, oauth::OPENAI.client_id)
         .await
         .map_err(|e| anyhow::anyhow!("device auth request failed: {e}"))?;
     let opened = open_in_browser(oauth::OPENAI_DEVICE_VERIFICATION_URL);
-    println!("\n== ridgecode login --codex --device-auth ==\n");
     println!(
         "1) {}:\n{}\n",
         if opened {
@@ -330,6 +381,7 @@ pub(crate) async fn run_login_device_auth(no_verify: bool) -> anyhow::Result<()>
     );
     println!("2) 在页面输入一次性设备码：{}", device.user_code);
     println!("   等待浏览器完成授权（最多 15 分钟）…");
+    std::io::stdout().flush().ok();
 
     let authorization = oauth::poll_device_code(&http, &device)
         .await
@@ -406,11 +458,28 @@ async fn finish_oauth_login(
     no_verify: bool,
 ) -> anyhow::Result<()> {
     let path = save_oauth_token(ocfg.provider, &token)?;
-    if let Some(name) = register_oauth_profile(ocfg.provider) {
+    let profile_name = register_oauth_profile(ocfg.provider);
+    if let Some(name) = profile_name.as_deref() {
         println!(
             "     profile    -> {}  (name \"{name}\", oauth)",
             config_path()
         );
+        let cfg_path = config_path();
+        let cfg = Config::load(&cfg_path);
+        let (model, base) = oauth_model_and_base(&cfg, ocfg.provider);
+        let text = std::fs::read_to_string(&cfg_path).unwrap_or_default();
+        match agent::config_set_selection(&text, name, &model, &base) {
+            Ok(updated) => {
+                if let Err(error) = std::fs::write(&cfg_path, updated) {
+                    eprintln!(
+                        "warning: OAuth credential saved, active selection not saved: {error}"
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!("warning: OAuth credential saved, active selection not saved: {error}")
+            }
+        }
     }
     println!("\n[OK] 订阅已接入({})。", ocfg.provider);
     println!(
@@ -420,19 +489,15 @@ async fn finish_oauth_login(
     if !no_verify {
         eprint!("verifying subscription reaches the model … ");
         std::io::stderr().flush().ok();
-        let (dm, db) = oauth_defaults(ocfg.provider);
-        let model = std::env::var("RIDGE_MODEL").unwrap_or_else(|_| dm.to_string());
-        let base = if ocfg.provider == "openai" {
-            std::env::var("RIDGE_CHATGPT_BASE_URL").unwrap_or_else(|_| db.to_string())
-        } else {
-            std::env::var("RIDGE_BASE_URL").unwrap_or_else(|_| db.to_string())
-        };
+        let cfg = Config::load(config_path());
+        let (model, base) = oauth_model_and_base(&cfg, ocfg.provider);
         let p = oauth_provider(
             ocfg.provider,
             base,
             model,
             token.access_token.clone(),
             token.account_id.clone(),
+            provider::DEFAULT_REASONING_EFFORT,
         );
         let req = provider::CompletionRequest {
             messages: vec![Message::user("ping")],
@@ -661,7 +726,10 @@ pub(crate) fn register_oauth_profile(provider_id: &str) -> Option<String> {
 /// key 全无时的回退(iter-43;iter-48 泛化) —— oauth.json 依次找 anthropic → openai
 /// 订阅 token,命中则构造 bearer-mode provider。过期(含 60s 余量)先刷新并落盘;
 /// 刷新失败退回旧 token 让 API 定夺。
-pub(crate) async fn resolve_claude_oauth_provider(cfg: &Config) -> Option<Arc<dyn LlmProvider>> {
+pub(crate) async fn resolve_claude_oauth_provider(
+    cfg: &Config,
+    effort: &str,
+) -> Option<Arc<dyn LlmProvider>> {
     let text = std::fs::read_to_string(oauth_path()).ok()?;
     for ocfg in [&provider::oauth::ANTHROPIC, &provider::oauth::OPENAI] {
         let Some(mut token) = agent::oauth_get(&text, ocfg.provider) else {
@@ -679,19 +747,49 @@ pub(crate) async fn resolve_claude_oauth_provider(cfg: &Config) -> Option<Arc<dy
                 Err(e) => eprintln!("[ridgecode] OAuth refresh failed: {e}; using existing token"),
             }
         }
-        let (dm, db) = oauth_defaults(ocfg.provider);
-        let model = std::env::var("RIDGE_MODEL")
-            .ok()
-            .or_else(|| cfg.model.clone())
-            .unwrap_or_else(|| dm.to_string());
-        let base = if ocfg.provider == "openai" {
-            std::env::var("RIDGE_CHATGPT_BASE_URL").unwrap_or_else(|_| db.to_string())
-        } else {
-            std::env::var("RIDGE_BASE_URL")
-                .ok()
-                .or_else(|| cfg.base_url.clone())
-                .unwrap_or_else(|| db.to_string())
-        };
+        let (mut model, base) = oauth_model_and_base(cfg, ocfg.provider);
+        if ocfg.provider == "openai" {
+            // ChatGPT subscriptions expose an account-scoped Codex catalog;
+            // the public/API default (for example `gpt-5`) may be rejected by
+            // the subscription endpoint. Prefer the configured model only
+            // when it is present in that live catalog, otherwise use its first
+            // visible entry and keep startup usable in headless mode too.
+            let http = provider::http::ReqwestClient::new();
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                provider::models::fetch_chatgpt_models(
+                    &http,
+                    &base,
+                    &token.access_token,
+                    token.account_id.as_deref(),
+                ),
+            )
+            .await
+            {
+                Ok(Ok(models)) if !models.is_empty() => {
+                    let selected = models
+                        .iter()
+                        .find(|candidate| candidate.id.eq_ignore_ascii_case(&model))
+                        .or_else(|| models.first());
+                    if let Some(selected) = selected {
+                        if selected.id != model {
+                            eprintln!(
+                                "[ridgecode] ChatGPT model {model} unavailable; using account model {}",
+                                selected.id
+                            );
+                            model = selected.id.clone();
+                        }
+                    }
+                }
+                Ok(Err(error)) => eprintln!(
+                    "[ridgecode] ChatGPT model catalog unavailable: {error}; keeping model {model}"
+                ),
+                Err(_) => eprintln!(
+                    "[ridgecode] ChatGPT model catalog timed out (10s); keeping model {model}"
+                ),
+                Ok(Ok(_)) => {}
+            }
+        }
         eprintln!(
             "[ridgecode] starting with {} subscription (OAuth) · {model}",
             ocfg.provider
@@ -702,6 +800,7 @@ pub(crate) async fn resolve_claude_oauth_provider(cfg: &Config) -> Option<Arc<dy
             model,
             token.access_token,
             token.account_id,
+            effort,
         ));
     }
     None

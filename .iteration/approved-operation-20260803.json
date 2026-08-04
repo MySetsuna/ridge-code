@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "upsert": [
+    {
+      "id": "REQ-20260803-01",
+      "section": "active",
+      "markdown": "### REQ-20260803-01 · goal 长时间任务生命周期\n\n- 状态:`ACTIVE`\n- 版本:`v0.3.0`\n- 行为:`提供可持久化的 goal 生命周期：创建、查看状态、继续/恢复、推进与完成/阻塞收敛；长时间运行保存目标、阶段、证据、失败原因与下一步，重启后可恢复，不以模型自述替代确定性验收。NotebookLM 仅提供经验证的架构建议。`\n- 边界:`范围限于 ridgecode CLI/TUI 的 goal 命令入口、goal 状态模型与本地持久化、长任务恢复/收敛规则及测试；NLM 非运行时必需依赖，不上传原始日志、密钥或未批准需求；不改变 langgraph 核心并发语义、权限门、危险命令拦截或 provider/MCP SDK 边界；不引入无界后台任务。`\n- 验收:`补充 goal 状态机、持久化原子写、重启恢复、完成/阻塞判定、取消与重复执行保护测试；通过 cargo fmt --all --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked；完成一次本机 CLI/TUI smoke。`\n- 追踪:`REQ → goal 状态/命令/持久化符号 → agent 测试与 workspace 质量门 → 经核验的 .iteration/notebooklm-response.json；不得将需求草案直接写入 NotebookLM 需求源。`"
+    },
+    {
+      "id": "REQ-20260803-02",
+      "section": "active",
+      "markdown": "### REQ-20260803-02 · MCP/tool 链路与模型供应商身份修复\n\n- 状态:`ACTIVE`\n- 版本:`v0.3.0`\n- 行为:`RidgeCode 明确发现并启动已配置的 MCP stdio server，完成 initialize、tools/list、tools/call 与结果回传；CodeGraph 使用实际可执行命令，初始化/列工具失败可观测；任一模型 function call 均与匹配的 function_call_output 成对进入下一次请求，异常/中断/恢复不发送悬空调用；TUI 与启动日志显示实际生效的供应商/模型，切换模型后持久化一致的身份、端点与模型。`\n- 边界:`范围限于 crates/mcp、crates/agent 的 MCP 配置加载/握手/工具路由、Responses tool call/result 历史编排、会话恢复、provider/model 元信息解析与相关测试，以及用户级 ridge 配置的最小修正；不打印或提交 API key、OAuth token、原始会话内容；不修改用户无关配置，不改变 MCP 协议语义、权限门、危险命令拦截或 provider SDK 边界；保留用户工作区脏改动，兼容 Windows PATH 与 stdio。`\n- 验收:`新增/修改握手、工具注册、调用结果、启动失败可观测、Responses 配对、恢复与 provider/model 一致性测试；通过 cargo fmt --all --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked；本机 PATH 运行 /tools 或等价 smoke，确认 CodeGraph 工具可见且一次调用有结果。`\n- 追踪:`REQ → resolve_configured_mcp/McpClient/Responses history/provider resolution → mcp/provider/agent tests → 本机配置与 PATH smoke；敏感值只留本地。`"
+    }
+  ],
+  "remove": [
+    "PENDING-REQ-20260803-01",
+    "PENDING-REQ-20260803-02"
+  ]
+}

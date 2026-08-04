@@ -1,0 +1,34 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "The same-session follow-up query did not return a recommendation or source-backed conclusion.",
+      "evidence": "NotebookLM MCP response returned Google error code 8 RESOURCE_EXHAUSTED before an answer payload was produced."
+    },
+    {
+      "fact": "The query used only the manually imported theory source and the existing conversation; no research-status operation or new member was used.",
+      "evidence": "conversation_id 68791fb7-659a-4ad6-a86c-beb7ac694781; source_ids=[8862d715-ffad-4288-b7eb-173260e2dcff]; no research_status call."
+    }
+  ],
+  "contradictions": [],
+  "unverified_hypotheses": [],
+  "candidates": [],
+  "recommendation": "No new NLM recommendation is available. Keep the locally verified AnswerHistory hint fix and do not retry while the account is RESOURCE_EXHAUSTED.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Continue only after a new reproducible local TUI gap or restored NLM quota; do not infer a design change from the failed query."
+  },
+  "stop_conditions": [
+    "Do not treat RESOURCE_EXHAUSTED as a design conclusion.",
+    "Do not query user-owned deep-research status.",
+    "Do not create another Ridge member or broaden the current TUI slice."
+  ],
+  "question": "基于当前已验证 TUI 基线，询问下一项尚未覆盖的局部改进；若无可用 NLM 回答则保持现状。",
+  "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+  "sources_used": [],
+  "citations": {},
+  "references": [],
+  "error": "Google rejected the query (error code 8: RESOURCE_EXHAUSTED)"
+}

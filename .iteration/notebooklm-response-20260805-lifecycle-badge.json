@@ -1,0 +1,72 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "The same-session NLM response proposed per-block borders, Tab focus, and Enter/ Escape actions, but returned sources_used:[] with empty citation mappings.",
+      "evidence": "NotebookLM conversation 68791fb7-659a-4ad6-a86c-beb7ac694781 response; only manually imported source 8862d715-ffad-4288-b7eb-173260e2dcff was selected."
+    },
+    {
+      "fact": "Current RidgeCode already has a rounded live-surface Block, a bounded lifecycle anchor in follow view, a HOLD phase anchor in Inspector view, and Tab remains the completion-popup route.",
+      "evidence": "CodeGraph over live_surface_block, live_lifecycle_anchor, live_phase_anchor, live_surface_title_line, and input_action."
+    }
+  ],
+  "contradictions": [
+    {
+      "claim": "Add per-Reasoning/Tool Block borders and use Tab for semantic container focus.",
+      "local_evidence": "Approved presentation constraints prohibit extra rows/second renderer; existing live surface already owns the bounded Block, and input_action maps Tab to completion selection/opening."
+    },
+    {
+      "claim": "Enter on a waiting tool container should submit/continue.",
+      "local_evidence": "Enter is already queue/submit input routing and approval/panel precedence must remain unchanged; no new execution state is allowed."
+    }
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "When a live Answer/Reasoning block is being audited, the current lifecycle tag (CHK/SUM/ASK/ERR) can be visually lost because the Inspector anchor shows free-form activity text while the title prioritizes the live channel.",
+      "support": [
+        "live_lifecycle_anchor is suppressed while is_inspecting is true",
+        "live_phase_anchor shows ui.activity without a compact lifecycle tag",
+        "live_surface_state prioritizes active_channel over retained lifecycle entries"
+      ],
+      "against": [
+        "the activity text remains visible and Activity panel is available"
+      ],
+      "experiment": "Add a bounded lifecycle badge to existing title/Inspector anchor only when a live channel is present; verify no extra rows, width overflow, HOLD loss, or key changes at 24/40/80/96 columns."
+    }
+  ],
+  "candidates": [
+    {
+      "core": "Preserve the latest actionable lifecycle tag beside the current live channel during follow and explicit Inspector focus.",
+      "disposition": "accepted_local_slice",
+      "constraints": [
+        "presentation-only",
+        "reuse existing live_surface_title_line/live_phase_anchor and ActivityKind mapping",
+        "no per-block borders, extra rows, parser, virtualizer, execution state, or Tab changes",
+        "keep HOLD/FOLLOW, queue, approval, Enter, Esc/Ctrl-C semantics and cell-width bounds"
+      ],
+      "risks": [
+        "a badge can compete with the channel title at narrow widths; omit it below the existing full-title tier and let the bounded Inspector anchor clip truthfully"
+      ],
+      "reversibility": "high",
+      "scope": [
+        "crates/agent/src/tui/draw.rs",
+        "crates/agent/src/tui/tests.rs"
+      ],
+      "validation": [
+        "lifecycle badge remains visible with live Answer/Reasoning under Inspector",
+        "24/40/80/96 cell-width and HOLD/FOLLOW regressions",
+        "workspace tests/fmt/clippy/Debug/Release/ConPTY"
+      ]
+    }
+  ],
+  "recommendation": "Reject per-block borders and Tab focus; validate the smaller lifecycle-badge experiment against current title and Inspector anchors.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Add only a bounded CHK/SUM/ASK/ERR badge to existing live chrome when an active stream coexists with an actionable lifecycle entry."
+  },
+  "stop_conditions": [
+    "Any extra physical row, cell-width overflow, or loss of HOLD/FOLLOW/takeover affordance",
+    "Any change to Tab completion, Enter queue/submit, approval, provider, graph, or MCP execution semantics",
+    "No reproducible lifecycle visibility improvement in both follow and Inspector projections"
+  ]
+}

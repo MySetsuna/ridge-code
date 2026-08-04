@@ -27,8 +27,8 @@ pub(crate) fn clip(s: &str, n: usize) -> String {
 }
 
 /// 把一条 agent 消息转成**总览化**显示行(可多行,各带色)。核心:给总览、减细节 ——
-/// 读文件只显路径(不倒内容)、写文件显首几行预览、改文件显 ± 着色 diff(形如 git diff)。
-/// **全文/全量在 run trace**;inline 已提交行不可回改,故预览截断并标注(替代「展开」)。
+/// 读文件折叠显路径与完成计数,展开时显有界内容预览;写文件显首几行预览、改文件显 ± 着色 diff(形如 git diff)。
+/// **全文/全量在 run trace**;inline 已提交行不可回改,故预览截断并标注。
 /// provider/运行错误是否**值得重试**(瞬时 vs 永久)。TUI 自动重试只该管瞬时失败;永久性失败
 /// (余额/鉴权/坏请求)重试同样输入只白烧 —— 命中永久标记 → 不重试,余(含未知)默认可重试(不回退既有瞬时容错)。
 pub(crate) fn is_retryable_error(msg: &str) -> bool {
@@ -111,14 +111,23 @@ pub(crate) fn summarize_event(m: &str) -> Vec<(String, Color)> {
                 return out;
             }
             let ok = role_color(Role::Success);
+            if obs.trim().is_empty() {
+                return vec![(format!("  ✓ {name}: no output"), ok)];
+            }
             if name == "read_file" {
-                return vec![(
+                let mut out = vec![(
                     format!("  ✓ Read complete ({} chars)", obs.chars().count()),
                     ok,
                 )];
+                out.extend(preview_lines(obs, 12));
+                return out;
             }
             let head = clip(obs.lines().next().unwrap_or(""), 200);
-            return vec![(format!("  ✓ {name}: {head}"), ok)];
+            let mut out = vec![(format!("  ✓ {name}: {head}"), ok)];
+            if obs.lines().count() > 1 {
+                out.extend(preview_lines(obs, 10));
+            }
+            return out;
         }
     }
     vec![(format_event_plain(m), event_color(m))]
@@ -126,19 +135,18 @@ pub(crate) fn summarize_event(m: &str) -> Vec<(String, Color)> {
 
 /// 将结构化工具事件转换为可折叠块；详情仅在 live 视口中按需显示。
 pub(crate) fn tool_preview(m: &str) -> Option<ToolBlock> {
-    let tool_call = m
-        .strip_prefix("reason#")
-        .map(|rest| rest.contains(": tool_call "))
-        .unwrap_or(false);
-    let observation = m
-        .strip_prefix("act: ")
-        .map(|rest| rest.contains(" -> "))
-        .unwrap_or(false);
-    if tool_call || observation {
-        ToolBlock::from_lines(summarize_event(m))
-    } else {
-        None
+    if let Some(rest) = m.strip_prefix("reason#") {
+        let body = rest.split_once(": tool_call ").map(|(_, body)| body)?;
+        let name = body.split_whitespace().next()?.to_owned();
+        return ToolBlock::from_lines_with_phase(summarize_event(m), ToolPhase::Call, Some(name));
     }
+    let rest = m.strip_prefix("act: ")?;
+    let (name, _) = rest.split_once(" -> ")?;
+    ToolBlock::from_lines_with_phase(
+        summarize_event(m),
+        ToolPhase::Observation,
+        Some(name.to_owned()),
+    )
 }
 
 const MAX_BATCH_EDIT_SUMMARY_PATHS: usize = 3;
@@ -225,21 +233,39 @@ pub(crate) fn apply_edits_summary(args: &serde_json::Value, info: Color) -> Vec<
     out
 }
 
-/// 写文件内容预览:首 `max` 行(每行截断),超出标注剩余行数(全文见 trace)。
+/// 写文件内容预览:保留首尾 `max` 行(每行截断),中间折叠；这样展开时既见入口又见收尾。
 pub(crate) fn preview_lines(content: &str, max: usize) -> Vec<(String, Color)> {
     let muted = role_color(Role::Muted);
     let lines: Vec<&str> = content.lines().collect();
+    if max == 0 || lines.is_empty() {
+        return Vec::new();
+    }
+    if lines.len() <= max {
+        return lines
+            .iter()
+            .map(|l| (format!("  │ {}", clip(l, 200)), muted))
+            .collect();
+    }
+    let tail = max.min(4);
+    let head = max.saturating_sub(tail).max(1);
     let mut out: Vec<(String, Color)> = lines
         .iter()
-        .take(max)
+        .take(head)
         .map(|l| (format!("  │ {}", clip(l, 200)), muted))
         .collect();
-    if lines.len() > max {
+    let hidden = lines.len().saturating_sub(head + tail);
+    if hidden > 0 {
         out.push((
-            format!("  │ … (+{} lines, full text in trace)", lines.len() - max),
+            format!("  │ … (+{hidden} lines folded; full text in trace)"),
             muted,
         ));
     }
+    out.extend(
+        lines
+            .iter()
+            .skip(lines.len().saturating_sub(tail))
+            .map(|l| (format!("  │ {}", clip(l, 200)), muted)),
+    );
     out
 }
 
@@ -262,7 +288,7 @@ pub(crate) fn diff_lines(old: &str, new: &str) -> Vec<(String, Color)> {
     }
     out
 }
-/// 事件行配色:经语义角色取色(iter-28 收口);终答用 White(具名 ANSI,非角色)。
+/// 事件行配色：所有语义色经 Role 取色，避免终答绕过主题集中点。
 pub(crate) fn event_color(m: &str) -> Color {
     if m.starts_with("verify: PASS") {
         role_color(Role::Success)
@@ -271,7 +297,7 @@ pub(crate) fn event_color(m: &str) -> Color {
     } else if m.starts_with("act:") {
         role_color(Role::Warn)
     } else if is_final_event(m) {
-        Color::White
+        role_color(Role::Answer)
     } else {
         role_color(Role::Info)
     }

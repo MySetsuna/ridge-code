@@ -1,0 +1,29 @@
+{
+  "status": "PROCEED",
+  "confirmed_facts": [],
+  "contradictions": [],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "A semantic status border and logical continuation indentation improve block recognition during live Reasoning/Tool transitions.",
+      "support": ["NLM theory source recommends status-aware rails and width-aware reflow."],
+      "against": ["The local renderer already has semantic rails, feature-gated rendered-line support, bounded physical-tail wrapping, and continuation-prefix indentation."],
+      "experiment": "Use existing narrow CJK/emoji, resize, and held-view regressions; add only the missing direct activation path."
+    }
+  ],
+  "candidates": [
+    {
+      "core": "Add plain Space activation for the focused semantic block while the live viewport is held/inspected.",
+      "constraints": ["presentation-only", "preserve ordinary prompt spaces", "reuse ToolBlock/Reasoning state owners", "no second renderer or execution state"],
+      "risks": ["Space must not be intercepted in normal input, popup, or non-HOLD states."],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/input.rs", "crates/agent/src/tui/transcript.rs", "crates/agent/src/tui/mod.rs", "crates/agent/src/tui/status.rs", "crates/agent/src/tui/draw.rs"],
+      "validation": ["focused route/state tests", "HOLD chrome discoverability", "workspace/clippy/build", "Dev/Release ConPTY"]
+    }
+  ],
+  "recommendation": "Accept the bounded HOLD/Inspector Space affordance; reject a second virtualizer and new parser because local reflow and cache primitives already cover those portions.",
+  "next_step": {
+    "type": "implementation",
+    "value": "Ship and verify the Space semantic-toggle route, then retain one Active Note and rerun deterministic gates."
+  },
+  "stop_conditions": ["Do not steal ordinary input Space outside HOLD/Inspector.", "Do not claim a deep-research report or import without a task id and direct evidence."]
+}

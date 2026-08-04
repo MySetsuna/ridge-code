@@ -10,6 +10,7 @@ use langgraph::{CompiledGraph, GraphError, StateGraph};
 use provider::{CompletionRequest, LlmProvider, Message, Role, StreamChunk};
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 
 // halt_reason 已移至 orchestrate;此处再导出,保持 `crate::graph::halt_reason` 路径不变
 //(signals.rs 经 `use crate::graph::*` 依赖它,不在本次改动范围内)。
@@ -23,6 +24,47 @@ pub type TokenBus = Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSend
 /// 一个「永不流式」的空总线(测试 / 非交互装配用)。
 pub fn null_token_bus() -> TokenBus {
     Arc::new(std::sync::Mutex::new(None))
+}
+
+const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 180;
+
+fn graph_trace(stage: &str) {
+    let Some(path) = std::env::var_os("RIDGE_TUI_TRACE") else {
+        return;
+    };
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "graph.{stage}");
+    }
+}
+
+fn mcp_tool_timeout() -> Duration {
+    std::env::var("RIDGE_TOOL_TIMEOUT")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(DEFAULT_TOOL_TIMEOUT_SECS))
+}
+
+async fn call_mcp_with_timeout(
+    client: &mcp::McpClient,
+    tool: &str,
+    arguments: serde_json::Value,
+    timeout: Duration,
+) -> String {
+    match tokio::time::timeout(timeout, client.call_tool(tool, arguments)).await {
+        Ok(Ok(text)) => text,
+        Ok(Err(error)) => format!("mcp error: {error}"),
+        Err(_) => format!("mcp error: timed out after {}ms", timeout.as_millis()),
+    }
 }
 
 /// 用**真实 LLM provider** 装配 agent 图(不接 MCP)。见 [`build_llm_agent_with`]。
@@ -118,6 +160,7 @@ fn build_core(
     agents: Arc<Agents>,
     read_only: bool,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
+    graph_trace("build.begin");
     let mut g = StateGraph::<AgentState>::new();
     // 只读模式:不 offer 副作用工具、也不 offer MCP(副作用未知)—— 从源头断写。
     let mut specs = builtin_tool_specs();
@@ -131,7 +174,9 @@ fn build_core(
         specs.extend(mcp.specs);
     }
     let router = Arc::new(mcp.router);
+    graph_trace("specs.ready");
     let system = Arc::new(build_system_prompt(&skills));
+    graph_trace("system.ready");
 
     let provider_c = provider.clone();
     let system_c = system.clone();
@@ -153,7 +198,8 @@ fn build_core(
             };
             tracing::debug!(step = s.steps + 1, msgs = req.messages.len(), "llm request");
             let completion = provider.complete_streaming(&req, &on_token).await?;
-            let tokens = completion.usage.total() as usize; // 成本记账
+            let usage = completion.usage.clone();
+            let tokens = usage.total() as usize; // 成本记账
             tracing::debug!(
                 step = s.steps + 1,
                 tokens,
@@ -166,7 +212,7 @@ fn build_core(
                 let hist = Message::assistant(asst_text).with_tool_calls(vec![call.clone()]);
                 Patch::Batch(vec![
                     Patch::BumpStep,
-                    Patch::AddTokens(tokens),
+                    Patch::AddUsage(usage.clone()),
                     Patch::Message(format!(
                         "reason#{}: tool_call {} {}",
                         s.steps + 1,
@@ -181,7 +227,7 @@ fn build_core(
                 // 模型给了最终文本,没有工具调用 → 收尾。
                 Patch::Batch(vec![
                     Patch::BumpStep,
-                    Patch::AddTokens(tokens),
+                    Patch::AddUsage(usage),
                     Patch::Message(format!("reason#{}: (final) {}", s.steps + 1, asst_text)),
                     Patch::PushHistory(Message::assistant(asst_text)),
                     Patch::PendingCall(None),
@@ -229,10 +275,13 @@ fn build_core(
                         fetch_url_obs(fetch.as_ref(), call).await
                     } else if let Some((client, raw)) = router.get(&call.name) {
                         // 命名空间命中 → 路由到 MCP 服务器。
-                        match client.call_tool(raw, call.arguments.clone()).await {
-                            Ok(t) => t,
-                            Err(e) => format!("mcp error: {e}"),
-                        }
+                        call_mcp_with_timeout(
+                            client,
+                            raw,
+                            call.arguments.clone(),
+                            mcp_tool_timeout(),
+                        )
+                        .await
                     } else {
                         execute_tool_call(call)
                     };
@@ -346,12 +395,15 @@ fn build_core(
                 tools: vec![],
             };
             // 交接说明生成失败也不阻断收尾(给个占位文本),halt_reason 仍据终态判定不变。
-            let (text, tokens) = match provider.complete(&req).await {
-                Ok(c) => (c.text, c.usage.total() as usize),
-                Err(e) => (format!("(交接说明生成失败:{e})"), 0),
+            let (text, usage) = match provider.complete(&req).await {
+                Ok(c) => (c.text, c.usage),
+                Err(e) => (
+                    format!("(交接说明生成失败:{e})"),
+                    provider::Usage::default(),
+                ),
             };
             Ok::<_, Infallible>(Patch::Batch(vec![
-                Patch::AddTokens(tokens),
+                Patch::AddUsage(usage),
                 // 以 `(final)` 约定渲染成模型终答(🤖 白);⏸ 标记「软暂停」+ 原因,供用户一眼分辨非正常完成。
                 Patch::Message(format!("(final) ⏸ [{}] {}", reason.as_str(), text)),
                 Patch::PushHistory(Message::assistant(text)),
@@ -365,7 +417,10 @@ fn build_core(
     // LLM 路径专用 verify 路由:熔断 → wrapup(收束回合)→ 隐式 END。
     g.add_conditional_edge("verify", verify_route_llm);
 
-    g.compile()
+    graph_trace("compile.begin");
+    let compiled = g.compile();
+    graph_trace("compile.end");
+    compiled
 }
 
 /// 给独立 reviewer 的复核请求:system 定角色 + user 附上 agent 的轨迹。
@@ -546,6 +601,41 @@ mod tests {
         assert!(out.approved, "MCP 工具返回 passed 应满足确定性闸");
         assert!(out.messages.iter().any(|m| m.contains("ci__check")));
         assert_eq!(out.tool_output.as_deref(), Some("tests: passed"));
+    }
+
+    #[tokio::test]
+    async fn hanging_mcp_call_becomes_bounded_error_observation() {
+        struct HangingTransport;
+        #[async_trait::async_trait]
+        impl mcp::McpTransport for HangingTransport {
+            async fn request(
+                &self,
+                method: &str,
+                _params: serde_json::Value,
+            ) -> Result<serde_json::Value, mcp::McpError> {
+                if method == "tools/call" {
+                    std::future::pending::<Result<serde_json::Value, mcp::McpError>>().await
+                } else {
+                    Ok(serde_json::json!({}))
+                }
+            }
+        }
+
+        let client = mcp::McpClient::new("hang", Box::new(HangingTransport));
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            call_mcp_with_timeout(
+                &client,
+                "never_returns",
+                serde_json::json!({}),
+                Duration::from_millis(20),
+            ),
+        )
+        .await
+        .expect("wrapper must return before the outer test timeout");
+
+        assert!(result.starts_with("mcp error: timed out after 20ms"));
+        assert!(is_error_observation(&result));
     }
 
     // maker:跑 exit 0(确定性通过)然后收尾。

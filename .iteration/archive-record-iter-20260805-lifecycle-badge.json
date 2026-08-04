@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-lifecycle-badge",
+  "at": "2026-08-05",
+  "type": "iteration",
+  "facts": [
+    "The same-session NLM semantic-container proposal returned sources_used:[] and empty citation mappings; per-block borders and Tab focus conflict with current bounded rows and completion routing.",
+    "CodeGraph found a narrower presentation gap: Inspector suppresses the existing lifecycle anchor while the live title prioritizes the current Answer/Reasoning/Tool channel, so CHK/SUM/ASK/ERR can lose a compact semantic tag.",
+    "The existing Ridge member `notebooklm-mcp-maintainer` was found and reused; no new member was created. Note audit still has one useful Active Note and no safe stale/completed deletion."
+  ],
+  "evidence": [
+    "notebook_gate.py validate-output: valid",
+    "focused live_surface_keeps_lifecycle_badge_during_answer_inspection and stale-conclusion regression: passed",
+    "CodeGraph over live_lifecycle_anchor/live_phase_anchor/live_surface_title_line/input_action",
+    "cargo test --workspace --locked --offline --quiet; cargo fmt --all -- --check; cargo clippy --workspace --all-targets --locked --offline -- -D warnings; Debug/Release build: passed",
+    "windows-pty-e2e.ps1 Debug BusyFixture and Release StressFixture: passed after stable rerun"
+  ],
+  "paths": [
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260805-lifecycle-badge.json"
+  ],
+  "symbols": [
+    "live_lifecycle_badge",
+    "live_surface_title_line",
+    "live_phase_anchor"
+  ],
+  "next": [
+    "Continue with one locally reproduced TUI presentation gap; reject broad container/focus changes without evidence."
+  ]
+}

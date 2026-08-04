@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260806-modal-gutter",
+  "at": "2026-08-06",
+  "type": "iteration",
+  "facts": [
+    "The same-session NLM lifecycle-closure follow-up returned sources_used:[] and empty citations; its per-block border direction overlaps the existing bounded live rails and was not adopted.",
+    "Dev ConPTY reproduced a narrow AnswerHistory overlay bleed: at 40 columns the inset modal left/right gutters retained the underlying DONE/ANS projection, visually corrupting the modal border and title.",
+    "The presentation-only fix clears the complete audit viewport before rendering any panel, preserving the existing inset geometry while preventing stale live/idle rows from showing through; no execution, panel, key, queue, or cache semantics changed.",
+    "The existing Ridge member notebooklm-mcp-maintainer remains the only member; its NotebookLM Deep Research attempt hit the account quota and made no repository changes. No new member was created."
+  ],
+  "evidence": [
+    "notebook_gate.py validate-output on .iteration/notebooklm-response-20260806-lifecycle-closure-followup.json: valid",
+    "CodeGraph over draw_audit_overlays/draw_panel_with_cache/panel_rect_for_kind and Dev CompletionFixture frame.json at 40x12",
+    "cargo test -p agent tui::tests:: (226 TUI tests passed) and narrow_audit_modal_clears_underlying_gutters passed"
+  ],
+  "paths": [
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260806-lifecycle-closure-followup.json"
+  ],
+  "symbols": [
+    "draw_panel_with_cache",
+    "draw_history_detail_panel",
+    "panel_rect_for_kind"
+  ],
+  "next": [
+    "Continue with one locally reproduced TUI presentation defect; reject broad per-block containers without new measured evidence."
+  ]
+}

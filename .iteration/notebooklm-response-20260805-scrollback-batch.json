@@ -1,0 +1,65 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "The latest same-session NLM answer proposed a DECSTBM/hardware scroll layer, but returned sources_used empty with no citation mapping.",
+      "evidence": "NotebookLM notebook_query using source 8862d715-ffad-4288-b7eb-173260e2dcff; local CodeGraph audit."
+    },
+    {
+      "fact": "RidgeCode already uses Viewport::Inline and Terminal::insert_before through insert_bounded_commit_lines; before this slice, each committed block independently invoked the bounded insertion helper during one flush.",
+      "evidence": "crates/agent/src/tui/app.rs flush_commits, insert_commit, activity_commit_lines, colored_commit_lines, insert_bounded_commit_lines; crates/agent/src/tui/tests.rs static_scrollback_preserves_order_and_sanitizes_controls."
+    }
+  ],
+  "contradictions": [
+    {
+      "claim": "A new hardware scroll/DECSTBM module is required.",
+      "local_evidence": "The existing inline viewport already owns native scrollback insertion. The compatible local gap is only repeated per-block insertion boundaries, not a missing hardware primitive."
+    }
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "Coalescing the existing pure committed-line projections before the bounded insert_before batches reduces redundant scroll/cursor boundary work without changing native scrollback order.",
+      "support": [
+        "flush_commits previously called the insertion helper once per CommitBlock."
+      ],
+      "against": [
+        "The current 8-row bound still creates multiple insert_before calls for very large output, and no fixed latency improvement is claimed."
+      ],
+      "experiment": "Aggregate mixed Answer/Reasoning/Activity/Tool projections in one flush, retain the existing 8-row insertion bound, and verify order, sanitization, CJK/Markdown wrapping, resize, HOLD/FOLLOW, takeover, and ConPTY."
+    }
+  ],
+  "candidates": [
+    {
+      "core": "Coalesce existing presentation-only commit lines per flush, then pass the combined wrapped vector once to the existing bounded native-scrollback inserter.",
+      "constraints": [
+        "presentation-only",
+        "retain Viewport::Inline, Terminal::insert_before, 8-row bound, block order, blank separators, folding, sanitization, and all key/execution semantics",
+        "no DECSTBM module, dependency, second renderer, cache, or action channel"
+      ],
+      "risks": [
+        "mixed blocks must preserve exact order and width wrapping; very large output must remain chunked by the existing bound"
+      ],
+      "reversibility": "high",
+      "scope": [
+        "crates/agent/src/tui/app.rs",
+        "crates/agent/src/tui/tests.rs"
+      ],
+      "validation": [
+        "mixed static order/sanitization and PARTIAL Answer regressions",
+        "32/40/80/96 CJK/Markdown wrapping",
+        "workspace/fmt/clippy/Debug/Release/ConPTY"
+      ]
+    }
+  ],
+  "recommendation": "Reject the duplicate hardware-scroll layer. Accept only the local coalescing boundary, with no latency or O(1) claim until measured.",
+  "next_step": {
+    "type": "implementation",
+    "value": "Project all CommitBlocks to wrapped Lines first, then invoke the existing bounded insert_before path once per flush."
+  },
+  "stop_conditions": [
+    "Do not add DECSTBM/scrolling-region code, a second renderer/cache/parser, or a fixed performance threshold.",
+    "Do not change Answer/Reasoning/Tool/Activity text, order, folding, queue, HOLD/FOLLOW, takeover, Tab/Enter, or Ctrl-C semantics.",
+    "Do not query old Deep Research status or create a Note/source.",
+    "If any mixed-block order, wrapping, or ConPTY regression appears, revert the coalescing boundary."
+  ]
+}

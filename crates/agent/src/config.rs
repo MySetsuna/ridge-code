@@ -6,6 +6,8 @@
 pub struct Config {
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// ChatGPT/Codex Responses reasoning effort (`none` through `max`).
+    pub effort: Option<String>,
     pub base_url: Option<String>,
     /// 顶层「主 provider」的内联明文密钥(可选,自担明文存盘风险)。填了它,启动即用
     /// 顶层 provider/model/base_url + 此 key,无需 `RIDGE_API_KEY`。留空则回落到 env 或 `providers[]` 档案。
@@ -175,6 +177,7 @@ impl Config {
 pub const CONFIG_KEYS: &[&str] = &[
     "provider",
     "model",
+    "effort",
     "base_url",
     "budget_tokens",
     "skills_dir",
@@ -196,6 +199,16 @@ pub fn config_set(text: &str, key: &str, value: &str) -> Result<String, String> 
         _ => serde_json::Map::new(),
     };
     let v = match key {
+        "effort" => serde_json::Value::from(
+            provider::normalize_reasoning_effort(value)
+                .ok_or_else(|| {
+                    format!(
+                        "effort 无效,可选: {}",
+                        provider::REASONING_EFFORTS.join(", ")
+                    )
+                })?
+                .to_string(),
+        ),
         "budget_tokens" => {
             let n: u64 = value
                 .parse()
@@ -211,6 +224,36 @@ pub fn config_set(text: &str, key: &str, value: &str) -> Result<String, String> 
         _ => serde_json::Value::from(value),
     };
     root.insert(key.to_string(), v);
+    serde_json::to_string_pretty(&serde_json::Value::Object(root)).map_err(|e| e.to_string())
+}
+
+/// Persist one active provider selection atomically at the text-transformation
+/// boundary.  A named profile owns the selected model; this keeps the
+/// top-level compatibility fields and the credential profile in sync.
+pub fn config_set_selection(
+    text: &str,
+    provider: &str,
+    model: &str,
+    base_url: &str,
+) -> Result<String, String> {
+    let mut updated = config_set(text, "provider", provider)?;
+    updated = config_set(&updated, "model", model)?;
+    updated = config_set(&updated, "base_url", base_url)?;
+
+    let mut root = match serde_json::from_str::<serde_json::Value>(&updated) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    if let Some(serde_json::Value::Array(profiles)) = root.get_mut("providers") {
+        if let Some(serde_json::Value::Object(fields)) = profiles.iter_mut().find(|profile| {
+            profile
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|name| name.eq_ignore_ascii_case(provider))
+        }) {
+            fields.insert("model".to_string(), serde_json::Value::from(model));
+        }
+    }
     serde_json::to_string_pretty(&serde_json::Value::Object(root)).map_err(|e| e.to_string())
 }
 
@@ -334,6 +377,32 @@ mod tests {
         assert!(config_set(start, "budget_tokens", "abc").is_err());
     }
 
+    #[test]
+    fn config_set_selection_keeps_profiles_and_syncs_named_profile_model() {
+        let start = r#"{
+          "provider": "old",
+          "model": "old-model",
+          "mcp": [{"name":"nlm","cmd":"nlm"}],
+          "providers": [{"name":"ChatGPT-Plus","kind":"openai","model":"gpt-4o","base_url":"https://chatgpt.com/backend-api/codex"}]
+        }"#;
+        let out = config_set_selection(
+            start,
+            "chatgpt-plus",
+            "gpt-5",
+            "https://chatgpt.com/backend-api/codex",
+        )
+        .unwrap();
+        let cfg = Config::parse(&out);
+        assert_eq!(cfg.provider.as_deref(), Some("chatgpt-plus"));
+        assert_eq!(cfg.model.as_deref(), Some("gpt-5"));
+        assert_eq!(
+            cfg.base_url.as_deref(),
+            Some("https://chatgpt.com/backend-api/codex")
+        );
+        assert_eq!(cfg.mcp.len(), 1);
+        assert_eq!(cfg.providers[0].model, "gpt-5");
+    }
+
     /// `/provider add` 的纯文本变换:追加 provider 档案、同名覆盖、保留 `mcp`、密钥不落盘。
     #[test]
     fn config_add_provider_appends_and_upserts() {
@@ -420,6 +489,7 @@ mod tests {
     #[test]
     fn config_set_persists_proxy_string() {
         assert!(CONFIG_KEYS.contains(&"proxy"));
+        assert!(CONFIG_KEYS.contains(&"effort"));
         let out = config_set("{}", "proxy", "http://127.0.0.1:51081").unwrap();
         let cfg = Config::parse(&out);
         assert_eq!(cfg.proxy.as_deref(), Some("http://127.0.0.1:51081"));
@@ -428,6 +498,9 @@ mod tests {
         let cfg = Config::parse(&out);
         assert_eq!(cfg.proxy.as_deref(), Some("http://127.0.0.1:51081"));
         assert_eq!(cfg.model.as_deref(), Some("glm-4.6"));
+        let out = config_set(&out, "effort", "high").unwrap();
+        assert_eq!(Config::parse(&out).effort.as_deref(), Some("high"));
+        assert!(config_set(&out, "effort", "invalid").is_err());
     }
 
     /// iter-34:`allow_jailbreak` 是可持久化 bool 配置键。

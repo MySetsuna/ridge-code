@@ -1,0 +1,35 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [],
+  "contradictions": [
+    "NLM's closed per-block Block containers and new render/container.rs plus theme/ansi16.rs would add a second physical container layer; the repository already has live_surface_block, AlertEdge, semantic rails, and bounded live projection.",
+    "The 16ms, O(k/n), exact narrow-width policy, and breathing border claims are not local acceptance facts; citations and sources_used are empty.",
+    "A full rectangular border can consume cells and rows, collide with Markdown/CJK wrapping, and duplicate the existing live-surface border; only a same-row boundary cue is compatible until a stronger local defect is demonstrated."
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "At a visible transition from one anchored semantic block to another, the existing rail marks the new block but leaves the preceding block visually open; a same-row bottom glyph at that transition can close the cue without adding physical rows.",
+      "support": ["CodeGraph shows live_rail derives only previous LiveLineKind and AlertEdge handles Markdown alerts, not LiveBlockFocus transitions."],
+      "against": ["Visible rows are deliberately assembled into bounded Answer/Reasoning/Tool lanes, so a transition is a presentation boundary rather than an execution chronology."],
+      "experiment": "Derive a bounded block-end flag from adjacent visible LiveLineAnchor focuses, replace only the preceding semantic rail at transitions, and test CJK/Markdown/resize plus unchanged row count."
+    }
+  ],
+  "candidates": [
+    {
+      "core": "Add a same-row semantic block-end cue to the existing live rail: when adjacent visible anchored rows change LiveBlockFocus, the preceding rail becomes a colored bottom marker; no new Block, row, parser, or layout layer is introduced.",
+      "constraints": ["reuse LiveLineAnchor, live_rail, existing ANSI16 roles and bounded projection", "do not override Markdown AlertEdge or fenced-code rails", "preserve tool folding, focus contrast, Follow/HOLD, keys, queue, execution/provider/MCP and cache semantics", "no fixed performance claim"],
+      "risks": ["lane ordering is presentation-owned and must not be described as execution chronology", "last visible tail row has no inferred closure when the next block is clipped; avoid guessing"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/draw.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["Reasoning→Answer and Tool→Answer boundary regressions with unchanged physical row count", "18/24/32/40/80/96 CJK/Markdown and resize tests", "workspace tests/fmt/clippy/Debug/Release ConPTY"]
+    }
+  ],
+  "recommendation": "Reject full per-block rectangular containers as local overlap and layout risk. Accept only a transition-boundary rail cue if the local regression proves the previous block is visually open and the cue preserves cell width and physical rows.",
+  "next_step": {
+    "type": "implementation",
+    "value": "Implement and verify the bounded adjacent-anchor block-end rail cue in the existing renderer."
+  },
+  "sources_used": [],
+  "citations": {},
+  "stop_conditions": ["Do not add a second renderer, physical container rows, global sidebar, virtualizer, fixed frame threshold, or execution state.", "Do not remap Tab/Enter or query excluded user-owned deep-research status.", "Do not delete the sole Active Note."]
+}

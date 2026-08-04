@@ -1,0 +1,31 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [],
+  "contradictions": [
+    "NLM's proposed active semantic containers overlap the existing AlertEdge, live semantic surface, channel rails, and bounded live projection; local coverage must identify a remaining presentation gap before implementation."
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "A lifecycle-aware container around the currently active Reasoning/Answer block could improve phase anchoring without adding execution state.",
+      "support": ["The manually imported theory source recommends semantic borders for streaming Markdown alerts and a heavy left rail at narrow widths."],
+      "against": ["RidgeCode already has AlertEdge markers, state-derived live surfaces, semantic rails, activity anchors, and bounded width-aware caches."],
+      "experiment": "Use CodeGraph to compare AlertEdge/live-surface/static/history projections for missing or inconsistent state, then implement only the smallest presentation-only gap and validate at 18/24/32/40/80/96 columns."
+    }
+  ],
+  "candidates": [
+    {
+      "core": "Adjudicate NLM's active semantic container proposal at the existing AlertEdge/live-surface boundary; add one bounded lifecycle container affordance only if a local cross-projection inconsistency is reproduced.",
+      "constraints": ["presentation-only", "reuse existing AlertEdge, semantic rails, LiveOutputCache, and lifecycle state", "no pulldown-cmark/tree-sitter dependency, global virtualizer, second renderer, or execution state machine", "preserve folded tools, Answer/Reasoning separation, queue/takeover/HOLD/FOLLOW, KKP fallback, and ANSI16/CJK width rules"],
+      "risks": ["duplicating existing borders can increase visual noise", "extra physical rows or unbounded per-token allocation can regress narrow layout and streaming performance"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/draw.rs", "crates/agent/src/tui/render.rs", "crates/agent/src/tui/transcript.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["CodeGraph/local cross-projection audit", "focused semantic-container or no-op adjudication regression", "workspace tests/fmt/clippy/Debug/Release builds", "Debug/Release ConPTY at narrow/wide widths with reasoning, answer, tools, resize, HOLD/FOLLOW, takeover, and double Ctrl-C"]
+    }
+  ],
+  "recommendation": "Do not add the proposed generic container yet. First prove a local inconsistency at the existing AlertEdge/live-surface boundary; if none exists, record the proposal as rejected overlap and choose the next concrete observability gap.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Run a CodeGraph audit of live, static scrollback, history, and lifecycle state projections before editing."
+  },
+  "stop_conditions": ["Do not add a new Markdown parser or renderer for a recommendation already covered by AlertEdge and semantic surfaces.", "Do not add rows, unbounded storage, or execution state for visual containers.", "Do not query excluded user-owned deep-research status or delete the sole Active Note."]
+}

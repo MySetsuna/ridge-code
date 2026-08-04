@@ -791,13 +791,13 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 <!-- PROJECT_STATE_RUNTIME -->
 ## 运行元数据
 
-- repository_head:`a1f96bc34dd20783e19f80a95b257847803e69c7`
+- repository_head:`d72dcb50454e0ffad8bca4bd07c9279125b09b52`
 - requirements_version:`v0.2.0`
-- requirements_hash:`c7933ea98ebce160e8c08ac818ce1a6aedaf280bb397dbcb458d6d190b6e998b`
+- requirements_hash:`2d7ac09fabbb88323085eb5c4e888ada7ba76d1028b2dbe9d5f76c1331a98237`
 - pending_hash:`3b2a1c2d01c1d0e6c33d8e5ec0365873066e4b3b541c2f63d703025b8f44425a`
-- decision_hash:`0d30ee0cbb9247f2a752db158d2286a143fac86c012d5e55aaf7c38e85e9a0f3`
-- generated_at:`2026-08-02T10:00:49+00:00`
-- current_git_diff:`.iteration/approved-decision.json,.iteration/approved-operation-rerelease.json,.iteration/approved-operation.json,.iteration/budget.json,.iteration/context.json,.iteration/decision.json,.iteration/intake-decision.json,.iteration/intakes/INTAKE-20260801-01.json,.iteration/intakes/INTAKE-20260801-02.json,.iteration/intakes/INTAKE-20260801-03.json,.iteration/intakes/INTAKE-20260801-04.json,.iteration/intakes/INTAKE-20260801-05.json,.iteration/intakes/INTAKE-20260801-06.json,.iteration/intakes/INTAKE-20260802-01.json,.iteration/intakes/INTAKE-20260802-02.json,.iteration/intakes/INTAKE-20260802-03.json,.iteration/intakes/INTAKE-20260802-04.json,.iteration/notebooklm-response-20260802-dirty-render.json,.iteration/notebooklm-response-20260802-source-scoped.json,.iteration/notebooklm-response-20260802-structural-search.json,.iteration/notebooklm-response-20260802-visible-code.json,.iteration/notebooklm-response-20260802.json,.iteration/notebooklm-response.json,.iteration/pending-nlm-operation.json,.iteration/pending-operation.json,.iteration/promote-nlm-operation.json,.iteration/request.txt,.iteration/research.json,.iteration/usage.json,docs/PENDING-REQUIREMENTS.md,docs/archive/events-2026-08.jsonl,samples/config.json,test_codegraph.ps1`
+- decision_hash:`d78f0eae03c62806fd863c268e349fe11f7d94a0b2b470e6b35c39f234fa9aa9`
+- generated_at:`2026-08-04T23:13:42+00:00`
+- current_git_diff:`.iteration/PROJECT-STATE.snapshot.md,.iteration/approved-operation-20260803.json,.iteration/archive-record-iter-20260805-help-affordance.json,.iteration/archive-record-iter-20260805-lifecycle-badge.json,.iteration/archive-record-iter-20260805-partial-answer.json,.iteration/archive-record-iter-20260805-plan-anchor.json,.iteration/archive-record-iter-20260806-input-chrome.json,.iteration/archive-record-iter-20260806-modal-gutter.json,.iteration/archive-record-iter-20260806-panel-hint.json,.iteration/archive-record-iter-20260806-panel-wrap.json,.iteration/context.json,.iteration/decision.json,.iteration/intake-decision.json,.iteration/intakes/INTAKE-20260803-01.json,.iteration/intakes/INTAKE-20260803-02.json,.iteration/intakes/INTAKE-20260803-03.json,.iteration/intakes/INTAKE-20260803-04.json,.iteration/intakes/INTAKE-20260803-05.json,.iteration/notebooklm-response-20260803-tui.json,.iteration/notebooklm-response-20260804-space.json,.iteration/notebooklm-response-20260805-active-containers.json,.iteration/notebooklm-response-20260805-contrast-floor.json,.iteration/notebooklm-response-20260805-dssc.json,.iteration/notebooklm-response-20260805-esc-takeover.json,.iteration/notebooklm-response-20260805-focus-contrast.json,.iteration/notebooklm-response-20260805-hardware-scroll-followup.json,.iteration/notebooklm-response-20260805-idle-reasoning.json,.iteration/notebooklm-response-20260805-incremental-highlight.json,.iteration/notebooklm-response-20260805-lifecycle-badge.json,.iteration/notebooklm-response-20260805-lifecycle-closure.json,.iteration/notebooklm-response-20260805-partial-answer.json,.iteration/notebooklm-response-20260805-scrollback-batch.json,.iteration/notebooklm-response-20260805-semantic-boundary.json,.iteration/notebooklm-response-20260806-hanging-indent.json,.iteration/notebooklm-response-20260806-kkp-audit.json,.iteration/notebooklm-response-20260806-lifecycle-closure-followup.json,.iteration/notebooklm-response-20260806-next.json,.iteration/pending-operation-20260803.json,.iteration/request.txt,Cargo.lock,Cargo.toml,README.md,crates/agent/Cargo.toml,crates/agent/examples/stdio_mcp_chain.rs,crates/agent/src/config.rs,crates/agent/src/context.rs,crates/agent/src/goal.rs,crates/agent/src/graph.rs,crates/agent/src/lib.rs,crates/agent/src/login.rs,crates/agent/src/main.rs,crates/agent/src/state.rs,crates/agent/src/tui/app.rs,crates/agent/src/tui/command.rs,crates/agent/src/tui/draw.rs,crates/agent/src/tui/eventfmt.rs,crates/agent/src/tui/input.rs,crates/agent/src/tui/mod.rs,crates/agent/src/tui/panel.rs,crates/agent/src/tui/presentation.rs,crates/agent/src/tui/render.rs,crates/agent/src/tui/status.rs,crates/agent/src/tui/tests.rs,crates/agent/src/tui/transcript.rs,crates/provider/src/anthropic.rs,crates/provider/src/chatgpt.rs,crates/provider/src/lib.rs,crates/provider/src/models.rs,crates/provider/src/openai.rs,crates/provider/src/responses.rs,crates/provider/src/tests.rs,crates/tools/src/lib.rs,docs/REQUIREMENTS-SPEC.md,docs/archive/events-2026-08.jsonl,scripts/windows-pty-e2e.ps1`
 
 ## 非权威 Pending 索引
 
@@ -808,81 +808,142 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 ```json
 {
   "approved_constraints": [
-    "REQ-20260801-01 已批准且本轮 intake 为 active",
-    "用户要求先询问既有 NLM 对话，但禁止查询进行中的深研状态",
-    "唯一理论源为手动导入源 8862d715-ffad-4288-b7eb-173260e2dcff",
-    "不把 NLM 建议当作代码事实、根因或性能结论"
+    "REQ-20260801-01 and INTAKE-20260803-05 are approved and executable.",
+    "Use only manually imported NotebookLM theory source 8862d715-ffad-4288-b7eb-173260e2dcff; do not inspect user-owned research status.",
+    "Do not create another Ridge member; use the existing notebooklm-mcp-maintainer only.",
+    "Do not change langgraph/provider/MCP execution semantics or add a second execution state machine.",
+    "Keep Answer separate from reasoning_content; preserve ANSI16, cell-width wrapping, bounded details, queue/takeover/HOLD/FOLLOW, and native scrollback.",
+    "Tools remain folded by default and expandable with bounded detail; user intervention remains non-blocking.",
+    "TestBackend is supplementary; Windows ConPTY is required for terminal claims."
   ],
   "attempts": [
     {
       "evidence": {
-        "command": "notebook_query existing conversation with manual source",
-        "error": "Google rejected the query (error code 16: UNAUTHENTICATED)",
-        "exit_code": 1,
-        "pointer": ".iteration/decision.json#attempt-1",
-        "refresh": "Auth tokens were reloaded from disk but are no longer valid (reason: stale)",
-        "tool": "mcp__notebooklm_mcp__notebook_query"
+        "command": "notebook_gate validation, CodeGraph, workspace tests, and Windows ConPTY",
+        "exit_code": 0,
+        "pointer": ".iteration/notebooklm-response-20260806-next.json; crates/agent/src/tui/status.rs; crates/agent/src/tui/tests.rs"
       },
-      "experiment": "以 source_ids=8862d715-ffad-4288-b7eb-173260e2dcff 继续既有 NotebookLM 对话，询问下一步计划",
+      "experiment": "Evaluate same-session NLM recommendations and local TUI presentation gaps one bounded slice at a time.",
       "result": {
         "status": "failed",
-        "summary": "MCP 返回 UNAUTHENTICATED；refresh_auth 确认磁盘凭据 stale，未查询 research_status。"
-      }
-    },
-    {
-      "evidence": {
-        "cli": "Authentication failed: Could not reach NotebookLM (network_error: ClientAuthenticationError)",
-        "command": "notebook_query existing conversation with manual source; nlm login --check",
-        "error": "Google rejected the query (error code 16: UNAUTHENTICATED)",
-        "exit_code": 1,
-        "pointer": ".iteration/decision.json#attempt-2",
-        "refresh": "Auth tokens were reloaded from disk but are no longer valid (reason: stale)",
-        "tool": "mcp__notebooklm_mcp__notebook_query"
-      },
-      "experiment": "用户声称已登录后重试 NotebookLM 对话查询，并运行 nlm login --check",
-      "result": {
-        "status": "failed",
-        "summary": "MCP 仍返回 UNAUTHENTICATED；refresh_auth 仍判定 stale；CLI 检查为 network_error。未查询 research_status。"
+        "summary": "NLM query was RESOURCE_EXHAUSTED and uncited proposals were rejected; local evidence selected the adaptive input legend instead."
       }
     }
   ],
-  "candidate_solutions": [],
+  "candidate_solutions": [
+    {
+      "core": "Clear the complete audit viewport before rendering inset history modals.",
+      "disposition": "accepted_local_slice",
+      "scope": [
+        "crates/agent/src/tui/draw.rs",
+        "crates/agent/src/tui/tests.rs"
+      ],
+      "validation": [
+        "narrow gutter regression",
+        "workspace/fmt/clippy",
+        "Dev/Release ConPTY"
+      ]
+    },
+    {
+      "core": "Preserve Enter expand and Esc close in medium AnswerHistory hints without changing LiveHistory HOLD/FOLLOW.",
+      "disposition": "accepted_local_slice",
+      "scope": [
+        "crates/agent/src/tui/draw.rs",
+        "crates/agent/src/tui/tests.rs"
+      ],
+      "validation": [
+        "medium_answer_hint_preserves_expand_and_close_actions",
+        "workspace tests/fmt/clippy",
+        "Debug/Release ConPTY"
+      ]
+    },
+    {
+      "constraints": [
+        "presentation-only",
+        "reuse input_chrome and existing cell-width accounting",
+        "preserve live prefixes, queue/takeover, Ctrl+R/Ctrl+T routing, and final title bounds"
+      ],
+      "core": "Use an adaptive wide input legend that preserves reasoning-history and activity actions while compacting lower-priority labels only on overflow.",
+      "disposition": "accepted_local_slice",
+      "scope": [
+        "crates/agent/src/tui/status.rs",
+        "crates/agent/src/tui/tests.rs"
+      ],
+      "validation": [
+        "input_chrome_exposes_submit_or_queue_mode",
+        "Debug BusyFixture",
+        "Release BusyFixture and StressFixture"
+      ]
+    }
+  ],
   "failure_signals": [
-    "候选重复已有语义或没有明确可证伪验收",
-    "建议依赖未批准的新键位、外部 Markdown/语法解析器或新 provider/MCP 状态",
-    "窄终端丢失 Answer、Reasoning、工具摘要、输入、审批或退出提示",
-    "无法建立真实终端证据却宣称性能或行业领先"
+    "NotebookLM Deep Research UI/API remains quota-exhausted (RESOURCE_EXHAUSTED).",
+    "The KKP recommendation was uncited and contradicted the current non-destructive HOLD plus Windows release filtering; no input protocol change is justified.",
+    "No local live-stream reflow, stale-width, or cache defect is reproduced beyond the fixed bounded input-title clipping gap.",
+    "CompletionFixture with immediate ScriptedProvider may report partial when Answer inspection is requested after the fixture completes; Release StressFixture provides the authoritative delayed streaming evidence."
   ],
   "hypotheses": [
-    "下一项高价值工作可能是补强真实终端验收/可复制证据，而非继续堆叠静态装饰",
-    "若物理证据暂不可自动化，应优先设计可复现的人工验收脚本与无副作用观察路径"
+    {
+      "against": [
+        "current long-live profile passes"
+      ],
+      "experiment": "Measure deterministic rebuild/body work under stable-prefix stream revisions before changing cache architecture.",
+      "hypothesis": "High-frequency stream revisions may still redo bounded visible Markdown/rail projection despite cache hits.",
+      "support": [
+        "cache invalidates on transcript render_revision"
+      ]
+    },
+    {
+      "against": [
+        "bounded live projection, height caches, and no user-visible stale-width defect"
+      ],
+      "experiment": "Require a reproduced anchor, stale-width, or measurable hot-path defect first.",
+      "hypothesis": "A whole-document virtualizer or new sidebar is needed.",
+      "support": []
+    }
   ],
   "prohibitions": [
-    "不查询 research_status、research_import 或修改远端深研记录",
-    "不把 NLM 输出原样写入需求或直接实施",
-    "不使用未经批准的新键位、不重写历史、不覆盖用户脏文件"
+    "Do not query old user-owned deep research status.",
+    "Do not create another Ridge member for the same MCP task.",
+    "Do not claim report/import/installation/ready without task id or direct repository/test evidence.",
+    "Do not add a whole-document virtualizer, fixed CPU/frame threshold, momentary KKP protocol, persistent sidebar, or second renderer from uncited NLM prose.",
+    "Do not modify the main repository while the independent MCP member works."
   ],
-  "question": "在 v0.5.0 稳定基线与现有 Answer/Reasoning、工具折叠实现之上，下一项最能提升 TUI 可理解性、交互感与真实终端适配性的可逆实验是什么？",
-  "questions": [
-    "请按可逆性、真实证据收益与适配风险排序最多三项下一步候选，并明确每项验收实验。"
-  ],
-  "target": "让 NotebookLM 仅基于手动导入理论与当前快照，排序最多三项候选；主 Agent 用 CodeGraph 和确定性测试选择一项落地。",
+  "question": "What is the next measurable RidgeCode TUI improvement after the current semantic channels, history, folded tools, lifecycle anchors, cache boundaries, and ConPTY coverage?",
+  "questions": [],
+  "target": "Make model reasoning, answers, waiting, conclusions, tools, queue, and takeover visible, searchable, expandable, bounded, adaptive, and responsive without changing execution semantics.",
   "verified_facts": [
     {
-      "evidence": "git refs; GitHub Release workflow success",
-      "fact": "v0.5.0 已发布，main 与 tag 均指向 676e801。"
+      "evidence": "draw_panel_with_cache; narrow_audit_modal_clears_underlying_gutters; Dev CompletionFixture at 40 columns.",
+      "fact": "The presentation-only modal fix clears the complete audit viewport before rendering inset history panels, preventing narrow gutters from leaking live/idle rows."
     },
     {
-      "evidence": "crates/agent/src/tui/*.rs; workspace tests/clippy/build",
-      "fact": "Answer/Reasoning 分层、工具默认折叠、Ctrl+R/Ctrl+O、窄屏布局与 bounded live transcript 已有确定性回归。"
+      "evidence": "draw.rs; CodeGraph; cache and long-live profile tests.",
+      "fact": "LiveOutputCache, DetailLayoutCache, and PanelItemsCache bound hot-path/live detail work and resize invalidation; no whole-document virtualizer is justified."
     },
     {
-      "evidence": "docs/PROJECT-STATE.md PTY evidence audit",
-      "fact": "本机没有自动 Windows PTY/native scrollback 证据，当前仍需真实终端验收。"
+      "evidence": "windows-pty-e2e.ps1 Debug BusyFixture and Release StressFixture.",
+      "fact": "Debug/Release ConPTY coverage passed lifecycle WAIT/CHK/SUM/DONE, Answer/Reasoning visibility, Inspector/detail, queue switching/removal, HOLD/FOLLOW, resize, effort, and two-Ctrl-C behavior."
     },
     {
-      "evidence": ".iteration/research.json; user instruction",
-      "fact": "用户已手动导入 40374 字符理论报告；远程深研状态仅保留历史元数据。"
+      "evidence": "NotebookLM note listing, login check, existing response artifacts, and member capture.",
+      "fact": "The focused notebook has exactly one useful Active Note; NLM authentication works, but the attempted new Deep Research flow was quota-exhausted before task creation and produced no task/report/import."
+    },
+    {
+      "evidence": "Current Ridge workspace profile and captured pane.",
+      "fact": "The existing Ridge member notebooklm-mcp-maintainer is the only member; no new member was created."
+    },
+    {
+      "evidence": "panel_hint/clip_hint_with_close; medium_answer_hint_preserves_expand_and_close_actions.",
+      "fact": "At 32/40-column AnswerHistory modals, the final hint preserves Enter expand and Esc close; LiveHistory HOLD/FOLLOW wording remains unchanged."
+    },
+    {
+      "evidence": "input_chrome; input_chrome_exposes_submit_or_queue_mode; Debug BusyFixture frame/output at 96 columns before and after the fix.",
+      "fact": "A wide idle input title clipped Ctrl+T activity to Ctrl+T activi… after reasoning history existed; the adaptive legend now keeps Ctrl+R history and Ctrl+T activity whole by compacting lower-priority labels within the cell budget."
+    },
+    {
+      "evidence": "Release StressFixture with Answer inspection/resize status=passed; Release BusyFixture with Inspector/Queue/Reasoning/HOLD/FOLLOW/Resize/dual Ctrl-C status=passed.",
+      "fact": "Release v0.5.2 candidate passed end-to-end completion and busy interaction probes."
     }
   ]
 }

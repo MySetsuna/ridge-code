@@ -10,6 +10,7 @@ pub struct ChatGptProvider {
     model: String,
     access_token: String,
     account_id: Option<String>,
+    reasoning_effort: String,
     http: Arc<dyn HttpClient>,
 }
 
@@ -27,12 +28,18 @@ impl ChatGptProvider {
             account_id: account_id
                 .or_else(|| crate::oauth::chatgpt_account_id(None, &access_token)),
             access_token,
+            reasoning_effort: crate::DEFAULT_REASONING_EFFORT.to_string(),
             http: Arc::new(ReqwestClient::new()),
         }
     }
 
     pub fn with_http(mut self, http: Arc<dyn HttpClient>) -> Self {
         self.http = http;
+        self
+    }
+
+    pub fn with_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
+        self.reasoning_effort = effort.into();
         self
     }
 
@@ -74,7 +81,7 @@ impl LlmProvider for ChatGptProvider {
         req: &CompletionRequest,
         on_token: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<Completion, ProviderError> {
-        let body = responses::build_request(&self.model, req);
+        let body = responses::build_request_with_effort(&self.model, req, &self.reasoning_effort);
         let url = self.url();
         let headers = self.headers()?;
         let acc = std::sync::Mutex::new(responses::StreamAcc::default());

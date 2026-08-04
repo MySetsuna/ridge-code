@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260803-03",
+  "classification": "active",
+  "summary": "修复 TUI live 内容换行与状态可见性，并整体重构终端视觉层、详情展开和输入输出 token 统计。",
+  "requirement_ids": [
+    "REQ-20260801-01"
+  ],
+  "pending_ids": [],
+  "approval_reasons": [],
+  "open_questions": [],
+  "approval_evidence": "",
+  "request_sha256": "554a2e04b730553468811002329e5b100c64f582583099c1b554be15f36b7b8b",
+  "requirements_sha256": "381592cd830da4a1f5db33291674690070ff81066de7d05c3d9d6f16fa4411c9",
+  "pending_sha256": "3b2a1c2d01c1d0e6c33d8e5ec0365873066e4b3b541c2f63d703025b8f44425a",
+  "draft_sha256": "",
+  "previous_intake_sha256": "",
+  "executable": true,
+  "reasons": []
+}

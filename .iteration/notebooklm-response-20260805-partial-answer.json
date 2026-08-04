@@ -1,0 +1,67 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "The latest same-session NLM answer again proposed viewport-bound highlighting and logical indentation, but returned sources_used empty with no citation mapping.",
+      "evidence": "NotebookLM notebook_query using source 8862d715-ffad-4288-b7eb-173260e2dcff; local CodeGraph render_live_line_with_alert_edge, wrap_live_spans_tail, and live_continuation_rail."
+    },
+    {
+      "fact": "PresentationLedger and AnswerEntry preserve PresentationStatus::Partial, but the native scrollback Markdown projection previously rendered every answer with only the ANSWER rail; the partial state was visible mainly through a separate retained-notice row and archive metadata.",
+      "evidence": "crates/agent/src/tui/presentation.rs PresentationLedger/PresentationStatus; crates/agent/src/tui/app.rs commit_live_answers/flush_commits; crates/agent/src/tui/render.rs answer_commit_lines."
+    }
+  ],
+  "contradictions": [
+    {
+      "claim": "A new viewport highlighter and logical indentation layer is the next missing architecture.",
+      "local_evidence": "The current bounded tail projection already limits visible Markdown work and preserves semantic continuation rails; adding another parser, virtualizer, or renderer would duplicate established boundaries."
+    }
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "A direct PARTIAL marker in native Answer scrollback will reduce mistaken interpretation of interrupted output without materially harming narrow wrapping.",
+      "support": [
+        "PresentationStatus::Partial is already retained for the Answer record while the static rail previously exposed only ANSWER."
+      ],
+      "against": [
+        "The first-row affordance consumes additional cells on narrow terminals."
+      ],
+      "experiment": "Render interrupted Answer Markdown through the existing semantic wrapper at 32/40/80/96 columns with CJK and fenced code, then verify the marker remains bounded and visible."
+    }
+  ],
+  "candidates": [
+    {
+      "core": "Make the existing static Answer projection status-aware: retain ANSWER and add a bounded PARTIAL affordance only for PresentationStatus::Partial.",
+      "constraints": [
+        "presentation-only",
+        "derive status from PresentationLedger",
+        "preserve answer body, Markdown roles, ANSWER rail, history/archive, successful final semantics, queue, and execution"
+      ],
+      "risks": [
+        "the marker consumes first-row cells on narrow terminals and must continue through the existing semantic wrapper"
+      ],
+      "reversibility": "high",
+      "scope": [
+        "crates/agent/src/tui/presentation.rs",
+        "crates/agent/src/tui/app.rs",
+        "crates/agent/src/tui/render.rs",
+        "crates/agent/src/tui/tests.rs"
+      ],
+      "validation": [
+        "partial Answer native-scrollback regression",
+        "32/40/80/96 and CJK/Markdown wrapping",
+        "workspace tests/fmt/clippy/Debug/Release/ConPTY"
+      ]
+    }
+  ],
+  "recommendation": "Reject the NLM duplicate architecture. Accept only the local status-projection slice, then verify that PARTIAL remains explicit, bounded, and non-semantic.",
+  "next_step": {
+    "type": "implementation",
+    "value": "Use PresentationLedger status to add [PARTIAL · Ctrl+A answers] to the existing first-row Answer affordance, then run the full narrow/wide and interruption matrix."
+  },
+  "stop_conditions": [
+    "Do not add a second renderer, parser, virtualizer, execution state machine, or dependency.",
+    "Do not change Answer text, successful final routing, queue/takeover/HOLD/FOLLOW, or Ctrl-C semantics.",
+    "Do not query old Deep Research status or create a Note/source.",
+    "If the marker causes clipping or wrapping regressions at 32/40 columns, remove the slice and retain the prior projection."
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "The latest same-session NLM answer proposed a DECSTBM/hardware-scroll layer and returned sources_used empty with no citation mapping.",
+      "evidence": "NotebookLM notebook_query using source 8862d715-ffad-4288-b7eb-173260e2dcff; local CodeGraph audit."
+    },
+    {
+      "fact": "RidgeCode already uses Viewport::Inline and Terminal::insert_before through insert_bounded_commit_lines.",
+      "evidence": "crates/agent/src/tui/app.rs:1162-1521; crates/agent/src/tui/tests.rs inline viewport and static scrollback tests."
+    }
+  ],
+  "contradictions": [
+    {
+      "claim": "A new hardware scroll or DECSTBM module is required.",
+      "local_evidence": "The current inline viewport already owns native scrollback insertion; no missing hardware primitive was found."
+    }
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "No additional hardware-scroll layer is justified until a local visual or ordering defect is reproduced.",
+      "support": [
+        "The current inline viewport already inserts bounded committed lines into native scrollback."
+      ],
+      "against": [
+        "No local high-frequency flicker or physical scrollback defect has yet been measured."
+      ],
+      "experiment": "Exercise the existing bounded insert_before path across mixed Answer/Reasoning/Activity/Tool output, CJK/Markdown, resize, HOLD/FOLLOW, takeover, and ConPTY."
+    }
+  ],
+  "candidates": [],
+  "recommendation": "Reject the duplicate hardware-scroll layer; continue with a locally reproduced presentation gap only.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Audit the remaining model-thinking and final-answer projections after the existing coalescing slice."
+  },
+  "stop_conditions": [
+    "Do not add DECSTBM, scrolling-region code, a second renderer/cache/parser, or fixed performance thresholds.",
+    "Do not query old Deep Research status or create a Note/source from this response."
+  ]
+}

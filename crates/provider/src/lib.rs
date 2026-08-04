@@ -77,6 +77,103 @@ impl Message {
 }
 
 /// 暴露给模型的工具规格(名字 + 描述 + JSON Schema)。
+/// Repair interrupted or compacted tool turns before they reach a provider.
+///
+/// Every assistant function call must have a matching tool output. A process
+/// terminated between those writes (or a history window cut at the wrong
+/// boundary) can leave an orphan call behind and make the Responses API reject
+/// the whole request. Completed pairs are preserved; orphan tool results are
+/// discarded; incomplete assistant calls are downgraded to plain text.
+pub fn repair_tool_history(messages: &[Message]) -> Vec<Message> {
+    struct Pending {
+        assistant: Message,
+        results: Vec<Message>,
+    }
+
+    fn flush(out: &mut Vec<Message>, pending: &mut Option<Pending>) {
+        let Some(mut pending) = pending.take() else {
+            return;
+        };
+        let matched = pending
+            .assistant
+            .tool_calls
+            .iter()
+            .filter(|call| {
+                pending
+                    .results
+                    .iter()
+                    .any(|result| result.tool_call_id.as_deref() == Some(call.id.as_str()))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if matched.is_empty() {
+            if !pending.assistant.content.is_empty() {
+                out.push(Message::assistant(pending.assistant.content));
+            }
+            return;
+        }
+
+        pending.assistant.tool_calls = matched;
+        let ids = pending
+            .assistant
+            .tool_calls
+            .iter()
+            .map(|call| call.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        out.push(pending.assistant);
+        out.extend(pending.results.into_iter().filter(|result| {
+            result
+                .tool_call_id
+                .as_deref()
+                .is_some_and(|id| ids.contains(id))
+        }));
+    }
+
+    let mut out = Vec::with_capacity(messages.len());
+    let mut pending = None;
+    for message in messages {
+        match &message.role {
+            Role::Assistant if !message.tool_calls.is_empty() => {
+                flush(&mut out, &mut pending);
+                pending = Some(Pending {
+                    assistant: message.clone(),
+                    results: Vec::new(),
+                });
+            }
+            Role::Tool => {
+                let Some(call_id) = message.tool_call_id.as_deref() else {
+                    continue;
+                };
+                let Some(current) = pending.as_mut() else {
+                    continue;
+                };
+                let expected = current
+                    .assistant
+                    .tool_calls
+                    .iter()
+                    .any(|call| call.id == call_id);
+                let duplicate = current
+                    .results
+                    .iter()
+                    .any(|result| result.tool_call_id.as_deref() == Some(call_id));
+                if expected && !duplicate {
+                    current.results.push(message.clone());
+                    if current.results.len() == current.assistant.tool_calls.len() {
+                        flush(&mut out, &mut pending);
+                    }
+                }
+            }
+            _ => {
+                flush(&mut out, &mut pending);
+                out.push(message.clone());
+            }
+        }
+    }
+    flush(&mut out, &mut pending);
+    out
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolSpec {
     pub name: String,
@@ -127,6 +224,16 @@ pub enum StreamChunk {
 }
 
 /// 一次补全请求:对话历史 + 可用工具。
+pub const REASONING_EFFORTS: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
+pub const DEFAULT_REASONING_EFFORT: &str = "medium";
+
+pub fn normalize_reasoning_effort(value: &str) -> Option<&'static str> {
+    REASONING_EFFORTS
+        .iter()
+        .copied()
+        .find(|candidate| candidate.eq_ignore_ascii_case(value.trim()))
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct CompletionRequest {
     pub messages: Vec<Message>,
@@ -249,20 +356,74 @@ impl LlmProvider for SwapProvider {
 /// 离线脚本 provider:按顺序吐预设的 [`Completion`],零联网、确定性,用于 demo / 测试。
 pub struct ScriptedProvider {
     steps: std::sync::Mutex<std::collections::VecDeque<Completion>>,
+    delay: Option<std::time::Duration>,
+    post_answer_delay: Option<std::time::Duration>,
 }
 
 impl ScriptedProvider {
     pub fn new(steps: Vec<Completion>) -> Self {
         Self {
             steps: std::sync::Mutex::new(steps.into()),
+            delay: None,
+            post_answer_delay: None,
         }
+    }
+
+    /// Add a deterministic pause for offline TUI busy-state fixtures.
+    /// The default provider remains immediate; the delay is opt-in and never
+    /// performs network I/O.
+    pub fn with_delay(mut self, delay: std::time::Duration) -> Self {
+        self.delay = Some(delay);
+        self
+    }
+
+    /// Keep a streamed Answer visible briefly before the scripted turn ends;
+    /// this exists for deterministic UI audit fixtures, not provider behavior.
+    pub fn with_post_answer_delay(mut self, delay: std::time::Duration) -> Self {
+        self.post_answer_delay = Some(delay);
+        self
+    }
+
+    fn next_step(&self) -> Completion {
+        self.steps.lock().unwrap().pop_front().unwrap_or_default()
     }
 }
 
 #[async_trait::async_trait]
 impl LlmProvider for ScriptedProvider {
     async fn complete(&self, _req: &CompletionRequest) -> Result<Completion, ProviderError> {
-        Ok(self.steps.lock().unwrap().pop_front().unwrap_or_default())
+        if let Some(delay) = self.delay {
+            tokio::time::sleep(delay).await;
+        }
+        Ok(self.next_step())
+    }
+
+    async fn complete_streaming(
+        &self,
+        _req: &CompletionRequest,
+        on_token: &(dyn Fn(StreamChunk) + Send + Sync),
+    ) -> Result<Completion, ProviderError> {
+        let completion = self.next_step();
+        if let Some(delay) = self.delay {
+            if !completion.reasoning.is_empty() {
+                on_token(StreamChunk::Reasoning(completion.reasoning.clone()));
+            }
+            tokio::time::sleep(delay).await;
+            if !completion.text.is_empty() {
+                on_token(StreamChunk::Answer(completion.text.clone()));
+            }
+            if let Some(delay) = self.post_answer_delay {
+                tokio::time::sleep(delay).await;
+            }
+            return Ok(completion);
+        }
+        if !completion.reasoning.is_empty() {
+            on_token(StreamChunk::Reasoning(completion.reasoning.clone()));
+        }
+        if !completion.text.is_empty() {
+            on_token(StreamChunk::Answer(completion.text.clone()));
+        }
+        Ok(completion)
     }
 }
 

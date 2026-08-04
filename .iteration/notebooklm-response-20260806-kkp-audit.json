@@ -1,0 +1,57 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "The same-session NLM answer proposes a momentary Ctrl+Space audit: press enters HOLD and release returns to FOLLOW.",
+      "evidence": "Conversation 68791fb7-659a-4ad6-a86c-beb7ac694781; query source selection limited to 8862d715-ffad-4288-b7eb-173260e2dcff."
+    },
+    {
+      "fact": "The response returned sources_used:[] with empty citations and references, so the proposal is advisory rather than source-backed evidence.",
+      "evidence": "The returned NLM response metadata."
+    },
+    {
+      "fact": "Local CodeGraph shows the current KKP path enables only DISAMBIGUATE_ESCAPE_CODES, does not request REPORT_EVENT_TYPES, and is disabled by default on Windows; decide_key intentionally filters matched Release events and input_action accepts Press events only.",
+      "evidence": "crates/agent/src/tui/mod.rs:107-129; crates/agent/src/tui/input.rs:108-133 and 153-234; crossterm 0.28.1 KeyboardEnhancementFlags documentation."
+    },
+    {
+      "fact": "The current Ctrl+Space HOLD/FOLLOW path is non-destructive and does not stop the running model task; it toggles the existing LiveTranscript viewport state before normal input routing.",
+      "evidence": "crates/agent/src/tui/mod.rs:935-949; crates/agent/src/tui/transcript.rs:1244-1280; existing HOLD/FOLLOW ConPTY coverage."
+    }
+  ],
+  "contradictions": [
+    {
+      "claim": "Users must stop the model to review recent reasoning before following again.",
+      "evidence": "The local hold_live/follow_live path preserves the running task and changes only presentation state."
+    },
+    {
+      "claim": "The proposed release interaction is already available in the current production path.",
+      "evidence": "Current Windows production path does not request KKP release reporting; matched releases are deliberately deduplicated before input_action."
+    }
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "An explicitly opt-in, capability-gated momentary audit mode could improve rapid review without changing the default Ctrl+Space toggle.",
+      "support": ["NLM proposal", "crossterm exposes REPORT_EVENT_TYPES and KeyEventKind::Release"],
+      "against": ["No local user defect is reproduced", "Windows/ConPTY and legacy terminals need a truthful fallback", "default key semantics must remain stable"],
+      "experiment": "Only consider a separate capability-gated path after a direct terminal probe proves press/release delivery and after tests cover duplicate releases, fallback toggle, modal precedence, and two-Ctrl-C exit."
+    }
+  ],
+  "candidates": [],
+  "recommendation": "Reject changing the default Ctrl+Space semantics from toggle to momentary. Preserve the verified non-destructive HOLD/FOLLOW path; defer any opt-in release mode until a local capability probe and fallback contract exist.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Find a different locally reproduced TUI readability or intervention gap; do not implement KKP release behavior from uncited NLM prose alone."
+  },
+  "stop_conditions": [
+    "Any default Ctrl+Space semantic change without capability detection and fallback",
+    "Any release-event handling that reintroduces duplicate Enter, queue, popup, or two-Ctrl-C actions",
+    "Any second renderer, virtualizer, execution state machine, or unbounded transcript scan"
+  ],
+  "question": "基于当前会话与手动导入理论源，给 RidgeCode TUI 下一项尚未覆盖的局部改进计划。",
+  "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+  "sources_used": [],
+  "citations": {},
+  "references": []
+}

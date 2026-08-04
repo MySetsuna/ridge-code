@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::sync::OnceLock;
 
 use super::*;
 
@@ -18,7 +19,7 @@ pub(crate) fn fmt_ctx(n: u64) -> String {
 /// ctx% 分母未知时的兜底上下文窗口(现代模型常见档)。`/models` 命中当前模型即被真实窗口覆盖。
 pub(crate) const DEFAULT_CTX_WINDOW: u64 = 200_000;
 /// 输入框下方自定义状态条内置默认模板。config `status_bar` 留空时用它。
-pub(crate) const DEFAULT_STATUS_BAR: &str = " {provider} · {model} · ctx {ctx} · {tokens} tok ";
+pub(crate) const DEFAULT_STATUS_BAR: &str = " {provider} · {model} · ctx {ctx} · {tokens} ";
 
 /// 实时 token 速率(tok/s,纯函数):elapsed 为 0 → 0,防除零。
 pub(crate) fn token_rate(tokens: usize, elapsed_ms: u128) -> u64 {
@@ -32,7 +33,7 @@ pub(crate) fn fmt_reasoning_meta(step: usize, elapsed_s: u64, tokens: usize) -> 
     } else {
         String::new()
     };
-    format!("💭 [{step}t+{elapsed_s}s · {tokens} task tok] ")
+    format!("THK[{step}t+{elapsed_s}s · {tokens} task tok] ")
 }
 
 /// 上下文占用百分比(纯函数):window 为 0 → 0;上限 100(压缩前估算,超窗即封顶)。
@@ -118,6 +119,7 @@ fn safe_path(path: &str) -> String {
 
 /// 忙碌粘条文案(需求 6,纯函数):运行态 · 已观测 step · 读秒 · token 消耗 · 速率 · 任务进度 · 待跑队列。
 /// todo 空则省略进度段;`queued>0` 追加 ` · ⏳N`(iter-33)。计时/计量全由入参给定 —— 零 wall-clock,可纯测。
+#[cfg(test)]
 pub(crate) fn fmt_busy_bar(
     phase: &str,
     todos: &[Todo],
@@ -129,6 +131,31 @@ pub(crate) fn fmt_busy_bar(
 ) -> String {
     let tool = pending_call.map(fmt_tool_intent).unwrap_or_default();
     let mut s = format!("⚡ {phase}{tool} · ⏱ {elapsed_s}s · {tokens} tok · {rate} tok/s");
+    if let Some((d, n)) = todo_progress(todos) {
+        s.push_str(&format!(" · todo {d}/{n}"));
+    }
+    if queued > 0 {
+        s.push_str(&format!(" · ⏳{queued}"));
+    }
+    s
+}
+
+/// 顶部活动轨文案：只承载阶段、活动、工具意图、时长、速率、todo 与队列。
+/// 输入/输出 token、ctx 与 effort 专属底部遥测，避免两条状态条互相复制。
+pub(crate) fn fmt_busy_signal(
+    phase: &str,
+    todos: &[Todo],
+    elapsed_s: u64,
+    rate: u64,
+    queued: usize,
+    pending_call: Option<&provider::ToolCall>,
+) -> String {
+    let tool = pending_call.map(fmt_tool_intent).unwrap_or_default();
+    let phase = inline_display(phase).trim().to_owned();
+    let mut s = format!("⚡ {phase}{tool} · t+{elapsed_s}s");
+    if rate > 0 {
+        s.push_str(&format!(" · {rate}/s"));
+    }
     if let Some((d, n)) = todo_progress(todos) {
         s.push_str(&format!(" · todo {d}/{n}"));
     }
@@ -151,7 +178,7 @@ pub(crate) fn fmt_busy_phase(phase: &str, step: usize) -> Cow<'_, str> {
 pub(crate) fn stream_channel_badge(channel: LiveChannel) -> (&'static str, Role) {
     match channel {
         LiveChannel::Answer => ("[ANSWER]", Role::Primary),
-        LiveChannel::Reasoning => ("[THINK]", Role::Muted),
+        LiveChannel::Reasoning => ("[THINK]", Role::Reasoning),
         LiveChannel::Tool => ("[TOOL]", Role::Info),
     }
 }
@@ -163,11 +190,164 @@ pub(crate) struct InputChromeArgs {
     pub(crate) width: u16,
     pub(crate) reasoning_expanded: bool,
     pub(crate) has_reasoning: bool,
+    pub(crate) has_reasoning_history: bool,
+    pub(crate) has_live_answer: bool,
+    pub(crate) has_answer_history: bool,
+    pub(crate) has_live_history: bool,
     pub(crate) has_tools: bool,
     pub(crate) has_history: bool,
     pub(crate) has_scrollable_tool_details: bool,
     pub(crate) has_live_output: bool,
     pub(crate) live_inspecting: bool,
+}
+
+/// Windows' legacy console cannot distinguish Shift+Enter from Enter. Keep
+/// the input affordance truthful: precise Shift+Enter is advertised only when
+/// the same opt-in KKP path used by `TerminalGuard` is active.
+pub(crate) fn multiline_shortcut_label(precise: bool) -> &'static str {
+    if precise {
+        "Shift/Alt+Enter newline"
+    } else {
+        "Alt+Enter/Ctrl+J newline"
+    }
+}
+
+/// TerminalGuard records the result of the best-effort KKP command once the
+/// terminal is actually entered. Tests and non-TUI callers retain the
+/// environment-based fallback until that runtime capability is known.
+static PRECISE_MULTILINE_INPUT: OnceLock<bool> = OnceLock::new();
+
+pub(crate) fn set_precise_multiline_input_enabled(enabled: bool) {
+    let _ = PRECISE_MULTILINE_INPUT.set(enabled);
+}
+
+fn precise_multiline_input_enabled() -> bool {
+    PRECISE_MULTILINE_INPUT.get().copied().unwrap_or_else(|| {
+        !cfg!(windows) || std::env::var("RIDGE_TUI_KITTY").ok().as_deref() == Some("1")
+    })
+}
+
+fn multiline_shortcut_hint() -> &'static str {
+    multiline_shortcut_label(precise_multiline_input_enabled())
+}
+
+/// Busy narrow chrome uses a packed action rail instead of dropping the
+/// takeover affordance altogether.  Priority is deliberate: queue depth and
+/// Ctrl-C remain first; tool detail, reasoning inspection, and live Inspector
+/// follow when their two-cell tokens fit.
+fn compact_busy_actions(
+    queued: usize,
+    width: u16,
+    has_tools: bool,
+    has_reasoning: bool,
+    has_live_answer: bool,
+    has_live_history: bool,
+    live_inspecting: bool,
+) -> String {
+    let budget = width.saturating_sub(2);
+    let mut text = format!(" Q:[{}]", compact_count(&queued.to_string()));
+    for token in [
+        Some("^C"),
+        has_live_answer.then_some("^A"),
+        live_inspecting.then_some("^Space"),
+        has_tools.then_some("^O"),
+        has_reasoning.then_some("^R"),
+        has_live_history.then_some("^I"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if str_cells(&text) + str_cells(token) > budget as usize {
+            break;
+        }
+        text.push_str(token);
+    }
+    format!("{text} ")
+}
+
+/// When the user is auditing live output, put the return-to-follow action at
+/// the left edge. The ordinary busy rail is clipped from the right, so a
+/// trailing `Alt+End follow` hint disappears exactly when it is needed.
+fn busy_live_inspection_actions(
+    queued: usize,
+    width: u16,
+    has_tools: bool,
+    has_reasoning: bool,
+    has_live_answer: bool,
+    has_live_history: bool,
+) -> String {
+    let takeover = if width >= 72 {
+        "Esc/^C takeover"
+    } else {
+        "^C takeover"
+    };
+    let mut text = format!(
+        " HOLD · Alt+End follow · {takeover} · Q:[{}]",
+        compact_count(&queued.to_string())
+    );
+    if width >= 72 && (has_tools || has_reasoning) {
+        text.push_str(" · Space toggle");
+    }
+    if width >= 80 && (has_tools || has_reasoning || has_live_answer) {
+        let focus = if width >= 88 {
+            " · Alt+←/→ focus"
+        } else {
+            " · Alt<> focus"
+        };
+        text.push_str(focus);
+    } else if width >= 72 && (has_tools || has_reasoning || has_live_answer) {
+        // Keep the action discoverable at the exact boundary where the full
+        // label would clip the HOLD/follow/takeover priority rail.
+        text.push_str(" · ←→");
+    }
+    if width >= 64 {
+        text.push_str(" · ^Enter front");
+    }
+    if width >= 80 && has_tools {
+        text.push_str(" · ^O details");
+    }
+    if width >= 80 && has_live_answer {
+        text.push_str(" · ^A answer");
+    }
+    if width >= 88 && has_reasoning {
+        text.push_str(" · ^R");
+    }
+    if width >= 96 && has_live_history {
+        text.push_str(" · ^I");
+    }
+    if width >= 104 {
+        text.push_str(" · Ctrl+T activity");
+    }
+    text
+}
+
+/// Idle narrow chrome keeps archive entry points discoverable even when the
+/// session has no live tool/reasoning block. Answer and reasoning history are
+/// the primary audit surfaces; tool/live inspection follows when cells remain.
+fn compact_idle_history_actions(
+    width: u16,
+    has_answer_history: bool,
+    has_reasoning_history: bool,
+    has_tools: bool,
+    has_live_history: bool,
+) -> String {
+    let budget = width.saturating_sub(2) as usize;
+    let mut text = " Input".to_owned();
+    for token in [
+        has_answer_history.then_some(" ^A"),
+        has_reasoning_history.then_some(" ^R"),
+        has_tools.then_some(" ^O"),
+        has_live_history.then_some(" ^I"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if str_cells(&text) + str_cells(token) > budget {
+            break;
+        }
+        text.push_str(token);
+    }
+    format!("{text} ")
 }
 
 pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
@@ -177,22 +357,59 @@ pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
         width,
         reasoning_expanded,
         has_reasoning,
+        has_reasoning_history,
+        has_live_answer,
+        has_answer_history,
+        has_live_history,
         has_tools,
         has_history,
         has_scrollable_tool_details,
         has_live_output,
         live_inspecting,
     } = args;
-    let reasoning_hint = if !has_reasoning {
-        None
-    } else if reasoning_expanded {
-        Some("Ctrl+R collapse")
+    if busy && live_inspecting && has_live_output && width >= 48 {
+        let text = busy_live_inspection_actions(
+            queued,
+            width,
+            has_tools,
+            has_reasoning,
+            has_live_answer,
+            has_live_history,
+        );
+        return (
+            clip_display_cells(&text, width.saturating_sub(2)),
+            Role::Primary,
+        );
+    }
+    let multiline_hint = multiline_shortcut_hint();
+    let reasoning_hint = if has_reasoning {
+        if reasoning_expanded {
+            Some("Ctrl+R collapse")
+        } else {
+            Some("Ctrl+R reasoning")
+        }
+    } else if has_reasoning_history {
+        Some("Ctrl+R history")
     } else {
-        Some("Ctrl+R reasoning")
+        None
     };
     let reasoning_suffix = reasoning_hint
         .map(|hint| format!(" · {hint}"))
         .unwrap_or_default();
+    let answer_suffix = if has_live_answer {
+        " · Ctrl+A focus"
+    } else if has_answer_history {
+        " · Ctrl+A answers"
+    } else {
+        ""
+    };
+    let answer_prefix = if has_live_answer {
+        "Ctrl+A focus · "
+    } else if has_answer_history {
+        "Ctrl+A answers · "
+    } else {
+        ""
+    };
     let focus_hint = if has_tools {
         " · Alt+↑/↓ focus"
     } else {
@@ -211,66 +428,138 @@ pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
     } else {
         ""
     };
-    let live_hint = if !has_live_output || has_scrollable_tool_details {
+    let live_hint = if !has_live_output {
         ""
     } else if live_inspecting {
-        " · Alt+End follow"
+        if has_tools || has_reasoning {
+            " · HOLD Ctrl+Space/Alt+End follow · Alt+←/→ focus · Space toggle"
+        } else {
+            " · HOLD Ctrl+Space/Alt+End follow"
+        }
     } else {
-        " · Alt+PgUp inspect"
+        " · Ctrl+Space hold · PgUp/PgDn page"
     };
+    let inspect_hint = if has_live_history {
+        " · Ctrl+I inspect"
+    } else {
+        ""
+    };
+    let inspect_compact = if has_live_history { " ^I" } else { "" };
+    // Put the live viewport control first on the wide input chrome. The
+    // tail is clipped on ordinary terminals; intervention must remain visible.
+    let wide_live_prefix = live_hint
+        .strip_prefix(" · ")
+        .map(|hint| format!("{hint} · "))
+        .unwrap_or_default();
+    let wide_live_prefix = if has_live_history {
+        format!("Ctrl+I inspect · {wide_live_prefix}")
+    } else {
+        wide_live_prefix
+    };
+    let push_hint = if busy { " · Ctrl+Enter push now" } else { "" };
     let text = match (busy, width) {
         (true, width) if width >= 96 && has_tools => format!(
-            " Queue [{queued}] · Enter enqueue · Ctrl+C cancel{reasoning_suffix}{focus_hint}{toggle_separator}{toggle_hint}{scroll_hint}{live_hint}"
+                " Queue [{queued}]{reasoning_suffix}{answer_suffix}{toggle_separator}{toggle_hint}{focus_hint}{inspect_hint} · Ctrl+T activity · Enter queue · Ctrl+Enter front · Ctrl+C takeover{scroll_hint}{live_hint}"
         ),
         (true, width) if width >= 72 && has_tools => {
-            // 工具运行时压缩动作词，但同时保留 focus/details 与真实 reasoning 入口。
+            // 工具运行时优先保留不打断的前插、接管、详情、思考与焦点动作。
+            // 96 列以下采用与窄栏一致的键位缩写，避免把 Alt+↑/↓ 裁成半个动作。
+            let reasoning = if has_reasoning {
+                if reasoning_expanded {
+                    " · ^R collapse"
+                } else {
+                    " · ^R"
+                }
+            } else {
+                ""
+            };
+            let enqueue = if width >= 88 {
+                " · Enter queue"
+            } else {
+                " · ↵ queue"
+            };
+            let front = if width >= 88 { "^Enter front" } else { "^Enter" };
+            let details = if width >= 80 { "^O details" } else { "^O" };
             format!(
-                " Queue [{queued}] · Enter · Ctrl+C · Alt+↑/↓ focus · {toggle_hint}{scroll_hint}{live_hint}{reasoning_suffix}"
+                " Queue [{queued}]{enqueue} · {front} · ^C takeover{reasoning} · {details} · Alt+↑/↓{inspect_hint}"
             )
         }
         (true, width) if width >= 72 => format!(
-            " Queue [{queued}] · Enter enqueue · Ctrl+C cancel{reasoning_suffix}{toggle_separator}{toggle_hint}{live_hint}"
+            " Queue [{queued}] · Ctrl+Enter front · Ctrl+C takeover · Enter{reasoning_suffix}{answer_suffix}{toggle_separator}{toggle_hint}{inspect_hint}{live_hint} · Ctrl+T activity"
         ),
         (true, width) if width >= 56 && has_tools => {
-            format!(
-                " Q:[{queued}] · Alt+↑/↓ focus · Ctrl+O details{scroll_hint}{live_hint}{reasoning_suffix} "
-            )
+            let reasoning = if has_reasoning { " · ^R" } else { "" };
+            let answer = if has_live_answer { " · ^A" } else { "" };
+            format!(" Q:[{queued}] · ^Enter front · ^C takeover · ^O details{reasoning}{answer}{inspect_compact} ")
         }
         (true, width) if width >= 56 => {
-                format!(" Queue [{queued}] · Enter enqueue · Ctrl+C cancel{reasoning_suffix}{live_hint} ")
+                format!(" Queue [{queued}] · Enter queue · Ctrl+Enter front · Ctrl+C takeover{reasoning_suffix}{answer_suffix}{inspect_hint}{live_hint} ")
         }
-        (true, width) if width >= 18 && (has_tools || has_history) => {
-            let reasoning = if has_reasoning { " ^R" } else { "" };
-            format!(" Q:[{queued}] ^O{reasoning} ")
-        }
-        (true, width) if width >= 18 && has_reasoning => {
-            format!(" Q:[{queued}] · {} ", reasoning_hint.unwrap_or("Ctrl+R reasoning"))
-        }
-        (true, width) if width >= 14 && (has_tools || has_history) => {
-            format!(" Q:[{queued}] ^O ")
-        }
-        (true, width) if width >= 14 && has_reasoning => format!(" Q:[{queued}] · ^R "),
-        (true, _) => format!(" Q:[{queued}] "),
-        (false, width) if width >= 88 => format!(
-            " Input (Enter send · Shift/Alt+Enter newline · Tab complete{focus_hint}{toggle_separator}{toggle_hint}{scroll_hint}{live_hint}{reasoning_suffix}) "
+        (true, width) => compact_busy_actions(
+            queued,
+            width,
+            has_tools || has_history,
+            has_reasoning,
+            has_live_answer,
+            has_live_history,
+            live_inspecting,
         ),
+        (false, width) if width >= 88 => {
+            let full = format!(
+                " Input ({answer_prefix}{wide_live_prefix}Enter send · {multiline_hint} · Tab complete{focus_hint}{toggle_separator}{toggle_hint}{scroll_hint}{reasoning_suffix} · Ctrl+T activity) "
+            );
+            if str_cells(&full) <= width.saturating_sub(2) as usize {
+                full
+            } else {
+                // Keep the reasoning/archive and activity actions whole when
+                // the full Windows keyboard legend would clip the last label.
+                format!(
+                    " Input ({answer_prefix}{wide_live_prefix}Enter · Ctrl+J newline · Tab{focus_hint}{toggle_separator}{toggle_hint}{scroll_hint}{reasoning_suffix} · Ctrl+T activity) "
+                )
+            }
+        }
         (false, width) if width >= 56 => {
-            format!(" Input{reasoning_suffix}{focus_hint}{toggle_separator}{toggle_hint}{scroll_hint}{live_hint} ")
+            format!(" Input{push_hint}{reasoning_suffix}{answer_suffix}{focus_hint}{toggle_separator}{toggle_hint}{inspect_hint}{scroll_hint}{live_hint} ")
         }
-        (false, width) if width >= 18 && (has_tools || has_history) => {
-            let reasoning = if has_reasoning { " ^R" } else { "" };
-            format!(" Input ^O{reasoning} ")
-        }
+        (false, width)
+            if width >= 18
+                && (has_tools
+                    || has_history
+                    || has_reasoning_history
+                    || has_answer_history
+                    || has_live_history) => compact_idle_history_actions(
+            width,
+            has_answer_history,
+            has_reasoning || has_reasoning_history,
+            has_tools || has_history,
+            has_live_history,
+        ),
         (false, width) if width >= 18 && has_reasoning => {
-            format!(" Input · {} ", reasoning_hint.unwrap_or("Ctrl+R reasoning"))
+            format!(" Input · {}{inspect_compact} ", reasoning_hint.unwrap_or("Ctrl+R reasoning"))
         }
-        (false, width) if width >= 14 && (has_tools || has_history) => " In ^O ".to_owned(),
-        (false, width) if width >= 14 && has_reasoning => " In · ^R ".to_owned(),
+        (false, width)
+            if width >= 14
+                && (has_tools
+                    || has_history
+                    || has_reasoning_history
+                    || has_answer_history
+                    || has_live_history) => compact_idle_history_actions(
+            width,
+            has_answer_history,
+            has_reasoning || has_reasoning_history,
+            has_tools || has_history,
+            has_live_history,
+        ),
+        (false, width) if width >= 14 && has_reasoning => {
+            format!(" In · ^R{inspect_compact} ")
+        }
         (false, _) => " Input ".to_owned(),
     };
     (
         clip_display_cells(&text, width.saturating_sub(2)),
-        if busy { Role::Warn } else { Role::Primary },
+        // Busy is an active mode, not a warning; keep the single cyan focus
+        // accent available for motion and current interaction.
+        Role::Primary,
     )
 }
 
@@ -291,6 +580,121 @@ pub(crate) fn render_status_template(tmpl: &str, v: &StatusVars) -> String {
         .replace("{ctx}", &v.ctx)
         .replace("{tokens}", &v.tokens)
         .replace("{cwd}", &v.cwd)
+}
+
+/// 窄终端底栏的固定优先级投影：上下文、输入/输出 token、effort 优先，
+/// 让默认模板不会因折行吃掉 Answer 槽；宽屏仍完整尊重用户模板。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compact_status_line(
+    width: u16,
+    provider: &str,
+    model: &str,
+    ctx: &str,
+    total_tokens: usize,
+    input_tokens: &str,
+    output_tokens: &str,
+    effort: &str,
+) -> String {
+    let input = compact_count(input_tokens);
+    let output = compact_count(output_tokens);
+    let total = compact_count(&total_tokens.to_string());
+    let effort_full = inline_display(effort);
+    let effort_short = compact_effort(effort);
+    let ctx = inline_display(ctx);
+    let provider = clip_display_cells(&inline_display(provider), 10);
+    let model = clip_display_cells(&inline_display(model), 18);
+
+    let line = match width {
+        72.. => {
+            format!("{provider}/{model} · C{ctx} · I{input} O{output} · E{effort_full} · T{total}")
+        }
+        48.. => format!("M:{model} · C{ctx} · I{input} O{output} · E{effort_full}"),
+        32.. => format!("C{ctx} · I{input} O{output} · E{effort_short}"),
+        20.. => format!("I{input} O{output} E{effort_short}"),
+        _ => format!("E{effort_short} I{input} O{output}"),
+    };
+    clip_display_cells(&line, width)
+}
+
+/// 仅给紧凑遥测增加语义层级：标签弱化、数值保持清晰，文本与宽度
+/// 仍由 `compact_status_line` 决定；非紧凑的用户自定义模板原样呈现。
+pub(crate) fn status_line_projection(text: &str) -> Text<'static> {
+    let segments = text.split(" · ").collect::<Vec<_>>();
+    let compact = segments.len() >= 2
+        && segments.iter().any(|segment| segment.starts_with('C'))
+        && segments.iter().any(|segment| segment.starts_with('E'))
+        && segments
+            .iter()
+            .any(|segment| segment.contains("I") || segment.contains("O"));
+    if !compact {
+        return Text::from(text.to_owned());
+    }
+
+    let mut spans = Vec::new();
+    for (index, segment) in segments.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(
+                " · ",
+                Style::default()
+                    .fg(role_color(Role::Label))
+                    .add_modifier(Modifier::DIM),
+            ));
+        }
+        for (token_index, token) in segment.split_whitespace().enumerate() {
+            if token_index > 0 {
+                spans.push(Span::raw(" "));
+            }
+            let mut chars = token.chars();
+            let Some(label) = chars.next() else {
+                continue;
+            };
+            if matches!(label, 'C' | 'I' | 'O' | 'E' | 'T' | 'M') {
+                spans.push(Span::styled(
+                    label.to_string(),
+                    Style::default()
+                        .fg(role_color(Role::Label))
+                        .add_modifier(Modifier::DIM),
+                ));
+                spans.push(Span::styled(
+                    chars.collect::<String>(),
+                    Style::default().fg(role_color(Role::Metric)),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    token.to_owned(),
+                    Style::default().fg(role_color(Role::Metric)),
+                ));
+            }
+        }
+    }
+    Text::from(Line::from(spans))
+}
+
+fn compact_count(value: &str) -> String {
+    let value = value.trim();
+    let approximate = value.starts_with('~');
+    let digits = value.strip_prefix('~').unwrap_or(value);
+    let Some(number) = digits.parse::<u64>().ok() else {
+        return clip_display_cells(value, 8);
+    };
+    let compact = fmt_ctx(number);
+    if approximate {
+        format!("~{compact}")
+    } else {
+        compact
+    }
+}
+
+fn compact_effort(effort: &str) -> String {
+    match effort.trim().to_ascii_lowercase().as_str() {
+        "default" => "def".to_owned(),
+        "minimal" => "min".to_owned(),
+        "low" => "lo".to_owned(),
+        "medium" => "med".to_owned(),
+        "high" => "hi".to_owned(),
+        "xhigh" | "extra-high" | "extra high" => "xhi".to_owned(),
+        other => clip_display_cells(other, 5),
+    }
 }
 
 /// 当前工作目录末段名(状态栏用),取不到 → 空串。

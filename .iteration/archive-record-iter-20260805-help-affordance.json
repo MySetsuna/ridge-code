@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-help-affordance",
+  "at": "2026-08-05",
+  "type": "iteration",
+  "facts": [
+    "The same-session NLM lifecycle-closure proposal returned sources_used:[] and empty citations; its per-block border/container direction overlaps the existing bounded live rails and static closure, so it was not adopted.",
+    "CodeGraph confirmed Ctrl+R/Ctrl+O/Ctrl+T routing is already correct. The concrete discoverability gap was the first /help branch omitting Ctrl+R/Ctrl+O and a duplicate unreachable /help arm; no-answer feedback also said completed although the Answer archive can retain PARTIAL entries.",
+    "The existing Ridge member notebooklm-mcp-maintainer was found and captured; its independent Deep Research attempt hit the NotebookLM quota limit, made no repository changes, and no new member was created. The notebook still has one useful Active Note and no safe stale/completed deletion."
+  ],
+  "evidence": [
+    "notebook_gate.py validate-output on .iteration/notebooklm-response-20260805-lifecycle-closure.json: valid",
+    "CodeGraph over live_block_end_rail/render_live_tail_projection/live_surface_block and input_action/panel_attention_action",
+    "cargo fmt --all -- --check; cargo test --workspace --locked --offline --quiet; cargo clippy --workspace --all-targets --locked --offline -- -D warnings: passed",
+    "cargo build --workspace --locked --offline and --release: passed",
+    "windows-pty-e2e.ps1 Debug BusyFixture stable rerun and Release StressFixture: passed"
+  ],
+  "paths": [
+    "crates/agent/src/tui/command.rs",
+    "crates/agent/src/tui/mod.rs",
+    ".iteration/notebooklm-response-20260805-lifecycle-closure.json"
+  ],
+  "symbols": [
+    "handle_command",
+    "input_action",
+    "panel_attention_action"
+  ],
+  "next": [
+    "Continue with one locally reproduced presentation defect; reject broad per-block containers without a new measured gap."
+  ]
+}

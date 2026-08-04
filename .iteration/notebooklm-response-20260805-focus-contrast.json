@@ -1,0 +1,35 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [],
+  "contradictions": [
+    "NLM's proposed audit contrast/focus layer overlaps existing LiveTranscript focus, semantic rails, AlertEdge styling, and bounded live projection; its cited source mapping is empty.",
+    "NLM names a non-existent render/transcript.rs boundary and its O(k/n), 16ms, and ConHost fallback claims are not local facts.",
+    "The current Answer/Reasoning audit selection can isolate one block, but explicit Tool focus still renders surrounding live blocks without a general focus-state style projection."
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "When a semantic block is focused during live inspection, its anchored rows can be made visually primary while surrounding anchored rows become quiet without changing text, height, or execution state.",
+      "support": ["CodeGraph shows every live row carries LiveLineAnchor and LiveTranscript exposes focused_block/is_inspecting.", "render_live_line_with_alert_edge currently styles channel kind and focused tool details but has no general semantic-focus modifier."],
+      "against": ["Answer/Reasoning focus can already use audit_lines to show only the selected block, so contrast must be limited to mixed live inspection such as focused Tool."],
+      "experiment": "Pass the existing focused block into the live line style projection, add bounded focus/non-focus modifier regressions, and verify unchanged rows, width, and PTY behavior."
+    }
+  ],
+  "candidates": [
+    {
+      "core": "Add a presentation-only focus modifier to the existing live line renderer: in inspection with an explicit semantic focus, anchored rows matching it gain a restrained primary emphasis and other anchored rows gain quiet contrast; normal Follow/live rendering is unchanged.",
+      "constraints": ["reuse LiveLineAnchor, focused_block, is_inspecting, existing renderer and cache", "no new renderer, parser, physical rows, key mapping, execution/provider/MCP/queue state, or fixed performance threshold", "preserve Markdown, AlertEdge, Tool folding, Answer/Reasoning rails, CJK width, resize, HOLD/FOLLOW and takeover"],
+      "risks": ["do not dim the sole selected Answer/Reasoning audit projection or make reasoning unreadable", "only apply when explicit focus exists; ordinary live output and HOLD without focus retain current styling"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/draw.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["mixed focused-tool style regression proving focused rows are bold and context rows quiet", "workspace tests/fmt/clippy/Debug/Release builds", "Dev/Release PTY with Audit/Inspector, reasoning, answer, folded tool, narrow resize and double Ctrl-C"]
+    }
+  ],
+  "recommendation": "Reject a second audit renderer and all ungrounded numeric/terminal claims. Accept the narrow existing-renderer focus style projection only after local tests prove it changes styling, not content, layout, or interaction semantics.",
+  "next_step": {
+    "type": "implementation",
+    "value": "Implement and verify the anchored semantic-focus style projection in the existing live renderer."
+  },
+  "sources_used": [],
+  "citations": {},
+  "stop_conditions": ["Do not add a second Markdown parser, renderer, virtualizer, or execution state machine.", "Do not add physical container rows or unbounded per-token storage.", "Do not remap keys or query excluded user-owned deep-research status.", "Do not delete the sole Active Note."]
+}

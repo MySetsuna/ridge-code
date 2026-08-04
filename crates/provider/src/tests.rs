@@ -1,7 +1,7 @@
 use super::*;
 use crate::http::HttpClient;
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[test]
 fn openai_and_anthropic_normalize_to_same_tool_call() {
@@ -69,6 +69,35 @@ async fn swap_provider_hot_switches_inner() {
     // 热切换到 B → 下一次补全即走 B(图无需重建)。
     sw.swap(b);
     assert_eq!(sw.complete(&req).await.unwrap().text, "from-B");
+}
+
+#[tokio::test]
+async fn scripted_delay_streams_reasoning_before_answer() {
+    let provider = ScriptedProvider::new(vec![Completion {
+        reasoning: "thinking".into(),
+        text: "answer".into(),
+        ..Default::default()
+    }])
+    .with_delay(std::time::Duration::from_millis(1));
+    let chunks = Mutex::new(Vec::new());
+    let on_token = |chunk: StreamChunk| {
+        chunks.lock().unwrap().push(match chunk {
+            StreamChunk::Reasoning(text) => format!("reasoning:{text}"),
+            StreamChunk::Answer(text) => format!("answer:{text}"),
+        });
+    };
+
+    let completion = provider
+        .complete_streaming(&CompletionRequest::default(), &on_token)
+        .await
+        .unwrap();
+
+    assert_eq!(completion.reasoning, "thinking");
+    assert_eq!(completion.text, "answer");
+    assert_eq!(
+        *chunks.lock().unwrap(),
+        vec!["reasoning:thinking", "answer:answer"]
+    );
 }
 
 #[test]
@@ -258,6 +287,32 @@ impl HttpClient for StubGet {
     }
 }
 
+struct CaptureGet {
+    value: Value,
+    url: Arc<Mutex<Option<String>>>,
+}
+
+#[async_trait::async_trait]
+impl HttpClient for CaptureGet {
+    async fn post_json(
+        &self,
+        _u: &str,
+        _h: &[(String, String)],
+        _b: &Value,
+    ) -> Result<Value, ProviderError> {
+        Err("only GET".into())
+    }
+
+    async fn get_json(
+        &self,
+        url: &str,
+        _headers: &[(String, String)],
+    ) -> Result<Value, ProviderError> {
+        *self.url.lock().unwrap() = Some(url.to_string());
+        Ok(self.value.clone())
+    }
+}
+
 #[test]
 fn parse_model_list_openai() {
     let v = json!({"object":"list","data":[
@@ -275,7 +330,8 @@ fn parse_chatgpt_model_catalog_uses_slug_and_models_array() {
     let v = json!({
         "models": [
             {"slug": "gpt-5.3-codex", "context_window": 200000},
-            {"slug": "gpt-5.4"}
+            {"slug": "gpt-5.4"},
+            {"slug": "hidden-rollout", "visibility": "hide"}
         ]
     });
     assert_eq!(
@@ -324,6 +380,29 @@ async fn fetch_models_via_stub_http() {
             context: Some(32768)
         }]
     );
+}
+
+#[tokio::test]
+async fn fetch_chatgpt_models_uses_codex_client_version_query() {
+    let url = Arc::new(Mutex::new(None));
+    let got = models::fetch_chatgpt_models(
+        &CaptureGet {
+            value: json!({"models":[{"slug":"gpt-5.6-sol","visibility":"list"}]}),
+            url: url.clone(),
+        },
+        "https://chatgpt.com/backend-api/codex",
+        "access",
+        Some("account"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(got[0].id, "gpt-5.6-sol");
+    assert!(url
+        .lock()
+        .unwrap()
+        .as_deref()
+        .is_some_and(|value| value
+            .starts_with("https://chatgpt.com/backend-api/codex/models?client_version=")));
 }
 
 /// 假流式传输:把预设的 SSE `data:` 帧逐条喂给 on_line(不用 mockito、零网络)。
@@ -527,6 +606,13 @@ async fn openai_provider_sends_bearer_auth_and_correct_url() {
     assert_eq!(seen.body["messages"][0]["role"], "user");
 }
 
+#[test]
+fn reasoning_effort_accepts_canonical_values_case_insensitively() {
+    assert_eq!(normalize_reasoning_effort(" HIGH "), Some("high"));
+    assert_eq!(normalize_reasoning_effort("xhigh"), Some("xhigh"));
+    assert_eq!(normalize_reasoning_effort("unknown"), None);
+}
+
 #[tokio::test]
 async fn chatgpt_provider_uses_codex_responses_wire() {
     let cap = Arc::new(StreamingCapturingHttp::new(vec![
@@ -542,6 +628,7 @@ async fn chatgpt_provider_uses_codex_responses_wire() {
         "oauth-access",
         Some("acct-123".into()),
     )
+    .with_reasoning_effort("high")
     .with_http(cap.clone());
     let c = p
         .complete(&CompletionRequest {
@@ -580,7 +667,12 @@ async fn chatgpt_provider_uses_codex_responses_wire() {
         .headers
         .iter()
         .any(|(k, v)| k == "ChatGPT-Account-Id" && v == "acct-123"));
+    assert!(seen
+        .headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("originator") && v == "codex_cli_rs"));
     assert_eq!(seen.body["model"], "gpt-5");
+    assert_eq!(seen.body["reasoning"]["effort"], "high");
     assert_eq!(seen.body["instructions"], "be concise");
     assert!(seen.body.get("messages").is_none());
     assert_eq!(seen.body["input"][0]["type"], "message");
@@ -589,6 +681,49 @@ async fn chatgpt_provider_uses_codex_responses_wire() {
     assert_eq!(seen.body["tools"][0]["type"], "function");
     assert_eq!(seen.body["stream"], true);
     assert_eq!(seen.body["store"], false);
+}
+
+#[test]
+fn repair_tool_history_removes_orphans_but_keeps_completed_pairs() {
+    let history = vec![
+        Message::user("inspect"),
+        Message::assistant("").with_tool_calls(vec![
+            ToolCall {
+                id: "orphan".into(),
+                name: "run_shell".into(),
+                arguments: json!({"cmd": "never"}),
+            },
+            ToolCall {
+                id: "complete".into(),
+                name: "run_shell".into(),
+                arguments: json!({"cmd": "pwd"}),
+            },
+        ]),
+        Message::tool_result("complete", "ok"),
+        Message::tool_result("stale", "discard"),
+        Message::assistant("next"),
+    ];
+
+    let repaired = repair_tool_history(&history);
+    assert_eq!(repaired.len(), 4);
+    assert_eq!(repaired[1].tool_calls.len(), 1);
+    assert_eq!(repaired[1].tool_calls[0].id, "complete");
+    assert_eq!(repaired[2].tool_call_id.as_deref(), Some("complete"));
+    assert_eq!(repaired[3].content, "next");
+
+    let body = crate::responses::build_request(
+        "gpt-5",
+        &CompletionRequest {
+            messages: history,
+            tools: Vec::new(),
+        },
+    );
+    let input = body["input"].as_array().expect("responses input");
+    assert_eq!(input[1]["type"], "function_call");
+    assert_eq!(input[1]["call_id"], "complete");
+    assert_eq!(input[2]["type"], "function_call_output");
+    assert_eq!(input[2]["call_id"], "complete");
+    assert_eq!(input.len(), 4);
 }
 
 #[tokio::test]

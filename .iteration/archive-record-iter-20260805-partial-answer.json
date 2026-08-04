@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-partial-answer",
+  "at": "2026-08-05",
+  "type": "iteration",
+  "facts": [
+    "The latest same-session NLM response used only the manually imported theory source and returned no usable citations; its second highlighter/virtualizer proposal was rejected because the current bounded live projection already owns that boundary.",
+    "Local audit found a concrete continuity gap: a normal graph result without `(final)` could clear an already-streamed Answer. The existing bounded PARTIAL archive now retains it before live streams are cleared, while a real final event is not duplicated.",
+    "The existing Ridge member `notebooklm-mcp-maintainer` was reused; no new member was created, and the single useful Active Note was retained."
+  ],
+  "evidence": [
+    "notebook_gate.py validate-output: valid",
+    "focused unfinished_answer_is_retained_for_error_and_non_final_stops: passed",
+    "cargo test -p agent --bin ridgecode --locked --offline --quiet: passed (290 tests)",
+    "CodeGraph over LiveOutputCache/render_live_tail_projection/render_live_line_with_alert_edge and TUI lifecycle",
+    "cargo fmt --all -- --check; cargo clippy --workspace --all-targets --locked --offline -- -D warnings; Debug/Release build: passed",
+    "windows-pty-e2e.ps1 Debug BusyFixture and Release StressFixture: status=passed",
+    "state snapshot, requirements, NLM, iteration, and budget gates: passed"
+  ],
+  "paths": [
+    "crates/agent/src/tui/mod.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260805-incremental-highlight.json"
+  ],
+  "symbols": [
+    "unfinished_answer_reason",
+    "Ui::commit_live_answers",
+    "Ui::clear_streams",
+    "is_final_event"
+  ],
+  "next": [
+    "Continue with one locally reproduced presentation gap; do not add a second renderer/virtualizer without evidence."
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "The same-session NLM answer again recommends active lifecycle container borders and conclusion closure lines, but reports sources_used:[] and empty citation mappings.",
+      "evidence": "Conversation 68791fb7-659a-4ad6-a86c-beb7ac694781; query source selection limited to 8862d715-ffad-4288-b7eb-173260e2dcff."
+    },
+    {
+      "fact": "The answer explicitly labels the physical delimiter gap as a suggestion/hypothesis requiring local verification, not as a repository fact.",
+      "evidence": "NLM answer's evidence-versus-suggestion section and requested local CodeGraph experiment."
+    }
+  ],
+  "contradictions": [],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "A new per-block border container would improve lifecycle scanability beyond the existing live rails and block-end closure.",
+      "support": ["NLM claims horizontal closure improves scanability"],
+      "against": ["approved constraints reject extra rows and a second renderer", "existing code already has bounded block-end rails and rounded live surfaces"],
+      "experiment": "Audit current live/static closure with CodeGraph and width/resize/HOLD/FOLLOW tests before accepting any presentation change."
+    }
+  ],
+  "candidates": [],
+  "recommendation": "Do not add per-block borders or queue placeholders until local evidence proves existing closure insufficient.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Find one concrete unverified presentation or interaction gap in current TUI code, then implement only that bounded slice."
+  },
+  "stop_conditions": [
+    "Any extra physical rows, duplicate renderer, or changed Tab/Enter/queue/takeover semantics",
+    "Any width, CJK, Markdown, HOLD/FOLLOW, or resize regression",
+    "No concrete local gap after CodeGraph audit"
+  ]
+}

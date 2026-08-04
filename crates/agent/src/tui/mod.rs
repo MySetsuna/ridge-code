@@ -21,13 +21,17 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Widget, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Widget, Wrap,
+    },
     Terminal, TerminalOptions, Viewport,
 };
 
 use super::*;
 
 type Term = Terminal<CrosstermBackend<io::Stdout>>;
+
+pub(crate) type ModelCatalog = Vec<(String, Vec<provider::models::ModelInfo>)>;
 
 /// Live 视口总高:状态行 1 + 流式尾巴 ≥5 + 输入框 3..=8。内联模式下 ratatui 只管这块,
 /// 高度恒小于终端 —— 从根上杜绝「动态高度超视口触发全屏清屏」的闪烁根因。
@@ -51,7 +55,51 @@ fn can_start_task(busy: bool, task_running: bool) -> bool {
     !busy && !task_running
 }
 
-struct TerminalGuard;
+/// Opt-in lifecycle trace for isolated terminal harnesses; normal TUI does no file I/O.
+fn tui_trace(stage: &str) {
+    let Some(path) = std::env::var_os("RIDGE_TUI_TRACE") else {
+        return;
+    };
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{stage}");
+    }
+}
+
+/// Record the hand-off boundary before aborting the task.  The task is still
+/// cancelled immediately; this extra presentation event lets Activity/trace
+/// consumers distinguish a user takeover from a provider failure.
+fn mark_takeover_requested(ui: &mut Ui) {
+    ui.record_activity(
+        ActivityKind::Takeover,
+        "interrupting · cancelling current turn",
+    );
+}
+
+/// Retain streamed answer text whenever the graph finishes without emitting
+/// its explicit `(final)` event.  A non-error stop can still be unverified or
+/// step-capped; clearing the live viewport in that case must not erase text
+/// the user already saw.
+fn unfinished_answer_reason(result: &Result<AgentState, String>) -> Option<&'static str> {
+    match result {
+        Err(_) => Some("run ended before final response"),
+        Ok(out) if !out.messages.iter().any(|message| is_final_event(message)) => {
+            Some("run stopped before final response")
+        }
+        Ok(_) => None,
+    }
+}
+
+struct TerminalGuard {
+    keyboard_enhancement_pushed: bool,
+}
 impl TerminalGuard {
     fn enter() -> anyhow::Result<(Self, Term)> {
         enable_raw_mode()?;
@@ -64,12 +112,21 @@ impl TerminalGuard {
         // ⚠ **仅非 Windows 推**:Windows Terminal 的 Kitty 键盘协议实现有缺陷 —— 开了它,**逐字打的空格键
         // 会被吞**(粘贴走 BracketedPaste 不受影响,故长任务粘贴照常);Windows 回落普通 WinAPI 键事件,
         // 空格正常,仅失 Shift+Enter 精确换行(Alt+Enter / Ctrl+J 仍可换行,损失可接受)。
-        if !cfg!(windows) {
-            let _ = execute!(
+        // Windows stays on the legacy WinAPI path by default; the opt-in
+        // fixture flag lets a raw ConPTY harness send CSI-u Ctrl+Enter without
+        // changing normal Windows Terminal compatibility.
+        let keyboard_enhancement_pushed = if !cfg!(windows)
+            || std::env::var("RIDGE_TUI_KITTY").ok().as_deref() == Some("1")
+        {
+            execute!(
                 stdout,
                 PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-            );
-        }
+            )
+            .is_ok()
+        } else {
+            false
+        };
+        set_precise_multiline_input_enabled(keyboard_enhancement_pushed);
         // 主屏内联视口(iter-26):不进备用屏,终端原生历史/选取/搜索神圣不可侵犯。
         let term = Terminal::with_options(
             CrosstermBackend::new(stdout),
@@ -77,13 +134,18 @@ impl TerminalGuard {
                 viewport: Viewport::Inline(inline_height_cap()),
             },
         )?;
-        Ok((Self, term))
+        Ok((
+            Self {
+                keyboard_enhancement_pushed,
+            },
+            term,
+        ))
     }
 }
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        // 与 enter 对称:非 Windows 才需还原(Windows 从未推,pop 空栈无谓)。
-        if !cfg!(windows) {
+        // 与 enter 对称:仅在 KKP 命令确实写出后还原,避免误发 pop。
+        if self.keyboard_enhancement_pushed {
             let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
         }
         let _ = execute!(io::stdout(), event::DisableBracketedPaste);
@@ -98,6 +160,7 @@ mod draw;
 mod eventfmt;
 mod input;
 mod panel;
+mod presentation;
 mod render;
 mod status;
 #[cfg(test)]
@@ -110,6 +173,7 @@ pub(crate) use draw::*;
 pub(crate) use eventfmt::*;
 pub(crate) use input::*;
 pub(crate) use panel::*;
+pub(crate) use presentation::*;
 pub(crate) use render::*;
 pub(crate) use status::*;
 pub(crate) use transcript::*;
@@ -127,7 +191,9 @@ pub(super) async fn run(
     agents: Arc<agent::Agents>,
     read_only: bool,
     commands: Vec<agent::SlashCommand>,
+    initial_effort: String,
 ) -> anyhow::Result<()> {
+    tui_trace("run.enter");
     set_dynamic_commands(&commands); // 自定义/skill 命令名进补全源(iter-39)
     let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
     let approver: Arc<dyn Approver> = if skip_danger {
@@ -145,15 +211,40 @@ pub(super) async fn run(
         agents.clone(),
         read_only,
     )?);
+    tui_trace("agent.ready");
     let (event_tx, mut event_rx) =
         tokio::sync::mpsc::unbounded_channel::<StreamEvent<AgentState>>();
     let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<provider::StreamChunk>();
     let (done_tx, mut done_rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<AgentState, String>>();
     let (_guard, mut terminal) = TerminalGuard::enter()?;
-    let mut ui = Ui::default();
+    tui_trace("terminal.ready");
+    let mut live_cache = LiveOutputCache::default();
+    let mut ui = Ui {
+        effort: Some(initial_effort),
+        ..Ui::default()
+    };
+    let session_input_history = if history.is_empty() {
+        load_global_input_history()
+    } else {
+        let saved = load_session_input_history();
+        if saved.is_empty() {
+            history
+                .iter()
+                .filter_map(|message| match message.role {
+                    provider::Role::User => Some(message.content.clone()),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            saved
+        }
+    };
+    ui.input
+        .set_history(session_input_history, !history.is_empty());
+    let mut model_catalog_rx = Some(start_model_catalog_preload(&meta.provider, &meta.base_url));
     ui.note(
-        "RidgeCode  ·  inline mode: output lands in terminal history (native scroll/select) · Enter to send · Ctrl+J newline (Shift+Enter where supported) · Ctrl-C interrupts; press twice to exit · /help",
+        "RidgeCode  ·  inline mode: output lands in terminal history (native scroll/select) · Enter send/queue · Ctrl+Enter front-queue without interrupt · Ctrl+I/Alt+I live inspect · Ctrl+Q queue · Ctrl+Space hold/follow · Ctrl+A answers · Ctrl+T activity · Ctrl+J newline · Esc/Ctrl-C takeover; press Ctrl-C twice to exit · /help",
         Color::Cyan,
     );
     if skip_danger {
@@ -175,8 +266,13 @@ pub(super) async fn run(
     let mut printed = 0usize;
     // 忙碌粘条计时(iter-31):任务起点,Submit 置、done/中断清;读秒/速率据此算(app 运行时用 Instant,非脚本)。
     let mut task_started: Option<Instant> = None;
+    let mut last_activity: Option<Instant> = None;
     // 统一提交点(iter-33):键入的新提交 or 队首,非 busy 时于主环顶消费(起任务/跑命令),消除重复。
-    let mut pending_submit: Option<String> = None;
+    // Opt-in no-network fixture starts one durable task before the first draw;
+    // the real input path remains unchanged and production never auto-submits.
+    let mut pending_submit: Option<String> = (std::env::var("RIDGE_TUI_FIXTURE").ok().as_deref()
+        == Some("busy"))
+    .then(|| "fixture busy task".to_string());
 
     // 阻塞读线程(iter-23):不开 crossterm `event-stream` feature(免引 futures 依赖),
     // std 线程 `event::read()` 转发进 tokio 通道;主环退出后线程仍阻塞在 read 上,随进程结束回收。
@@ -236,6 +332,32 @@ pub(super) async fn run(
     let mut last_ctrl_c: Option<Instant> = None;
 
     'main: loop {
+        if ui.model_catalog_reload {
+            ui.model_catalog_reload = false;
+            ui.model_catalog = None;
+            model_catalog_rx = Some(start_model_catalog_preload(&meta.provider, &meta.base_url));
+        }
+        let model_catalog_result = match model_catalog_rx.as_mut() {
+            Some(receiver) => match receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => Some((Vec::new(), 1)),
+            },
+            None => None,
+        };
+        if let Some((grouped, failures)) = model_catalog_result {
+            model_catalog_rx = None;
+            auto_select_chatgpt_model(&grouped, &mut meta, &swap, &mut ui);
+            let empty = grouped.is_empty();
+            ui.model_catalog = Some(grouped);
+            if empty && failures > 0 {
+                ui.note(
+                    "model catalog unavailable; retry /model after checking credentials or network",
+                    Color::Yellow,
+                );
+            }
+            dirty = true;
+        }
         let oauth_device_event = match ui.oauth_device.as_mut() {
             Some(flow) => match flow.receiver.try_recv() {
                 Ok(event) => Some(event),
@@ -248,22 +370,26 @@ pub(super) async fn run(
         };
         if let Some(event) = oauth_device_event {
             match event {
-                DeviceOAuthEvent::Ready { user_code, opened } => ui.note(
-                    format!(
-                        "Codex device auth: {} browser at {} and enter code: {user_code}",
-                        if opened {
-                            "browser opened; visit"
-                        } else {
-                            "open"
-                        },
-                        provider::oauth::OPENAI_DEVICE_VERIFICATION_URL
-                    ),
-                    Color::Cyan,
-                ),
+                DeviceOAuthEvent::Ready { user_code, opened } => {
+                    ui.device_auth_status = Some(format!("Device code: {user_code}"));
+                    ui.note(
+                        format!(
+                            "Codex device auth: {} browser at {} and enter code: {user_code}",
+                            if opened {
+                                "browser opened; visit"
+                            } else {
+                                "open"
+                            },
+                            provider::oauth::OPENAI_DEVICE_VERIFICATION_URL
+                        ),
+                        Color::Cyan,
+                    );
+                }
                 DeviceOAuthEvent::Complete(result) => {
                     ui.oauth_device.take();
                     match result {
                         Ok(token) => {
+                            ui.device_auth_status = None;
                             apply_oauth_token(
                                 &provider::oauth::OPENAI,
                                 token,
@@ -273,6 +399,7 @@ pub(super) async fn run(
                             );
                         }
                         Err(error) => {
+                            ui.device_auth_status = Some(format!("Device auth failed: {error}"));
                             ui.note(format!("Codex device OAuth failed: {error}"), Color::Red)
                         }
                     }
@@ -307,7 +434,7 @@ pub(super) async fn run(
         // 起任务/跑命令的逻辑**只此一处**(键 Submit 臂与 done 队列接跑共用),消除重复。
         if can_start_task(ui.busy, task.is_some()) {
             if let Some(input) = pending_submit.take() {
-                if run_command(
+                let should_exit = run_command(
                     &input,
                     &mut ui,
                     &mut history,
@@ -319,8 +446,20 @@ pub(super) async fn run(
                     session_tokens,
                     session_turns,
                 )
-                .await?
-                {
+                .await?;
+                let starts_session = !input.starts_with('/') || ui.run_task.is_some();
+                if starts_session && !ui.input.session_mode {
+                    ui.input.drop_last_history_if(&input);
+                    save_global_input_history(&ui.input.history);
+                    ui.input.begin_session();
+                    ui.input.push_history(&input);
+                } else if !ui.input.session_mode {
+                    save_global_input_history(&ui.input.history);
+                }
+                if ui.input.session_mode {
+                    save_session_input_history(&ui.input.history);
+                }
+                if should_exit {
                     break 'main;
                 }
                 // 普通输入直接是任务;斜杠命令若为自定义/skill 命令,run_command 已把展开的 prompt 置 ui.run_task。
@@ -335,12 +474,17 @@ pub(super) async fn run(
                     last_task = Some(ti.clone());
                     retry_count = 0; // 新任务:重试计数清零
                     ui.busy = true;
+                    ui.waiting = false;
                     ui.phase = "reasoning".into();
+                    ui.set_activity("starting task");
                     ui.clear_streams();
                     ui.stream_tokens = 0;
+                    ui.input_tokens = 0;
+                    ui.output_tokens = 0;
                     ui.superstep = 0;
                     ui.pending_call = None;
                     task_started = Some(Instant::now());
+                    last_activity = task_started;
                     printed = 0;
                     task = Some(start_task(&ti, &history));
                 }
@@ -353,6 +497,7 @@ pub(super) async fn run(
             dirty = true;
         }
         if should_draw(dirty, animation_due) {
+            tui_trace("draw.begin");
             ui.frame = ui.frame.wrapping_add(1);
             let elapsed_ms = task_started.map(|t| t.elapsed().as_millis()).unwrap_or(0);
             let ctx_used = history
@@ -367,8 +512,18 @@ pub(super) async fn run(
                 ctx_used,
                 queued: ui.queued.len(),
             };
-            terminal
-                .draw(|frame| draw(frame, &ui, &meta, session_tokens, &vitals, pending.as_ref()))?;
+            terminal.draw(|frame| {
+                draw_with_cache(
+                    frame,
+                    &ui,
+                    &meta,
+                    session_tokens,
+                    &vitals,
+                    pending.as_ref(),
+                    &mut live_cache,
+                )
+            })?;
+            tui_trace("draw.end");
             dirty = false;
             animation_due = false;
         }
@@ -399,7 +554,7 @@ pub(super) async fn run(
                     continue;
                 };
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && key.code == KeyCode::Char('c')
+                    && matches!(key.code, KeyCode::Char('c' | 'C'))
                 {
                     let now = Instant::now();
                     if is_second_ctrl_c(last_ctrl_c, now) {
@@ -407,10 +562,17 @@ pub(super) async fn run(
                     }
                     last_ctrl_c = Some(now);
                     if let Some(handle) = task.take() {
+                        mark_takeover_requested(&mut ui);
                         handle.abort();
                         *bus.lock().unwrap() = None;
                         ui.busy = false;
+                        ui.waiting = false;
                         ui.commit_live_reasoning(
+                            ui.superstep,
+                            task_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                        );
+                        ui.commit_live_answers(
+                            "interrupted before final response",
                             ui.superstep,
                             task_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
                         );
@@ -419,14 +581,15 @@ pub(super) async fn run(
                         ui.superstep = 0;
                         ui.pending_call = None;
                         task_started = None;
+                        last_activity = None;
                         retry_count = 0;
-                        let dropped = ui.queued.len();
-                        ui.queued.clear();
                         pending_submit = None;
-                        let tail = if dropped > 0 {
-                            format!("interrupted current task (and cleared {dropped} queued)")
+                        ui.set_activity("takeover ready");
+                        let kept = ui.queued.len();
+                        let tail = if kept > 0 {
+                            format!("interrupted current task · takeover ready · {kept} queued kept")
                         } else {
-                            "interrupted current task".into()
+                            "interrupted current task · takeover ready".into()
                         };
                         ui.note(tail, Color::Yellow);
                     } else {
@@ -461,13 +624,78 @@ pub(super) async fn run(
                     }
                     continue;
                 }
+                if queue_panel_toggle_action(&key)
+                    && (ui.panel.is_none()
+                        || ui
+                            .panel
+                            .as_ref()
+                            .is_some_and(|panel| panel.allows_attention_switch()))
+                    && ui.popup.is_none()
+                {
+                    ui.toggle_queue_panel();
+                    continue;
+                }
+                if live_history_toggle_action(
+                    &key,
+                    ui.popup.is_some(),
+                    ui.transcript.has_history(),
+                ) && (ui.panel.is_none()
+                    || ui
+                        .panel
+                        .as_ref()
+                        .is_some_and(|panel| panel.allows_attention_switch()))
+                {
+                    ui.toggle_live_history();
+                    continue;
+                }
+                if let Some(action) = panel_attention_action(
+                    &key,
+                    ui.panel
+                        .as_ref()
+                        .is_some_and(|panel| panel.allows_attention_switch()),
+                    ui.popup.is_some(),
+                ) {
+                    match action {
+                        InputAction::ToggleDetails => {
+                            if !ui.toggle_details_or_history() {
+                                ui.note("no tool details or history", Color::Gray);
+                            }
+                        }
+                        InputAction::ToggleReasoning => {
+                            if !ui.toggle_reasoning_or_history() {
+                                ui.note("no reasoning output or history", Color::Gray);
+                            }
+                        }
+                        InputAction::ToggleAnswer => {
+                            if !ui.toggle_answer_or_history() {
+                                ui.note("no recoverable answer history", Color::Gray);
+                            }
+                        }
+                        InputAction::ToggleActivity => ui.toggle_activity_panel(),
+                        _ => unreachable!("panel_attention_action only returns attention actions"),
+                    }
+                    continue;
+                }
                 // 交互页模态(iter-35):优先级 审批 > Panel > 浮窗 > 输入。编辑态字符入编辑缓冲,浏览态入 query。
                 if ui.panel.is_some() {
+                    if key.kind == KeyEventKind::Press
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(key.code, KeyCode::Char('t' | 'T'))
+                        && ui
+                            .panel
+                            .as_ref()
+                            .is_some_and(|panel| panel.kind == PanelKind::Activity)
+                    {
+                        ui.toggle_activity_panel();
+                        continue;
+                    }
                     match panel_action(&key) {
                         PanelAction::Esc => {
                             let cancel_oauth = ui.panel.as_ref().is_some_and(|p| {
                                 p.editing.is_some() && p.oauth_verifier.is_some()
                             });
+                            let cancel_device = ui.oauth_device.is_some()
+                                || ui.device_auth_status.is_some();
                             let p = ui.panel.as_mut().unwrap();
                             if p.editing.is_some() {
                                 p.editing = None; // 取消编辑
@@ -477,18 +705,74 @@ pub(super) async fn run(
                             if cancel_oauth {
                                 ui.oauth_callback.take();
                             }
+                            if cancel_device {
+                                ui.oauth_device.take();
+                                ui.device_auth_status = None;
+                            }
+                        }
+                        PanelAction::Remove => {
+                            let selection = ui.panel.as_ref().and_then(|panel| {
+                                if panel.editing.is_some() {
+                                    return None;
+                                }
+                                match panel.selected_action() {
+                                    PanelRowAction::RemoveQueued(index) => Some((index, true)),
+                                    PanelRowAction::None if panel.kind == PanelKind::Queue => {
+                                        panel.selected_index().map(|index| (index, false))
+                                    }
+                                    PanelRowAction::None | PanelRowAction::FocusLiveBlock(_) => None,
+                                }
+                            });
+                            if let Some((index, from_live_panel)) = selection {
+                                if let Some(message) = ui.remove_queued(index) {
+                                    ui.record_activity(
+                                        ActivityKind::Queue,
+                                        format!("removed · {}", clip_display_cells(&message, 44)),
+                                    );
+                                    ui.note(
+                                        format!(
+                                            "removed pending item ({} left): {}",
+                                            ui.queued.len(),
+                                            message
+                                        ),
+                                        role_color(Role::Warn),
+                                    );
+                                    if from_live_panel {
+                                        ui.refresh_live_history_panel();
+                                    } else {
+                                        ui.refresh_queue_panel();
+                                    }
+                                }
+                            } else if key.code == KeyCode::Backspace {
+                                let p = ui.panel.as_mut().unwrap();
+                                match &mut p.editing {
+                                    Some(buf) => {
+                                        buf.pop();
+                                    }
+                                    None => {
+                                        p.query.pop();
+                                        p.retype();
+                                    }
+                                }
+                            }
                         }
                         PanelAction::Up => {
-                            let p = ui.panel.as_mut().unwrap();
-                            if p.editing.is_none() {
-                                p.move_up();
+                            {
+                                let p = ui.panel.as_mut().unwrap();
+                                if p.editing.is_none() {
+                                    p.move_up();
+                                }
                             }
+                            ui.sync_live_panel_focus();
                         }
                         PanelAction::Down => {
-                            let p = ui.panel.as_mut().unwrap();
-                            if p.editing.is_none() {
-                                p.move_down();
+                            {
+                                let p = ui.panel.as_mut().unwrap();
+                                if p.editing.is_none() {
+                                    p.move_down();
+                                }
                             }
+                            ui.sync_live_panel_focus();
                         }
                         PanelAction::DetailPageUp => {
                             let p = ui.panel.as_mut().unwrap();
@@ -503,28 +787,40 @@ pub(super) async fn run(
                             }
                         }
                         PanelAction::PageUp => {
-                            let p = ui.panel.as_mut().unwrap();
-                            if p.editing.is_none() {
-                                p.page_up();
+                            {
+                                let p = ui.panel.as_mut().unwrap();
+                                if p.editing.is_none() {
+                                    p.page_up();
+                                }
                             }
+                            ui.sync_live_panel_focus();
                         }
                         PanelAction::PageDown => {
-                            let p = ui.panel.as_mut().unwrap();
-                            if p.editing.is_none() {
-                                p.page_down();
+                            {
+                                let p = ui.panel.as_mut().unwrap();
+                                if p.editing.is_none() {
+                                    p.page_down();
+                                }
                             }
+                            ui.sync_live_panel_focus();
                         }
                         PanelAction::First => {
-                            let p = ui.panel.as_mut().unwrap();
-                            if p.editing.is_none() {
-                                p.first();
+                            {
+                                let p = ui.panel.as_mut().unwrap();
+                                if p.editing.is_none() {
+                                    p.first();
+                                }
                             }
+                            ui.sync_live_panel_focus();
                         }
                         PanelAction::Last => {
-                            let p = ui.panel.as_mut().unwrap();
-                            if p.editing.is_none() {
-                                p.last();
+                            {
+                                let p = ui.panel.as_mut().unwrap();
+                                if p.editing.is_none() {
+                                    p.last();
+                                }
                             }
+                            ui.sync_live_panel_focus();
                         }
                         PanelAction::Backspace => {
                             let p = ui.panel.as_mut().unwrap();
@@ -537,15 +833,31 @@ pub(super) async fn run(
                                     p.retype();
                                 }
                             }
+                            ui.sync_live_panel_focus();
                         }
                         PanelAction::Char(c) => {
-                            let p = ui.panel.as_mut().unwrap();
-                            match &mut p.editing {
-                                Some(buf) => buf.push(c),
-                                None => {
-                                    p.query.push(c);
-                                    p.retype();
+                            let toggle_live = {
+                                let p = ui.panel.as_mut().unwrap();
+                                if p.kind == PanelKind::LiveHistory
+                                    && p.editing.is_none()
+                                    && c == ' '
+                                {
+                                    true
+                                } else {
+                                    match &mut p.editing {
+                                        Some(buf) => buf.push(c),
+                                        None => {
+                                            p.query.push(c);
+                                            p.retype();
+                                        }
+                                    }
+                                    false
                                 }
+                            };
+                            if toggle_live {
+                                ui.toggle_live_panel_detail();
+                            } else {
+                                ui.sync_live_panel_focus();
                             }
                         }
                         PanelAction::Enter => {
@@ -606,12 +918,44 @@ pub(super) async fn run(
                     let _ = ui.move_tool_focus(delta);
                     continue;
                 }
+                if let Some(delta) = semantic_focus_action(
+                    &key,
+                    ui.popup.is_some(),
+                    ui.transcript.is_inspecting(),
+                    ui.has_inspectable_live_output(),
+                ) {
+                    let _ = ui.move_semantic_focus(delta);
+                    ui.note("Alt+←/→ · semantic focus", role_color(Role::Info));
+                    continue;
+                }
                 if let Some(delta) = tool_detail_scroll_action(
                     &key,
                     ui.popup.is_some(),
                     ui.has_scrollable_live_tool(),
                 ) {
                     let _ = ui.scroll_tool_details(delta);
+                    continue;
+                }
+                if live_hold_toggle_action(
+                    &key,
+                    ui.popup.is_some(),
+                    ui.has_inspectable_live_output(),
+                ) {
+                    if ui.transcript.is_inspecting() {
+                        let _ = ui.follow_live();
+                    } else {
+                        let _ = ui.hold_live();
+                    }
+                    continue;
+                }
+                if live_semantic_toggle_action(
+                    &key,
+                    ui.popup.is_some(),
+                    ui.transcript.is_inspecting(),
+                    ui.has_live_tools() || ui.transcript.has_reasoning(),
+                ) {
+                    let _ = ui.toggle_focused_semantic();
+                    ui.note("Space · semantic block toggled", role_color(Role::Info));
                     continue;
                 }
                 if let Some(action) = live_scroll_action(
@@ -627,6 +971,18 @@ pub(super) async fn run(
                         LiveScrollAction::Newer => {
                             let _ = ui.scroll_live(-1);
                         }
+                        LiveScrollAction::OlderPage => {
+                            let page_rows = crossterm::terminal::size()
+                                .map(|(_, height)| live_page_rows(height))
+                                .unwrap_or(12);
+                            let _ = ui.scroll_live_page(1, page_rows);
+                        }
+                        LiveScrollAction::NewerPage => {
+                            let page_rows = crossterm::terminal::size()
+                                .map(|(_, height)| live_page_rows(height))
+                                .unwrap_or(12);
+                            let _ = ui.scroll_live_page(-1, page_rows);
+                        }
                         LiveScrollAction::Follow => {
                             let _ = ui.follow_live();
                         }
@@ -636,10 +992,16 @@ pub(super) async fn run(
                 match input_action(&key, ui.busy, ui.popup.is_some()) {
                     InputAction::Interrupt => {
                         if let Some(handle) = task.take() {
+                            mark_takeover_requested(&mut ui);
                             handle.abort();
                             *bus.lock().unwrap() = None;
                             ui.busy = false;
                             ui.commit_live_reasoning(
+                                ui.superstep,
+                                task_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                            );
+                            ui.commit_live_answers(
+                                "interrupted before final response",
                                 ui.superstep,
                                 task_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
                             );
@@ -649,14 +1011,13 @@ pub(super) async fn run(
                             ui.pending_call = None;
                             task_started = None;
                             retry_count = 0; // 中断即取消重试链
-                            // 中止即取消全部待跑(iter-33):不让排队项在中断后意外接跑。
-                            let dropped = ui.queued.len();
-                            ui.queued.clear();
                             pending_submit = None;
-                            let tail = if dropped > 0 {
-                                format!("interrupted current task (and cleared {dropped} queued)")
+                            ui.set_activity("takeover ready");
+                            let kept = ui.queued.len();
+                            let tail = if kept > 0 {
+                                format!("interrupted current task · takeover ready · {kept} queued kept")
                             } else {
-                                "interrupted current task".into()
+                                "interrupted current task · takeover ready".into()
                             };
                             ui.note(tail, Color::Yellow);
                         }
@@ -721,7 +1082,7 @@ pub(super) async fn run(
                             if ui.busy {
                                 ui.queued.push_back(input.clone());
                                 ui.note(
-                                    format!("⏳ queued ({} pending): {input}", ui.queued.len()),
+                                    format!("⏳ queued ({} pending; current turn continues): {input}", ui.queued.len()),
                                     role_color(Role::Muted),
                                 );
                             } else {
@@ -734,7 +1095,16 @@ pub(super) async fn run(
                         let _ = ui.toggle_details_or_history();
                     }
                     InputAction::ToggleReasoning => {
-                        let _ = ui.toggle_reasoning();
+                        let _ = ui.toggle_reasoning_or_history();
+                    }
+                    InputAction::ToggleAnswer => {
+                        let _ = ui.toggle_answer_or_history();
+                    }
+                    InputAction::ToggleActivity => ui.toggle_activity_panel(),
+                    InputAction::OpenLiveSearch => {
+                        if !ui.open_live_search("") {
+                            ui.note("no live blocks to search", Color::Gray);
+                        }
                     }
                     InputAction::Submit => {
                         // 空闲提交:交主环顶统一提交点起任务/跑命令(iter-33)。
@@ -748,9 +1118,29 @@ pub(super) async fn run(
                         let input = ui.input.take().trim().to_owned();
                         if !input.is_empty() {
                             ui.queued.push_back(input.clone());
+                            ui.refresh_queue_panel();
+                            ui.record_activity(
+                                ActivityKind::Queue,
+                                format!("queued · {}", clip_display_cells(&input, 48)),
+                            );
                             ui.note(
-                                format!("⏳ queued ({} pending): {input}", ui.queued.len()),
+                                format!("⏳ queued ({} pending; current turn continues): {input}", ui.queued.len()),
                                 role_color(Role::Muted),
+                            );
+                        }
+                    }
+                    InputAction::PushNow => {
+                        let input = ui.input.take().trim().to_owned();
+                        if !input.is_empty() {
+                            ui.queued.push_front(input.clone());
+                            ui.refresh_queue_panel();
+                            ui.record_activity(
+                                ActivityKind::Queue,
+                                format!("front-queued · {}", clip_display_cells(&input, 44)),
+                            );
+                            ui.note(
+                                format!("⏩ front-queued ({} pending; current turn continues): {input}", ui.queued.len()),
+                                role_color(Role::Primary),
                             );
                         }
                     }
@@ -759,20 +1149,35 @@ pub(super) async fn run(
             }
             Some(chunk) = token_rx.recv() => {
                 ui.busy = true;
+                ui.waiting = false;
+                last_activity = Some(Instant::now());
+                ui.set_activity(match &chunk {
+                    provider::StreamChunk::Answer(_) => "model · answering",
+                    provider::StreamChunk::Reasoning(_) => "model · thinking",
+                });
                 ui.push_chunk(chunk); // 分道:回答→白尾巴,思考→灰尾巴
                 // 批量排空积压 token,免逐 token 一帧。
                 for _ in 0..MAX_STREAM_CHUNKS_PER_WAKE {
                     match token_rx.try_recv() {
-                        Ok(c) => ui.push_chunk(c),
+                        Ok(c) => {
+                            ui.set_activity(match &c {
+                                provider::StreamChunk::Answer(_) => "model · answering",
+                                provider::StreamChunk::Reasoning(_) => "model · thinking",
+                            });
+                            ui.push_chunk(c);
+                        }
                         Err(_) => break,
                     }
                 }
                 dirty = true;
             }
             Some(event) = event_rx.recv() => {
+                ui.waiting = false;
+                last_activity = Some(Instant::now());
                 match event {
                     StreamEvent::NodeFinished { node, .. } => {
                         ui.phase = node_label(&node);
+                        ui.set_activity(format!("node · {}", ui.phase));
                         ui.busy = true;
                     }
                     StreamEvent::Superstep {
@@ -781,7 +1186,26 @@ pub(super) async fn run(
                         state,
                     } => {
                         ui.superstep = step;
+                        ui.input_tokens = state.input_tokens;
+                        ui.output_tokens = state.output_tokens;
                         ui.pending_call = state.pending_call.clone();
+                        let active_label = active
+                            .iter()
+                            .map(|node| node_label(node))
+                            .collect::<Vec<_>>()
+                            .join(" + ");
+                        let activity = if let Some(call) = state.pending_call.as_ref() {
+                            format!("tool · {}", call.name)
+                        } else if active_label.is_empty() {
+                            "settling result".to_owned()
+                        } else {
+                            format!("next · {active_label}")
+                        };
+                        ui.set_activity(activity);
+                        let answer_step = ui.superstep;
+                        let answer_elapsed_s =
+                            task_started.map(|started| started.elapsed().as_secs()).unwrap_or(0);
+                        let answer_tokens = ui.stream_tokens;
                         for m in state.messages.iter().skip(printed) {
                             // 总览化(用户需求):读只显路径、写显预览、改显 ± diff;减噪。
                             if let Some(tool) = tool_preview(m) {
@@ -790,7 +1214,12 @@ pub(super) async fn run(
                                 let is_final = is_final_event(m);
                                 for (line, color) in summarize_event(m) {
                                     if is_final {
-                                        ui.note_markdown(line);
+                                        ui.note_markdown_with_meta(
+                                            line,
+                                            answer_step,
+                                            answer_elapsed_s,
+                                            answer_tokens,
+                                        );
                                     } else {
                                         ui.note(line, color);
                                     }
@@ -798,11 +1227,12 @@ pub(super) async fn run(
                             }
                         }
                         printed = state.messages.len();
-                        // TODO 变更 → 清单快照静态提交进历史(取代旧侧边栏面板)。
-                        if render_todo_block(&state.todos) != render_todo_block(&ui.todos)
+                        // TODO 变更 → 进入有界 PLAN 活动锚点；详情仍由 Ctrl+T 展开。
+                        let todo_snapshot = render_todo_block(&state.todos);
+                        if todo_snapshot != render_todo_block(&ui.todos)
                             && !state.todos.is_empty()
                         {
-                            ui.note(render_todo_block(&state.todos), Color::Cyan);
+                            ui.record_plan(todo_snapshot);
                         }
                         ui.todos = state.todos;
                         // 流式已完段落随 Superstep 消息历史化,Live 只留尾巴。
@@ -820,29 +1250,48 @@ pub(super) async fn run(
                 pending = Some(request);
                 ui.scroll = 0; // 新审批从头看
                 ui.busy = false;
+                ui.waiting = false;
+                ui.set_activity("approval required · user can take over");
                 dirty = true;
             }
             Some(result) = done_rx.recv() => {
                 task = None;
                 ui.busy = false;
+                ui.waiting = false;
+                let partial_answer_reason = unfinished_answer_reason(&result);
                 ui.commit_live_reasoning(
                     ui.superstep,
                     task_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
                 );
+                if let Some(reason) = partial_answer_reason {
+                    ui.commit_live_answers(
+                        reason,
+                        ui.superstep,
+                        task_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                    );
+                }
                 ui.clear_streams();
                 ui.commit_live_tools();
                 ui.superstep = 0;
                 ui.pending_call = None;
                 task_started = None;
+                last_activity = None;
                 printed = 0;
                 match result {
                     Ok(out) => {
                         retry_count = 0; // 成功:重试计数清零
                         history = out.history.clone();
                         save_session(&session_path(), &history);
+                        ui.input_tokens = out.input_tokens;
+                        ui.output_tokens = out.output_tokens;
                         session_tokens += out.total_tokens;
                         session_turns += 1;
                         ui.todos = out.todos.clone();
+                        ui.set_activity(if out.approved {
+                            "completed"
+                        } else {
+                            "stopped · not approved"
+                        });
                         // 显停机原因:未通过时把 halt_reason 一并播报(为何停一眼可见),配合「收束回合」的模型陈述。
                         let status = if out.approved {
                             "✓ approved".to_string()
@@ -881,10 +1330,13 @@ pub(super) async fn run(
                                     Color::Yellow,
                                 );
                                 ui.busy = true;
+                                ui.waiting = false;
                                 ui.phase = "reasoning".into();
+                                ui.set_activity(format!("retrying · reasoning {retry_count}/{MAX_RETRIES}"));
                                 ui.superstep = 0;
                                 ui.pending_call = None;
                                 task_started = Some(Instant::now());
+                                last_activity = task_started;
                                 task = Some(start_task(&ti, &history));
                             }
                             _ => {
@@ -896,6 +1348,7 @@ pub(super) async fn run(
                                     format!("error: {e}")
                                 };
                                 ui.note(tail, Color::Red);
+                                ui.set_activity("stopped · error");
                                 agent::fire_session_hooks("stop", "error");
                                 retry_count = 0;
                             }
@@ -905,10 +1358,18 @@ pub(super) async fn run(
                 // 排队接跑(iter-33):任务毕,取队首交主环顶统一提交点起下一任务。
                 if pending_submit.is_none() {
                     pending_submit = ui.queued.pop_front();
+                    ui.refresh_queue_panel();
                 }
                 dirty = true;
             }
             _ = tick.tick() => {
+                let was_waiting = ui.waiting;
+                ui.waiting = ui.busy
+                    && last_activity
+                        .is_some_and(|at| at.elapsed() >= Duration::from_secs(8));
+                if ui.waiting && !was_waiting {
+                    ui.record_activity(ActivityKind::Waiting, "waiting · no stream for 8s");
+                }
                 animation_due = ui.busy && pending.is_none() && ui.panel.is_none();
                 // 启动帧序列(iter-28;iter-36 居中+防折行):空闲时借 tick 渐显 banner,末帧整幅入历史。
                 if ui.splash < SPLASH_TICKS && !ui.busy && pending.is_none() {

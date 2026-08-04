@@ -14,7 +14,8 @@ pub fn build_request(model: &str, max_tokens: u32, req: &CompletionRequest) -> V
         .join("\n");
 
     let mut msgs: Vec<Value> = Vec::new();
-    for m in req.messages.iter().filter(|m| m.role != Role::System) {
+    let repaired = crate::repair_tool_history(&req.messages);
+    for m in repaired.iter().filter(|m| m.role != Role::System) {
         let (role, blocks) = match m.role {
             Role::User => ("user", vec![json!({"type":"text","text": m.content})]),
             Role::Tool => (

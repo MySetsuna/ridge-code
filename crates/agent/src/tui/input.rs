@@ -53,9 +53,15 @@ pub(crate) enum InputAction {
     Submit,
     /// busy 时提交 → 入队(iter-33),当前任务毕自动接跑。
     Queue,
+    /// busy 时把输入插到队首，当前任务完成后立即推进。
+    PushNow,
     Interrupt,
     ToggleDetails,
     ToggleReasoning,
+    ToggleAnswer,
+    ToggleActivity,
+    /// Open the non-blocking live audit/search surface without mutating input.
+    OpenLiveSearch,
     CursorUpOrHistory,
     CursorDownOrHistory,
     PopupOpen,
@@ -82,10 +88,28 @@ pub(crate) enum InputAction {
 /// 收下者一律以 **Press** 呈现给下游(下游 `input_action`/`panel_action` 内部只认 Press),并把
 /// no-break(U+00A0)/全角(U+3000)空格**归一为普通空格**(否则显示像空格但按 `' '` 分词的命令会失败)。
 /// 返回 `Some(归一后的 Press 事件)` = 处理;`None` = 忽略。
+fn canonical_key_code(key: &KeyEvent) -> KeyCode {
+    match key.code {
+        // ConPTY/legacy terminals may surface Enter as CR or LF instead of
+        // KeyCode::Enter.  Normalize at the boundary so submit, queue and
+        // Ctrl+Enter front-queue share one routing path.
+        KeyCode::Char('\r' | '\n') => KeyCode::Enter,
+        // Ctrl-M is the byte-level CR spelling used by a few terminal/input
+        // stacks for Enter.  Keep Ctrl-J as the explicit multiline shortcut.
+        KeyCode::Char('m' | 'M') if key.modifiers.contains(KeyModifiers::CONTROL) => KeyCode::Enter,
+        other => other,
+    }
+}
+
+pub(crate) fn normalize_key_event(ev: &KeyEvent) -> KeyEvent {
+    KeyEvent::new_with_kind(canonical_key_code(ev), ev.modifiers, ev.kind)
+}
+
 pub(crate) fn decide_key(
     pressed: &mut std::collections::HashSet<KeyCode>,
     ev: &KeyEvent,
 ) -> Option<KeyEvent> {
+    let ev = normalize_key_event(ev);
     let process = match ev.kind {
         KeyEventKind::Press | KeyEventKind::Repeat => {
             pressed.insert(ev.code);
@@ -130,16 +154,29 @@ pub(crate) fn input_action(key: &KeyEvent, busy: bool, popup_open: bool) -> Inpu
     if key.kind != KeyEventKind::Press {
         return InputAction::Ignore;
     }
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+    let code = canonical_key_code(key);
+    // Escape is a takeover signal only for an un-covered busy surface. Popup,
+    // approval, and panel precedence is resolved by the main loop before this
+    // classifier is called, so those surfaces keep their close/reject meaning.
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c' | 'C'))
+        || busy && key.modifiers.is_empty() && code == KeyCode::Esc
+    {
         return InputAction::Interrupt;
     }
     if popup_open {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o') {
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('o' | 'O'))
+        {
+            return InputAction::Ignore;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('a' | 'A'))
+        {
             return InputAction::Ignore;
         }
         // 浮窗态:↑↓选、Tab 接受但不提交、Enter 接受并提交、Esc 关;
         // 字符/退格穿透继续编辑(主环先关浮窗)。
-        return match key.code {
+        return match code {
             KeyCode::Tab => InputAction::PopupAccept,
             KeyCode::Down => InputAction::PopupNext,
             KeyCode::Up => InputAction::PopupPrev,
@@ -149,13 +186,30 @@ pub(crate) fn input_action(key: &KeyEvent, busy: bool, popup_open: bool) -> Inpu
             _ => InputAction::PopupClose,
         };
     }
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o') {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('o' | 'O'))
+    {
         return InputAction::ToggleDetails;
     }
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('r' | 'R'))
+    {
         return InputAction::ToggleReasoning;
     }
-    match key.code {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('a' | 'A'))
+    {
+        return InputAction::ToggleAnswer;
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('t' | 'T'))
+    {
+        return InputAction::ToggleActivity;
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('f' | 'F'))
+    {
+        return InputAction::OpenLiveSearch;
+    }
+    if busy && key.modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Enter {
+        return InputAction::PushNow;
+    }
+    match code {
         KeyCode::Enter
             if key.modifiers.contains(KeyModifiers::SHIFT)
                 || key.modifiers.contains(KeyModifiers::ALT) =>
@@ -177,6 +231,52 @@ pub(crate) fn input_action(key: &KeyEvent, busy: bool, popup_open: bool) -> Inpu
         KeyCode::Down => InputAction::CursorDownOrHistory,
         _ => InputAction::Ignore,
     }
+}
+
+/// Keep audit attention shortcuts global while a panel is being browsed.
+///
+/// Panel text/search editing owns ordinary characters, but Ctrl+R/Ctrl+A/Ctrl+O/Ctrl+T
+/// are semantic attention changes, not query input.  The caller disables this
+/// bridge for editor fields and completion popups so those modal states retain
+/// their existing precedence.
+pub(crate) fn panel_attention_action(
+    key: &KeyEvent,
+    browsing_panel: bool,
+    popup_open: bool,
+) -> Option<InputAction> {
+    if !browsing_panel || popup_open {
+        return None;
+    }
+    match input_action(key, false, false) {
+        action @ (InputAction::ToggleDetails
+        | InputAction::ToggleReasoning
+        | InputAction::ToggleAnswer
+        | InputAction::ToggleActivity) => Some(action),
+        _ => None,
+    }
+}
+
+/// Queue inspection is a global, non-destructive intervention shortcut.
+pub(crate) fn queue_panel_toggle_action(key: &KeyEvent) -> bool {
+    key.kind == KeyEventKind::Press
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('q' | 'Q'))
+}
+
+/// Open/close the current mixed-stream inspector without cancelling the task.
+/// Ctrl+I is deliberately separate from Tab, which remains completion select;
+/// Alt+I is the byte-safe fallback for terminals that encode Ctrl+I as Tab.
+pub(crate) fn live_history_toggle_action(
+    key: &KeyEvent,
+    popup_open: bool,
+    has_history: bool,
+) -> bool {
+    key.kind == KeyEventKind::Press
+        && !popup_open
+        && has_history
+        && (key.modifiers.contains(KeyModifiers::CONTROL)
+            || key.modifiers.contains(KeyModifiers::ALT))
+        && matches!(key.code, KeyCode::Char('i' | 'I'))
 }
 
 /// Live 工具焦点快捷键:仅在无浮窗且确有工具块时拦截 Alt+↑/↓,避免破坏输入编辑回退。
@@ -205,6 +305,28 @@ pub(crate) fn tool_focus_action(key: &KeyEvent, popup_open: bool, has_tools: boo
     }
 }
 
+/// HOLD 下跨 Answer/Reasoning/Tool 语义块移动焦点；Tab 仍专属补全。
+pub(crate) fn semantic_focus_action(
+    key: &KeyEvent,
+    popup_open: bool,
+    inspecting: bool,
+    has_blocks: bool,
+) -> Option<i8> {
+    if key.kind != KeyEventKind::Press
+        || popup_open
+        || !inspecting
+        || !has_blocks
+        || !key.modifiers.contains(KeyModifiers::ALT)
+    {
+        return None;
+    }
+    match key.code {
+        KeyCode::Left => Some(-1),
+        KeyCode::Right => Some(1),
+        _ => None,
+    }
+}
+
 /// 展开工具详情的局部滚动:Alt+PageUp/Alt+PageDown,仅单焦点详情可滚时拦截。
 pub(crate) fn tool_detail_scroll_action(
     key: &KeyEvent,
@@ -229,30 +351,78 @@ pub(crate) fn tool_detail_scroll_action(
 pub(crate) enum LiveScrollAction {
     Older,
     Newer,
+    OlderPage,
+    NewerPage,
     Follow,
 }
 
-/// Live Answer/Reasoning inspection: tool detail scrolling and modal input keep priority.
+/// Toggle a non-destructive hold/follow mode for the live viewport.
+pub(crate) fn live_hold_toggle_action(key: &KeyEvent, popup_open: bool, has_output: bool) -> bool {
+    if key.kind != KeyEventKind::Press || popup_open || !has_output {
+        return false;
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char(' ')) {
+        return true;
+    }
+    // Windows ConPTY/crossterm can surface the physical NUL generated by
+    // Ctrl+Space as Ctrl+Shift+2 (or Ctrl+@). Treat these encodings as the
+    // same semantic shortcut so HOLD/FOLLOW works in native terminals too.
+    key.modifiers
+        .contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        && matches!(key.code, KeyCode::Char('2' | '@'))
+}
+
+/// In the held Inspector, plain Space activates the focused semantic block.
+/// HOLD gates this shortcut so ordinary prompt typing keeps its usual meaning.
+pub(crate) fn live_semantic_toggle_action(
+    key: &KeyEvent,
+    popup_open: bool,
+    inspecting: bool,
+    has_semantic_block: bool,
+) -> bool {
+    key.kind == KeyEventKind::Press
+        && !popup_open
+        && inspecting
+        && has_semantic_block
+        && key.modifiers.is_empty()
+        && matches!(canonical_key_code(key), KeyCode::Char(' '))
+}
+
+/// Live Answer/Reasoning inspection: plain PageUp/PageDown page the live viewport;
+/// Alt+PageUp/PageDown keep the smaller detail-scroll step. Modal input keeps priority.
 pub(crate) fn live_scroll_action(
     key: &KeyEvent,
     popup_open: bool,
     tool_details_scrollable: bool,
     has_output: bool,
 ) -> Option<LiveScrollAction> {
-    if key.kind != KeyEventKind::Press
-        || popup_open
-        || tool_details_scrollable
-        || !has_output
-        || !key.modifiers.contains(KeyModifiers::ALT)
-    {
+    if key.kind != KeyEventKind::Press || popup_open || !has_output {
         return None;
     }
-    match key.code {
-        KeyCode::PageUp => Some(LiveScrollAction::Older),
-        KeyCode::PageDown => Some(LiveScrollAction::Newer),
-        KeyCode::End => Some(LiveScrollAction::Follow),
-        _ => None,
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        if tool_details_scrollable {
+            return None;
+        }
+        return match key.code {
+            KeyCode::PageUp => Some(LiveScrollAction::Older),
+            KeyCode::PageDown => Some(LiveScrollAction::Newer),
+            KeyCode::End => Some(LiveScrollAction::Follow),
+            _ => None,
+        };
     }
+    if key.modifiers == KeyModifiers::NONE {
+        return match key.code {
+            KeyCode::PageUp => Some(LiveScrollAction::OlderPage),
+            KeyCode::PageDown => Some(LiveScrollAction::NewerPage),
+            _ => None,
+        };
+    }
+    None
+}
+
+/// 默认输入/状态 chrome 占五行；窄终端仍至少保留一行 Live 输出。
+pub(crate) fn live_page_rows(terminal_height: u16) -> usize {
+    terminal_height.saturating_sub(5).max(1) as usize
 }
 
 /// 首逻辑行内 Up 的回退决策(iter-48 G5,修「光标卡首行」):`move_up` 失败(已在首逻辑行)时,
@@ -274,11 +444,40 @@ pub(crate) struct InputState {
     pub(crate) cursor: usize,
     pub(crate) history: Vec<String>,
     pub(crate) hist_idx: Option<usize>,
+    /// false = global pre-session history; true = current conversation history.
+    pub(crate) session_mode: bool,
     /// 召回历史前暂存的未提交草稿(Down 到底还原)。
     pub(crate) draft: String,
 }
 
 impl InputState {
+    pub(crate) fn set_history(&mut self, history: Vec<String>, session_mode: bool) {
+        self.history = history;
+        self.hist_idx = None;
+        self.draft.clear();
+        self.session_mode = session_mode;
+    }
+
+    pub(crate) fn begin_session(&mut self) {
+        self.history.clear();
+        self.hist_idx = None;
+        self.draft.clear();
+        self.session_mode = true;
+    }
+
+    pub(crate) fn drop_last_history_if(&mut self, value: &str) {
+        if self.history.last().is_some_and(|last| last == value) {
+            self.history.pop();
+        }
+    }
+
+    pub(crate) fn push_history(&mut self, value: &str) {
+        if value.trim().is_empty() || self.history.last().is_some_and(|last| last == value) {
+            return;
+        }
+        self.history.push(value.to_string());
+    }
+
     pub(crate) fn byte_at(&self, char_idx: usize) -> usize {
         self.buffer
             .char_indices()
@@ -416,9 +615,7 @@ impl InputState {
         self.cursor = 0;
         self.hist_idx = None;
         self.draft.clear();
-        if !s.trim().is_empty() {
-            self.history.push(s.clone());
-        }
+        self.push_history(s.trim());
         s
     }
 }
@@ -428,11 +625,16 @@ impl InputState {
 /// 斜杠命令静态表(补全数据源,与 `run_command` 分支对齐;有序稳态)。
 pub(crate) const SLASH_COMMANDS: &[&str] = &[
     "/agent",
+    "/activity",
+    "/answer",
+    "/answers",
     "/commands",
     "/compact",
     "/config",
     "/cost",
     "/exit",
+    "/effort",
+    "/find",
     "/help",
     "/history",
     "/jailbreak",
@@ -441,6 +643,7 @@ pub(crate) const SLASH_COMMANDS: &[&str] = &[
     "/model",
     "/provider",
     "/quit",
+    "/queue",
     "/reset",
     "/skills",
     "/tools",

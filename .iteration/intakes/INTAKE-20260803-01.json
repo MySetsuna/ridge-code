@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260803-01",
+  "classification": "pending",
+  "summary": "新增 goal 长任务生命周期，并修复 MCP/tool 调用链、悬空 function call 及模型供应商身份展示一致性。",
+  "requirement_ids": [],
+  "pending_ids": [
+    "PENDING-REQ-20260803-01",
+    "PENDING-REQ-20260803-02"
+  ],
+  "approval_reasons": [],
+  "open_questions": [
+    "goal 的子命令、持久化格式、阻塞判定与跨会话语义需在批准后设计收敛。",
+    "CodeGraph MCP 实际可执行入口与 stdio 参数需本机实测确认。"
+  ],
+  "approval_evidence": "",
+  "request_sha256": "86873534a7bb49f2c233034c3808e7398e484a4291d5e369474742903affcdaf",
+  "requirements_sha256": "c7933ea98ebce160e8c08ac818ce1a6aedaf280bb397dbcb458d6d190b6e998b",
+  "pending_sha256": "27ac6a399611b480362866e0a476a5d5e128e1df6f64d2799e9b0b34ff8d0565",
+  "draft_sha256": "93e4f4498b044150a7ebafd4a4fba9656a524efe0c53879fe9c28d00d5e5de2a",
+  "previous_intake_sha256": "",
+  "executable": false,
+  "reasons": [
+    "approval_reasons_required",
+    "approval_required"
+  ]
+}

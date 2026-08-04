@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "upsert": [
+    {
+      "id": "PENDING-REQ-20260803-01",
+      "section": "pending",
+      "markdown": "### PENDING-REQ-20260803-01 · goal 长时间任务生命周期\n\n- 类型:`NEW`\n- 原始意图:`给 RidgeCode 增加 goal 命令，并使用 NotebookLM 深度调研长时间任务如何持续执行、收敛任务与完成目标。`\n- 关联 Active 条款:`none`\n- 目标行为:`提供可持久化的 goal 生命周期：创建、查看状态、继续/恢复、推进与完成/阻塞收敛；长时间运行过程中保存目标、阶段、证据、失败原因与下一步，重启后可恢复，不以模型自述替代确定性验收。NotebookLM 仅提供经验证的架构建议，不直接决定代码事实或完成状态。`\n- 范围:`ridgecode CLI/TUI 的 goal 命令入口、goal 状态模型与本地持久化、长任务恢复/收敛规则、确定性状态与测试；必要时使用已认证 NotebookLM 做一次长任务/目标收敛深度调研并保存可审计结果。`\n- 非目标:`不把 NotebookLM 作为运行时必需依赖；不上传原始日志、密钥或未批准需求；不改变 langgraph 核心并发语义、权限门、危险命令拦截、provider/MCP SDK 边界；不引入无界后台任务或无法恢复的隐式状态。`\n- 不可动边界:`目标完成须有明确验收证据；状态更新须原子且可恢复；预算、最大步骤与取消/退出语义必须保留；NLM 建议须经当前代码、CodeGraph 与测试核验后方可落地。`\n- 假设/待确认:`goal 命令的完整子命令、状态文件格式、并发/锁语义、阻塞判定与用户可见提示需在实现前收敛；长任务是否跨会话及是否支持定时触发需由设计与测试确认。`\n- 确定性验收:`补充 goal 状态机、持久化原子写、重启恢复、完成/阻塞判定、取消与重复执行保护测试；通过 cargo fmt --all --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked；完成一次本机 CLI/TUI smoke。`\n- 预期追踪:`PENDING → goal 状态/命令/持久化符号 → agent 测试与 workspace 质量门 → 经核验的 .iteration/notebooklm-response.json；不得将 Pending 直接写入 NotebookLM 需求源。"
+    },
+    {
+      "id": "PENDING-REQ-20260803-02",
+      "section": "pending",
+      "markdown": "### PENDING-REQ-20260803-02 · MCP/tool 链路与模型供应商身份修复\n\n- 类型:`FIX`\n- 原始意图:`继续查询 ridgecode 本机 MCP/tool 配置与调用链，修复 CodeGraph 无法加载、tool call 缺少 tool output 导致 400，以及供应商展示与实际模型不一致的问题。`\n- 关联 Active 条款:`none`\n- 目标行为:`RidgeCode 能明确发现并启动已配置的 MCP stdio server，完成 initialize、tools/list、tools/call 与结果回传；CodeGraph 配置使用实际可执行命令，初始化/列工具失败不再静默吞掉；任一模型 function call 都必须与匹配的 function_call_output 成对进入下一次请求，异常/中断/恢复不会把悬空调用再次发送；TUI 与启动日志显示实际生效的供应商/模型，并在切换模型后持久化一致的身份、端点与模型。`\n- 范围:`crates/mcp、crates/agent 的 MCP 配置加载/握手/工具路由、Responses tool call/result 历史编排、会话恢复与 provider/model 元信息解析、相关测试、用户级 ridge 配置的最小修正与本机 PATH smoke。`\n- 非目标:`不打印或提交 API key、OAuth token、原始会话内容；不修改用户无关配置；不替换 NotebookLM 深研状态；不改变 MCP 协议语义、权限门、危险命令拦截或 provider SDK 边界；不以清空会话掩盖配对错误。`\n- 不可动边界:`保留现有用户工作区脏改动；工具调用必须有确定性 ID 配对与错误输出；MCP server 启动失败须可观测且可降级；修复须兼容 Windows PATH 与 stdio。`\n- 假设/待确认:`CodeGraph 可执行入口及参数需以本机 help/stdio 握手实测为准；悬空 call 可能来自持久化会话或中断路径，需先定位再决定兼容清理/拒绝策略；供应商显示应采用实际生效 profile，而非孤立顶层 provider 字段。`\n- 确定性验收:`新增/修改握手、工具注册、调用结果、未知工具/启动失败可观测、Responses 配对、恢复与 provider/model 一致性测试；通过 cargo fmt --all --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked；本机 PATH 运行 `/tools` 或等价 smoke，确认 CodeGraph 工具可见且一次调用有结果。`\n- 预期追踪:`PENDING → resolve_configured_mcp/McpClient/Responses history/provider resolution → mcp/provider/agent tests → 本机配置与 PATH smoke；敏感值只留本地，不进入报告。"
+    }
+  ],
+  "remove": []
+}

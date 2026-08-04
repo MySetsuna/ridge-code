@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260806-panel-wrap",
+  "at": "2026-08-06",
+  "type": "iteration",
+  "facts": [
+    "The same-session NLM hanging-indent/highlighter recommendation returned sources_used:[] with empty citations; local CodeGraph already showed same-cell continuation rails and bounded visible-tail highlighting, so the uncited proposal was not adopted.",
+    "Dev ConPTY at 18 columns reproduced a concrete AnswerHistory defect: metadata wrapped inside words (st/ep and cha/rs), making the audit surface hard to read despite remaining within bounds.",
+    "Panel rows now prefer whitespace boundaries and hard-wrap only unbroken tokens; the semantic rail repeats on every continuation row, and execution, queue, focus, and panel geometry semantics remain unchanged.",
+    "The existing Ridge member notebooklm-mcp-maintainer remains the only member; no new member was created. The sole useful Active Note was retained and no old research status was queried."
+  ],
+  "evidence": [
+    "notebook_gate.py validate-output on .iteration/notebooklm-response-20260806-hanging-indent.json: valid",
+    "CodeGraph over panel_item_with_rail/wrap_input/draw_history_detail_panel and Dev CompletionFixture frame.json at 18 columns before and after the fix",
+    "narrow_answer_metadata_wraps_at_word_boundaries and cargo test --workspace --locked --offline --quiet: all tests passed (293 TUI tests)",
+    "cargo fmt --all -- --check; cargo clippy --workspace --all-targets --locked --offline -- -D warnings; Debug/Release build: passed",
+    "windows-pty-e2e.ps1 Debug BusyFixture with Inspector/Queue/Reasoning/HOLD/FOLLOW/Resize/dual Ctrl-C: status=passed; Release StressFixture: status=passed"
+  ],
+  "paths": [
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260806-hanging-indent.json"
+  ],
+  "symbols": [
+    "wrap_panel_lines",
+    "panel_item_with_rail",
+    "detail_panel_items"
+  ],
+  "next": [
+    "Continue with one locally reproduced TUI presentation or intervention gap; reject broad containers, virtualizers, or renderer rewrites without new measured evidence."
+  ]
+}

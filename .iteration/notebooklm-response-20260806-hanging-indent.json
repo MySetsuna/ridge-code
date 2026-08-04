@@ -1,0 +1,42 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "The same-session NLM answer recommends semantic hanging indentation and viewport-bound syntax highlighting for narrow TUI output.",
+      "evidence": "Conversation 68791fb7-659a-4ad6-a86c-beb7ac694781; query source selection limited to 8862d715-ffad-4288-b7eb-173260e2dcff."
+    },
+    {
+      "fact": "The NLM answer returned sources_used:[] with empty citations and references, so its recommendation is advisory and not source-backed evidence.",
+      "evidence": "The returned NLM response metadata."
+    },
+    {
+      "fact": "Local CodeGraph shows continuation rows already reserve the exact semantic-prefix width and repeat the rail, while live highlighting is bounded to the visible tail and viewport width.",
+      "evidence": "crates/agent/src/tui/draw.rs:2002, crates/agent/src/tui/draw.rs:2044, crates/agent/src/tui/draw.rs:2150-2400; existing narrow-width and bounded-highlight tests."
+    }
+  ],
+  "contradictions": [
+    {
+      "claim": "A new two-cell hanging indent and a new highlighter path are required.",
+      "evidence": "The local implementation already aligns continuation content to the existing prefix and bounds highlighting; no concrete overflow or overlap was reproduced."
+    }
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "A different narrow-width presentation defect remains despite the existing semantic rail and viewport bounds.",
+      "support": ["NLM recommendation", "Raw narrow-width output warrants an authoritative frame snapshot audit"],
+      "against": ["Existing CodeGraph invariants and narrow-width regression coverage"],
+      "experiment": "Run completion fixtures at 18 and 24 columns, inspect frame snapshots, and change code only if a concrete local defect is reproduced."
+    }
+  ],
+  "candidates": [],
+  "recommendation": "Do not add the uncited hanging-indent/highlighter proposal. First complete the 18/24-column snapshot audit and select a bounded fix only from a reproduced local gap.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Audit authoritative completion snapshots at the smallest supported widths, then implement one evidence-backed TUI slice if needed."
+  },
+  "stop_conditions": [
+    "Any extra physical rows, duplicate renderer, or changed Tab/Enter/queue/takeover semantics",
+    "Any width, CJK, Markdown, HOLD/FOLLOW, or resize regression",
+    "No concrete local gap after the narrow-width snapshot audit"
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260803-02",
+  "classification": "approved",
+  "summary": "已批准新增 goal 长任务生命周期，并修复 MCP/tool 调用链、悬空 function call 及模型供应商身份展示一致性。",
+  "requirement_ids": [
+    "REQ-20260803-01",
+    "REQ-20260803-02"
+  ],
+  "pending_ids": [
+    "PENDING-REQ-20260803-01",
+    "PENDING-REQ-20260803-02"
+  ],
+  "approval_reasons": [],
+  "open_questions": [],
+  "approval_evidence": "批准",
+  "request_sha256": "8364d30b7b3f756d4ccfdbea9b5f0b1e2acc6f0c1ad3e2c80758eb234062925f",
+  "requirements_sha256": "274b9a8a419c7001840c9acac255a0447b1d3c1570159c8d8eb5176768c0f499",
+  "pending_sha256": "3b2a1c2d01c1d0e6c33d8e5ec0365873066e4b3b541c2f63d703025b8f44425a",
+  "draft_sha256": "93e4f4498b044150a7ebafd4a4fba9656a524efe0c53879fe9c28d00d5e5de2a",
+  "previous_intake_sha256": "118b2c8edd5beae3dc07316d01b1488b8b1c2bfbfe224daf63dfdd0ef23d7e42",
+  "executable": true,
+  "reasons": []
+}

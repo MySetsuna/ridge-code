@@ -1,5 +1,5 @@
 use crate::state::*;
-use provider::{Message, Role};
+use provider::{repair_tool_history, Message, Role};
 
 /// 把当前状态铺成给 provider 的消息序列:system(含注入的技能)+ **真实多轮 history**
 /// (user / assistant(带 tool_calls) / role=tool 结果),而非把轨迹当 assistant 文本糊上去。
@@ -59,7 +59,7 @@ pub(crate) fn to_messages(system: &str, s: &AgentState) -> Vec<Message> {
         s.history.clone()
     };
     let mut msgs = vec![Message::new(Role::System, system)];
-    msgs.extend(history);
+    msgs.extend(repair_tool_history(&history));
     // 继承信号块(信号复利:上个会话的未决发现),放末尾同 Durable State,有界、仅在有信号时注入。
     if let Some(block) = &s.signal_block {
         msgs.push(Message::new(Role::System, block.clone()));

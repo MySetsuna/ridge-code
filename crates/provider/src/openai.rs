@@ -8,7 +8,8 @@ use serde_json::{json, Value};
 /// 关键:assistant 的工具调用进 `tool_calls`(arguments 序列化成字符串),
 /// 工具结果是独立的 `role=tool` 消息且带 `tool_call_id`。
 pub fn build_request(model: &str, req: &CompletionRequest) -> Value {
-    let messages: Vec<Value> = req.messages.iter().map(message_to_wire).collect();
+    let repaired = crate::repair_tool_history(&req.messages);
+    let messages: Vec<Value> = repaired.iter().map(message_to_wire).collect();
     let mut body = json!({ "model": model, "messages": messages });
     if !req.tools.is_empty() {
         body["tools"] = Value::Array(

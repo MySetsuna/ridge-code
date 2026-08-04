@@ -1,14 +1,287 @@
 use super::*;
 
-/// 当前 API key 解析(供 `/models` 抓取、`/model` 热切用):走 iter-41 收敛的
-/// [`resolve_top_level_key`](env `RIDGE_API_KEY` > 顶层内联 `api_key` > 顶层 `key_env`→env/auth)。都无 → None。
-pub(crate) fn current_api_key() -> Option<String> {
-    resolve_top_level_key(&Config::load(config_path()), &load_auth())
+fn profile_for_runtime<'a>(
+    cfg: &'a Config,
+    provider: &str,
+    base_url: &str,
+) -> Option<&'a agent::ProviderProfile> {
+    let matches_runtime = |profile: &&agent::ProviderProfile| {
+        profile.kind.eq_ignore_ascii_case(provider) && same_endpoint(&profile.base_url, base_url)
+    };
+    cfg.provider
+        .as_deref()
+        .and_then(|selected| {
+            cfg.providers
+                .iter()
+                .find(|profile| profile.name.eq_ignore_ascii_case(selected))
+        })
+        .filter(matches_runtime)
+        .or_else(|| cfg.providers.iter().find(matches_runtime))
+}
+
+pub(crate) fn named_profile_name(cfg: &Config, selection: &str) -> Option<String> {
+    cfg.providers
+        .iter()
+        .find(|profile| profile.name.eq_ignore_ascii_case(selection.trim()))
+        .map(|profile| profile.name.clone())
+}
+
+fn api_key_for_runtime(
+    cfg: &Config,
+    auth: &std::collections::BTreeMap<String, String>,
+    provider: &str,
+    base_url: &str,
+) -> Option<String> {
+    match profile_for_runtime(cfg, provider, base_url) {
+        Some(profile) => profile.resolve_key_with(auth),
+        None => resolve_top_level_key(cfg, auth),
+    }
 }
 
 fn openai_oauth_token() -> Option<provider::oauth::OAuthToken> {
     let text = std::fs::read_to_string(oauth_path()).ok()?;
     agent::oauth_get(&text, "openai")
+}
+
+pub(crate) const CHATGPT_MODEL_GROUP: &str = "ChatGPT (Codex)";
+pub(crate) const EFFORT_MODEL_GROUP: &str = "Effort";
+
+fn current_effort(ui: &Ui) -> &str {
+    ui.effort
+        .as_deref()
+        .and_then(provider::normalize_reasoning_effort)
+        .unwrap_or(provider::DEFAULT_REASONING_EFFORT)
+}
+
+fn same_endpoint(left: &str, right: &str) -> bool {
+    left.trim_end_matches('/')
+        .eq_ignore_ascii_case(right.trim_end_matches('/'))
+}
+
+fn active_profile_name(provider: &str, base_url: &str) -> String {
+    let cfg = Config::load(config_path());
+    let matches_runtime = |profile: &&agent::ProviderProfile| {
+        profile.kind.eq_ignore_ascii_case(provider) && same_endpoint(&profile.base_url, base_url)
+    };
+    cfg.provider
+        .as_deref()
+        .and_then(|selected| {
+            cfg.providers
+                .iter()
+                .find(|profile| profile.name.eq_ignore_ascii_case(selected))
+        })
+        .filter(matches_runtime)
+        .or_else(|| cfg.providers.iter().find(matches_runtime))
+        .map(|profile| profile.name.clone())
+        .unwrap_or_else(|| provider.to_string())
+}
+
+fn refresh_provider_label(meta: &mut ReplMeta) {
+    meta.provider_label = active_profile_name(&meta.provider, &meta.base_url);
+}
+
+fn persist_default_selection(ui: &mut Ui, provider: &str, model: &str, base_url: &str) {
+    let path = config_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let selection = active_profile_name(provider, base_url);
+    let updated = match agent::config_set_selection(&text, &selection, model, base_url) {
+        Ok(updated) => updated,
+        Err(error) => {
+            ui.note(
+                format!("model switched, but default selection was not saved: {error}"),
+                Color::Yellow,
+            );
+            return;
+        }
+    };
+    let result = (|| {
+        if let Some(dir) = std::path::Path::new(&path).parent() {
+            std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+        }
+        std::fs::write(&path, updated).map_err(|error| error.to_string())
+    })();
+    if let Err(error) = result {
+        ui.note(
+            format!("model switched, but default selection was not saved: {error}"),
+            Color::Yellow,
+        );
+    }
+}
+
+struct ModelTarget {
+    name: String,
+    kind: String,
+    base_url: String,
+    key: String,
+    oauth: bool,
+    account_id: Option<String>,
+}
+
+pub(crate) fn model_group_name(provider: &str, base_url: &str) -> String {
+    let oauth_base = std::env::var("RIDGE_CHATGPT_BASE_URL")
+        .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
+    if provider == "openai" && base_url.trim_end_matches('/') == oauth_base.trim_end_matches('/') {
+        CHATGPT_MODEL_GROUP.to_string()
+    } else {
+        provider.to_string()
+    }
+}
+
+fn build_model_targets(
+    cfg: &Config,
+    auth: &std::collections::BTreeMap<String, String>,
+    active_provider: &str,
+    active_base_url: &str,
+) -> Vec<ModelTarget> {
+    let mut targets = Vec::new();
+    let oauth_base = std::env::var("RIDGE_CHATGPT_BASE_URL")
+        .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
+    let active_is_oauth = active_provider == "openai"
+        && active_base_url.trim_end_matches('/') == oauth_base.trim_end_matches('/');
+    if active_is_oauth {
+        if let Some(token) = openai_oauth_token() {
+            targets.push(ModelTarget {
+                name: CHATGPT_MODEL_GROUP.to_string(),
+                kind: "openai".to_string(),
+                base_url: active_base_url.to_string(),
+                key: token.access_token,
+                oauth: true,
+                account_id: token.account_id,
+            });
+        }
+    } else if let Some(key) = api_key_for_runtime(cfg, auth, active_provider, active_base_url) {
+        targets.push(ModelTarget {
+            name: active_provider.to_string(),
+            kind: active_provider.to_string(),
+            base_url: active_base_url.to_string(),
+            key,
+            oauth: false,
+            account_id: None,
+        });
+    }
+    for profile in &cfg.providers {
+        if profile.use_oauth == Some(true) && profile.kind == "openai" {
+            if !targets.iter().any(|target| target.oauth) {
+                if let Some(token) = openai_oauth_token() {
+                    targets.push(ModelTarget {
+                        name: CHATGPT_MODEL_GROUP.to_string(),
+                        kind: "openai".to_string(),
+                        base_url: oauth_base.clone(),
+                        key: token.access_token,
+                        oauth: true,
+                        account_id: token.account_id,
+                    });
+                }
+            }
+        } else if let Some(key) = profile.resolve_key_with(auth) {
+            if !targets.iter().any(|target| target.name == profile.name) {
+                targets.push(ModelTarget {
+                    name: profile.name.clone(),
+                    kind: profile.kind.clone(),
+                    base_url: profile.base_url.clone(),
+                    key,
+                    oauth: false,
+                    account_id: None,
+                });
+            }
+        }
+    }
+    targets
+}
+
+async fn fetch_model_catalog(targets: Vec<ModelTarget>) -> (ModelCatalog, u32) {
+    let jobs = targets
+        .into_iter()
+        .map(|target| {
+            tokio::spawn(async move {
+                let ModelTarget {
+                    name,
+                    kind,
+                    base_url,
+                    key,
+                    oauth,
+                    account_id,
+                } = target;
+                let http = provider::http::ReqwestClient::new();
+                let result = tokio::time::timeout(Duration::from_secs(10), async {
+                    if oauth {
+                        provider::models::fetch_chatgpt_models(
+                            &http,
+                            &base_url,
+                            &key,
+                            account_id.as_deref(),
+                        )
+                        .await
+                    } else {
+                        provider::models::fetch_models(&http, &kind, &base_url, &key).await
+                    }
+                })
+                .await;
+                let models = match result {
+                    Ok(Ok(models)) if !models.is_empty() => Some(models),
+                    _ => None,
+                };
+                (name, models)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut grouped = Vec::new();
+    let mut failures = 0;
+    for job in jobs {
+        match job.await {
+            Ok((name, Some(models))) => grouped.push((name, models)),
+            Ok((_, None)) | Err(_) => failures += 1,
+        }
+    }
+    (grouped, failures)
+}
+
+pub(crate) fn start_model_catalog_preload(
+    active_provider: &str,
+    active_base_url: &str,
+) -> tokio::sync::oneshot::Receiver<(ModelCatalog, u32)> {
+    let cfg = Config::load(config_path());
+    let auth = load_auth();
+    let active_provider = active_provider.to_string();
+    let active_base_url = active_base_url.to_string();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let targets = build_model_targets(&cfg, &auth, &active_provider, &active_base_url);
+        let result = fetch_model_catalog(targets).await;
+        let _ = sender.send(result);
+    });
+    receiver
+}
+
+pub(crate) fn auto_select_chatgpt_model(
+    grouped: &ModelCatalog,
+    meta: &mut ReplMeta,
+    swap: &Arc<SwapProvider>,
+    ui: &mut Ui,
+) {
+    let oauth_base = std::env::var("RIDGE_CHATGPT_BASE_URL")
+        .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
+    if meta.provider != "openai"
+        || meta.base_url.trim_end_matches('/') != oauth_base.trim_end_matches('/')
+        || meta.model != oauth_defaults("openai").0
+    {
+        return;
+    }
+    let Some(model) = grouped
+        .iter()
+        .find(|(name, _)| name == CHATGPT_MODEL_GROUP)
+        .and_then(|(_, models)| models.first())
+    else {
+        return;
+    };
+    if model.id == meta.model {
+        meta.ctx_window = model.context.unwrap_or(tui::DEFAULT_CTX_WINDOW);
+    } else {
+        if let Some(context) = model.context {
+            meta.ctx_window = context;
+        }
+        swap_model(swap, meta, &model.id, ui);
+    }
 }
 
 /// TUI `/login` 落盘核(与 CLI `run_login` 同语义,精简版):key → auth.json(收权限),
@@ -49,6 +322,7 @@ pub(crate) async fn login_apply_verified(
                 meta.provider = preset.kind.to_string();
                 meta.model = preset.default_model.to_string();
                 meta.base_url = preset.base_url.to_string();
+                refresh_provider_label(meta);
                 ui.panel = None;
                 ui.note(
                     format!(
@@ -76,6 +350,7 @@ pub(crate) fn begin_oauth(ui: &mut Ui, ocfg: &provider::oauth::OAuthConfig) {
             Ok(callback) => Some(callback),
             Err(error) => {
                 if ocfg.provider == "openai" {
+                    ui.device_auth_status = Some("Requesting device code...".into());
                     ui.oauth_device = Some(start_device_oauth());
                     if let Some(panel) = ui.panel.as_mut() {
                         panel.editing = None;
@@ -230,16 +505,31 @@ pub(crate) fn apply_oauth_token(
     match save_oauth_token(ocfg.provider, &token) {
         Ok(path) => {
             let (dm, db) = oauth_defaults(ocfg.provider);
+            let cfg = Config::load(config_path());
+            let configured_oauth_model = if ocfg.provider == "openai" {
+                let is_chatgpt_selection = cfg
+                    .base_url
+                    .as_deref()
+                    .is_some_and(|base| same_endpoint(base, db))
+                    || cfg
+                        .provider
+                        .as_deref()
+                        .is_some_and(|provider| provider.eq_ignore_ascii_case("chatgpt-plus"));
+                is_chatgpt_selection.then_some(cfg.model).flatten()
+            } else {
+                cfg.model
+            };
             let model = std::env::var("RIDGE_MODEL")
                 .ok()
-                .or_else(|| Config::load(config_path()).model)
+                .or(configured_oauth_model)
+                .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| dm.to_string());
             let base_url = if ocfg.provider == "openai" {
                 std::env::var("RIDGE_CHATGPT_BASE_URL").unwrap_or_else(|_| db.to_string())
             } else {
                 std::env::var("RIDGE_BASE_URL")
                     .ok()
-                    .or_else(|| Config::load(config_path()).base_url)
+                    .or(cfg.base_url)
                     .unwrap_or_else(|| db.to_string())
             };
             swap.swap(oauth_swap_provider(
@@ -248,12 +538,19 @@ pub(crate) fn apply_oauth_token(
                 model.clone(),
                 token.access_token,
                 token.account_id,
+                current_effort(ui),
             ));
             meta.provider = ocfg.provider.to_string();
             meta.model = model;
             meta.base_url = base_url;
+            if ocfg.provider == "openai" {
+                ui.model_catalog = None;
+                ui.model_catalog_reload = true;
+            }
             ui.panel = None;
             register_oauth_profile(ocfg.provider);
+            persist_default_selection(ui, &meta.provider, &meta.model, &meta.base_url);
+            refresh_provider_label(meta);
             ui.note(
                 format!(
                     "✓ {} OAuth connected · credential saved to {path}",
@@ -276,14 +573,56 @@ fn oauth_swap_provider(
     model: String,
     access: String,
     account_id: Option<String>,
+    effort: &str,
 ) -> Arc<dyn provider::LlmProvider> {
     if provider_id == "anthropic" {
         Arc::new(AnthropicProvider::new_oauth(base, model, access))
     } else {
-        Arc::new(provider::ChatGptProvider::new(
-            base, model, access, account_id,
-        ))
+        Arc::new(
+            provider::ChatGptProvider::new(base, model, access, account_id)
+                .with_reasoning_effort(effort),
+        )
     }
+}
+
+fn apply_effort(swap: &Arc<SwapProvider>, meta: &ReplMeta, value: &str, ui: &mut Ui) -> bool {
+    let Some(effort) = provider::normalize_reasoning_effort(value) else {
+        ui.note(
+            format!(
+                "invalid effort; choose one of: {}",
+                provider::REASONING_EFFORTS.join(", ")
+            ),
+            Color::Yellow,
+        );
+        return false;
+    };
+    let effort = effort.to_string();
+    ui.effort = Some(effort.clone());
+    if let Err(error) = persist_config("effort", &effort) {
+        ui.note(
+            format!("effort applied, but save failed: {error}"),
+            Color::Yellow,
+        );
+    }
+
+    let oauth_base = std::env::var("RIDGE_CHATGPT_BASE_URL")
+        .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
+    if meta.provider == "openai"
+        && meta.base_url.trim_end_matches('/') == oauth_base.trim_end_matches('/')
+    {
+        if let Some(token) = openai_oauth_token() {
+            swap.swap(oauth_swap_provider(
+                "openai",
+                meta.base_url.clone(),
+                meta.model.clone(),
+                token.access_token,
+                token.account_id,
+                &effort,
+            ));
+        }
+    }
+    ui.note(format!("reasoning effort={effort}"), Color::Green);
+    true
 }
 
 /// 热切换模型(iter-32 共用路径):密钥经 `current_api_key`(env 优先,回落 config 内联)——
@@ -301,16 +640,21 @@ pub(crate) fn swap_model(swap: &Arc<SwapProvider>, meta: &mut ReplMeta, model: &
                 model.to_string(),
                 token.access_token,
                 token.account_id,
+                current_effort(ui),
             ));
             meta.model = model.to_string();
+            persist_default_selection(ui, &meta.provider, model, &meta.base_url);
             ui.note(format!("switched model={model}"), Color::Green);
             return;
         }
     }
-    match current_api_key() {
+    let cfg = Config::load(config_path());
+    let auth = load_auth();
+    match api_key_for_runtime(&cfg, &auth, &meta.provider, &meta.base_url) {
         Some(key) => {
             swap.swap(make_provider(&meta.provider, model, &meta.base_url, key));
             meta.model = model.to_string();
+            persist_default_selection(ui, &meta.provider, model, &meta.base_url);
             ui.note(format!("switched model={model}"), Color::Green);
         }
         None => ui.note(
@@ -358,10 +702,13 @@ pub(crate) fn switch_provider(
                         p.model.clone(),
                         token.access_token,
                         token.account_id,
+                        current_effort(ui),
                     ));
                     meta.provider = p.kind;
                     meta.model = p.model;
                     meta.base_url = base_url;
+                    persist_default_selection(ui, &meta.provider, &meta.model, &meta.base_url);
+                    refresh_provider_label(meta);
                     ui.note(format!("switched provider {name} (oauth)"), Color::Green);
                 }
                 None => ui.note(
@@ -379,6 +726,8 @@ pub(crate) fn switch_provider(
                 meta.provider = p.kind;
                 meta.model = p.model;
                 meta.base_url = p.base_url;
+                persist_default_selection(ui, &meta.provider, &meta.model, &meta.base_url);
+                refresh_provider_label(meta);
                 ui.note(format!("switched provider {name}"), Color::Green);
             }
             None => ui.note(
@@ -405,12 +754,23 @@ pub(crate) fn apply_config_live(
         "allow_jailbreak" => agent::set_allow_jailbreak(val == "true"),
         "model" => swap_model(swap, meta, val, ui),
         "provider" | "base_url" => {
+            let cfg = Config::load(config_path());
             if key == "provider" {
+                // Config stores the selected profile name (for example
+                // `Zai`), while the runtime needs its wire kind (`openai`).
+                // Route named selections through the same atomic switch path
+                // as `/provider use` so endpoint, model, credential and label
+                // cannot drift apart.
+                if let Some(profile_name) = named_profile_name(&cfg, val) {
+                    switch_provider(&profile_name, meta, swap, ui);
+                    return;
+                }
                 meta.provider = val.to_string();
             } else {
                 meta.base_url = val.to_string();
             }
-            if let Some(k) = current_api_key() {
+            let auth = load_auth();
+            if let Some(k) = api_key_for_runtime(&cfg, &auth, &meta.provider, &meta.base_url) {
                 swap.swap(make_provider(
                     &meta.provider,
                     &meta.model,
@@ -418,12 +778,34 @@ pub(crate) fn apply_config_live(
                     k,
                 ));
             }
+            refresh_provider_label(meta);
         }
         "status_bar" => {
             meta.status_bar = if val.trim().is_empty() {
                 DEFAULT_STATUS_BAR.to_string()
             } else {
                 val.to_string()
+            }
+        }
+        "effort" => {
+            if let Some(effort) = provider::normalize_reasoning_effort(val) {
+                ui.effort = Some(effort.to_string());
+                let oauth_base = std::env::var("RIDGE_CHATGPT_BASE_URL")
+                    .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
+                if meta.provider == "openai"
+                    && meta.base_url.trim_end_matches('/') == oauth_base.trim_end_matches('/')
+                {
+                    if let Some(token) = openai_oauth_token() {
+                        swap.swap(oauth_swap_provider(
+                            "openai",
+                            meta.base_url.clone(),
+                            meta.model.clone(),
+                            token.access_token,
+                            token.account_id,
+                            effort,
+                        ));
+                    }
+                }
             }
         }
         // 代理即时注入 env:下一次登录 verify / 新建 provider 立即走它,无需重启。
@@ -474,7 +856,42 @@ pub(crate) fn panel_enter(ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvi
             if let Some(key) = sel_key {
                 // key 格式: "provider · model_id"
                 let (provider_name, model) = key.split_once(" · ").unwrap_or(("", &key));
-                if !provider_name.is_empty() && provider_name != meta.provider {
+                if provider_name == EFFORT_MODEL_GROUP {
+                    apply_effort(swap, meta, model, ui);
+                    ui.panel = None;
+                    return;
+                } else if provider_name == CHATGPT_MODEL_GROUP {
+                    if let Some(token) = openai_oauth_token() {
+                        let base_url = std::env::var("RIDGE_CHATGPT_BASE_URL")
+                            .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
+                        swap.swap(oauth_swap_provider(
+                            "openai",
+                            base_url.clone(),
+                            model.to_string(),
+                            token.access_token,
+                            token.account_id,
+                            current_effort(ui),
+                        ));
+                        meta.provider = "openai".to_string();
+                        meta.model = model.to_string();
+                        meta.base_url = base_url;
+                        persist_default_selection(ui, &meta.provider, model, &meta.base_url);
+                        refresh_provider_label(meta);
+                        if let Some(w) = sel_ctx {
+                            meta.ctx_window = w;
+                        }
+                        ui.note(
+                            format!("switched to {CHATGPT_MODEL_GROUP} / {model}"),
+                            Color::Green,
+                        );
+                        ui.panel = None;
+                        return;
+                    }
+                    ui.note(
+                        "no ChatGPT OAuth credential; run /login --codex first",
+                        Color::Red,
+                    );
+                } else if !provider_name.is_empty() && provider_name != meta.provider {
                     // 跨 provider:查档案,全量切换
                     let cfg = Config::load(config_path());
                     let auth = load_auth();
@@ -489,10 +906,18 @@ pub(crate) fn panel_enter(ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvi
                                     model.to_string(),
                                     token.access_token,
                                     token.account_id,
+                                    current_effort(ui),
                                 ));
                                 meta.provider = p.kind;
                                 meta.model = model.to_string();
                                 meta.base_url = base_url;
+                                persist_default_selection(
+                                    ui,
+                                    &meta.provider,
+                                    model,
+                                    &meta.base_url,
+                                );
+                                refresh_provider_label(meta);
                                 if let Some(w) = sel_ctx {
                                     meta.ctx_window = w;
                                 }
@@ -508,6 +933,8 @@ pub(crate) fn panel_enter(ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvi
                             meta.provider = p.kind;
                             meta.model = model.to_string();
                             meta.base_url = p.base_url;
+                            persist_default_selection(ui, &meta.provider, model, &meta.base_url);
+                            refresh_provider_label(meta);
                             if let Some(w) = sel_ctx {
                                 meta.ctx_window = w;
                             }
@@ -554,16 +981,27 @@ pub(crate) fn panel_enter(ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvi
             }
         }
         (PanelKind::Login, Some(_)) => {}
-        (PanelKind::ToolHistory, _) => {
+        (
+            PanelKind::Activity
+            | PanelKind::ToolHistory
+            | PanelKind::ReasoningHistory
+            | PanelKind::AnswerHistory,
+            _,
+        ) => {
             if let Some(p) = ui.panel.as_mut() {
                 p.toggle_detail();
             }
+        }
+        (PanelKind::LiveHistory, _) => {
+            ui.sync_live_panel_focus();
+            ui.toggle_live_panel_detail();
         }
         // 只读页:Enter 关页。
         (PanelKind::Tools, _)
         | (PanelKind::Agent, _)
         | (PanelKind::Mcp, _)
-        | (PanelKind::Skills, _) => ui.panel = None,
+        | (PanelKind::Skills, _)
+        | (PanelKind::Queue, _) => ui.panel = None,
     }
 }
 
@@ -580,141 +1018,112 @@ pub(crate) async fn run_command(
     tokens: usize,
     turns: usize,
 ) -> anyhow::Result<bool> {
+    if input == "/help" {
+        ui.note(
+            "/exit /model /provider /config /effort /find [query] /goal [status|create|start|advance|resume|complete|block|cancel] /activity /inspect /transcript /audit /reasoning /answers /queue /tools /history /login /agent /mcp /skills /commands; Enter queues while busy; Ctrl+Enter front-queues without interrupting; Ctrl+F opens non-blocking live search; Ctrl+Q opens the queue and Delete removes a pending item; Ctrl+I/Alt+I inspects live blocks in Transcript Audit; Ctrl+A opens the Answer archive; Ctrl+R toggles live reasoning or opens Reasoning history; Ctrl+O toggles live tool details or opens Tool history; Ctrl+T opens recent Agent activity; Ctrl-C hands input back.",
+            Color::Gray,
+        );
+        return Ok(false);
+    }
     match input {
         "/exit" | "/quit" => return Ok(true),
-        "/help" => ui.note("/exit /reset /compact /cost /tools /history /login [list|--claude|--codex|<id> <key>] /model [<name>] (no arg = live model picker) /provider [list|use <name>|add ...] /agent /mcp /init (generate AGENTS.md) /skills /commands (custom /name from ~/.ridge/commands/*.md + skills; $ARGS) /config [set key value] /jailbreak [on|off]; @path to reference a file; Ctrl-C interrupts; press twice within 2 seconds to exit; Ctrl+R toggles live reasoning view; Ctrl+O toggles live tool details or opens Tool history; /history opens searchable completed tool calls; approval prompt: y/Enter approve, n/Esc reject, ↑↓ scroll details.", Color::Gray),
         "/tools" => ui.panel = Some(tools_panel(&meta.tools)),
+        "/activity" => ui.open_activity_panel(),
+        "/inspect" | "/live" | "/transcript" | "/audit" => {
+            if !ui.open_live_history() {
+                ui.note("no live blocks to inspect", Color::Gray);
+            }
+        }
+        "/find" => {
+            if !ui.open_live_search("") {
+                ui.note("no live blocks to search", Color::Gray);
+            }
+        }
+        _ if input.starts_with("/find ") => {
+            if !ui.open_live_search(input[6..].trim()) {
+                ui.note("no live blocks to search", Color::Gray);
+            }
+        }
+        "/reasoning" | "/thinking" => {
+            if !ui.open_reasoning_history() {
+                ui.note("no completed reasoning history", Color::Gray);
+            }
+        }
+        "/answer" | "/answers" => {
+            if !ui.open_answer_history() {
+                ui.note("no recoverable answer history", Color::Gray);
+            }
+        }
+        "/queue" => ui.open_queue_panel(),
         "/history" => {
             if !ui.open_tool_history() {
                 ui.note("no completed tool history", Color::Gray);
             }
         }
-        "/reset" => { history.clear(); save_session(&session_path(), history); ui.note("context cleared", Color::Yellow); }
-        "/compact" => { let n = history.len(); *history = compact_history(std::mem::take(history), 4); ui.note(format!("context compacted: {n} → {} messages", history.len()), Color::Yellow); }
-        "/cost" => ui.note(format!("session total: {tokens} tokens · {turns} tasks"), Color::Gray),
+        "/reset" => {
+            history.clear();
+            ui.reasoning_history.clear();
+            ui.answer_history.clear();
+            ui.panel = None;
+            save_session(&session_path(), history);
+            ui.note("context cleared", Color::Yellow);
+        }
+        "/compact" => {
+            let n = history.len();
+            *history = compact_history(std::mem::take(history), 4);
+            ui.note(
+                format!("context compacted: {n} → {} messages", history.len()),
+                Color::Yellow,
+            );
+        }
+        "/cost" => ui.note(
+            format!("session total: {tokens} tokens · {turns} tasks"),
+            Color::Gray,
+        ),
+        "/effort" => ui.note(
+            format!(
+                "reasoning effort={} · options: {}",
+                current_effort(ui),
+                provider::REASONING_EFFORTS.join(", ")
+            ),
+            Color::Gray,
+        ),
+        _ if input.starts_with("/effort ") => {
+            apply_effort(swap, meta, input[8..].trim(), ui);
+        }
         // /model 单命令:无参 → 跨 provider 模型页(↑↓ 选、Enter 切);`/model <name>` → 直接热切。
         // `/models` `/model pick` 保留为别名(旧肌肉记忆),补全表只呈现 `/model`。
         _ if input == "/model" || input == "/models" || input == "/model pick" => {
-            let cfg = Config::load(config_path());
-            let auth = load_auth();
-            let http = provider::http::ReqwestClient::new();
-            // 收集所有可查询的 provider (当前活跃 + 命名档案)
-            struct Target {
-                name: String,
-                kind: String,
-                base_url: String,
-                _key: String,
-                oauth: bool,
-                account_id: Option<String>,
-            }
-            let mut targets: Vec<Target> = Vec::new();
-            let oauth_base = std::env::var("RIDGE_CHATGPT_BASE_URL")
-                .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
-            if meta.provider == "openai"
-                && meta.base_url.trim_end_matches('/') == oauth_base.trim_end_matches('/')
-            {
-                if let Some(token) = openai_oauth_token() {
-                    targets.push(Target {
-                        name: meta.provider.clone(),
-                        kind: meta.provider.clone(),
-                        base_url: meta.base_url.clone(),
-                        _key: token.access_token,
-                        oauth: true,
-                        account_id: token.account_id,
-                    });
-                }
-            } else if let Some(key) = current_api_key() {
-                targets.push(Target {
-                    name: meta.provider.clone(),
-                    kind: meta.provider.clone(),
-                    base_url: meta.base_url.clone(),
-                    _key: key,
-                    oauth: false,
-                    account_id: None,
-                });
-            }
-            for p in &cfg.providers {
-                if p.use_oauth == Some(true) && p.kind == "openai" {
-                    let already_added = targets.iter().any(|t| {
-                        t.oauth
-                            && t.base_url.trim_end_matches('/')
-                                == p.base_url.trim_end_matches('/')
-                    });
-                    if !already_added {
-                        if let Some(token) = openai_oauth_token() {
-                            targets.push(Target {
-                                name: p.name.clone(),
-                                kind: p.kind.clone(),
-                                base_url: p.base_url.clone(),
-                                _key: token.access_token,
-                                oauth: true,
-                                account_id: token.account_id,
-                            });
-                        }
-                    }
-                } else if let Some(key) = p.resolve_key_with(&auth) {
-                    if !targets.iter().any(|t| t.name == p.name) {
-                        targets.push(Target {
-                            name: p.name.clone(),
-                            kind: p.kind.clone(),
-                            base_url: p.base_url.clone(),
-                            _key: key,
-                            oauth: false,
-                            account_id: None,
-                        });
-                    }
-                }
-            }
-            if targets.is_empty() {
-                ui.note("no API key resolved (set RIDGE_API_KEY or api_key at config.json top level)", Color::Red);
+            let Some(grouped) = ui.model_catalog.as_ref() else {
+                ui.note(
+                    "model catalog is still loading; try /model again shortly",
+                    Color::Yellow,
+                );
+                return Ok(false);
+            };
+            if grouped.is_empty() {
+                ui.note(
+                    "no models returned (providers unreachable or authentication failed)",
+                    Color::Yellow,
+                );
             } else {
-                let mut grouped: Vec<(String, Vec<provider::models::ModelInfo>)> = Vec::new();
-                let mut has_current = false;
-                let mut fail_count = 0u32;
-                for t in &targets {
-                    let result = tokio::time::timeout(Duration::from_secs(10), async {
-                        if t.oauth {
-                            provider::models::fetch_chatgpt_models(
-                                &http,
-                                &t.base_url,
-                                &t._key,
-                                t.account_id.as_deref(),
-                            )
-                            .await
-                        } else {
-                            provider::models::fetch_models(&http, &t.kind, &t.base_url, &t._key)
-                                .await
-                        }
+                let current_group = model_group_name(&meta.provider, &meta.base_url);
+                meta.ctx_window = grouped
+                    .iter()
+                    .find(|(name, _models)| name == &current_group)
+                    .and_then(|(_, models)| {
+                        models
+                            .iter()
+                            .find(|model| model.id == meta.model)
+                            .and_then(|model| model.context)
                     })
-                    .await;
-                    match result {
-                        Ok(Ok(list)) if !list.is_empty() => {
-                            // 缓存当前模型的真实上下文窗口
-                            if t.name == meta.provider {
-                                if let Some(n) = list.iter().find(|m| m.id == meta.model).and_then(|m| m.context) {
-                                    meta.ctx_window = n;
-                                }
-                                has_current = true;
-                            }
-                            grouped.push((t.name.clone(), list));
-                        }
-                        Ok(Ok(_)) => fail_count += 1, // 空列表
-                        Ok(Err(_)) => fail_count += 1, // 认证失败等
-                        Err(_) => fail_count += 1,      // 超时
-                    }
-                }
-                if grouped.is_empty() {
-                    ui.note(
-                        format!("no models returned ({fail_count} provider(s) unreachable or auth failed)"),
-                        Color::Yellow,
-                    );
-                } else {
-                    // 未在当前 provider 的列表中找到当前模型 → ctx_window 维持默认
-                    if !has_current {
-                        meta.ctx_window = tui::DEFAULT_CTX_WINDOW;
-                    }
-                    ui.panel = Some(models_panel(&grouped, &meta.provider, &meta.model));
-                }
+                    .unwrap_or(tui::DEFAULT_CTX_WINDOW);
+                ui.panel = Some(models_panel_with_effort(
+                    grouped,
+                    &current_group,
+                    &meta.model,
+                    current_effort(ui),
+                ));
             }
         }
         _ if input.starts_with("/model ") => swap_model(swap, meta, input[7..].trim(), ui),
@@ -722,14 +1131,39 @@ pub(crate) async fn run_command(
             let on = agent::allow_jailbreak();
             ui.note(if on { "jailbreak: ON ⚠ (can write outside cwd subtree; disaster commands / protected paths / read-only still blocked). Disable: /jailbreak off" } else { "jailbreak: OFF (writes limited to cwd subtree). Enable: /jailbreak on —— top status bar turns red when on" }, if on { Color::Red } else { Color::Gray });
         }
-        _ if input == "/jailbreak on" => { agent::set_allow_jailbreak(true); ui.note("⚠ jailbreak ON: can write outside cwd subtree (disaster commands / protected paths / read-only still hard-blocked). Session only; to persist: /config set allow_jailbreak true", Color::Red); }
-        _ if input == "/jailbreak off" => { agent::set_allow_jailbreak(false); ui.note("jailbreak OFF: writes limited back to cwd subtree", Color::Green); }
+        _ if input == "/jailbreak on" => {
+            agent::set_allow_jailbreak(true);
+            ui.note("⚠ jailbreak ON: can write outside cwd subtree (disaster commands / protected paths / read-only still hard-blocked). Session only; to persist: /config set allow_jailbreak true", Color::Red);
+        }
+        _ if input == "/jailbreak off" => {
+            agent::set_allow_jailbreak(false);
+            ui.note(
+                "jailbreak OFF: writes limited back to cwd subtree",
+                Color::Green,
+            );
+        }
         _ if input == "/config" => ui.panel = Some(config_panel()),
-        _ if input.starts_with("/config set ") => { let parts: Vec<_> = input.splitn(4, ' ').collect(); if parts.len() == 4 { match persist_config(parts[2], parts[3]) { Ok(path) => ui.note(format!("wrote {path}; takes effect next start"), Color::Green), Err(e) => ui.note(format!("write failed: {e}"), Color::Red) } } else { ui.note("usage: /config set <key> <value>", Color::Yellow); } }
+        _ if input.starts_with("/config set ") => {
+            let parts: Vec<_> = input.splitn(4, ' ').collect();
+            if parts.len() == 4 {
+                match persist_config(parts[2], parts[3]) {
+                    Ok(path) => ui.note(
+                        format!("wrote {path}; takes effect next start"),
+                        Color::Green,
+                    ),
+                    Err(e) => ui.note(format!("write failed: {e}"), Color::Red),
+                }
+            } else {
+                ui.note("usage: /config set <key> <value>", Color::Yellow);
+            }
+        }
         _ if input == "/provider" || input == "/provider list" => {
             let cfg = Config::load(config_path());
-            if cfg.providers.is_empty() { ui.note("no provider profiles. Add: /provider add <name> <kind> <model> <base_url> [key_env]", Color::Gray); }
-            else { ui.panel = Some(provider_panel()); }
+            if cfg.providers.is_empty() {
+                ui.note("no provider profiles. Add: /provider add <name> <kind> <model> <base_url> [key_env]", Color::Gray);
+            } else {
+                ui.panel = Some(provider_panel());
+            }
         }
         _ if input.starts_with("/provider add ") => {
             match agent::parse_provider_add(input["/provider add ".len()..].trim()) {
@@ -747,7 +1181,9 @@ pub(crate) async fn run_command(
                 Err(e) => ui.note(e, Color::Yellow),
             }
         }
-        _ if input.starts_with("/provider use ") => switch_provider(input[14..].trim(), meta, swap, ui),
+        _ if input.starts_with("/provider use ") => {
+            switch_provider(input[14..].trim(), meta, swap, ui)
+        }
         _ if input == "/login" => ui.panel = Some(login_panel()),
         _ if input == "/login list" => {
             let ids: Vec<&str> = PROVIDER_PRESETS.iter().map(|p| p.id).collect();
@@ -756,7 +1192,11 @@ pub(crate) async fn run_command(
         _ if input == "/login --claude" || input == "/login claude-oauth" => {
             ui.panel = Some(login_panel());
             if let Some(panel) = ui.panel.as_mut() {
-                if let Some(pos) = panel.view.iter().position(|&i| panel.rows[i].key == CLAUDE_OAUTH_ROW) {
+                if let Some(pos) = panel
+                    .view
+                    .iter()
+                    .position(|&i| panel.rows[i].key == CLAUDE_OAUTH_ROW)
+                {
                     panel.sel = pos;
                 }
             }
@@ -765,7 +1205,11 @@ pub(crate) async fn run_command(
         _ if input == "/login --codex" || input == "/login codex-oauth" => {
             ui.panel = Some(login_panel());
             if let Some(panel) = ui.panel.as_mut() {
-                if let Some(pos) = panel.view.iter().position(|&i| panel.rows[i].key == CODEX_OAUTH_ROW) {
+                if let Some(pos) = panel
+                    .view
+                    .iter()
+                    .position(|&i| panel.rows[i].key == CODEX_OAUTH_ROW)
+                {
                     panel.sel = pos;
                 }
             }
@@ -777,29 +1221,69 @@ pub(crate) async fn run_command(
             match (it.next(), it.next()) {
                 (Some(id), Some(key)) => match preset_by_id(id) {
                     Some(preset) => login_apply_verified(preset, key, meta, swap, ui).await,
-                    None => ui.note(format!("unknown provider \"{id}\"; see /login list"), Color::Yellow),
+                    None => ui.note(
+                        format!("unknown provider \"{id}\"; see /login list"),
+                        Color::Yellow,
+                    ),
                 },
-                _ => ui.note("usage: /login <id> <API_KEY>, or just /login to pick interactively", Color::Yellow),
+                _ => ui.note(
+                    "usage: /login <id> <API_KEY>, or just /login to pick interactively",
+                    Color::Yellow,
+                ),
+            }
+        }
+        _ if input == "/goal" || input.starts_with("/goal ") => {
+            let args = input
+                .strip_prefix("/goal")
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            match agent::goal_command(&args) {
+                Ok(text) => ui.note(text, Color::Cyan),
+                Err(error) => ui.note(format!("goal error: {error}"), Color::Red),
             }
         }
         _ if input == "/agent" => {
-            if agents.defs.is_empty() { ui.note("no sub-agents available", Color::Gray); }
-            else { ui.panel = Some(agent_panel(&agents.defs)); }
+            if agents.defs.is_empty() {
+                ui.note("no sub-agents available", Color::Gray);
+            } else {
+                ui.panel = Some(agent_panel(&agents.defs));
+            }
         }
         _ if input == "/mcp" => {
             let cfg = Config::load(config_path());
-            if cfg.mcp.is_empty() { ui.note("no MCP servers configured. Add them under \"mcp\": [ ... ] in ~/.ridge/config.json (each: name + cmd [+ args]).", Color::Gray); }
-            else { ui.panel = Some(mcp_panel()); }
+            if cfg.mcp.is_empty() {
+                ui.note("no MCP servers configured. Add them under \"mcp\": [ ... ] in ~/.ridge/config.json (each: name + cmd [+ args]).", Color::Gray);
+            } else {
+                ui.panel = Some(mcp_panel());
+            }
         }
         _ if input == "/skills" => {
-            if skills.is_empty() { ui.note("no skills loaded. Add ~/.ridge/skills/<name>/SKILL.md (frontmatter name/description + body); loaded skills are injected into the system prompt.", Color::Gray); }
-            else { ui.panel = Some(skills_panel(skills)); }
+            if skills.is_empty() {
+                ui.note("no skills loaded. Add ~/.ridge/skills/<name>/SKILL.md (frontmatter name/description + body); loaded skills are injected into the system prompt.", Color::Gray);
+            } else {
+                ui.panel = Some(skills_panel(skills));
+            }
         }
         _ if input == "/commands" => {
-            if commands.is_empty() { ui.note("no custom commands. Add ~/.ridge/commands/<name>.md (body = prompt, $ARGS = args); skills also appear here.", Color::Gray); }
-            else {
-                let lines: Vec<String> = commands.iter().map(|c| if c.description.is_empty() { format!("/{}", c.name) } else { format!("/{}  —— {}", c.name, c.description) }).collect();
-                ui.note(format!("commands ({}):\n{}", commands.len(), lines.join("\n")), Color::Gray);
+            if commands.is_empty() {
+                ui.note("no custom commands. Add ~/.ridge/commands/<name>.md (body = prompt, $ARGS = args); skills also appear here.", Color::Gray);
+            } else {
+                let lines: Vec<String> = commands
+                    .iter()
+                    .map(|c| {
+                        if c.description.is_empty() {
+                            format!("/{}", c.name)
+                        } else {
+                            format!("/{}  —— {}", c.name, c.description)
+                        }
+                    })
+                    .collect();
+                ui.note(
+                    format!("commands ({}):\n{}", commands.len(), lines.join("\n")),
+                    Color::Gray,
+                );
             }
         }
         // 自定义 / skill 命令(iter-39):/name [args] → 展开 body(替 $ARGS)为任务(置 run_task,主环起任务)。
@@ -808,7 +1292,10 @@ pub(crate) async fn run_command(
             let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
             match agent::resolve_command(name, commands) {
                 Some(cmd) => ui.run_task = Some(agent::expand_command(&cmd.body, args.trim())),
-                None => ui.note(format!("unknown command: {input} (/help · /commands)"), Color::Yellow),
+                None => ui.note(
+                    format!("unknown command: {input} (/help · /commands)"),
+                    Color::Yellow,
+                ),
             }
         }
         _ => return Ok(false),

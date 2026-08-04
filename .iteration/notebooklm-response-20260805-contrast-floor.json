@@ -1,0 +1,32 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [],
+  "contradictions": [
+    "NLM's proposed viewport-bound highlighting already exists in render_live_line_with_alert_edge: long Answer text is tail-bounded before Markdown span projection, and LiveOutputCache receives only the bounded visible tail.",
+    "NLM's proposed semantic indentation already exists for physical continuation rows: the live renderer repeats the one-cell semantic rail and fills the remaining prefix cells before body text; adding a second reflow layer would duplicate it.",
+    "The response returned sources_used:[] and empty citations; its tree-sitter, O(k/n), <16ms, and exact 2-cell claims are hypotheses, not local acceptance facts."
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "Reasoning remains unnecessarily dim and italic at narrow widths, reducing model-thought readability when the terminal has little horizontal space.",
+      "support": ["render_live_line_with_alert_edge applies Modifier::DIM | Modifier::ITALIC to ordinary Reasoning at every width."],
+      "against": ["Static reasoning scrollback intentionally retains DIM and ITALIC; wide live presentation uses the restrained existing theme."],
+      "experiment": "Remove only DIM from live Reasoning at widths <=40 while retaining ITALIC, then compare focused live styles at 40 and 80 columns without changing rows, text, rails, or keys."
+    }
+  ],
+  "candidates": [
+    {
+      "core": "Add a narrow live-reasoning readability floor by retaining the existing italic semantic style but dropping DIM at widths <=40.",
+      "constraints": ["presentation-only", "reuse existing Role::Reasoning and live renderer", "static scrollback, wide live styling, rows, wrapping, rails, cache, keys, queue, and execution unchanged", "no new renderer or performance claim"],
+      "risks": ["too much contrast could compete with Answer; keep the change limited to narrow live Reasoning and preserve italic distinction"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/draw.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["live Reasoning style regression at 40 and 80 columns", "18/24/32/40/80/96 render matrix plus CJK/resize", "workspace tests/fmt/clippy/Debug/Release ConPTY"]
+    }
+  ],
+  "recommendation": "Reject the proposed highlighter/indentation modules as already covered locally. Accept only the separately testable narrow live-Reasoning contrast experiment if it improves readability without changing geometry or interaction semantics.",
+  "next_step": {"type": "experiment", "value": "Compare narrow versus wide live Reasoning modifiers, then implement only the verified contrast floor."},
+  "sources_used": [],
+  "citations": {},
+  "stop_conditions": ["Do not add a second renderer, tree-sitter dependency, virtualizer, physical rows, global sidebar, or fixed frame-time threshold.", "Do not remap Tab/Enter or query excluded user-owned deep-research status.", "Do not delete or update the sole Active Note."]
+}
