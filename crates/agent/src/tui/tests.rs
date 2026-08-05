@@ -1618,6 +1618,31 @@ fn partial_completed_idle_surface_keeps_partial_answer_truthful() {
 }
 
 #[test]
+fn error_idle_surface_keeps_partial_answer_recoverable() {
+    let mut ui = Ui::default();
+    ui.push_chunk(provider::StreamChunk::Answer(
+        "partial provider response".into(),
+    ));
+    ui.commit_live_answers("provider failed after streaming", 4, 9);
+    ui.record_activity(ActivityKind::Error, "provider failed");
+
+    let text = live_empty_state_for_test(&ui, 64, 10)
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(text.contains("ERR"), "error state missing: {text}");
+    assert!(
+        text.contains("PARTIAL · ") && text.contains("partial provider response"),
+        "error state hid retained partial Answer: {text}"
+    );
+    assert!(
+        text.contains("step 4") && text.contains("task tok"),
+        "error state hid partial Answer metadata: {text}"
+    );
+}
+
+#[test]
 fn completed_idle_surface_keeps_whole_labels_at_extreme_widths() {
     let mut ui = Ui::default();
     ui.note_markdown("final answer body remains in the Answer archive");
@@ -4850,6 +4875,26 @@ fn input_action_routes_keys() {
         false,
         false
     ));
+    assert!(live_hold_release_action(
+        &KeyEvent::new_with_kind(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        ),
+        false,
+    ));
+    assert!(!live_hold_release_action(
+        &KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
+        false,
+    ));
+    assert!(!live_hold_release_action(
+        &KeyEvent::new_with_kind(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        ),
+        true,
+    ));
     assert_eq!(
         live_scroll_action(
             &KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
@@ -4973,6 +5018,23 @@ fn decide_key_filters_windows_release_without_losing_ime_characters() {
     .expect("unpaired character release should remain usable");
     assert_eq!(ime.code, KeyCode::Char(' '));
     assert_eq!(ime.kind, KeyEventKind::Press);
+
+    let hold = KeyEvent::new_with_kind(
+        KeyCode::Char(' '),
+        KeyModifiers::CONTROL,
+        KeyEventKind::Press,
+    );
+    assert!(decide_key(&mut pressed, &hold).is_some());
+    let release = KeyEvent::new_with_kind(
+        KeyCode::Char(' '),
+        KeyModifiers::CONTROL,
+        KeyEventKind::Release,
+    );
+    assert_eq!(
+        decide_key(&mut pressed, &release).map(|key| key.kind),
+        Some(KeyEventKind::Release),
+        "Ctrl+Space release must reach momentary audit"
+    );
 }
 
 #[test]

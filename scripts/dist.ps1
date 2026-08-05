@@ -31,8 +31,9 @@ Copy-Item "$root\target\release\ridgecode.exe" $stage
 Copy-Item "$root\README.md" $stage
 Copy-Item "$root\scripts\install.ps1" $stage
 
-New-Item -ItemType Directory -Force -Path (Join-Path $root $OutDir) | Out-Null
-$zip = Join-Path $root "$OutDir\$name.zip"
+$outRoot = if ([IO.Path]::IsPathRooted($OutDir)) { $OutDir } else { Join-Path $root $OutDir }
+New-Item -ItemType Directory -Force -Path $outRoot | Out-Null
+$zip = Join-Path $outRoot "$name.zip"
 Remove-Item -Force $zip -ErrorAction SilentlyContinue
 Compress-Archive -Path "$stage\*" -DestinationPath $zip
 (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() + "  $name.zip" |

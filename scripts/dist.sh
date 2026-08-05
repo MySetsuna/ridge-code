@@ -17,15 +17,19 @@ cp "$root/README.md" "$stage/"
 cp "$root/scripts/install.sh" "$stage/"
 chmod +x "$stage/ridgecode" "$stage/install.sh"
 
-mkdir -p "$root/$out"
-tar="$root/$out/$name.tar.gz"
+case "$out" in
+  /*) out_root="$out" ;;
+  *)  out_root="$root/$out" ;;
+esac
+mkdir -p "$out_root"
+tar="$out_root/$name.tar.gz"
 ( cd "$(dirname "$stage")" && tar -czf "$tar" "$name" )
 
 # SHA256(GNU/macOS 兼容)
 if command -v sha256sum >/dev/null 2>&1; then
-  ( cd "$root/$out" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
+  ( cd "$out_root" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
 else
-  ( cd "$root/$out" && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256" )
+  ( cd "$out_root" && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256" )
 fi
 rm -rf "$(dirname "$stage")"
 echo "[OK] $tar"

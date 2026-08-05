@@ -107,25 +107,28 @@ impl TerminalGuard {
         // BPM best-effort(iter-24):旧 Windows conhost 不支持则静默退化为逐字粘贴,绝不阻 TUI 启动。
         let _ = execute!(stdout, event::EnableBracketedPaste);
         // CSI u best-effort(iter-27):现代终端(Ghostty/WezTerm/iTerm2/kitty)得 Shift+Enter
-        // 精确修饰键;不支持则静默降级(Alt+Enter / Ctrl+J 仍可换行)。只推 DISAMBIGUATE,
-        // 不开 REPORT_EVENT_TYPES(免 press/release/repeat 事件噪声)。
+        // 精确修饰键;不支持则静默降级(Alt+Enter / Ctrl+J 仍可换行)。同时请求
+        // REPORT_EVENT_TYPES，让 Ctrl+Space 可实现按住审计、松开跟随；decide_key
+        // 只放行这一语义键的 Release，其余 press/release 噪声仍去重。
         // ⚠ **仅非 Windows 推**:Windows Terminal 的 Kitty 键盘协议实现有缺陷 —— 开了它,**逐字打的空格键
         // 会被吞**(粘贴走 BracketedPaste 不受影响,故长任务粘贴照常);Windows 回落普通 WinAPI 键事件,
         // 空格正常,仅失 Shift+Enter 精确换行(Alt+Enter / Ctrl+J 仍可换行,损失可接受)。
         // Windows stays on the legacy WinAPI path by default; the opt-in
         // fixture flag lets a raw ConPTY harness send CSI-u Ctrl+Enter without
         // changing normal Windows Terminal compatibility.
-        let keyboard_enhancement_pushed = if !cfg!(windows)
-            || std::env::var("RIDGE_TUI_KITTY").ok().as_deref() == Some("1")
-        {
-            execute!(
-                stdout,
-                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-            )
-            .is_ok()
-        } else {
-            false
-        };
+        let keyboard_enhancement_pushed =
+            if !cfg!(windows) || std::env::var("RIDGE_TUI_KITTY").ok().as_deref() == Some("1") {
+                execute!(
+                    stdout,
+                    PushKeyboardEnhancementFlags(
+                        KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                            | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
+                    )
+                )
+                .is_ok()
+            } else {
+                false
+            };
         set_precise_multiline_input_enabled(keyboard_enhancement_pushed);
         // 主屏内联视口(iter-26):不进备用屏,终端原生历史/选取/搜索神圣不可侵犯。
         let term = Terminal::with_options(
@@ -329,6 +332,8 @@ pub(super) async fn run(
 
     // 「已按下集」:去重 Windows 每键的 Press+Release,并识别输入法「仅 Release」的悬空字符注入。
     let mut pressed: std::collections::HashSet<KeyCode> = std::collections::HashSet::new();
+    // Ctrl+Space 的按住审计标记；无 Release 能力的终端自然退化为原有 toggle。
+    let mut momentary_hold = false;
     let mut last_ctrl_c: Option<Instant> = None;
 
     'main: loop {
@@ -553,6 +558,13 @@ pub(super) async fn run(
                 let Some(key) = decide_key(&mut pressed, &key) else {
                     continue;
                 };
+                if live_hold_release_action(&key, ui.popup.is_some()) {
+                    if momentary_hold {
+                        momentary_hold = false;
+                        let _ = ui.follow_live();
+                    }
+                    continue;
+                }
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     && matches!(key.code, KeyCode::Char('c' | 'C'))
                 {
@@ -562,6 +574,7 @@ pub(super) async fn run(
                     }
                     last_ctrl_c = Some(now);
                     if let Some(handle) = task.take() {
+                        momentary_hold = false;
                         mark_takeover_requested(&mut ui);
                         handle.abort();
                         *bus.lock().unwrap() = None;
@@ -942,9 +955,11 @@ pub(super) async fn run(
                     ui.has_inspectable_live_output(),
                 ) {
                     if ui.transcript.is_inspecting() {
+                        momentary_hold = false;
                         let _ = ui.follow_live();
                     } else {
                         let _ = ui.hold_live();
+                        momentary_hold = true;
                     }
                     continue;
                 }
@@ -992,6 +1007,7 @@ pub(super) async fn run(
                 match input_action(&key, ui.busy, ui.popup.is_some()) {
                     InputAction::Interrupt => {
                         if let Some(handle) = task.take() {
+                            momentary_hold = false;
                             mark_takeover_requested(&mut ui);
                             handle.abort();
                             *bus.lock().unwrap() = None;
@@ -1248,6 +1264,7 @@ pub(super) async fn run(
             }
             Some(request) = approval_rx.recv() => {
                 pending = Some(request);
+                momentary_hold = false;
                 ui.scroll = 0; // 新审批从头看
                 ui.busy = false;
                 ui.waiting = false;
@@ -1256,6 +1273,7 @@ pub(super) async fn run(
             }
             Some(result) = done_rx.recv() => {
                 task = None;
+                momentary_hold = false;
                 ui.busy = false;
                 ui.waiting = false;
                 let partial_answer_reason = unfinished_answer_reason(&result);

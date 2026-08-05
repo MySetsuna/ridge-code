@@ -6,9 +6,9 @@ RidgeCode 是一个模块化、跨领域可扩展的通用 agent 框架，发布
 
 ## 先跑起来
 
-### 通过 GitHub 快速安装（无需 Rust/Cargo）
+### 其他 PC：通过 GitHub 快速安装（无需 Rust/Cargo）
 
-Release 归档包含平台二进制、完整 `README.md`、安装脚本与 `.sha256` 校验文件。安装器会下载对应平台归档、先校验 SHA256，再把 `ridgecode` 放入用户 PATH。
+最省事的方式是从 GitHub 拉取安装器。它会识别当前平台、下载对应 Release 归档、先校验 SHA256，再把 `ridgecode` 放入用户 PATH；无需安装 Rust、Cargo 或源码。每个归档内同时带有完整 `README.md` 与安装脚本，便于离线转交和审计。
 
 Windows PowerShell：
 
@@ -16,9 +16,9 @@ Windows PowerShell：
 # 最新稳定版：安装到 %LOCALAPPDATA%\Programs\ridgecode，并写入用户 PATH
 irm https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.ps1 | iex
 
-# 可复现安装：固定脚本与 Release 版本
-$s = irm https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.3/scripts/install.ps1
-& ([scriptblock]::Create($s)) -Version v0.5.3
+# 可复现安装：固定脚本与 Release 版本 v0.5.4
+$s = irm https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.4/scripts/install.ps1
+& ([scriptblock]::Create($s)) -Version v0.5.4
 
 # 新开终端后验证
 ridgecode --version
@@ -31,8 +31,8 @@ Linux / macOS：
 # 最新稳定版：安装到 ~/.local/bin
 curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.sh | sh
 
-# 可复现安装：固定脚本与 Release 版本
-curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.3/scripts/install.sh | sh -s -- --version v0.5.3
+# 可复现安装：固定脚本与 Release 版本 v0.5.4
+curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.4/scripts/install.sh | sh -s -- --version v0.5.4
 
 # 验证
 ridgecode --version
@@ -41,7 +41,16 @@ command -v ridgecode
 
 安装器首次运行会生成 `~/.ridge/config.json`（Windows 为 `%USERPROFILE%\.ridge\config.json`）与 `config.example.json`；填入 API Key 或设置 `RIDGE_API_KEY` 后即可启动真实模型。安装完成后若当前 shell 尚未刷新 PATH，请新开终端。
 
-当前 Release：[v0.5.3](https://github.com/MySetsuna/ridge-code/releases/tag/v0.5.3)。手动下载时按平台选择：
+首次启动示例：
+
+~~~powershell
+$env:RIDGE_API_KEY = "your-key"
+ridgecode
+~~~
+
+Linux / macOS 将 `$env:RIDGE_API_KEY` 改为 `export RIDGE_API_KEY="your-key"`。企业或审计环境可先下载 `scripts/install.ps1` / `scripts/install.sh` 检查内容，再用本地脚本执行；安装器也支持 `-Dir`、`--dir` 自定义目录。
+
+当前 Release：[v0.5.4](https://github.com/MySetsuna/ridge-code/releases/tag/v0.5.4)。手动下载时按平台选择：
 
 | 平台 | Release 资产 |
 | --- | --- |
@@ -49,7 +58,7 @@ command -v ridgecode
 | Linux x86_64 / ARM64 | `ridgecode-x86_64-unknown-linux-gnu.tar.gz` / `ridgecode-aarch64-unknown-linux-gnu.tar.gz` |
 | macOS Intel / Apple Silicon | `ridgecode-x86_64-apple-darwin.tar.gz` / `ridgecode-aarch64-apple-darwin.tar.gz` |
 
-每个归档旁均有同名 `.sha256` 文件；手动下载后先校验，再解压并将二进制放入 PATH。安装器参数：Unix 支持 `--version <tag>`、`--local <binary>`、`--dir <dir>`；Windows 支持 `-Version <tag>`、`-Local <path>`、`-Dir <dir>`。本地安装不联网：`scripts/install.sh --local target/release/ridgecode` 或 `scripts/install.ps1 -Local target/release/ridgecode.exe`。
+每个归档旁均有同名 `.sha256` 文件；手动下载后先校验，再解压并将二进制放入 PATH。Windows 可用 `Get-FileHash .\ridgecode-*.zip -Algorithm SHA256`，Linux / macOS 可用 `sha256sum ridgecode-*.tar.gz` 或 `shasum -a 256 ridgecode-*.tar.gz` 对照校验文件。安装器参数：Unix 支持 `--version <tag>`、`--local <binary>`、`--dir <dir>`；Windows 支持 `-Version <tag>`、`-Local <path>`、`-Dir <dir>`。本地安装不联网：`scripts/install.sh --local target/release/ridgecode` 或 `scripts/install.ps1 -Local target/release/ridgecode.exe`。
 
 ### 从源码运行
 
@@ -186,7 +195,7 @@ ChatGPT/Codex 启动时会用 OAuth 账号目录校验当前模型；若配置�
 | Ctrl+I / Alt+I | 打开/关闭 Live Block Inspector；可检视/删除 pending，不暂停当前任务 |
 | Ctrl+T | 打开/关闭最近 Agent 活动 |
 | Ctrl+Q | 打开/关闭待执行队列面板 |
-| Ctrl+Space | 保持/跟随实时 Answer/Reasoning 视口，不暂停模型任务 |
+| Ctrl+Space | 支持释放事件的终端：按住进入 HOLD、松开回到 FOLLOW；旧终端按键切换，不暂停模型任务 |
 | Ctrl+Enter | 忙时将当前输入插入队首，不打断当前任务 |
 | Alt+↑/↓ | 选择 live 工具焦点 |
 | Alt+PageUp/PageDown | 优先滚动工具详情；否则检视 Live Answer/Reasoning 或 Tool History 详情 |
@@ -205,7 +214,7 @@ ChatGPT/Codex 启动时会用 OAuth 账号目录校验当前模型；若配置�
 
 任务忙时，普通 `Enter` 将当前输入追加到 FIFO；`Ctrl+Enter` 直接插入队首，均不打断当前模型思考。输入框上方持续显示队首与有界预览。Live Inspector 也显示 pending 行：选中后 `Delete` 可直接移除；`Ctrl+Q` 或 `/queue` 切到完整队列，`Ctrl+I` 可从队列返回 Inspector。删除只作用于尚未执行的队列，不影响当前回合。面板可实时观察队列变化，模型仍继续输出。
 
-实时状态位于顶部活动条与底部状态条：阶段、阶段耗时、工具/思考/回答通道、输入/输出 token、速率、上下文占用、effort 与队列深度均分开显示。长回答与工具输出按终端宽度换行；文件读取默认折叠为一个工具块，`Ctrl+O` 展开当前工具详情，详情保留首尾并折叠中段，`Alt+↑/↓` 切换工具，`Alt+PageUp/PageDown` 查看详情，`/history` 搜索已完成工具记录。`Ctrl+I`/`Alt+I` 或 `/inspect` 检视当前 Answer/Reasoning/Tool 混合块，Enter/Space 展开选中块而不打断模型。`Ctrl+R` 或 `/reasoning` 搜索最近 8 段已完成 reasoning，Enter 展开全文，Alt+PageUp/PageDown 滚动详情。`Ctrl+Space` 将实时视口置为 `HOLD`，用户可阅读旧内容而不打断模型；再按一次或 `Alt+End` 回到 `FOLLOW`。`Ctrl+C` 第一次请求接管并保留输入，2 秒内第二次才退出。
+实时状态位于顶部活动条与底部状态条：阶段、阶段耗时、工具/思考/回答通道、输入/输出 token、速率、上下文占用、effort 与队列深度均分开显示。长回答与工具输出按终端宽度换行；文件读取默认折叠为一个工具块，`Ctrl+O` 展开当前工具详情，详情保留首尾并折叠中段，`Alt+↑/↓` 切换工具，`Alt+PageUp/PageDown` 查看详情，`/history` 搜索已完成工具记录。`Ctrl+I`/`Alt+I` 或 `/inspect` 检视当前 Answer/Reasoning/Tool 混合块，Enter/Space 展开选中块而不打断模型。`Ctrl+R` 或 `/reasoning` 搜索最近 8 段已完成 reasoning，Enter 展开全文，Alt+PageUp/PageDown 滚动详情。支持释放事件的终端中，`Ctrl+Space` 按住将实时视口置为 `HOLD`，松开回到 `FOLLOW`；不支持释放事件的终端保留原有按键切换。任何情况下都不打断模型。`Ctrl+C` 第一次请求接管并保留输入，2 秒内第二次才退出。
 
 启用 `RIDGE_TUI_SNAPSHOT` 时，诊断 JSON 还会记录当前面板、筛选词、选中项、详情展开/滚动位置、可见行数、`state.live_view`（`hold`/`follow`）、`state.reasoning_expanded`、`state.live_focus`（`answer`/`reasoning`/`tool:<id>`）、`state.activity_kind`、有界 `state.activity_history`、`state.live_blocks` 与 `state.reasoning_history` 数量，便于外部终端/测试工具实时判断用户正在查看什么。
 
@@ -493,15 +502,15 @@ sh scripts/dist.sh
 维护者在稳定基线完成全量质量门后创建 v* 标签并推送；CI 会自动创建 GitHub Release、构建五个平台资产、生成 SHA256 并把 README/安装脚本放进归档：
 
 ~~~bash
-git tag v0.5.3
+git tag v0.5.4
 git push origin main
-git push origin v0.5.3
+git push origin v0.5.4
 ~~~
 
 也可用 GitHub CLI 下载指定版本：
 
 ~~~bash
-gh release download v0.5.3 --repo MySetsuna/ridge-code --pattern 'ridgecode-*'
+gh release download v0.5.4 --repo MySetsuna/ridge-code --pattern 'ridgecode-*'
 ~~~
 
 `.github/workflows/release.yml` 会为 Linux x86_64/aarch64、macOS x86_64/aarch64、Windows x86_64 构建并上传归档。CI 同时验证 fmt、clippy、workspace build 与 workspace test；发布前至少执行：

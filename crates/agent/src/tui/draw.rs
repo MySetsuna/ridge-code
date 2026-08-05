@@ -4237,15 +4237,7 @@ fn idle_result_summary(ui: &Ui, width: usize, rows: usize) -> Option<(String, Ro
             Role::Error,
             "inspect failure",
             if has_answer {
-                if width >= 27 {
-                    "Ctrl+T activity · Ctrl+A answers"
-                } else if width >= 15 {
-                    "^T activity · ^A"
-                } else if width >= 8 {
-                    "^T · ^A"
-                } else {
-                    "^T/^A"
-                }
+                idle_answer_recovery(width, partial_answer)
             } else {
                 idle_activity_recovery(width)
             },
@@ -4268,7 +4260,7 @@ fn idle_result_summary(ui: &Ui, width: usize, rows: usize) -> Option<(String, Ro
     }
     if matches!(
         signal.kind,
-        ActivityKind::Completed | ActivityKind::Conclusion
+        ActivityKind::Completed | ActivityKind::Conclusion | ActivityKind::Error
     ) && rows >= 5
         && has_answer
     {
@@ -4280,7 +4272,7 @@ fn idle_result_summary(ui: &Ui, width: usize, rows: usize) -> Option<(String, Ro
     }
     if matches!(
         signal.kind,
-        ActivityKind::Completed | ActivityKind::Conclusion
+        ActivityKind::Completed | ActivityKind::Conclusion | ActivityKind::Error
     ) && width >= 48
         && rows >= 10
     {
@@ -4309,7 +4301,7 @@ fn idle_result_summary(ui: &Ui, width: usize, rows: usize) -> Option<(String, Ro
     }
     if matches!(
         signal.kind,
-        ActivityKind::Completed | ActivityKind::Conclusion
+        ActivityKind::Completed | ActivityKind::Conclusion | ActivityKind::Error
     ) && rows >= 6
         && has_reasoning
     {
