@@ -263,6 +263,42 @@ fn activity_history_is_bounded_deduplicated_and_newest_first() {
 }
 
 #[test]
+fn lifecycle_boundaries_keep_phase_and_activity_aligned() {
+    let mut ui = Ui {
+        phase: "verifying".into(),
+        ..Ui::default()
+    };
+
+    ui.mark_task_outcome(true);
+    assert_eq!(ui.phase, "completed");
+    assert_eq!(ui.activity, "completed");
+    assert_eq!(
+        ui.activity_history.back().unwrap().kind,
+        ActivityKind::Completed
+    );
+
+    ui.mark_task_outcome(false);
+    assert_eq!(ui.phase, "stopped");
+    assert_eq!(ui.activity, "stopped · not approved");
+    assert_eq!(
+        ui.activity_history.back().unwrap().kind,
+        ActivityKind::Error
+    );
+
+    ui.mark_error();
+    assert_eq!(ui.phase, "error");
+    assert_eq!(ui.activity, "stopped · error");
+
+    ui.mark_takeover_ready();
+    assert_eq!(ui.phase, "takeover");
+    assert_eq!(ui.activity, "takeover ready");
+
+    ui.mark_approval_required();
+    assert_eq!(ui.phase, "approval");
+    assert_eq!(ui.activity, "approval required · user can take over");
+}
+
+#[test]
 fn activity_history_retains_actionable_boundaries_during_node_chatter() {
     let mut ui = Ui::default();
     ui.record_activity(ActivityKind::Waiting, "waiting · no stream for 8s");
@@ -4726,6 +4762,23 @@ fn decide_key_dedups_and_recovers_ime_space() {
         decide_key(&mut p, &press(KeyCode::Char(' '))).map(|k| k.code),
         Some(KeyCode::Char(' '))
     );
+}
+
+#[test]
+fn decide_key_preserves_momentary_hold_press_and_release() {
+    use std::collections::HashSet;
+    let mut pressed = HashSet::new();
+    let modifiers = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+    let press = KeyEvent::new_with_kind(KeyCode::Char('2'), modifiers, KeyEventKind::Press);
+    let release = KeyEvent::new_with_kind(KeyCode::Char('2'), modifiers, KeyEventKind::Release);
+
+    let down = decide_key(&mut pressed, &press).expect("hold press should survive filtering");
+    assert_eq!(down.kind, KeyEventKind::Press);
+    assert!(live_hold_toggle_action(&down, false, true));
+
+    let up = decide_key(&mut pressed, &release).expect("hold release should survive filtering");
+    assert_eq!(up.kind, KeyEventKind::Release);
+    assert!(live_hold_release_action(&up, false));
 }
 
 /// 根因回归:审批态下滚动键**不再误拒**,而是滚动;仅 y/Enter 批准、n/Esc 拒绝,余键忽略。

@@ -623,7 +623,7 @@ pub(super) async fn run(
                         last_activity = None;
                         retry_count = 0;
                         pending_submit = None;
-                        ui.set_activity("takeover ready");
+                        ui.mark_takeover_ready();
                         let kept = ui.queued.len();
                         let tail = if kept > 0 {
                             format!("interrupted current task · takeover ready · {kept} queued kept")
@@ -1042,7 +1042,7 @@ pub(super) async fn run(
                             task_started = None;
                             retry_count = 0; // 中断即取消重试链
                             pending_submit = None;
-                            ui.set_activity("takeover ready");
+                            ui.mark_takeover_ready();
                             let kept = ui.queued.len();
                             let tail = if kept > 0 {
                                 format!("interrupted current task · takeover ready · {kept} queued kept")
@@ -1276,7 +1276,7 @@ pub(super) async fn run(
                 ui.scroll = 0; // 新审批从头看
                 ui.busy = false;
                 ui.waiting = false;
-                ui.set_activity("approval required · user can take over");
+                ui.mark_approval_required();
                 dirty = true;
             }
             Some(result) = done_rx.recv() => {
@@ -1313,11 +1313,7 @@ pub(super) async fn run(
                         session_tokens += out.total_tokens;
                         session_turns += 1;
                         ui.todos = out.todos.clone();
-                        ui.set_activity(if out.approved {
-                            "completed"
-                        } else {
-                            "stopped · not approved"
-                        });
+                        ui.mark_task_outcome(out.approved);
                         // 显停机原因:未通过时把 halt_reason 一并播报(为何停一眼可见),配合「收束回合」的模型陈述。
                         let status = if out.approved {
                             "✓ approved".to_string()
@@ -1374,7 +1370,7 @@ pub(super) async fn run(
                                     format!("error: {e}")
                                 };
                                 ui.note(tail, Color::Red);
-                                ui.set_activity("stopped · error");
+                                ui.mark_error();
                                 agent::fire_session_hooks("stop", "error");
                                 retry_count = 0;
                             }

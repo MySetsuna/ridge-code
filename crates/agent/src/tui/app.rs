@@ -264,6 +264,8 @@ pub(crate) struct Ui {
     /// No event/stream chunk arrived for the stale threshold; render an explicit
     /// waiting state instead of leaving the user to infer a permanent reasoning loop.
     pub(crate) waiting: bool,
+    /// Current lifecycle projection: observed agent node while busy, then the
+    /// terminal/intervention outcome once the task settles.
     pub(crate) phase: String,
     /// 当前实际观测到的 Agent 活动；与 phase 分开，避免把 node 名误当实时进展。
     pub(crate) activity: String,
@@ -304,6 +306,33 @@ pub(crate) struct Ui {
     pub(crate) run_task: Option<String>,
 }
 impl Ui {
+    /// Keep the visible lifecycle phase and activity rail synchronized at
+    /// presentation boundaries. The activity history still retains the
+    /// preceding node transitions for reasoning/detail inspection.
+    pub(crate) fn mark_takeover_ready(&mut self) {
+        self.phase = "takeover".into();
+        self.set_activity("takeover ready");
+    }
+
+    pub(crate) fn mark_approval_required(&mut self) {
+        self.phase = "approval".into();
+        self.set_activity("approval required · user can take over");
+    }
+
+    pub(crate) fn mark_task_outcome(&mut self, approved: bool) {
+        self.phase = if approved { "completed" } else { "stopped" }.into();
+        self.set_activity(if approved {
+            "completed"
+        } else {
+            "stopped · not approved"
+        });
+    }
+
+    pub(crate) fn mark_error(&mut self) {
+        self.phase = "error".into();
+        self.set_activity("stopped · error");
+    }
+
     pub(crate) fn note(&mut self, text: impl Into<String>, color: Color) {
         self.commits.push(CommitBlock::Text {
             text: text.into(),

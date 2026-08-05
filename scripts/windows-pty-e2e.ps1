@@ -838,7 +838,6 @@ try {
     $inspectQueueEvidenceSatisfied = -not $InspectQueue -or ($inspectQueueRemovedObserved -and $attentionQueueObserved -and $attentionLiveObserved)
     $reasoningEvidenceSatisfied = -not $InspectReasoning -or $reasoningObserved
     $answerInspectEvidenceSatisfied = -not $InspectAnswer -or $answerInspectObserved
-    $holdEvidenceSatisfied = -not $InspectHold -or ($holdObserved -and $followObserved)
     $resizeEvidenceSatisfied = -not $ResizeProbe -or $resizeObserved
     $trace = if (Test-Path -LiteralPath $isolatedTrace) {
         [IO.File]::ReadAllText($isolatedTrace)
@@ -851,19 +850,42 @@ try {
     # chunk boundary.
     $ansiPattern = '\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))'
     $plain = [regex]::Replace($text.ToString(), $ansiPattern, '')
+    # ConPTY cursor-addressed redraws can insert cell separators or split a
+    # word across writes.  Keep a compact ASCII probe for fixture markers;
+    # snapshot rows below remain the authoritative visible-frame evidence.
+    $probePlain = [regex]::Replace($plain, '[^A-Za-z0-9]+', '').ToLowerInvariant()
+    # A Windows raw Ctrl+Space byte commonly arrives as a press/release pair
+    # in one ConPTY read.  The application correctly renders the momentary
+    # HOLD frame, then returns to FOLLOW on release before the polling loop can
+    # capture a JSON frame.  Accept that visible HOLD marker plus final FOLLOW
+    # as the same contract, while still preferring the direct snapshot path.
+    $holdFrameObserved = ($plain -match '(?i)HOLD\s*·') -or
+        ($probePlain -match 'hold(?:model|thinking|answer|tool|waiting|reasoning)')
+    if ($InspectHold -and -not $holdObserved -and $holdFrameObserved) {
+        $holdObserved = $true
+    }
+    if ($InspectHold -and $holdObserved -and -not $followObserved -and
+        $null -ne $snapshotState -and $snapshotState.live_view -eq 'follow') {
+        $followObserved = $true
+    }
+    $holdEvidenceSatisfied = -not $InspectHold -or ($holdObserved -and $followObserved)
     $rawOutputPath = Join-Path $isolatedHome '.ridge\pty-output.bin'
     if ($KeepDiagnostics) {
         [IO.File]::WriteAllBytes($rawOutputPath, $rawOutput.ToArray())
     }
     $completionReasoningObserved = if ($stressFixtureRequested) {
-        $plain -match 'STRESS_REASONING_END'
+        ($plain -match 'STRESS_REASONING_END') -or ($probePlain -match 'stressreasoningend')
     } else {
-        $plain -match 'fixture\s*reasoning\s*:\s*completed\s*path\s*remains\s*inspectable'
+        ($plain -match 'fixture\s*reasoning\s*:\s*completed\s*path\s*remains\s*inspectable') -or
+            ($snapshotRows -match 'fixture\s*reasoning\s*:\s*completed\s*path') -or
+            ($probePlain -match 'fixturereasoningcompletedpathremainsinspectable')
     }
     $completionAnswerObserved = if ($stressFixtureRequested) {
-        $plain -match 'STRESS_ANSWER_BEGIN'
+        ($plain -match 'STRESS_ANSWER_BEGIN') -or ($probePlain -match 'stressanswerbegin')
     } else {
-        $plain -match 'fixture\s*answer\s*:\s*final\s*response\s*reached\s*scrollback'
+        ($plain -match 'fixture\s*answer\s*:\s*final\s*response\s*reached\s*scrollback') -or
+            ($snapshotRows -match 'fixture\s*answer\s*:\s*final\s*response') -or
+            ($probePlain -match 'fixtureanswerfinalresponsereachedscrollback')
     }
     $completionTextObserved = -not $completionMode -or ($completionReasoningObserved -and $completionAnswerObserved)
     $completionEvidenceSatisfied = -not $completionMode -or ($completionTaskSent -and $completionObserved -and $completionTextObserved)
@@ -940,6 +962,7 @@ try {
         snapshot_answer_history = if ($null -ne $snapshotState) { $snapshotState.answer_history } else { $null }
         snapshot_rate = if ($null -ne $snapshotState) { $snapshotState.rate } else { $null }
         snapshot_effort = if ($null -ne $snapshotState) { $snapshotState.effort } else { $null }
+        hold_frame_observed = $holdFrameObserved
         snapshot_has_ridge_marker = ($snapshotRows -match 'RIDGE|RidgeCode|ready')
         snapshot_has_help = ($snapshotRows -match '(?i)help')
         snapshot_has_next_queue = $queueAffordanceObserved
