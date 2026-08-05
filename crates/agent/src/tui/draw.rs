@@ -3080,14 +3080,11 @@ fn live_channel_state(channel: LiveChannel) -> (Role, &'static str) {
 /// the preceding reasoning/tool work without duplicating any body text.
 fn live_channel_tags(ui: &Ui) -> Vec<&'static str> {
     let mut channels = Vec::with_capacity(3);
-    if ui.transcript.has_reasoning() {
-        channels.push("THK");
-    }
-    if ui.transcript.has_answer() {
-        channels.push("ANS");
-    }
-    if ui.has_live_tools() {
-        channels.push("TLS");
+    for channel in ui.transcript.phase_trace() {
+        let tag = live_channel_tag(channel);
+        if !channels.contains(&tag) {
+            channels.push(tag);
+        }
     }
     channels
 }
@@ -5118,6 +5115,22 @@ mod snapshot_tests {
                 && span.style.fg == Some(role_color(Role::Warn))
                 && span.style.add_modifier.contains(Modifier::BOLD)
         }));
+    }
+
+    #[test]
+    fn live_surface_title_preserves_observed_channel_order() {
+        let mut ui = Ui {
+            busy: true,
+            ..Ui::default()
+        };
+        ui.push_chunk(provider::StreamChunk::Reasoning("plan".into()));
+        ui.push_tool(ToolBlock::from_lines(vec![("search".into(), Color::Cyan)]).expect("tool"));
+        ui.push_chunk(provider::StreamChunk::Answer("result".into()));
+
+        let title = live_surface_title(&ui, 48);
+        assert!(title.contains("THK/TLS/ANS"), "{title}");
+        assert!(!title.contains("THK/ANS/TLS"), "{title}");
+        assert!(str_cells(&title) <= 48, "{title}");
     }
 
     #[test]
