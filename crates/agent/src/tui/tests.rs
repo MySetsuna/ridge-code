@@ -366,6 +366,42 @@ fn reasoning_history_panel_exposes_think_rail_and_detail_anchor() {
 }
 
 #[test]
+fn reasoning_history_row_identifies_thinking_and_character_count() {
+    let mut ui = Ui::default();
+    let body = "inspect state";
+    ui.push_chunk(provider::StreamChunk::Reasoning(body.into()));
+    ui.commit_live_reasoning(3, 2);
+
+    let panel = reasoning_history_panel(&ui.reasoning_history);
+    let row = panel.rows.first().expect("reasoning history row");
+    assert!(row.key.contains("THINK"), "{}", row.key.as_str());
+    assert!(
+        row.key.contains(&format!("{} chars", body.chars().count())),
+        "{}",
+        row.key.as_str()
+    );
+    assert!(row.key.contains("p#"), "{}", row.key.as_str());
+
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(48, 8))
+        .expect("reasoning history metadata terminal");
+    terminal
+        .draw(|frame| draw_panel(frame, frame.area(), &panel))
+        .expect("reasoning history metadata draw");
+    let symbols = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(
+        symbols.contains("THINK"),
+        "row label disappeared: {symbols}"
+    );
+    assert!(symbols.contains("chars"), "row size disappeared: {symbols}");
+}
+
+#[test]
 fn live_inspector_detail_anchor_tracks_answer_and_thinking_focus() {
     let mut ui = Ui::default();
     ui.push_chunk(provider::StreamChunk::Reasoning("plan".into()));

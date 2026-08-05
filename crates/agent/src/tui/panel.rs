@@ -332,7 +332,7 @@ pub(crate) fn tool_history_panel(history: &std::collections::VecDeque<ToolBlock>
     )
 }
 
-/// 已提交 reasoning 历史:摘要展示 step/token，Enter 展开完整思考文本。
+/// 已提交 reasoning 历史:摘要展示 THINK/step/token/字符数，Enter 展开完整思考文本。
 pub(crate) fn reasoning_history_panel(
     history: &std::collections::VecDeque<ReasoningEntry>,
 ) -> Panel {
@@ -342,11 +342,12 @@ pub(crate) fn reasoning_history_panel(
         .enumerate()
         .map(|(index, reasoning)| PanelRow {
             key: format!(
-                "#{} step {} · {} tok · +{}s · p#{}",
+                "#{} THINK · step {} · {} tok · +{}s · {} chars · p#{}",
                 index + 1,
                 reasoning.step,
                 reasoning.tokens,
                 reasoning.elapsed_s,
+                reasoning.text.chars().count(),
                 reasoning.id
             ),
             value: reasoning.text.clone(),

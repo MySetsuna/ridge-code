@@ -2,7 +2,7 @@
 # RidgeCode 安装器(Unix:Linux / macOS)—— 零 cargo、零源码,只需一个独立二进制。
 #
 #   在线装最新版:  curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.sh | sh
-#   指定版本:      curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.8/scripts/install.sh | sh -s -- --version v0.5.8
+#   指定版本:      curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.9/scripts/install.sh | sh -s -- --version v0.5.9
 #   装本地已构建:  ./scripts/install.sh --local target/release/ridgecode
 #
 # 装到 $RIDGE_BIN_DIR(默认 ~/.local/bin);若不在 PATH,脚本会提示如何加。
