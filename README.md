@@ -8,7 +8,7 @@ RidgeCode 是一个模块化、跨领域可扩展的通用 agent 框架，发布
 
 ### 其他 PC：通过 GitHub 快速安装（无需 Rust/Cargo）
 
-最省事的方式是从 GitHub 拉取安装器。它会识别当前平台、下载对应 Release 归档、先校验 SHA256，再把 `ridgecode` 放入用户 PATH；无需安装 Rust、Cargo 或源码。当前稳定版为 `v0.5.5`；每个归档内同时带有完整 `README.md` 与安装脚本，便于离线转交和审计。
+最省事的方式是从 GitHub 拉取安装器。它会识别当前平台、下载对应 Release 归档、先校验 SHA256，再把 `ridgecode` 放入用户 PATH；无需安装 Rust、Cargo 或源码。当前稳定版为 `v0.5.6`；每个归档内同时带有完整 `README.md` 与安装脚本，便于离线转交和审计。
 
 Windows PowerShell：
 
@@ -16,9 +16,9 @@ Windows PowerShell：
 # 最新稳定版：安装到 %LOCALAPPDATA%\Programs\ridgecode，并写入用户 PATH
 irm https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.ps1 | iex
 
-# 可复现安装：固定脚本与 Release 版本 v0.5.5
-$s = irm https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.5/scripts/install.ps1
-& ([scriptblock]::Create($s)) -Version v0.5.5
+# 可复现安装：固定脚本与 Release 版本 v0.5.6
+$s = irm https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.6/scripts/install.ps1
+& ([scriptblock]::Create($s)) -Version v0.5.6
 
 # 新开终端后验证
 ridgecode --version
@@ -31,8 +31,8 @@ Linux / macOS：
 # 最新稳定版：安装到 ~/.local/bin
 curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.sh | sh
 
-# 可复现安装：固定脚本与 Release 版本 v0.5.5
-curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.5/scripts/install.sh | sh -s -- --version v0.5.5
+# 可复现安装：固定脚本与 Release 版本 v0.5.6
+curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.6/scripts/install.sh | sh -s -- --version v0.5.6
 
 # 验证
 ridgecode --version
@@ -52,7 +52,7 @@ Linux / macOS 将 `$env:RIDGE_API_KEY` 改为 `export RIDGE_API_KEY="your-key"`�
 
 升级时重复执行对应平台的最新版安装命令即可；安装器会覆盖旧二进制，不改已有 `~/.ridge/config.json`。卸载仅需删除安装目录中的二进制（配置默认保留）：Windows 删除 `%LOCALAPPDATA%\Programs\ridgecode\ridgecode.exe`，Linux / macOS 删除 `~/.local/bin/ridgecode`。
 
-当前 Release：[v0.5.5](https://github.com/MySetsuna/ridge-code/releases/tag/v0.5.5)。手动下载时按平台选择：
+当前 Release：[v0.5.6](https://github.com/MySetsuna/ridge-code/releases/tag/v0.5.6)。手动下载时按平台选择：
 
 | 平台 | Release 资产 |
 | --- | --- |
@@ -504,15 +504,15 @@ sh scripts/dist.sh
 维护者在稳定基线完成全量质量门后创建 v* 标签并推送；CI 会自动创建 GitHub Release、构建五个平台资产、生成 SHA256 并把 README/安装脚本放进归档：
 
 ~~~bash
-git tag v0.5.5
+git tag v0.5.6
 git push origin main
-git push origin v0.5.5
+git push origin v0.5.6
 ~~~
 
 也可用 GitHub CLI 下载指定版本：
 
 ~~~bash
-gh release download v0.5.5 --repo MySetsuna/ridge-code --pattern 'ridgecode-*'
+gh release download v0.5.6 --repo MySetsuna/ridge-code --pattern 'ridgecode-*'
 ~~~
 
 `.github/workflows/release.yml` 会为 Linux x86_64/aarch64、macOS x86_64/aarch64、Windows x86_64 构建并上传归档。CI 同时验证 fmt、clippy、workspace build 与 workspace test；发布前至少执行：

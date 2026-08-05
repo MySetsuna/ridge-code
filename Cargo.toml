@@ -4,7 +4,7 @@ members = ["crates/langgraph", "crates/agent", "crates/tools", "crates/provider"
 
 [workspace.package]
 edition = "2021"
-version = "0.5.5"
+version = "0.5.6"
 license = "MIT"
 
 # 依赖版本统一在此管理,子 crate 用 `dep.workspace = true`。

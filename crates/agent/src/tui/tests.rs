@@ -6291,7 +6291,7 @@ fn committed_answer_keeps_a_semantic_rail_after_leaving_live_view() {
     let lines = answer_commit_lines("🤖 **answer**\nnext line");
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[0].spans[0].content.as_ref(), "╭ ANSWER ");
-    assert_eq!(lines[1].spans[0].content.as_ref(), "│ ");
+    assert_eq!(lines[1].spans[0].content.as_ref(), "╰ ");
     assert!(lines[0]
         .spans
         .iter()
@@ -6299,8 +6299,36 @@ fn committed_answer_keeps_a_semantic_rail_after_leaving_live_view() {
     assert_eq!(lines[0].spans[0].style.fg, Some(role_color(Role::Primary)));
     assert_eq!(
         answer_commit_measure("first\nsecond"),
-        "╭ ANSWER first  [Ctrl+A answers]\n│ second"
+        "╭ ANSWER first  [Ctrl+A answers]\n╰ second"
     );
+}
+
+#[test]
+fn reasoning_scrollback_closes_multiline_block() {
+    let lines = reasoning_commit_lines("first thought\nsecond thought", 2, 3, 5, 80);
+    assert_eq!(lines[1].spans[0].content.as_ref(), "┊ ");
+    assert_eq!(lines[2].spans[0].content.as_ref(), "└ ");
+    assert!(lines.iter().all(|line| {
+        line.spans
+            .iter()
+            .map(|span| str_cells(span.content.as_ref()))
+            .sum::<usize>()
+            <= 80
+    }));
+}
+
+#[test]
+fn answer_scrollback_closes_multiline_block() {
+    let lines = answer_commit_lines("🤖 first answer\nsecond answer");
+    assert_eq!(lines[0].spans[0].content.as_ref(), "╭ ANSWER ");
+    assert_eq!(lines[1].spans[0].content.as_ref(), "╰ ");
+}
+
+#[test]
+fn activity_scrollback_closes_multiline_block() {
+    let lines = activity_commit_lines(3, ActivityKind::Conclusion, "settling\nresult ready", 80);
+    assert_eq!(lines[1].spans[0].content.as_ref(), "⟦SUM #3⟧ ");
+    assert_eq!(lines[2].spans[0].content.as_ref(), "└ ");
 }
 
 #[test]
@@ -8617,7 +8645,7 @@ fn activity_anchor_keeps_rail_across_explicit_detail_lines() {
         .find(|row| row.contains("second detail"))
         .expect("explicit activity detail");
     assert!(
-        detail.starts_with("│ "),
-        "explicit activity detail lost continuation rail: {rows:?}"
+        detail.starts_with("└ "),
+        "explicit activity detail lost closing rail: {rows:?}"
     );
 }

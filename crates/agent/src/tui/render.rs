@@ -1041,9 +1041,11 @@ pub(crate) fn markdown_lines(text: &str) -> Vec<Line<'static>> {
 /// The live renderer already exposes the same semantic channel; keeping this
 /// prefix in committed scrollback prevents the final answer from becoming
 /// indistinguishable from an untyped Markdown note.
-fn answer_commit_rail(index: usize) -> &'static str {
+fn answer_commit_rail(index: usize, last_index: usize) -> &'static str {
     if index == 0 {
         "╭ ANSWER "
+    } else if index == last_index {
+        "╰ "
     } else {
         "│ "
     }
@@ -1059,12 +1061,15 @@ fn answer_commit_hint(index: usize, partial: bool) -> &'static str {
 
 #[cfg(test)]
 pub(crate) fn answer_commit_measure(text: &str) -> String {
-    text.lines()
+    let lines = text.lines().collect::<Vec<_>>();
+    let last_index = lines.len().saturating_sub(1);
+    lines
+        .into_iter()
         .enumerate()
         .map(|(index, line)| {
             format!(
                 "{}{line}{}",
-                answer_commit_rail(index),
+                answer_commit_rail(index, last_index),
                 answer_commit_hint(index, false)
             )
         })
@@ -1099,11 +1104,13 @@ pub(crate) fn answer_commit_lines_with_status_and_metrics(
     partial: bool,
     metrics: Option<PresentationMetrics>,
 ) -> Vec<Line<'static>> {
-    markdown_lines(text)
+    let lines = markdown_lines(text);
+    let last_index = lines.len().saturating_sub(1);
+    lines
         .into_iter()
         .enumerate()
         .map(|(index, line)| {
-            let rail = answer_commit_rail(index);
+            let rail = answer_commit_rail(index, last_index);
             let mut spans = Vec::with_capacity(line.spans.len() + 1);
             spans.push(Span::styled(
                 rail,
@@ -1172,6 +1179,551 @@ pub(crate) fn fold_lines(text: &str, max: usize) -> String {
     let mut out = lines[..max].join("\n");
     out.push_str(&format!("\n… (+{hidden} lines folded)"));
     out
+}
+
+pub(crate) fn activity_role(kind: ActivityKind) -> Role {
+    match kind {
+        ActivityKind::Plan => Role::Reasoning,
+        ActivityKind::Waiting | ActivityKind::Approval => Role::Warn,
+        ActivityKind::Takeover => Role::Primary,
+        ActivityKind::Completed | ActivityKind::Conclusion => Role::Success,
+        ActivityKind::Error => Role::Error,
+        _ => Role::Info,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reasoning_commit_text(
+    text: &str,
+    step: usize,
+    elapsed_s: u64,
+    tokens: usize,
+) -> String {
+    let text = bound_reasoning_history_text(text);
+    let meta = fmt_reasoning_meta(step, elapsed_s, tokens);
+    let mut lines = text.lines();
+    let Some(first) = lines.next() else {
+        return format!("┊ {meta}");
+    };
+    let mut committed = format!("┊ {meta}{first}  [Ctrl+R history]");
+    for line in lines {
+        committed.push('\n');
+        committed.push_str("│ ");
+        committed.push_str(line);
+    }
+    committed
+}
+
+#[cfg(test)]
+pub(crate) fn activity_commit_text(sequence: u64, kind: ActivityKind, text: &str) -> String {
+    format!("⟦{} #{sequence}⟧ {text}  [Ctrl+T activity]", kind.tag())
+}
+
+/// Static commit projection stays with the other presentation renderers.
+/// `app.rs` owns only CommitBlock orchestration and terminal insertion; these
+/// helpers own Answer/Reasoning/Activity/Tool text, rails, and cell wrapping.
+pub(crate) fn reasoning_commit_lines(
+    text: &str,
+    step: usize,
+    elapsed_s: u64,
+    tokens: usize,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let text = fold_lines(
+        &sanitize_display_text(&bound_reasoning_history_text(text)),
+        FOLD_MAX,
+    );
+    let meta = fmt_reasoning_meta(step, elapsed_s, tokens);
+    let base = Style::default()
+        .fg(role_color(Role::Reasoning))
+        .add_modifier(Modifier::DIM | Modifier::ITALIC);
+    let meta_style = Style::default()
+        .fg(role_color(Role::Label))
+        .add_modifier(Modifier::DIM | Modifier::ITALIC);
+    let hint_style = Style::default()
+        .fg(role_color(Role::Muted))
+        .add_modifier(Modifier::DIM | Modifier::ITALIC);
+    let mut in_code = false;
+    let mut alert_role = None;
+    let source_lines = text.lines().collect::<Vec<_>>();
+    let edges = alert_edges(source_lines.iter().copied());
+    let last_index = source_lines.len().saturating_sub(1);
+    let mut lines = vec![Line::default()];
+
+    for (index, line) in source_lines.into_iter().enumerate() {
+        let (mut body, next_code) = md_line_spans_with_alert(line, in_code, &mut alert_role);
+        in_code = next_code;
+        if let Some(edge) = edges.get(index).copied().flatten() {
+            apply_alert_edge(&mut body, edge);
+        }
+        for span in &mut body {
+            span.style = base.patch(span.style);
+        }
+
+        let mut spans = Vec::with_capacity(body.len() + 4);
+        let rail = if index == 0 {
+            "┊ "
+        } else if index == last_index {
+            "└ "
+        } else {
+            "│ "
+        };
+        spans.push(Span::styled(rail, base));
+        if index == 0 {
+            spans.push(Span::styled(meta.clone(), meta_style));
+        }
+        spans.extend(body);
+        if index == 0 {
+            spans.push(Span::styled("  [Ctrl+R history]", hint_style));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    if lines.len() == 1 {
+        lines.push(Line::from(vec![
+            Span::styled("┊ ", base),
+            Span::styled(meta, meta_style),
+        ]));
+    }
+
+    wrap_commit_lines(lines, width)
+}
+
+pub(crate) fn activity_commit_lines(
+    sequence: u64,
+    kind: ActivityKind,
+    text: &str,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let text = fold_lines(&sanitize_display_text(text), FOLD_MAX);
+    let prefix = format!("⟦{} #{sequence}⟧ ", kind.tag());
+    let hint = "  [Ctrl+T activity]";
+    let source_lines = text.lines().collect::<Vec<_>>();
+    let last_index = source_lines.len().saturating_sub(1);
+    let first = source_lines.first().copied().unwrap_or("");
+    let role = activity_role(kind);
+    let tag_style = Style::default()
+        .fg(role_color(role))
+        .add_modifier(Modifier::BOLD);
+    let body_style = Style::default()
+        .fg(role_color(role))
+        .add_modifier(Modifier::DIM);
+    let hint_style = Style::default()
+        .fg(role_color(Role::Muted))
+        .add_modifier(Modifier::DIM);
+    let mut lines = vec![Line::default()];
+    lines.push(Line::from(vec![
+        Span::styled(prefix, tag_style),
+        Span::styled(first.to_owned(), body_style),
+        Span::styled(hint, hint_style),
+    ]));
+    lines.extend(
+        source_lines
+            .into_iter()
+            .enumerate()
+            .skip(1)
+            .map(|(index, line)| {
+                let rail = if index == last_index { "└ " } else { "│ " };
+                Line::from(vec![
+                    Span::styled(rail.to_owned(), body_style),
+                    Span::styled(line.to_owned(), body_style),
+                ])
+            }),
+    );
+    wrap_commit_lines(lines, width)
+}
+
+pub(crate) fn static_tool_lines(tool: &ToolBlock, width: u16) -> Vec<(String, Color)> {
+    let mut lines = tool.commit_lines();
+    if tool.has_details() && lines.len() == 1 {
+        if let Some((summary, _)) = lines.first_mut() {
+            summary.push_str(&format!(
+                "  [folded · Ctrl+O details · {} rows]",
+                tool.details_count()
+            ));
+        }
+    }
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, (text, color))| {
+            if index == 0 {
+                let prefix = if width >= 72 {
+                    format!("◈ {} ", tool.phase_label())
+                } else {
+                    format!("{} ", tool.phase_short_label())
+                };
+                (format!("{prefix}{text}"), color)
+            } else {
+                (format!("  ┆ {text}"), color)
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn commit_lines(
+    text: String,
+    color: Color,
+    markdown: bool,
+    partial: bool,
+    modifier: Modifier,
+    width: u16,
+) -> Vec<Line<'static>> {
+    commit_lines_with_answer_metrics(text, color, markdown, partial, modifier, width, None)
+}
+
+pub(crate) fn commit_lines_with_answer_metrics(
+    text: String,
+    color: Color,
+    markdown: bool,
+    partial: bool,
+    modifier: Modifier,
+    width: u16,
+    metrics: Option<PresentationMetrics>,
+) -> Vec<Line<'static>> {
+    let text = sanitize_display_text(&text);
+    let text = if markdown {
+        bound_answer_history_text(&text)
+    } else {
+        text
+    };
+    let text = fold_lines(&text, FOLD_MAX);
+    let mut lines: Vec<Line> = vec![Line::default()];
+    if markdown {
+        lines.extend(answer_commit_lines_with_status_and_metrics(
+            &text, partial, metrics,
+        ));
+    } else {
+        lines.extend(text.lines().map(|line| {
+            Line::from(Span::styled(
+                line.to_owned(),
+                Style::default().fg(color).add_modifier(modifier),
+            ))
+        }));
+    }
+    wrap_commit_lines(lines, width)
+}
+
+pub(crate) fn colored_commit_lines(
+    entries: Vec<(String, Color)>,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let rows = entries
+        .into_iter()
+        .flat_map(|(text, color)| {
+            let text = fold_lines(&sanitize_display_text(&text), FOLD_MAX);
+            text.lines()
+                .map(move |line| (line.to_owned(), color))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut lines = vec![Line::default()];
+    lines.extend(
+        rows.into_iter()
+            .map(|(text, color)| Line::from(Span::styled(text, Style::default().fg(color)))),
+    );
+    wrap_commit_lines(lines, width)
+}
+
+#[derive(Clone, Copy)]
+struct CommitSemanticPrefix {
+    first: &'static str,
+    continuation: &'static str,
+}
+
+fn commit_semantic_prefix(spans: &[Span<'static>]) -> Option<CommitSemanticPrefix> {
+    let first = spans.first()?.content.as_ref();
+    [
+        ("\u{256d} ANSWER ", "\u{2502} "),
+        ("\u{2502} ", "\u{2502} "),
+        ("\u{256d} ", "\u{2502} "),
+        ("\u{2514} ", "\u{2502} "),
+        ("\u{257a} ", "\u{2502} "),
+        ("\u{250a} ", "\u{2502} "),
+        ("C ", "  \u{2506} "),
+        ("O ", "  \u{2506} "),
+        ("T ", "  \u{2506} "),
+        ("\u{25c8} CALL ", "  \u{2506} "),
+        ("\u{25c8} OUT ", "  \u{2506} "),
+        ("\u{25c8} TOOL ", "  \u{2506} "),
+        ("\u{25c8} ", "  \u{2506} "),
+        ("  \u{2506} ", "  \u{2506} "),
+    ]
+    .into_iter()
+    .find_map(|(prefix, continuation)| {
+        first.starts_with(prefix).then_some(CommitSemanticPrefix {
+            first: prefix,
+            continuation,
+        })
+    })
+}
+
+fn split_commit_prefix(
+    spans: Vec<Span<'static>>,
+    prefix: &str,
+) -> Option<(Vec<Span<'static>>, Vec<Span<'static>>)> {
+    let joined = spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    if !joined.starts_with(prefix) {
+        return None;
+    }
+
+    let mut prefix_spans = Vec::new();
+    let mut body_spans = Vec::new();
+    let mut remaining = prefix.len();
+    for span in spans {
+        let content = span.content.into_owned();
+        if remaining == 0 {
+            body_spans.push(Span::styled(content, span.style));
+            continue;
+        }
+        let take = remaining.min(content.len());
+        if !content.is_char_boundary(take) {
+            return None;
+        }
+        let (head, tail) = content.split_at(take);
+        if !head.is_empty() {
+            prefix_spans.push(Span::styled(head.to_owned(), span.style));
+        }
+        if !tail.is_empty() {
+            body_spans.push(Span::styled(tail.to_owned(), span.style));
+        }
+        remaining -= take;
+    }
+    (remaining == 0).then_some((prefix_spans, body_spans))
+}
+
+#[derive(Clone)]
+struct CommitFragment {
+    text: String,
+    style: Style,
+    cells: usize,
+}
+
+enum CommitBodyUnit {
+    Word(Vec<CommitFragment>),
+    Whitespace(Vec<CommitFragment>),
+    Newline,
+}
+
+fn commit_body_units(body: Vec<Span<'static>>) -> Vec<CommitBodyUnit> {
+    let mut units = Vec::new();
+    let mut kind = None;
+    let mut fragments = Vec::new();
+
+    for span in body {
+        let style = span.style;
+        for grapheme in span.content.as_ref().graphemes(true) {
+            if grapheme == "\n" {
+                if let Some(kind) = kind.take() {
+                    let chunk = std::mem::take(&mut fragments);
+                    units.push(if kind {
+                        CommitBodyUnit::Whitespace(chunk)
+                    } else {
+                        CommitBodyUnit::Word(chunk)
+                    });
+                }
+                units.push(CommitBodyUnit::Newline);
+                continue;
+            }
+
+            let whitespace = grapheme.chars().all(char::is_whitespace);
+            if kind.is_some_and(|current| current != whitespace) {
+                let previous = kind.take().expect("commit unit kind exists");
+                let chunk = std::mem::take(&mut fragments);
+                units.push(if previous {
+                    CommitBodyUnit::Whitespace(chunk)
+                } else {
+                    CommitBodyUnit::Word(chunk)
+                });
+            }
+            kind = Some(whitespace);
+            fragments.push(CommitFragment {
+                text: grapheme.to_owned(),
+                style,
+                cells: str_cells(grapheme),
+            });
+        }
+    }
+
+    if let Some(kind) = kind {
+        units.push(if kind {
+            CommitBodyUnit::Whitespace(fragments)
+        } else {
+            CommitBodyUnit::Word(fragments)
+        });
+    }
+    units
+}
+
+fn commit_fragments_cells(fragments: &[CommitFragment]) -> usize {
+    fragments.iter().map(|fragment| fragment.cells).sum()
+}
+
+fn push_commit_continuation(
+    rows: &mut Vec<Vec<Span<'static>>>,
+    continuation: &str,
+    prefix_style: Style,
+) {
+    rows.push(vec![Span::styled(continuation.to_owned(), prefix_style)]);
+}
+
+fn append_commit_fragments(
+    rows: &mut Vec<Vec<Span<'static>>>,
+    fragments: &[CommitFragment],
+    row_cells: &mut usize,
+    width: usize,
+    continuation: &str,
+    continuation_cells: usize,
+    prefix_style: Style,
+) {
+    for fragment in fragments {
+        if *row_cells > 0 && row_cells.saturating_add(fragment.cells) > width {
+            push_commit_continuation(rows, continuation, prefix_style);
+            *row_cells = continuation_cells;
+        }
+        rows.last_mut()
+            .expect("semantic commit wrap owns one row")
+            .push(Span::styled(fragment.text.clone(), fragment.style));
+        *row_cells = row_cells.saturating_add(fragment.cells);
+    }
+}
+
+fn activity_commit_prefix(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("⟦")?;
+    let close = rest.find("⟧ ")?;
+    let header = &rest[..close];
+    let (tag, sequence) = header.split_once(" #")?;
+    if !matches!(
+        tag,
+        "SYS"
+            | "PLAN"
+            | "THK"
+            | "ANS"
+            | "TLS"
+            | "CHK"
+            | "SUM"
+            | "WAIT"
+            | "ASK"
+            | "QUE"
+            | "TAKE"
+            | "DONE"
+            | "ERR"
+    ) || sequence.is_empty()
+        || !sequence.chars().all(|character| character.is_ascii_digit())
+    {
+        return None;
+    }
+    let end = "⟦".len() + close + "⟧ ".len();
+    text.get(..end)
+}
+
+fn wrap_semantic_commit_line_with_prefix(
+    spans: Vec<Span<'static>>,
+    first: &str,
+    continuation: &str,
+    width: u16,
+) -> Option<Vec<Line<'static>>> {
+    let (first_prefix, body) = split_commit_prefix(spans, first)?;
+    let first_cells = str_cells(first);
+    let continuation_cells = str_cells(continuation);
+    let width = width as usize;
+    if width <= first_cells || width <= continuation_cells {
+        return None;
+    }
+
+    let prefix_style = first_prefix
+        .first()
+        .map(|span| span.style)
+        .unwrap_or_default();
+    let mut rows = vec![first_prefix];
+    let mut row_cells = first_cells;
+    let mut row_has_body = false;
+    let mut pending_whitespace = Vec::new();
+    for unit in commit_body_units(body) {
+        match unit {
+            CommitBodyUnit::Newline => {
+                pending_whitespace.clear();
+                push_commit_continuation(&mut rows, continuation, prefix_style);
+                row_cells = continuation_cells;
+                row_has_body = false;
+            }
+            CommitBodyUnit::Whitespace(fragments) => {
+                pending_whitespace = fragments;
+            }
+            CommitBodyUnit::Word(fragments) => {
+                let whitespace_cells = commit_fragments_cells(&pending_whitespace);
+                let word_cells = commit_fragments_cells(&fragments);
+                let would_overflow = row_cells
+                    .saturating_add(whitespace_cells)
+                    .saturating_add(word_cells)
+                    > width;
+                if row_has_body && would_overflow {
+                    push_commit_continuation(&mut rows, continuation, prefix_style);
+                    row_cells = continuation_cells;
+                    pending_whitespace.clear();
+                } else if !row_has_body && would_overflow {
+                    pending_whitespace.clear();
+                }
+                append_commit_fragments(
+                    &mut rows,
+                    &pending_whitespace,
+                    &mut row_cells,
+                    width,
+                    continuation,
+                    continuation_cells,
+                    prefix_style,
+                );
+                append_commit_fragments(
+                    &mut rows,
+                    &fragments,
+                    &mut row_cells,
+                    width,
+                    continuation,
+                    continuation_cells,
+                    prefix_style,
+                );
+                pending_whitespace.clear();
+                row_has_body = true;
+            }
+        }
+    }
+    Some(rows.into_iter().map(Line::from).collect())
+}
+
+fn wrap_semantic_commit_line(spans: Vec<Span<'static>>, width: u16) -> Option<Vec<Line<'static>>> {
+    let prefix = commit_semantic_prefix(&spans)?;
+    wrap_semantic_commit_line_with_prefix(spans, prefix.first, prefix.continuation, width)
+}
+
+fn wrap_commit_line(line: Line<'static>, width: u16) -> Vec<Line<'static>> {
+    let spans = line.spans.into_iter().collect::<Vec<_>>();
+    let activity_prefix = spans
+        .first()
+        .and_then(|span| activity_commit_prefix(span.content.as_ref()))
+        .map(str::to_owned);
+    if let Some(prefix) = activity_prefix.as_deref() {
+        if let Some(wrapped) =
+            wrap_semantic_commit_line_with_prefix(spans.clone(), prefix, "│ ", width)
+        {
+            return wrapped;
+        }
+    }
+    wrap_semantic_commit_line(spans.clone(), width).unwrap_or_else(|| {
+        wrap_live_spans_greedy(spans, width)
+            .into_iter()
+            .map(Line::from)
+            .collect()
+    })
+}
+
+pub(crate) fn wrap_commit_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .flat_map(|line| wrap_commit_line(line, width))
+        .collect()
 }
 
 /// 启动 banner(iter-28):ASCII 安全字符(单格宽),经 `splash_frame` 列渐显 ≈1s。
