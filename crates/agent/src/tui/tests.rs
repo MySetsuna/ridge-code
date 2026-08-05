@@ -232,7 +232,9 @@ fn activity_history_is_bounded_deduplicated_and_newest_first() {
 
     assert_eq!(ui.activity_history.len(), MAX_ACTIVITY_HISTORY);
     assert_eq!(ui.activity, format!("node · {}", MAX_ACTIVITY_HISTORY + 2));
-    assert_eq!(ui.activity_history.front().unwrap().text, "node · 3");
+    // A task boundary is a retained audit anchor, so it survives transient
+    // node chatter while the bounded history continues to evict old chatter.
+    assert_eq!(ui.activity_history.front().unwrap().text, "starting task");
     assert_eq!(
         ui.activity_history.back().unwrap().text,
         format!("node · {}", MAX_ACTIVITY_HISTORY + 2)
@@ -1108,6 +1110,7 @@ fn activity_classifier_exposes_investigation_verification_and_conclusion() {
 fn activity_classifier_keeps_chinese_lifecycle_states_observable() {
     let cases = [
         ("调查中：读取上下文", ActivityKind::Reasoning),
+        ("starting task", ActivityKind::Run),
         ("等待模型响应", ActivityKind::Waiting),
         ("验证工具结果", ActivityKind::Verification),
         ("形成结论", ActivityKind::Conclusion),
@@ -1148,6 +1151,93 @@ fn retained_activity_leaves_a_static_anchor_with_a_detail_affordance() {
     assert_eq!(
         rendered,
         vec!["⟦WAIT #1⟧ waiting · no stream for 8s  [Ctrl+T activity]"]
+    );
+}
+
+#[test]
+fn task_start_leaves_run_anchor_in_native_scrollback() {
+    let mut ui = Ui::default();
+    ui.set_activity("starting task");
+
+    assert_eq!(
+        ui.activity_history.back().map(|entry| entry.kind),
+        Some(ActivityKind::Run)
+    );
+    assert!(matches!(
+        ui.commits.as_slice(),
+        [CommitBlock::Activity {
+            sequence: 1,
+            kind: ActivityKind::Run,
+            text,
+        }] if text == "starting task"
+    ));
+
+    let mut terminal = Terminal::with_options(
+        ratatui::backend::TestBackend::new(40, 8),
+        TerminalOptions {
+            viewport: Viewport::Inline(4),
+        },
+    )
+    .expect("run boundary terminal");
+    flush_commits(&mut terminal, &mut ui).expect("run boundary scrollback");
+    let symbols = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(symbols.contains("RUN"), "run tag missing: {symbols}");
+    assert!(
+        symbols.contains("starting task"),
+        "run boundary missing: {symbols}"
+    );
+    assert!(
+        symbols.contains("Ctrl+T"),
+        "run detail hint missing: {symbols}"
+    );
+}
+
+#[test]
+fn task_start_does_not_promote_agent_ready_system_chatter() {
+    let mut ui = Ui::default();
+    ui.set_activity("agent ready");
+
+    assert_eq!(
+        ui.activity_history.back().map(|entry| entry.kind),
+        Some(ActivityKind::System)
+    );
+    assert!(ui.commits.is_empty(), "system chatter entered scrollback");
+}
+
+#[test]
+fn attention_shortcuts_explain_missing_history() {
+    let cases = [
+        (InputAction::ToggleDetails, "no tool details or history"),
+        (
+            InputAction::ToggleReasoning,
+            "no reasoning output or history",
+        ),
+        (InputAction::ToggleAnswer, "no recoverable answer history"),
+    ];
+    for (action, expected) in cases {
+        let mut ui = Ui::default();
+        apply_attention_action(&mut ui, action);
+        assert!(matches!(
+            ui.commits.as_slice(),
+            [CommitBlock::Text { text, .. }] if text == expected
+        ));
+    }
+
+    let mut ui = Ui::default();
+    apply_attention_action(&mut ui, InputAction::ToggleActivity);
+    assert!(matches!(
+        ui.panel.as_ref().map(|panel| panel.kind),
+        Some(PanelKind::Activity)
+    ));
+    assert!(
+        ui.commits.is_empty(),
+        "activity panel emitted an empty-state note"
     );
 }
 

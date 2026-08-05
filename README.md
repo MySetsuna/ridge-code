@@ -8,7 +8,7 @@ RidgeCode 是一个模块化、跨领域可扩展的通用 agent 框架，发布
 
 ### 其他 PC：通过 GitHub 快速安装（无需 Rust/Cargo）
 
-最省事的方式是从 GitHub 拉取安装器。它会识别当前平台、下载对应 Release 归档、先校验 SHA256，再把 `ridgecode` 放入用户 PATH；无需安装 Rust、Cargo 或源码。当前稳定版为 `v0.5.6`；每个归档内同时带有完整 `README.md` 与安装脚本，便于离线转交和审计。
+最省事的方式是从 GitHub 拉取安装器。它会识别当前平台、下载对应 Release 归档、先校验 SHA256，再把 `ridgecode` 放入用户 PATH；无需安装 Rust、Cargo 或源码。当前稳定版为 `v0.5.7`；每个归档内同时带有完整 `README.md` 与安装脚本，便于离线转交和审计。
 
 Windows PowerShell：
 
@@ -16,9 +16,9 @@ Windows PowerShell：
 # 最新稳定版：安装到 %LOCALAPPDATA%\Programs\ridgecode，并写入用户 PATH
 irm https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.ps1 | iex
 
-# 可复现安装：固定脚本与 Release 版本 v0.5.6
-$s = irm https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.6/scripts/install.ps1
-& ([scriptblock]::Create($s)) -Version v0.5.6
+# 可复现安装：固定脚本与 Release 版本 v0.5.7
+$s = irm https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.7/scripts/install.ps1
+& ([scriptblock]::Create($s)) -Version v0.5.7
 
 # 新开终端后验证
 ridgecode --version
@@ -31,8 +31,8 @@ Linux / macOS：
 # 最新稳定版：安装到 ~/.local/bin
 curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.sh | sh
 
-# 可复现安装：固定脚本与 Release 版本 v0.5.6
-curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.6/scripts/install.sh | sh -s -- --version v0.5.6
+# 可复现安装：固定脚本与 Release 版本 v0.5.7
+curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.7/scripts/install.sh | sh -s -- --version v0.5.7
 
 # 验证
 ridgecode --version
@@ -48,11 +48,11 @@ $env:RIDGE_API_KEY = "your-key"
 ridgecode
 ~~~
 
-Linux / macOS 将 `$env:RIDGE_API_KEY` 改为 `export RIDGE_API_KEY="your-key"`。企业或审计环境可先下载 `scripts/install.ps1` / `scripts/install.sh` 检查内容，再用本地脚本执行；安装器也支持 `-Dir`、`--dir` 自定义目录。
+Linux / macOS 将 `$env:RIDGE_API_KEY` 改为 `export RIDGE_API_KEY="your-key"`。安装器支持 Windows x86_64、Linux x86_64/ARM64、macOS Intel/Apple Silicon；Windows ARM64 可改用 WSL 或从源码构建。企业或审计环境可先下载 `scripts/install.ps1` / `scripts/install.sh` 检查内容，再用本地脚本执行；安装器也支持 `-Dir`、`--dir` 自定义目录。
 
 升级时重复执行对应平台的最新版安装命令即可；安装器会覆盖旧二进制，不改已有 `~/.ridge/config.json`。卸载仅需删除安装目录中的二进制（配置默认保留）：Windows 删除 `%LOCALAPPDATA%\Programs\ridgecode\ridgecode.exe`，Linux / macOS 删除 `~/.local/bin/ridgecode`。
 
-当前 Release：[v0.5.6](https://github.com/MySetsuna/ridge-code/releases/tag/v0.5.6)。手动下载时按平台选择：
+当前 Release：[v0.5.7](https://github.com/MySetsuna/ridge-code/releases/tag/v0.5.7)。手动下载时按平台选择：
 
 | 平台 | Release 资产 |
 | --- | --- |
@@ -61,6 +61,14 @@ Linux / macOS 将 `$env:RIDGE_API_KEY` 改为 `export RIDGE_API_KEY="your-key"`�
 | macOS Intel / Apple Silicon | `ridgecode-x86_64-apple-darwin.tar.gz` / `ridgecode-aarch64-apple-darwin.tar.gz` |
 
 每个归档旁均有同名 `.sha256` 文件；手动下载后先校验，再解压并将二进制放入 PATH。Windows 可用 `Get-FileHash .\ridgecode-*.zip -Algorithm SHA256`，Linux / macOS 可用 `sha256sum ridgecode-*.tar.gz` 或 `shasum -a 256 ridgecode-*.tar.gz` 对照校验文件。安装器参数：Unix 支持 `--version <tag>`、`--local <binary>`、`--dir <dir>`；Windows 支持 `-Version <tag>`、`-Local <path>`、`-Dir <dir>`。本地安装不联网：`scripts/install.sh --local target/release/ridgecode` 或 `scripts/install.ps1 -Local target/release/ridgecode.exe`。
+
+若目标 PC 不能执行远程脚本，可用 GitHub CLI 下载完整归档，再离线传给目标 PC：
+
+~~~bash
+gh release download v0.5.7 --repo MySetsuna/ridge-code --pattern 'ridgecode-*'
+~~~
+
+归档内包含二进制、完整 `README.md` 与对应安装脚本；解压后可用 `--local` / `-Local` 安装，仍会校验归档旁的 `.sha256`。
 
 ### 从源码运行
 
@@ -504,15 +512,15 @@ sh scripts/dist.sh
 维护者在稳定基线完成全量质量门后创建 v* 标签并推送；CI 会自动创建 GitHub Release、构建五个平台资产、生成 SHA256 并把 README/安装脚本放进归档：
 
 ~~~bash
-git tag v0.5.6
+git tag v0.5.7
 git push origin main
-git push origin v0.5.6
+git push origin v0.5.7
 ~~~
 
 也可用 GitHub CLI 下载指定版本：
 
 ~~~bash
-gh release download v0.5.6 --repo MySetsuna/ridge-code --pattern 'ridgecode-*'
+gh release download v0.5.7 --repo MySetsuna/ridge-code --pattern 'ridgecode-*'
 ~~~
 
 `.github/workflows/release.yml` 会为 Linux x86_64/aarch64、macOS x86_64/aarch64、Windows x86_64 构建并上传归档。CI 同时验证 fmt、clippy、workspace build 与 workspace test；发布前至少执行：

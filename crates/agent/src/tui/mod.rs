@@ -181,6 +181,32 @@ pub(crate) use render::*;
 pub(crate) use status::*;
 pub(crate) use transcript::*;
 
+/// Route attention shortcuts through one presentation-only fallback path.
+/// Panel and editor contexts must tell the user when no matching history or
+/// live block exists; the shortcut itself keeps its existing precedence.
+fn apply_attention_action(ui: &mut Ui, action: InputAction) {
+    let available = match action {
+        InputAction::ToggleDetails => ui.toggle_details_or_history(),
+        InputAction::ToggleReasoning => ui.toggle_reasoning_or_history(),
+        InputAction::ToggleAnswer => ui.toggle_answer_or_history(),
+        InputAction::ToggleActivity => {
+            ui.toggle_activity_panel();
+            true
+        }
+        _ => false,
+    };
+    if !available {
+        let message = match action {
+            InputAction::ToggleDetails => "no tool details or history",
+            InputAction::ToggleReasoning => "no reasoning output or history",
+            InputAction::ToggleAnswer => "no recoverable answer history",
+            InputAction::ToggleActivity => return,
+            _ => return,
+        };
+        ui.note(message, Color::Gray);
+    }
+}
+
 /// TUI 是交互入口；只有非 TTY 的自动化管道才会回落到 headless。
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run(
@@ -669,22 +695,10 @@ pub(super) async fn run(
                     ui.popup.is_some(),
                 ) {
                     match action {
-                        InputAction::ToggleDetails => {
-                            if !ui.toggle_details_or_history() {
-                                ui.note("no tool details or history", Color::Gray);
-                            }
-                        }
-                        InputAction::ToggleReasoning => {
-                            if !ui.toggle_reasoning_or_history() {
-                                ui.note("no reasoning output or history", Color::Gray);
-                            }
-                        }
-                        InputAction::ToggleAnswer => {
-                            if !ui.toggle_answer_or_history() {
-                                ui.note("no recoverable answer history", Color::Gray);
-                            }
-                        }
-                        InputAction::ToggleActivity => ui.toggle_activity_panel(),
+                        InputAction::ToggleDetails
+                        | InputAction::ToggleReasoning
+                        | InputAction::ToggleAnswer
+                        | InputAction::ToggleActivity => apply_attention_action(&mut ui, action),
                         _ => unreachable!("panel_attention_action only returns attention actions"),
                     }
                     continue;
@@ -1107,16 +1121,10 @@ pub(super) async fn run(
                         }
                     }
                     InputAction::PopupClose => ui.popup = None,
-                    InputAction::ToggleDetails => {
-                        let _ = ui.toggle_details_or_history();
-                    }
-                    InputAction::ToggleReasoning => {
-                        let _ = ui.toggle_reasoning_or_history();
-                    }
-                    InputAction::ToggleAnswer => {
-                        let _ = ui.toggle_answer_or_history();
-                    }
-                    InputAction::ToggleActivity => ui.toggle_activity_panel(),
+                    action @ (InputAction::ToggleDetails
+                    | InputAction::ToggleReasoning
+                    | InputAction::ToggleAnswer
+                    | InputAction::ToggleActivity) => apply_attention_action(&mut ui, action),
                     InputAction::OpenLiveSearch => {
                         if !ui.open_live_search("") {
                             ui.note("no live blocks to search", Color::Gray);

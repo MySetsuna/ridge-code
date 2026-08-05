@@ -805,6 +805,7 @@ fn activity_signal_chip(ui: &Ui, remaining: usize) -> Option<(String, Role)> {
         return None;
     }
     let (tag, role) = match entry.kind {
+        ActivityKind::Run => ("RUN", Role::Primary),
         ActivityKind::Plan => ("PLAN", Role::Reasoning),
         ActivityKind::Reasoning => ("THK", Role::Reasoning),
         ActivityKind::Answer => ("ANS", Role::Primary),
@@ -3041,6 +3042,7 @@ fn live_surface_state(ui: &Ui) -> (Role, &'static str) {
     }
     if let Some(entry) = ui.activity_history.back() {
         let state = match entry.kind {
+            ActivityKind::Run => Some((Role::Primary, "RUN")),
             ActivityKind::Error => Some((Role::Error, "ERR")),
             ActivityKind::Approval => Some((Role::Warn, "ASK")),
             ActivityKind::Conclusion => Some((Role::Success, "SUM")),
@@ -3114,6 +3116,7 @@ fn live_lifecycle_badge(ui: &Ui) -> Option<(&'static str, Role)> {
         ActivityKind::Error => Some(("ERR", Role::Error)),
         ActivityKind::Waiting
         | ActivityKind::System
+        | ActivityKind::Run
         | ActivityKind::Plan
         | ActivityKind::Reasoning
         | ActivityKind::Answer

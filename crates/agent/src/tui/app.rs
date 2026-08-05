@@ -98,6 +98,7 @@ pub(crate) const MAX_ACTIVITY_HISTORY: usize = 12;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ActivityKind {
     System,
+    Run,
     Plan,
     Reasoning,
     Answer,
@@ -118,6 +119,7 @@ impl ActivityKind {
     pub(crate) fn tag(self) -> &'static str {
         match self {
             Self::System => "SYS",
+            Self::Run => "RUN",
             Self::Plan => "PLAN",
             Self::Reasoning => "THK",
             Self::Answer => "ANS",
@@ -139,7 +141,8 @@ impl ActivityKind {
     fn is_retained_signal(self) -> bool {
         matches!(
             self,
-            Self::Plan
+            Self::Run
+                | Self::Plan
                 | Self::Verification
                 | Self::Waiting
                 | Self::Approval
@@ -153,8 +156,15 @@ impl ActivityKind {
     /// Existing activity text remains the single source of truth for the
     /// displayed transition; this classifier only adds presentation metadata.
     fn from_text(text: &str) -> Self {
+        let trimmed = text.trim();
         let lower = text.to_ascii_lowercase();
-        if lower.contains("approval") || text.contains("审批") || text.contains("授权") {
+        if matches!(
+            lower.as_str(),
+            "starting task" | "task started" | "beginning task"
+        ) || matches!(trimmed, "开始任务" | "任务开始")
+        {
+            Self::Run
+        } else if lower.contains("approval") || text.contains("审批") || text.contains("授权") {
             Self::Approval
         } else if lower.contains("waiting") || text.contains("等待") {
             Self::Waiting

@@ -1183,6 +1183,7 @@ pub(crate) fn fold_lines(text: &str, max: usize) -> String {
 
 pub(crate) fn activity_role(kind: ActivityKind) -> Role {
     match kind {
+        ActivityKind::Run => Role::Primary,
         ActivityKind::Plan => Role::Reasoning,
         ActivityKind::Waiting | ActivityKind::Approval => Role::Warn,
         ActivityKind::Takeover => Role::Primary,
