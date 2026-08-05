@@ -639,12 +639,18 @@ fn audit_detail_text(text: &str, kind: PanelKind, key: &str) -> Text<'static> {
     let base = Style::default().fg(role_color(role));
     let mut in_code = false;
     let mut alert_role = None;
-    let lines = text
-        .split('\n')
-        .map(|line| {
-            let (spans, next_code) =
+    let source_lines = text.split('\n').collect::<Vec<_>>();
+    let edges = super::render::alert_edges(source_lines.iter().copied());
+    let lines = source_lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let (mut spans, next_code) =
                 super::render::md_line_spans_with_alert(line, in_code, &mut alert_role);
             in_code = next_code;
+            if let Some(edge) = edges.get(index).copied().flatten() {
+                super::render::apply_alert_edge(&mut spans, edge);
+            }
             let spans = spans
                 .into_iter()
                 .map(|mut span| {

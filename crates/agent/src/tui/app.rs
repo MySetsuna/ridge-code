@@ -1215,13 +1215,8 @@ pub(crate) fn flush_commits<B: Backend>(terminal: &mut Terminal<B>, ui: &mut Ui)
                 tokens,
             } => {
                 debug_assert!(ui.presentation.contains(PresentationChannel::Reasoning, id));
-                lines.extend(commit_lines(
-                    reasoning_commit_text(&text, step, elapsed_s, tokens),
-                    role_color(Role::Reasoning),
-                    false,
-                    false,
-                    Modifier::DIM | Modifier::ITALIC,
-                    width,
+                lines.extend(reasoning_commit_lines(
+                    &text, step, elapsed_s, tokens, width,
                 ));
             }
             CommitBlock::Activity {
@@ -1239,6 +1234,66 @@ pub(crate) fn flush_commits<B: Backend>(terminal: &mut Terminal<B>, ui: &mut Ui)
     insert_bounded_commit_lines(terminal, lines)
 }
 
+pub(crate) fn reasoning_commit_lines(
+    text: &str,
+    step: usize,
+    elapsed_s: u64,
+    tokens: usize,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let text = fold_lines(
+        &sanitize_display_text(&bound_reasoning_history_text(text)),
+        FOLD_MAX,
+    );
+    let meta = fmt_reasoning_meta(step, elapsed_s, tokens);
+    let base = Style::default()
+        .fg(role_color(Role::Reasoning))
+        .add_modifier(Modifier::DIM | Modifier::ITALIC);
+    let meta_style = Style::default()
+        .fg(role_color(Role::Label))
+        .add_modifier(Modifier::DIM | Modifier::ITALIC);
+    let hint_style = Style::default()
+        .fg(role_color(Role::Muted))
+        .add_modifier(Modifier::DIM | Modifier::ITALIC);
+    let mut in_code = false;
+    let mut alert_role = None;
+    let source_lines = text.lines().collect::<Vec<_>>();
+    let edges = alert_edges(source_lines.iter().copied());
+    let mut lines = vec![Line::default()];
+
+    for (index, line) in source_lines.into_iter().enumerate() {
+        let (mut body, next_code) = md_line_spans_with_alert(line, in_code, &mut alert_role);
+        in_code = next_code;
+        if let Some(edge) = edges.get(index).copied().flatten() {
+            apply_alert_edge(&mut body, edge);
+        }
+        for span in &mut body {
+            span.style = base.patch(span.style);
+        }
+
+        let mut spans = Vec::with_capacity(body.len() + 4);
+        spans.push(Span::styled(if index == 0 { "┊ " } else { "│ " }, base));
+        if index == 0 {
+            spans.push(Span::styled(meta.clone(), meta_style));
+        }
+        spans.extend(body);
+        if index == 0 {
+            spans.push(Span::styled("  [Ctrl+R history]", hint_style));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    if lines.len() == 1 {
+        lines.push(Line::from(vec![
+            Span::styled("┊ ", base),
+            Span::styled(meta, meta_style),
+        ]));
+    }
+
+    wrap_commit_lines(lines, width)
+}
+
+#[cfg(test)]
 fn reasoning_commit_text(text: &str, step: usize, elapsed_s: u64, tokens: usize) -> String {
     let text = bound_reasoning_history_text(text);
     let meta = fmt_reasoning_meta(step, elapsed_s, tokens);

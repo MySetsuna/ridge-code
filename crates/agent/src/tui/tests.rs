@@ -492,6 +492,48 @@ fn audit_detail_reuses_markdown_heading_style() {
 }
 
 #[test]
+fn reasoning_history_detail_preserves_markdown_alert_edges() {
+    let panel = Panel::new(
+        PanelKind::ReasoningHistory,
+        "reasoning".into(),
+        vec![PanelRow {
+            key: "#1 reasoning".into(),
+            value: "> [!WARNING] protect the boundary\n> continue this conclusion".into(),
+            ctx: None,
+        }],
+    );
+    let detail = panel.selected().expect("detail row");
+    let mut cache = DetailLayoutCache::default();
+    cache.prepare(
+        panel.content_revision,
+        panel.selected_index().expect("selection"),
+        &detail.value,
+        panel.kind,
+        &detail.key,
+        96,
+    );
+    let rendered = cache
+        .text()
+        .lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        rendered.iter().any(|line| line.contains("┌ WARNING")),
+        "alert top edge missing: {rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|line| line.contains("└ continue")),
+        "alert bottom edge missing: {rendered:?}"
+    );
+}
+
+#[test]
 fn narrow_open_detail_prioritizes_audit_body_over_competing_list_rows() {
     let mut panel = Panel::new(
         PanelKind::ReasoningHistory,
@@ -7711,6 +7753,81 @@ fn reasoning_commit_renders_in_inline_scrollback() {
     assert!(reasoning_cell.modifier.contains(Modifier::ITALIC));
     assert!(ui.commits.is_empty());
     assert!(!symbols.contains('\x1b'));
+}
+
+#[test]
+fn reasoning_scrollback_preserves_markdown_roles() {
+    let lines = reasoning_commit_lines(
+        "# plan\n```rust\nfn main() { let count: usize = 42; }\n```\n> [!WARNING] caution",
+        2,
+        12,
+        9,
+        80,
+    );
+    let body = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(body.contains("┊ "));
+    assert!(body.contains("THK[step 2"));
+    assert!(body.contains("t+12s"));
+    assert!(body.contains("9 task tok] "));
+    assert!(body.contains("[Ctrl+R history]"));
+
+    let heading = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "#")
+        .expect("heading span");
+    assert_eq!(heading.style.fg, Some(role_color(Role::Primary)));
+    assert!(heading.style.add_modifier.contains(Modifier::BOLD));
+
+    let code_type = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "u")
+        .expect("code type span");
+    assert_eq!(code_type.style.fg, Some(role_color(Role::Info)));
+    assert!(code_type.style.add_modifier.contains(Modifier::DIM));
+    assert!(code_type.style.add_modifier.contains(Modifier::ITALIC));
+
+    assert!(lines.iter().all(|line| {
+        line.spans
+            .iter()
+            .map(|span| str_cells(span.content.as_ref()))
+            .sum::<usize>()
+            <= 80
+    }));
+}
+
+#[test]
+fn reasoning_scrollback_preserves_markdown_alert_edges() {
+    let lines = reasoning_commit_lines(
+        "intro\n> [!WARNING] protect the boundary\n> continue **this** conclusion\nplain",
+        2,
+        12,
+        9,
+        96,
+    );
+    let rendered = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        rendered.iter().any(|line| line.contains("┌ WARNING")),
+        "alert top edge missing: {rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|line| line.contains("└ continue")),
+        "alert bottom edge missing: {rendered:?}"
+    );
+    assert!(rendered.iter().all(|line| str_cells(line) <= 96));
 }
 
 #[test]
