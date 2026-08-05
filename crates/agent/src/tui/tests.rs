@@ -1761,6 +1761,47 @@ fn wide_completed_idle_surface_uses_bounded_result_card() {
 }
 
 #[test]
+fn wide_short_result_card_is_content_aware_and_centered() {
+    let mut ui = Ui::default();
+    ui.push_chunk(provider::StreamChunk::Reasoning("checked".into()));
+    ui.commit_live_reasoning(1, 1);
+    ui.note_markdown_with_meta("OK", 1, 1, 2);
+    ui.record_activity(ActivityKind::Conclusion, "ready");
+    ui.record_activity(ActivityKind::Completed, "completed");
+
+    let lines = live_empty_state_for_test(&ui, 96, 10);
+    let top = lines
+        .iter()
+        .find(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.as_ref().contains("╭─"))
+        })
+        .expect("result card top border");
+    let top_text = top
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(
+        top_text.starts_with(' '),
+        "card should be centered: {top_text}"
+    );
+    assert!(str_cells(&top_text) < 96, "card should shrink: {top_text}");
+    assert!(
+        top_text.contains("DONE"),
+        "completion title missing: {top_text}"
+    );
+    assert!(lines.iter().all(|line| {
+        line.spans
+            .iter()
+            .map(|span| str_cells(span.content.as_ref()))
+            .sum::<usize>()
+            <= 96
+    }));
+}
+
+#[test]
 fn partial_completed_idle_surface_keeps_partial_answer_truthful() {
     let mut ui = Ui::default();
     ui.push_chunk(provider::StreamChunk::Answer("partial response".into()));
@@ -3521,6 +3562,7 @@ fn input_chrome_exposes_submit_or_queue_mode() {
     assert!(idle.contains("Ctrl+R reasoning"));
     let (idle_send, _) = chrome(false, 0, 64, false, true, false, false);
     assert!(idle_send.contains("Enter send"), "{idle_send}");
+    assert!(idle_send.contains("Tab complete"), "{idle_send}");
     assert!(!idle.contains("Ctrl+O"));
     assert!(!idle.contains("Alt+↑/↓ focus"));
     assert_eq!(idle_role, Role::Primary);
@@ -3617,8 +3659,43 @@ fn input_chrome_exposes_submit_or_queue_mode() {
             "idle submit affordance hidden at {width}: {compact}"
         );
         assert!(
+            compact.contains('⇥'),
+            "idle completion affordance hidden at {width}: {compact}"
+        );
+        assert!(
             str_cells(&compact) <= width.saturating_sub(2) as usize,
             "idle compact overflow at {width}: {compact}"
+        );
+    }
+
+    for width in [10, 18, 24, 40] {
+        let (compact, _) = input_chrome(InputChromeArgs {
+            busy: false,
+            queued: 0,
+            width,
+            reasoning_expanded: false,
+            has_reasoning: false,
+            has_reasoning_history: false,
+            has_live_answer: false,
+            has_answer_history: false,
+            has_live_history: false,
+            has_tools: false,
+            has_history: false,
+            has_scrollable_tool_details: false,
+            has_live_output: false,
+            live_inspecting: false,
+        });
+        assert!(
+            compact.contains('↵') || compact.contains("Enter"),
+            "idle submit hidden at {width}: {compact}"
+        );
+        assert!(
+            compact.contains('⇥') || compact.contains("Tab"),
+            "idle completion hidden at {width}: {compact}"
+        );
+        assert!(
+            str_cells(&compact) <= width.saturating_sub(2) as usize,
+            "idle input overflow at {width}: {compact}"
         );
     }
 
@@ -5903,7 +5980,7 @@ fn tiny_frames_keep_input_slot_visible() {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(
-            symbols.contains("Input"),
+            symbols.contains("Input") || symbols.contains("In"),
             "input slot disappeared: {symbols}"
         );
         assert!(

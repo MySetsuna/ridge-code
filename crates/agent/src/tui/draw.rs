@@ -4052,8 +4052,19 @@ fn idle_line_cells(line: &Line<'_>) -> usize {
         .sum()
 }
 
+fn pad_result_card_line(line: Line<'static>, left_padding: usize) -> Line<'static> {
+    if left_padding == 0 {
+        return line;
+    }
+    let mut spans = Vec::with_capacity(line.spans.len() + 1);
+    spans.push(Span::raw(" ".repeat(left_padding)));
+    spans.extend(line.spans);
+    Line::from(spans)
+}
+
 /// 宽屏完成态的低噪声结果卡。只包 presentation spans，不复制正文或新增
-/// 交互状态；窄屏/低高视口继续使用原有线性投影，保证恢复快捷键优先。
+/// 交互状态；宽屏短结果按已有 Answer/THK/SUM 详情宽度居中，避免空洞
+/// 全屏框；流式视口、原生滚动历史、窄屏/低高视口仍保持原有全宽投影。
 fn idle_result_card_lines(
     summary: &(String, Role, Vec<String>),
     width: u16,
@@ -4062,10 +4073,31 @@ fn idle_result_card_lines(
     if width < 48 || rows < summary.2.len().saturating_add(3) {
         return None;
     }
-    let inner_width = width.saturating_sub(4);
+    let full_width = width as usize;
+    let full_inner_width = width.saturating_sub(4);
+    let full_details = summary
+        .2
+        .iter()
+        .map(|detail| idle_detail_line(detail.clone(), full_inner_width))
+        .collect::<Vec<_>>();
+    let detail_cells = full_details.iter().map(idle_line_cells).max().unwrap_or(0);
     let title = clip_display_cells(&summary.0, width.saturating_sub(3));
     let title_cells = str_cells(&title);
-    let top_fill = (width as usize)
+    let desired_width = title_cells
+        .saturating_add(3)
+        .max(detail_cells.saturating_add(4))
+        .max(48);
+    let card_width = if width >= 80 {
+        desired_width.min(full_width)
+    } else {
+        full_width
+    };
+    let left_padding = full_width.saturating_sub(card_width) / 2;
+    let card_width = card_width as u16;
+    let inner_width = card_width.saturating_sub(4);
+    let title = clip_display_cells(&summary.0, card_width.saturating_sub(3));
+    let title_cells = str_cells(&title);
+    let top_fill = (card_width as usize)
         .saturating_sub(3)
         .saturating_sub(title_cells);
     let border = Style::default().fg(role_color(Role::Border));
@@ -4075,12 +4107,15 @@ fn idle_result_card_lines(
     let mut lines = Vec::with_capacity(summary.2.len() + 3);
     let card_rows = summary.2.len() + 3;
     lines.extend((0..rows.saturating_sub(card_rows) / 2).map(|_| Line::default()));
-    lines.push(Line::from(vec![
-        Span::styled("╭─", border),
-        Span::styled(title, title_style),
-        Span::styled("─".repeat(top_fill), border),
-        Span::styled("╮", border),
-    ]));
+    lines.push(pad_result_card_line(
+        Line::from(vec![
+            Span::styled("╭─", border),
+            Span::styled(title, title_style),
+            Span::styled("─".repeat(top_fill), border),
+            Span::styled("╮", border),
+        ]),
+        left_padding,
+    ));
     for detail in &summary.2 {
         let detail = idle_detail_line(detail.clone(), inner_width);
         let padding = inner_width as usize - idle_line_cells(&detail).min(inner_width as usize);
@@ -4088,12 +4123,15 @@ fn idle_result_card_lines(
         spans.extend(detail.spans);
         spans.push(Span::raw(" ".repeat(padding)));
         spans.push(Span::styled(" │", border));
-        lines.push(Line::from(spans));
+        lines.push(pad_result_card_line(Line::from(spans), left_padding));
     }
-    lines.push(Line::from(Span::styled(
-        format!("╰{}╯", "─".repeat(width.saturating_sub(2) as usize)),
-        border,
-    )));
+    lines.push(pad_result_card_line(
+        Line::from(Span::styled(
+            format!("╰{}╯", "─".repeat(card_width.saturating_sub(2) as usize)),
+            border,
+        )),
+        left_padding,
+    ));
     Some(lines)
 }
 

@@ -366,8 +366,10 @@ fn compact_idle_history_actions(
     } else {
         " Input".to_owned()
     };
+    let tab_hint = if width >= 40 { " Tab complete" } else { "⇥" };
     for token in [
         Some(" ↵"),
+        Some(tab_hint),
         has_answer_history.then_some(" ^A"),
         has_reasoning_history.then_some(" ^R"),
         has_tools.then_some(" ^O"),
@@ -382,6 +384,20 @@ fn compact_idle_history_actions(
         text.push_str(token);
     }
     format!("{text} ")
+}
+
+/// Idle input still needs a truthful submit/completion rail when no archive
+/// exists to occupy the title.  Keep the full labels for roomier frames and
+/// reserve compact glyphs for the same two actions on narrow terminals.
+fn compact_idle_input_actions(width: u16) -> String {
+    let text = if width >= 40 {
+        " Input · Enter send · Tab complete "
+    } else if width >= 24 {
+        " Input · ↵ send · ⇥ "
+    } else {
+        " In ↵ ⇥ "
+    };
+    clip_display_cells(text, width.saturating_sub(2))
 }
 
 pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
@@ -559,7 +575,7 @@ pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
             }
         }
         (false, width) if width >= 56 => format!(
-            " Input · Enter send{reasoning_suffix}{answer_suffix}{focus_hint}{toggle_separator}{toggle_hint}{inspect_hint}{scroll_hint}{live_hint} "
+            " Input · Enter send · Tab complete{reasoning_suffix}{answer_suffix}{focus_hint}{toggle_separator}{toggle_hint}{inspect_hint}{scroll_hint}{live_hint} "
         ),
         (false, width)
             if width >= 18
@@ -586,7 +602,7 @@ pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
             clip_display_cells(&text, width.saturating_sub(2))
         }
         (false, width)
-            if width >= 14
+            if width >= 10
                 && (has_tools
                     || has_history
                     || has_reasoning_history
@@ -601,6 +617,7 @@ pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
         (false, width) if width >= 14 && has_reasoning => {
             compact_idle_history_actions(width, false, true, false, has_live_history)
         }
+        (false, width) if width >= 10 => compact_idle_input_actions(width),
         (false, _) => " Input ".to_owned(),
     };
     (
