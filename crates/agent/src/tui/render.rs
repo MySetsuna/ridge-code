@@ -1072,11 +1072,33 @@ pub(crate) fn answer_commit_measure(text: &str) -> String {
         .join("\n")
 }
 
+#[cfg(test)]
 pub(crate) fn answer_commit_lines(text: &str) -> Vec<Line<'static>> {
     answer_commit_lines_with_status(text, false)
 }
 
+#[cfg(test)]
 pub(crate) fn answer_commit_lines_with_status(text: &str, partial: bool) -> Vec<Line<'static>> {
+    answer_commit_lines_with_status_and_metrics(text, partial, None)
+}
+
+fn answer_commit_meta(metrics: PresentationMetrics) -> String {
+    let step = if metrics.step > 0 {
+        format!("step {} · ", metrics.step)
+    } else {
+        String::new()
+    };
+    format!(
+        "[{step}+{}s · {} task tok] ",
+        metrics.elapsed_s, metrics.tokens
+    )
+}
+
+pub(crate) fn answer_commit_lines_with_status_and_metrics(
+    text: &str,
+    partial: bool,
+    metrics: Option<PresentationMetrics>,
+) -> Vec<Line<'static>> {
     markdown_lines(text)
         .into_iter()
         .enumerate()
@@ -1087,6 +1109,16 @@ pub(crate) fn answer_commit_lines_with_status(text: &str, partial: bool) -> Vec<
                 rail,
                 Style::default().fg(role_color(Role::Primary)),
             ));
+            if index == 0 {
+                if let Some(metrics) = metrics {
+                    spans.push(Span::styled(
+                        answer_commit_meta(metrics),
+                        Style::default()
+                            .fg(role_color(Role::Label))
+                            .add_modifier(Modifier::DIM),
+                    ));
+                }
+            }
             spans.extend(line.spans);
             let hint = answer_commit_hint(index, partial);
             if !hint.is_empty() {

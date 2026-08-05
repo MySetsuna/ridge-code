@@ -634,6 +634,72 @@ fn medium_answer_hint_preserves_expand_and_close_actions() {
 }
 
 #[test]
+fn narrow_history_hint_names_expand_action() {
+    let panel = Panel::new(
+        PanelKind::AnswerHistory,
+        "answers".into(),
+        vec![PanelRow {
+            key: "#1 ANSWER".into(),
+            value: "answer body".into(),
+            ctx: None,
+        }],
+    );
+
+    let narrow = panel_hint(&panel, 18);
+    assert!(
+        narrow.contains("Enter") && narrow.contains('↗'),
+        "missing expand affordance: {narrow}"
+    );
+    assert!(narrow.contains("Esc"), "missing close affordance: {narrow}");
+    assert!(str_cells(&narrow) <= 18, "hint overflow: {narrow}");
+
+    let micro = panel_hint(&panel, 14);
+    assert!(
+        micro.contains("Enter") && micro.contains('↗'),
+        "missing micro expand affordance: {micro}"
+    );
+    assert!(
+        micro.contains("Esc"),
+        "missing micro close affordance: {micro}"
+    );
+    assert!(str_cells(&micro) <= 14, "micro hint overflow: {micro}");
+}
+
+#[test]
+fn narrow_live_history_hint_names_expand_action() {
+    let panel = Panel::new(
+        PanelKind::LiveHistory,
+        "live".into(),
+        vec![PanelRow {
+            key: "#1 ANSWER".into(),
+            value: "answer body".into(),
+            ctx: None,
+        }],
+    );
+
+    let narrow = panel_hint(&panel, 18);
+    assert!(narrow.contains("^Space"), "hold/follow hidden: {narrow}");
+    assert!(
+        narrow.contains("Enter") && narrow.contains('↗'),
+        "missing live expand affordance: {narrow}"
+    );
+    assert!(narrow.contains("Esc"), "missing close affordance: {narrow}");
+    assert!(str_cells(&narrow) <= 18, "hint overflow: {narrow}");
+
+    let micro = panel_hint(&panel, 14);
+    assert!(micro.contains("^Sp"), "micro hold/follow hidden: {micro}");
+    assert!(
+        micro.contains("Enter") && micro.contains('↗'),
+        "missing micro live expand affordance: {micro}"
+    );
+    assert!(
+        micro.contains("Esc"),
+        "missing micro close affordance: {micro}"
+    );
+    assert!(str_cells(&micro) <= 14, "micro hint overflow: {micro}");
+}
+
+#[test]
 fn detail_layout_cache_reuses_same_snapshot_and_invalidates_on_width_or_panel() {
     let panel = Panel::new(
         PanelKind::ReasoningHistory,
@@ -976,6 +1042,16 @@ fn activity_classifier_exposes_investigation_verification_and_conclusion() {
         ui.activity_history.back().map(|entry| entry.kind),
         Some(ActivityKind::Verification)
     );
+    ui.set_activity("node · running tools");
+    assert_eq!(
+        ui.activity_history.back().map(|entry| entry.kind),
+        Some(ActivityKind::Tool)
+    );
+    ui.set_activity("node · wrapping up");
+    assert_eq!(
+        ui.activity_history.back().map(|entry| entry.kind),
+        Some(ActivityKind::Conclusion)
+    );
     ui.set_activity("settling result");
     assert_eq!(
         ui.activity_history.back().map(|entry| entry.kind),
@@ -1097,6 +1173,46 @@ fn retained_activity_anchor_wraps_in_native_scrollback() {
     assert!(
         symbols.contains("Ctrl+T"),
         "activity detail affordance missing: {symbols}"
+    );
+    assert!(!symbols.contains('\x1b'));
+}
+
+#[test]
+fn verification_activity_leaves_a_static_anchor_with_a_detail_affordance() {
+    let mut ui = Ui::default();
+    ui.set_activity("verify output · checking tool result");
+    let mut terminal = Terminal::with_options(
+        ratatui::backend::TestBackend::new(40, 8),
+        TerminalOptions {
+            viewport: Viewport::Inline(4),
+        },
+    )
+    .expect("verification terminal");
+
+    flush_commits(&mut terminal, &mut ui).expect("verification scrollback");
+    let symbols = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(
+        symbols.contains("CHK"),
+        "verification tag missing: {symbols}"
+    );
+    assert!(
+        symbols.contains("Ctrl+T"),
+        "verification detail affordance missing: {symbols}"
+    );
+    let body = symbols
+        .replace('│', "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        body.contains("checking tool result"),
+        "verification body missing: {symbols}"
     );
     assert!(!symbols.contains('\x1b'));
 }
@@ -1419,7 +1535,7 @@ fn wide_completed_idle_surface_uses_bounded_result_card() {
     let mut ui = Ui::default();
     ui.push_chunk(provider::StreamChunk::Reasoning("check state".into()));
     ui.commit_live_reasoning(1, 1);
-    ui.note_markdown("final answer");
+    ui.note_markdown_with_meta("final answer", 1, 1, 17);
     ui.record_activity(ActivityKind::Conclusion, "result ready");
     ui.record_activity(ActivityKind::Completed, "completed");
 
@@ -1447,6 +1563,26 @@ fn wide_completed_idle_surface_uses_bounded_result_card() {
             .iter()
             .any(|span| span.content.as_ref() == "ANS · ")
     }));
+    assert!(
+        nonempty.iter().any(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+                .contains("step 1")
+        }),
+        "completed result card should retain Answer context metadata"
+    );
+    assert!(
+        nonempty.iter().any(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+                .contains("THK · step 1")
+        }),
+        "completed result card should retain Reasoning context metadata"
+    );
     assert!(lines.iter().all(|line| {
         line.spans
             .iter()
@@ -1454,6 +1590,31 @@ fn wide_completed_idle_surface_uses_bounded_result_card() {
             .sum::<usize>()
             <= 64
     }));
+}
+
+#[test]
+fn partial_completed_idle_surface_keeps_partial_answer_truthful() {
+    let mut ui = Ui::default();
+    ui.push_chunk(provider::StreamChunk::Answer("partial response".into()));
+    ui.commit_live_answers("interrupted before final response", 3, 4);
+    ui.record_activity(ActivityKind::Conclusion, "result interrupted");
+    ui.record_activity(ActivityKind::Completed, "completed");
+
+    let text = live_empty_state_for_test(&ui, 64, 10)
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(text.contains("partial answer retained"), "{text}");
+    assert!(text.contains("PARTIAL · "), "partial label missing: {text}");
+    assert!(
+        text.contains("step 3") && text.contains("4 task tok"),
+        "partial context metadata missing: {text}"
+    );
+    assert!(
+        !text.contains("ANS · step 3"),
+        "partial answer was presented as complete: {text}"
+    );
 }
 
 #[test]
@@ -1633,6 +1794,43 @@ fn live_output_wraps_long_lines_to_terminal_cells() {
 }
 
 #[test]
+fn live_output_prefers_word_boundaries_before_hard_wrapping() {
+    let text =
+        "fixture reasoning: waiting without network; queue and takeover remain available [Ctrl+R history]";
+    let row_text = |rows: &[Vec<Span<'static>>]| {
+        rows.iter()
+            .map(|row| {
+                row.iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+    };
+    for rendered in [
+        row_text(&wrap_live_spans(vec![Span::raw(text)], 40)),
+        row_text(&wrap_live_spans_tail(vec![Span::raw(text)], 40, 3)),
+    ] {
+        assert!(
+            rendered.iter().all(|line| str_cells(line) <= 40),
+            "{rendered:?}"
+        );
+        for word in [
+            "reasoning",
+            "network",
+            "queue",
+            "takeover",
+            "available",
+            "history",
+        ] {
+            assert!(
+                rendered.iter().any(|line| line.contains(word)),
+                "{word} split by live reflow: {rendered:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn committed_semantic_prefixes_survive_narrow_reflow() {
     let line_text = |line: &Line<'static>| {
         line.spans
@@ -1680,6 +1878,35 @@ fn committed_semantic_prefixes_survive_narrow_reflow() {
         .iter()
         .skip(1)
         .all(|line| line_text(line).starts_with("  \u{2506} ") && within(line, 18)));
+}
+
+#[test]
+fn committed_reasoning_text_keeps_its_continuation_rail_after_narrow_reflow() {
+    let text = "┊ THK[step 2 · t+3s · 11 task tok] the reasoning body remains visible across a narrow terminal width  [Ctrl+R history]";
+    let lines = wrap_commit_lines(
+        vec![Line::from(Span::styled(
+            text,
+            Style::default().fg(role_color(Role::Reasoning)),
+        ))],
+        18,
+    );
+    let line_text = |line: &Line<'static>| {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    };
+    assert!(lines.len() > 1);
+    assert!(line_text(&lines[0]).starts_with("┊ "));
+    assert!(lines.iter().skip(1).all(|line| {
+        line_text(line).starts_with("│ ")
+            && line
+                .spans
+                .iter()
+                .map(|span| str_cells(span.content.as_ref()))
+                .sum::<usize>()
+                <= 18
+    }));
 }
 
 #[test]
@@ -2112,6 +2339,98 @@ fn live_phase_anchor_keeps_activity_inside_held_viewport() {
 }
 
 #[test]
+fn held_live_anchor_keeps_waiting_target_visible() {
+    let mut ui = Ui {
+        busy: true,
+        waiting: true,
+        phase: "reasoning".into(),
+        ..Ui::default()
+    };
+    ui.push_chunk(provider::StreamChunk::Answer("waiting tail".into()));
+    let vitals = Vitals {
+        step: 3,
+        elapsed_s: 1,
+        task_tokens: 2,
+        rate: 0,
+        ctx_used: 4,
+        queued: 0,
+    };
+
+    assert!(ui.hold_live());
+    let mut text = |pending_call: bool| {
+        ui.pending_call = pending_call.then(|| provider::ToolCall {
+            id: "wait-1".into(),
+            name: "search".into(),
+            arguments: serde_json::json!({}),
+        });
+        live_phase_anchor(&ui, &vitals, 40)
+            .expect("held waiting anchor")
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    };
+
+    let model = text(false);
+    assert!(model.contains("waiting"), "{model}");
+    assert!(model.contains("model"), "{model}");
+    assert!(str_cells(&model) <= 40, "{model}");
+
+    let tool = text(true);
+    assert!(tool.contains("waiting"), "{tool}");
+    assert!(tool.contains("tool"), "{tool}");
+    assert!(str_cells(&tool) <= 40, "{tool}");
+}
+
+#[test]
+fn held_wait_anchor_prioritizes_waiting_target_over_optional_breadcrumbs() {
+    let mut ui = Ui {
+        busy: true,
+        waiting: true,
+        phase: "reasoning".into(),
+        ..Ui::default()
+    };
+    ui.set_activity("node · verify");
+    ui.push_chunk(provider::StreamChunk::Reasoning("plan".into()));
+    ui.push_tool(ToolBlock::from_lines(vec![("search".into(), Color::Cyan)]).expect("tool"));
+    ui.push_chunk(provider::StreamChunk::Answer("answer".into()));
+    let vitals = Vitals {
+        step: 3,
+        elapsed_s: 1,
+        task_tokens: 2,
+        rate: 0,
+        ctx_used: 4,
+        queued: 0,
+    };
+    assert!(ui.hold_live());
+
+    for (target, pending_call) in [("model", false), ("tool", true)] {
+        ui.pending_call = pending_call.then(|| provider::ToolCall {
+            id: "wait-1".into(),
+            name: "search".into(),
+            arguments: serde_json::json!({}),
+        });
+        for width in [18, 24, 32, 40] {
+            let text = live_phase_anchor(&ui, &vitals, width)
+                .expect("held waiting anchor")
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            assert!(
+                text.contains("waiting"),
+                "target={target}, width={width}: {text}"
+            );
+            assert!(
+                text.contains(target),
+                "target={target}, width={width}: {text}"
+            );
+            assert!(str_cells(&text) <= width as usize, "width={width}: {text}");
+        }
+    }
+}
+
+#[test]
 fn live_phase_anchor_adapts_trace_to_terminal_width() {
     let mut ui = Ui {
         busy: true,
@@ -2184,6 +2503,45 @@ fn top_chrome_surfaces_waiting_target_after_event_silence() {
         .collect::<String>();
     assert!(tool.contains("waiting"), "{tool}");
     assert!(tool.contains("tool"), "{tool}");
+}
+
+#[test]
+fn narrow_busy_chrome_keeps_waiting_target_without_live_channel() {
+    let mut ui = Ui {
+        busy: true,
+        waiting: true,
+        phase: "reasoning".into(),
+        ..Ui::default()
+    };
+    let vitals = Vitals {
+        step: 2,
+        elapsed_s: 12,
+        task_tokens: 0,
+        rate: 0,
+        ctx_used: 0,
+        queued: 0,
+    };
+
+    for (target, pending_call) in [("model", false), ("tool", true)] {
+        ui.pending_call = pending_call.then(|| provider::ToolCall {
+            id: "wait-1".into(),
+            name: "search".into(),
+            arguments: serde_json::json!({}),
+        });
+        for width in [18, 24, 32, 40] {
+            let text = top_chrome(&ui, &vitals, width)
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            assert!(str_cells(&text) <= width as usize, "width={width}: {text}");
+            assert!(text.contains("waiting"), "width={width}: {text}");
+            assert!(
+                text.contains(target),
+                "target={target}, width={width}: {text}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -2455,6 +2813,37 @@ fn narrow_live_matrix_keeps_state_and_takeover_signals_observable() {
 }
 
 #[test]
+fn live_empty_state_keeps_takeover_affordance_across_widths() {
+    let ui = Ui {
+        busy: true,
+        activity: "planning next step".into(),
+        ..Ui::default()
+    };
+
+    for (width, rows) in [(6, 4), (11, 4), (18, 6), (32, 6), (48, 6), (80, 6)] {
+        let lines = live_empty_state_for_test(&ui, width, rows);
+        let text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+            .collect::<String>();
+        assert!(
+            text.contains("Esc"),
+            "empty LIVE state must expose takeover at {width} columns: {text}"
+        );
+        assert!(
+            lines.iter().all(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| str_cells(span.content.as_ref()))
+                    .sum::<usize>()
+                    <= width as usize
+            }),
+            "empty LIVE state overflow at {width} columns: {text}"
+        );
+    }
+}
+
+#[test]
 fn reasoning_answer_transition_rail_is_bounded() {
     assert_eq!(
         live_rail(
@@ -2633,6 +3022,11 @@ fn final_answer_gets_assistant_marker() {
         format_event_plain("reason#2: (final) **hello**"),
         "🤖 **hello**"
     );
+    assert_eq!(format_event_plain("(final)"), "🤖 [empty answer]");
+    assert_eq!(format_event_plain("reason#2: (final)"), "🤖 [empty answer]");
+    assert!(is_final_event("(final)"));
+    assert!(is_final_event("reason#2: (final)"));
+    assert!(!is_final_event("(final)not-a-marker"));
     assert!(is_final_event("reason#2: (final) hello"));
     assert!(!is_final_event("reason#2: tool_call search {}"));
 }
@@ -2932,6 +3326,8 @@ fn input_chrome_exposes_submit_or_queue_mode() {
     let (idle, idle_role) = chrome(false, 0, 80, false, true, false, false);
     assert!(idle.contains("Input"));
     assert!(idle.contains("Ctrl+R reasoning"));
+    let (idle_send, _) = chrome(false, 0, 64, false, true, false, false);
+    assert!(idle_send.contains("Enter send"), "{idle_send}");
     assert!(!idle.contains("Ctrl+O"));
     assert!(!idle.contains("Alt+↑/↓ focus"));
     assert_eq!(idle_role, Role::Primary);
@@ -2990,9 +3386,48 @@ fn input_chrome_exposes_submit_or_queue_mode() {
     );
     assert!(str_cells(&answers_history) <= 94, "{answers_history}");
 
+    for width in [12, 18, 24] {
+        let (compact, _) = chrome(true, 2, width, false, true, false, false);
+        assert!(
+            compact.contains('↵'),
+            "busy queue affordance hidden at {width}: {compact}"
+        );
+        assert!(
+            str_cells(&compact) <= width.saturating_sub(2) as usize,
+            "busy compact overflow at {width}: {compact}"
+        );
+    }
+
     let (idle_history, _) = chrome(false, 0, 80, false, true, false, true);
     assert!(idle_history.contains("Ctrl+O history"));
     assert!(!idle_history.contains("Ctrl+O details"));
+
+    for width in [14, 18, 24] {
+        let (compact, _) = input_chrome(InputChromeArgs {
+            busy: false,
+            queued: 0,
+            width,
+            reasoning_expanded: false,
+            has_reasoning: false,
+            has_reasoning_history: false,
+            has_live_answer: false,
+            has_answer_history: true,
+            has_live_history: false,
+            has_tools: false,
+            has_history: false,
+            has_scrollable_tool_details: false,
+            has_live_output: false,
+            live_inspecting: false,
+        });
+        assert!(
+            compact.contains('↵'),
+            "idle submit affordance hidden at {width}: {compact}"
+        );
+        assert!(
+            str_cells(&compact) <= width.saturating_sub(2) as usize,
+            "idle compact overflow at {width}: {compact}"
+        );
+    }
 
     let (busy_tools, _) = chrome(true, 2, 80, false, true, true, false);
     assert!(busy_tools.contains("Queue [2]"));
@@ -3144,13 +3579,15 @@ fn input_chrome_exposes_submit_or_queue_mode() {
     assert!(medium_with_tools.contains("^R"));
 
     let (narrow_medium_with_tools, _) = chrome(true, 10, 56, false, true, true, false);
+    assert!(narrow_medium_with_tools.contains("↵ queue"));
     assert!(narrow_medium_with_tools.contains("^O details"));
+    assert!(narrow_medium_with_tools.contains("^R"));
 
     let (medium_with_tools_expanded, _) = chrome(true, 10, 64, true, true, true, false);
     assert!(medium_with_tools_expanded.contains("^R"));
 
     let (narrow, narrow_role) = chrome(true, 10, 15, false, false, true, false);
-    assert_eq!(narrow, " Q:[10]^C^O ");
+    assert_eq!(narrow, " Q:[10]↵^C^O ");
     assert_eq!(narrow_role, Role::Primary);
     assert!(str_cells(&narrow) <= 13);
     assert!(narrow.contains("^C"), "takeover disappeared: {narrow}");
@@ -3838,6 +4275,20 @@ fn slash_popup_lists_all_and_filters() {
     mo.insert_str("/mo");
     let f = build_popup(&mo).expect("应有候选");
     assert_eq!(f.items, vec!["/model".to_string()]);
+}
+
+#[test]
+fn slash_popup_surfaces_goal_and_attention_commands() {
+    for (input, expected) in [
+        ("/go", "/goal"),
+        ("/in", "/inspect"),
+        ("/rea", "/reasoning"),
+    ] {
+        let mut state = InputState::default();
+        state.insert_str(input);
+        let popup = build_popup(&state).expect("slash command should be discoverable");
+        assert_eq!(popup.items, vec![expected.to_owned()], "input={input}");
+    }
 }
 
 #[test]
@@ -4939,7 +5390,7 @@ fn completion_word_filter_and_apply() {
     assert_eq!(s.cursor, 10);
     // build_popup:行首 / 词才补命令;非行首不补
     let mut q = InputState::default();
-    q.insert_str("/re");
+    q.insert_str("/res");
     let pop = build_popup(&q).expect("应有候选");
     assert_eq!(pop.items, vec!["/reset".to_string()]);
     assert_eq!(pop.anchor, 0);
@@ -5010,7 +5461,7 @@ fn responsive_live_layout_preserves_output_and_input_under_vertical_pressure() {
         if height > 0 {
             assert!(slots[0].height >= 1, "output floor disappeared at {height}");
         }
-        if height >= 4 {
+        if height >= 5 {
             assert_eq!(slots[1].height, 1, "chrome must stay visible at {height}");
         } else {
             assert_eq!(slots[1].height, 0, "chrome should collapse at {height}");
@@ -5066,10 +5517,122 @@ fn responsive_live_layout_preserves_output_and_input_under_vertical_pressure() {
             symbols.contains("Input"),
             "input chrome lost at {height}: {symbols}"
         );
+        assert!(
+            symbols.contains("draft"),
+            "editable draft lost at {height}: {symbols}"
+        );
         if height >= 6 {
             assert!(
                 symbols.contains("status"),
                 "status lost at {height}: {symbols}"
+            );
+        }
+    }
+}
+
+#[test]
+fn responsive_live_layout_handles_ultra_low_height_editor_fallback() {
+    let meta = ReplMeta {
+        tools: Vec::new(),
+        provider: "test".into(),
+        provider_label: "test".into(),
+        model: "model".into(),
+        base_url: String::new(),
+        status_bar: "status".into(),
+        ctx_window: 200_000,
+    };
+    let vitals = Vitals {
+        step: 1,
+        elapsed_s: 1,
+        task_tokens: 1,
+        rate: 1,
+        ctx_used: 1,
+        queued: 0,
+    };
+    for height in [2, 3] {
+        let mut ui = Ui::default();
+        ui.push_chunk(provider::StreamChunk::Answer("answer survives".into()));
+        ui.input.insert_str("draft survives");
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(24, height))
+            .expect("ultra-low terminal");
+        terminal
+            .draw(|frame| draw(frame, &ui, &meta, 1, &vitals, None))
+            .expect("ultra-low draw");
+        let symbols = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            symbols.contains("answer survives"),
+            "answer lost at {height}: {symbols}"
+        );
+        assert!(
+            symbols.contains("draft survives"),
+            "draft lost at {height}: {symbols}"
+        );
+    }
+
+    let mut terminal =
+        Terminal::new(ratatui::backend::TestBackend::new(24, 1)).expect("single-row terminal");
+    terminal
+        .draw(|frame| {
+            let ui = Ui::default();
+            draw(frame, &ui, &meta, 0, &vitals, None);
+        })
+        .expect("single-row draw");
+}
+
+#[test]
+fn ultra_low_height_pending_queue_stays_visible_above_or_with_draft() {
+    let meta = ReplMeta {
+        tools: Vec::new(),
+        provider: "test".into(),
+        provider_label: "test".into(),
+        model: "model".into(),
+        base_url: String::new(),
+        status_bar: "status".into(),
+        ctx_window: 200_000,
+    };
+    let vitals = Vitals {
+        step: 1,
+        elapsed_s: 1,
+        task_tokens: 1,
+        rate: 1,
+        ctx_used: 1,
+        queued: 1,
+    };
+    for height in [2, 3] {
+        let mut ui = Ui::default();
+        ui.queued.push_back("queued intent".into());
+        ui.input.insert_str("draft survives");
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(24, height))
+            .expect("ultra-low queue terminal");
+        terminal
+            .draw(|frame| draw(frame, &ui, &meta, 1, &vitals, None))
+            .expect("ultra-low queue draw");
+        let symbols = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            symbols.contains("draft survives"),
+            "draft lost at {height}: {symbols}"
+        );
+        if height == 2 {
+            assert!(
+                symbols.contains("1 pending"),
+                "queue count lost at {height}: {symbols}"
+            );
+        } else {
+            assert!(
+                symbols.contains("queued intent"),
+                "queue preview lost at {height}: {symbols}"
             );
         }
     }
@@ -5637,6 +6200,35 @@ fn committed_answer_keeps_a_semantic_rail_after_leaving_live_view() {
 }
 
 #[test]
+fn committed_answer_exposes_observed_context_alongside_its_rail() {
+    let lines = answer_commit_lines_with_status_and_metrics(
+        "🤖 answer",
+        false,
+        Some(PresentationMetrics {
+            step: 2,
+            elapsed_s: 3,
+            tokens: 17,
+            chars: 11,
+        }),
+    );
+    let first = lines[0]
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(first.starts_with("╭ ANSWER "), "{first}");
+    assert!(first.contains("[step 2 · +3s · 17 task tok]"), "{first}");
+    assert!(first.contains("Ctrl+A answers"), "{first}");
+    assert!(
+        lines[0].spans.iter().any(|span| {
+            span.content.as_ref().contains("step 2")
+                && span.style.fg == Some(role_color(Role::Label))
+        }),
+        "answer metadata should be visually subordinate"
+    );
+}
+
+#[test]
 fn live_answer_uses_bounded_markdown_roles_and_fence_state() {
     let mut in_code = false;
     let spans = live_markdown_line(
@@ -5841,6 +6433,8 @@ fn partial_answer_scrollback_keeps_answer_channel_and_marks_partial() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(symbols.contains("ANSWER"));
+    assert!(symbols.contains("step 2"), "{symbols}");
+    assert!(symbols.contains("task tok"), "{symbols}");
     assert!(symbols.contains("PARTIAL"));
 }
 
@@ -7036,7 +7630,8 @@ fn reasoning_commit_renders_in_inline_scrollback() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(symbols.contains("actual plan"));
+    let body = symbols.replace("│ ", "");
+    assert!(body.contains("actual plan"));
     assert!(symbols.contains("t+12s"));
     assert!(symbols.contains("task tok"));
     assert!(symbols.contains("THK["));
@@ -7054,6 +7649,40 @@ fn reasoning_commit_renders_in_inline_scrollback() {
     assert!(reasoning_cell.modifier.contains(Modifier::ITALIC));
     assert!(ui.commits.is_empty());
     assert!(!symbols.contains('\x1b'));
+}
+
+#[test]
+fn semantic_reasoning_rail_prefers_word_boundaries_on_narrow_reflow() {
+    let text = "┊ THK[t+3s · 19 task tok] fixture reasoning: waiting without network; queue and takeover remain available  [Ctrl+R history]";
+    let lines = wrap_commit_lines(vec![Line::from(Span::raw(text))], 40);
+    let rendered = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(rendered.iter().any(|line| line.starts_with("│ ")));
+    assert!(
+        rendered.iter().all(|line| str_cells(line) <= 40),
+        "{rendered:?}"
+    );
+    for word in [
+        "reasoning",
+        "network",
+        "queue",
+        "takeover",
+        "available",
+        "history",
+    ] {
+        assert!(
+            rendered.iter().any(|line| line.contains(word)),
+            "{word} split across semantic rail: {rendered:?}"
+        );
+    }
 }
 
 #[test]
@@ -7728,4 +8357,88 @@ fn presentation_ledger_is_bounded_and_keeps_channel_identity() {
         .records()
         .iter()
         .all(|record| record.status == PresentationStatus::Committed));
+}
+
+#[test]
+fn activity_anchor_preserves_semantic_continuation_rail_when_wrapped() {
+    let width = 40;
+    let mut ui = Ui::default();
+    ui.set_activity("waiting for the background model response while keeping takeover visible");
+    let mut terminal = Terminal::with_options(
+        ratatui::backend::TestBackend::new(width, 30),
+        TerminalOptions {
+            viewport: Viewport::Inline(20),
+        },
+    )
+    .expect("activity wrapping terminal");
+    flush_commits(&mut terminal, &mut ui).expect("activity wrapping scrollback");
+    let rows = terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        })
+        .filter(|row| !row.is_empty())
+        .collect::<Vec<_>>();
+
+    assert!(rows.len() > 1, "activity should wrap at {width}: {rows:?}");
+    assert!(
+        rows[0].starts_with("⟦WAIT #1⟧"),
+        "missing activity tag: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| str_cells(row) <= width as usize),
+        "activity row exceeded width: {rows:?}"
+    );
+    assert!(
+        rows.iter().skip(1).all(|row| row.starts_with("│ ")),
+        "wrapped activity rows lost continuation rail: {rows:?}"
+    );
+
+    assert!(
+        rows.iter().any(|row| row.contains("model response")),
+        "activity split an ordinary word: {rows:?}"
+    );
+}
+
+#[test]
+fn activity_anchor_keeps_rail_across_explicit_detail_lines() {
+    let mut ui = Ui::default();
+    ui.set_activity("waiting for the model\nsecond detail remains actionable");
+    let mut terminal = Terminal::with_options(
+        ratatui::backend::TestBackend::new(40, 30),
+        TerminalOptions {
+            viewport: Viewport::Inline(20),
+        },
+    )
+    .expect("multiline activity terminal");
+    flush_commits(&mut terminal, &mut ui).expect("multiline activity scrollback");
+    let rows = terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(40)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        })
+        .filter(|row| !row.is_empty())
+        .collect::<Vec<_>>();
+    let detail = rows
+        .iter()
+        .find(|row| row.contains("second detail"))
+        .expect("explicit activity detail");
+    assert!(
+        detail.starts_with("│ "),
+        "explicit activity detail lost continuation rail: {rows:?}"
+    );
 }

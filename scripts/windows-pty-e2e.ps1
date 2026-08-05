@@ -3,7 +3,10 @@ param(
     [string]$Binary,
     [int]$Columns = 96,
     [int]$Rows = 24,
-    [int]$TimeoutMs = 4000,
+    # InspectAnswer waits for a live Answer before the takeover probe; its
+    # effective interrupt point is 5000 ms, so the default must leave room for
+    # the two Ctrl-C bytes and final frame drain.
+    [int]$TimeoutMs = 6500,
     [int]$EnterAfterMs = 500,
     [int]$InterruptAfterMs = 1200,
     [switch]$EscTakeover,

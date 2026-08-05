@@ -2,7 +2,7 @@
 # RidgeCode 安装器(Unix:Linux / macOS)—— 零 cargo、零源码,只需一个独立二进制。
 #
 #   在线装最新版:  curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.sh | sh
-#   指定版本:      ... | sh -s -- --version v0.2.0
+#   指定版本:      curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.3/scripts/install.sh | sh -s -- --version v0.5.3
 #   装本地已构建:  ./scripts/install.sh --local target/release/ridgecode
 #
 # 装到 $RIDGE_BIN_DIR(默认 ~/.local/bin);若不在 PATH,脚本会提示如何加。
@@ -31,6 +31,17 @@ install_file() { # $1 = 源二进制路径
   echo "✓ 已安装: $BIN_DIR/$BIN"
 }
 
+download() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fSL "$1" -o "$2"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$2" "$1"
+  else
+    echo "需要 curl 或 wget" >&2
+    exit 1
+  fi
+}
+
 if [ -n "$LOCAL" ]; then
   [ -f "$LOCAL" ] || { echo "本地文件不存在: $LOCAL" >&2; exit 1; }
   install_file "$LOCAL"
@@ -54,11 +65,26 @@ else
 
   tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
   echo "↓ 下载 $url"
-  if command -v curl >/dev/null 2>&1; then curl -fSL "$url" -o "$tmp/a.tgz"
-  elif command -v wget >/dev/null 2>&1; then wget -qO "$tmp/a.tgz" "$url"
-  else echo "需要 curl 或 wget" >&2; exit 1; fi
+  download "$url" "$tmp/a.tgz"
+  download "$url.sha256" "$tmp/a.sha256"
+  expected="$(awk 'NF {print $1; exit}' "$tmp/a.sha256" | tr 'A-F' 'a-f')"
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$tmp/a.tgz" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual="$(shasum -a 256 "$tmp/a.tgz" | awk '{print $1}')"
+  else
+    echo "需要 sha256sum 或 shasum 以校验 Release 归档" >&2
+    exit 1
+  fi
+  if [ "$expected" != "$actual" ]; then
+    echo "SHA256 校验失败: expected=$expected actual=$actual" >&2
+    exit 1
+  fi
+  echo "✓ SHA256 $actual"
   tar -xzf "$tmp/a.tgz" -C "$tmp"
-  install_file "$(find "$tmp" -name "$BIN" -type f | head -1)"
+  exe="$(find "$tmp" -name "$BIN" -type f | head -1)"
+  [ -n "$exe" ] || { echo "归档里没找到 $BIN" >&2; exit 1; }
+  install_file "$exe"
 fi
 
 # ---- 配置骨架:写 config.example.json 到安装目录 + 首次生成 ~/.ridge/config.json ----

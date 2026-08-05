@@ -3,7 +3,7 @@
   RidgeCode 安装器(Windows)—— 零 cargo、零源码,只需一个独立 .exe。
 .DESCRIPTION
   在线装最新版:  irm https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.ps1 | iex
-  指定版本:      &([scriptblock]::Create((irm .../install.ps1))) -Version v0.2.0
+  指定版本:      &([scriptblock]::Create((irm .../v0.5.3/scripts/install.ps1))) -Version v0.5.3
   装本地已构建:  .\scripts\install.ps1 -Local .\target\release\ridgecode.exe
   装到 $env:LOCALAPPDATA\Programs\ridgecode,并把该目录加入「用户 PATH」(新终端生效)。
 .PARAMETER Version
@@ -41,6 +41,14 @@ if ($Local) {
     Write-Host "下载 $url"
     $zip = Join-Path $tmp "a.zip"
     Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+    $checksumUrl = "$url.sha256"
+    $checksumText = (Invoke-WebRequest -Uri $checksumUrl -UseBasicParsing).Content
+    $expected = (($checksumText -split '\s+')[0]).Trim().ToLowerInvariant()
+    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+    if ($expected -notmatch '^[0-9a-f]{64}$' -or $actual -ne $expected) {
+      throw "SHA256 校验失败: expected=$expected actual=$actual"
+    }
+    Write-Host "[OK] SHA256 $actual" -ForegroundColor DarkGray
     Expand-Archive -Path $zip -DestinationPath $tmp -Force
     $exe = Get-ChildItem -Path $tmp -Recurse -Filter $Bin | Select-Object -First 1
     if (-not $exe) { throw "归档里没找到 $Bin" }

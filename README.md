@@ -6,27 +6,50 @@ RidgeCode 是一个模块化、跨领域可扩展的通用 agent 框架，发布
 
 ## 先跑起来
 
-### 下载 Release
+### 通过 GitHub 快速安装（无需 Rust/Cargo）
 
-Release 归档包含：平台二进制、本文档 README.md，以及对应平台安装脚本。归档旁附 .sha256 校验文件。
+Release 归档包含平台二进制、完整 `README.md`、安装脚本与 `.sha256` 校验文件。安装器会下载对应平台归档、先校验 SHA256，再把 `ridgecode` 放入用户 PATH。
 
-~~~bash
-# Linux / macOS：安装最新 Release 到 ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.sh | sh
-~~~
+Windows PowerShell：
 
 ~~~powershell
-# Windows：安装到 %LOCALAPPDATA%/Programs/ridgecode，并写入用户 PATH
+# 最新稳定版：安装到 %LOCALAPPDATA%\Programs\ridgecode，并写入用户 PATH
 irm https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.ps1 | iex
+
+# 可复现安装：固定脚本与 Release 版本
+$s = irm https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.3/scripts/install.ps1
+& ([scriptblock]::Create($s)) -Version v0.5.3
+
+# 新开终端后验证
+ridgecode --version
+Get-Command ridgecode
 ~~~
 
-手动下载地址：[GitHub Releases](https://github.com/MySetsuna/ridge-code/releases)。按平台选择 ridgecode-<target>.tar.gz 或 ridgecode-<target>.zip，解压后把二进制放进 PATH 即可。
+Linux / macOS：
 
-安装器参数：
+~~~bash
+# 最新稳定版：安装到 ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.sh | sh
 
-- Unix：--version <tag>、--local <binary>、--dir <dir>、--help。
-- Windows：-Version <tag>、-Local <path>、-Dir <dir>。
-- 当前平台本地安装不联网、不需要 Cargo：scripts/install.sh --local target/release/ridgecode 或 scripts/install.ps1 -Local target/release/ridgecode.exe。
+# 可复现安装：固定脚本与 Release 版本
+curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.3/scripts/install.sh | sh -s -- --version v0.5.3
+
+# 验证
+ridgecode --version
+command -v ridgecode
+~~~
+
+安装器首次运行会生成 `~/.ridge/config.json`（Windows 为 `%USERPROFILE%\.ridge\config.json`）与 `config.example.json`；填入 API Key 或设置 `RIDGE_API_KEY` 后即可启动真实模型。安装完成后若当前 shell 尚未刷新 PATH，请新开终端。
+
+当前 Release：[v0.5.3](https://github.com/MySetsuna/ridge-code/releases/tag/v0.5.3)。手动下载时按平台选择：
+
+| 平台 | Release 资产 |
+| --- | --- |
+| Windows x86_64 | `ridgecode-x86_64-pc-windows-msvc.zip` |
+| Linux x86_64 / ARM64 | `ridgecode-x86_64-unknown-linux-gnu.tar.gz` / `ridgecode-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS Intel / Apple Silicon | `ridgecode-x86_64-apple-darwin.tar.gz` / `ridgecode-aarch64-apple-darwin.tar.gz` |
+
+每个归档旁均有同名 `.sha256` 文件；手动下载后先校验，再解压并将二进制放入 PATH。安装器参数：Unix 支持 `--version <tag>`、`--local <binary>`、`--dir <dir>`；Windows 支持 `-Version <tag>`、`-Local <path>`、`-Dir <dir>`。本地安装不联网：`scripts/install.sh --local target/release/ridgecode` 或 `scripts/install.ps1 -Local target/release/ridgecode.exe`。
 
 ### 从源码运行
 
@@ -253,6 +276,9 @@ $env:RIDGE_TUI_SNAPSHOT = "$pwd\ridgecode-frame.json"
 | /history | 搜索已完成工具调用；Enter 展开详情 |
 | /model | 打开跨 provider 模型选择器 |
 | /model <name> | 沿用当前 provider 热切换模型 |
+| /effort | 查看当前 reasoning effort 与可选值 |
+| /effort <none\|low\|medium\|high\|xhigh\|max> | 持久化并立即切换 reasoning effort |
+| /find [query] | 在当前 Live Answer/Reasoning/Tool 块中打开非阻塞搜索 |
 | /goal [status|create|start|advance|resume|complete|block|cancel] | 查看或推进持久化长任务目标 |
 | /provider、/provider list | 查看 provider 档案 |
 | /provider add <name> <kind> <model> <base_url> [key_env] | 新增档案并写回配置 |
@@ -464,14 +490,21 @@ sh scripts/dist.sh
 
 ### GitHub Release
 
-维护者在稳定基线完成全量质量门后创建 v* 标签并推送：
+维护者在稳定基线完成全量质量门后创建 v* 标签并推送；CI 会自动创建 GitHub Release、构建五个平台资产、生成 SHA256 并把 README/安装脚本放进归档：
 
 ~~~bash
-git tag v<version>
-git push origin v<version>
+git tag v0.5.3
+git push origin main
+git push origin v0.5.3
 ~~~
 
-.github/workflows/release.yml 会为 Linux x86_64/aarch64、macOS x86_64/aarch64、Windows x86_64 构建并上传归档。CI 同时验证 fmt、clippy、workspace build 与 workspace test。发布前至少执行：
+也可用 GitHub CLI 下载指定版本：
+
+~~~bash
+gh release download v0.5.3 --repo MySetsuna/ridge-code --pattern 'ridgecode-*'
+~~~
+
+`.github/workflows/release.yml` 会为 Linux x86_64/aarch64、macOS x86_64/aarch64、Windows x86_64 构建并上传归档。CI 同时验证 fmt、clippy、workspace build 与 workspace test；发布前至少执行：
 
 ~~~bash
 cargo fmt --all -- --check

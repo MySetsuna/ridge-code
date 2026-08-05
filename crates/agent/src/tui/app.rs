@@ -142,6 +142,7 @@ impl ActivityKind {
         matches!(
             self,
             Self::Plan
+                | Self::Verification
                 | Self::Waiting
                 | Self::Approval
                 | Self::Conclusion
@@ -184,6 +185,7 @@ impl ActivityKind {
         } else if lower.contains("settling")
             || lower.contains("conclusion")
             || lower.contains("synthes")
+            || lower.contains("wrapping up")
             || text.contains("结论")
             || text.contains("总结")
             || text.contains("收敛")
@@ -210,7 +212,10 @@ impl ActivityKind {
         } else if lower.contains("answering") || text.contains("回答") || text.contains("答复")
         {
             Self::Answer
-        } else if lower.starts_with("tool") || text.starts_with("工具") {
+        } else if lower.contains("running tool")
+            || lower.starts_with("tool")
+            || text.starts_with("工具")
+        {
             Self::Tool
         } else {
             Self::System
@@ -1191,13 +1196,15 @@ pub(crate) fn flush_commits<B: Backend>(terminal: &mut Terminal<B>, ui: &mut Ui)
                 debug_assert!(ui.presentation.contains(PresentationChannel::Answer, id));
                 let partial = ui.presentation.status(PresentationChannel::Answer, id)
                     == Some(PresentationStatus::Partial);
-                lines.extend(commit_lines(
+                let metrics = ui.presentation.metrics(PresentationChannel::Answer, id);
+                lines.extend(commit_lines_with_answer_metrics(
                     text,
                     role_color(Role::Answer),
                     true,
                     partial,
                     Modifier::empty(),
                     width,
+                    metrics,
                 ));
             }
             CommitBlock::Reasoning {
@@ -1294,11 +1301,12 @@ fn activity_commit_lines(
         Span::styled(first.to_owned(), body_style),
         Span::styled(hint, hint_style),
     ]));
-    lines.extend(
-        text.lines()
-            .skip(1)
-            .map(|line| Line::from(Span::styled(line.to_owned(), body_style))),
-    );
+    lines.extend(text.lines().skip(1).map(|line| {
+        Line::from(vec![
+            Span::styled("│ ".to_owned(), body_style),
+            Span::styled(line.to_owned(), body_style),
+        ])
+    }));
     wrap_commit_lines(lines, width)
 }
 
@@ -1338,21 +1346,30 @@ fn commit_lines(
     modifier: Modifier,
     width: u16,
 ) -> Vec<Line<'static>> {
+    commit_lines_with_answer_metrics(text, color, markdown, partial, modifier, width, None)
+}
+
+fn commit_lines_with_answer_metrics(
+    text: String,
+    color: Color,
+    markdown: bool,
+    partial: bool,
+    modifier: Modifier,
+    width: u16,
+    metrics: Option<PresentationMetrics>,
+) -> Vec<Line<'static>> {
     let text = sanitize_display_text(&text);
     let text = if markdown {
         bound_answer_history_text(&text)
     } else {
         text
     };
-    let text = fold_lines(&text, FOLD_MAX); // 呈现层折叠(iter-28):历史不刷屏
-                                            // 块间前置一空白行(iter-31 需求 5):连续输出块视觉分栏,不再贴成一片。
+    let text = fold_lines(&text, FOLD_MAX);
     let mut lines: Vec<Line> = vec![Line::default()];
     if markdown {
-        if partial {
-            lines.extend(answer_commit_lines_with_status(&text, true));
-        } else {
-            lines.extend(answer_commit_lines(&text));
-        }
+        lines.extend(answer_commit_lines_with_status_and_metrics(
+            &text, partial, metrics,
+        ));
     } else {
         lines.extend(text.lines().map(|l| {
             Line::from(Span::styled(
@@ -1399,6 +1416,7 @@ fn commit_semantic_prefix(spans: &[Span<'static>]) -> Option<CommitSemanticPrefi
         ("\u{256d} ANSWER ", "\u{2502} "),
         ("\u{2502} ", "\u{2502} "),
         ("\u{257a} ", "\u{2502} "),
+        ("\u{250a} ", "\u{2502} "),
         ("C ", "  \u{2506} "),
         ("O ", "  \u{2506} "),
         ("T ", "  \u{2506} "),
@@ -1454,11 +1472,140 @@ fn split_commit_prefix(
     (remaining == 0).then_some((prefix_spans, body_spans))
 }
 
-fn wrap_semantic_commit_line(spans: Vec<Span<'static>>, width: u16) -> Option<Vec<Line<'static>>> {
-    let prefix = commit_semantic_prefix(&spans)?;
-    let (first_prefix, body) = split_commit_prefix(spans, prefix.first)?;
-    let first_cells = str_cells(prefix.first);
-    let continuation_cells = str_cells(prefix.continuation);
+#[derive(Clone)]
+struct CommitFragment {
+    text: String,
+    style: Style,
+    cells: usize,
+}
+
+enum CommitBodyUnit {
+    Word(Vec<CommitFragment>),
+    Whitespace(Vec<CommitFragment>),
+    Newline,
+}
+
+fn commit_body_units(body: Vec<Span<'static>>) -> Vec<CommitBodyUnit> {
+    let mut units = Vec::new();
+    let mut kind = None;
+    let mut fragments = Vec::new();
+
+    for span in body {
+        let style = span.style;
+        for grapheme in span.content.as_ref().graphemes(true) {
+            if grapheme == "\n" {
+                if let Some(kind) = kind.take() {
+                    let chunk = std::mem::take(&mut fragments);
+                    units.push(if kind {
+                        CommitBodyUnit::Whitespace(chunk)
+                    } else {
+                        CommitBodyUnit::Word(chunk)
+                    });
+                }
+                units.push(CommitBodyUnit::Newline);
+                continue;
+            }
+
+            let whitespace = grapheme.chars().all(char::is_whitespace);
+            if kind.is_some_and(|current| current != whitespace) {
+                let previous = kind.take().expect("commit unit kind exists");
+                let chunk = std::mem::take(&mut fragments);
+                units.push(if previous {
+                    CommitBodyUnit::Whitespace(chunk)
+                } else {
+                    CommitBodyUnit::Word(chunk)
+                });
+            }
+            kind = Some(whitespace);
+            fragments.push(CommitFragment {
+                text: grapheme.to_owned(),
+                style,
+                cells: str_cells(grapheme),
+            });
+        }
+    }
+
+    if let Some(kind) = kind {
+        units.push(if kind {
+            CommitBodyUnit::Whitespace(fragments)
+        } else {
+            CommitBodyUnit::Word(fragments)
+        });
+    }
+    units
+}
+
+fn commit_fragments_cells(fragments: &[CommitFragment]) -> usize {
+    fragments.iter().map(|fragment| fragment.cells).sum()
+}
+
+fn push_commit_continuation(
+    rows: &mut Vec<Vec<Span<'static>>>,
+    continuation: &str,
+    prefix_style: Style,
+) {
+    rows.push(vec![Span::styled(continuation.to_owned(), prefix_style)]);
+}
+
+fn append_commit_fragments(
+    rows: &mut Vec<Vec<Span<'static>>>,
+    fragments: &[CommitFragment],
+    row_cells: &mut usize,
+    width: usize,
+    continuation: &str,
+    continuation_cells: usize,
+    prefix_style: Style,
+) {
+    for fragment in fragments {
+        if *row_cells > 0 && row_cells.saturating_add(fragment.cells) > width {
+            push_commit_continuation(rows, continuation, prefix_style);
+            *row_cells = continuation_cells;
+        }
+        rows.last_mut()
+            .expect("semantic commit wrap owns one row")
+            .push(Span::styled(fragment.text.clone(), fragment.style));
+        *row_cells = row_cells.saturating_add(fragment.cells);
+    }
+}
+
+fn activity_commit_prefix(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("⟦")?;
+    let close = rest.find("⟧ ")?;
+    let header = &rest[..close];
+    let (tag, sequence) = header.split_once(" #")?;
+    if !matches!(
+        tag,
+        "SYS"
+            | "PLAN"
+            | "THK"
+            | "ANS"
+            | "TLS"
+            | "CHK"
+            | "SUM"
+            | "WAIT"
+            | "ASK"
+            | "QUE"
+            | "TAKE"
+            | "DONE"
+            | "ERR"
+    ) || sequence.is_empty()
+        || !sequence.chars().all(|character| character.is_ascii_digit())
+    {
+        return None;
+    }
+    let end = "⟦".len() + close + "⟧ ".len();
+    text.get(..end)
+}
+
+fn wrap_semantic_commit_line_with_prefix(
+    spans: Vec<Span<'static>>,
+    first: &str,
+    continuation: &str,
+    width: u16,
+) -> Option<Vec<Line<'static>>> {
+    let (first_prefix, body) = split_commit_prefix(spans, first)?;
+    let first_cells = str_cells(first);
+    let continuation_cells = str_cells(continuation);
     let width = width as usize;
     if width <= first_cells || width <= continuation_cells {
         return None;
@@ -1470,41 +1617,79 @@ fn wrap_semantic_commit_line(spans: Vec<Span<'static>>, width: u16) -> Option<Ve
         .unwrap_or_default();
     let mut rows = vec![first_prefix];
     let mut row_cells = first_cells;
-    let mut row_width = width;
-    for span in body {
-        let style = span.style;
-        for grapheme in span.content.as_ref().graphemes(true) {
-            if grapheme == "\n" {
-                rows.push(vec![Span::styled(
-                    prefix.continuation.to_owned(),
-                    prefix_style,
-                )]);
+    let mut row_has_body = false;
+    let mut pending_whitespace = Vec::new();
+    for unit in commit_body_units(body) {
+        match unit {
+            CommitBodyUnit::Newline => {
+                pending_whitespace.clear();
+                push_commit_continuation(&mut rows, continuation, prefix_style);
                 row_cells = continuation_cells;
-                row_width = width;
-                continue;
+                row_has_body = false;
             }
-            let cells = str_cells(grapheme);
-            if row_cells > 0 && row_cells.saturating_add(cells) > row_width {
-                rows.push(vec![Span::styled(
-                    prefix.continuation.to_owned(),
+            CommitBodyUnit::Whitespace(fragments) => {
+                pending_whitespace = fragments;
+            }
+            CommitBodyUnit::Word(fragments) => {
+                let whitespace_cells = commit_fragments_cells(&pending_whitespace);
+                let word_cells = commit_fragments_cells(&fragments);
+                let would_overflow = row_cells
+                    .saturating_add(whitespace_cells)
+                    .saturating_add(word_cells)
+                    > width;
+                if row_has_body && would_overflow {
+                    push_commit_continuation(&mut rows, continuation, prefix_style);
+                    row_cells = continuation_cells;
+                    pending_whitespace.clear();
+                } else if !row_has_body && would_overflow {
+                    pending_whitespace.clear();
+                }
+                append_commit_fragments(
+                    &mut rows,
+                    &pending_whitespace,
+                    &mut row_cells,
+                    width,
+                    continuation,
+                    continuation_cells,
                     prefix_style,
-                )]);
-                row_cells = continuation_cells;
-                row_width = width;
+                );
+                append_commit_fragments(
+                    &mut rows,
+                    &fragments,
+                    &mut row_cells,
+                    width,
+                    continuation,
+                    continuation_cells,
+                    prefix_style,
+                );
+                pending_whitespace.clear();
+                row_has_body = true;
             }
-            rows.last_mut()
-                .expect("semantic commit wrap owns one row")
-                .push(Span::styled(grapheme.to_owned(), style));
-            row_cells = row_cells.saturating_add(cells);
         }
     }
     Some(rows.into_iter().map(Line::from).collect())
 }
 
+fn wrap_semantic_commit_line(spans: Vec<Span<'static>>, width: u16) -> Option<Vec<Line<'static>>> {
+    let prefix = commit_semantic_prefix(&spans)?;
+    wrap_semantic_commit_line_with_prefix(spans, prefix.first, prefix.continuation, width)
+}
+
 fn wrap_commit_line(line: Line<'static>, width: u16) -> Vec<Line<'static>> {
     let spans = line.spans.into_iter().collect::<Vec<_>>();
+    let activity_prefix = spans
+        .first()
+        .and_then(|span| activity_commit_prefix(span.content.as_ref()))
+        .map(str::to_owned);
+    if let Some(prefix) = activity_prefix.as_deref() {
+        if let Some(wrapped) =
+            wrap_semantic_commit_line_with_prefix(spans.clone(), prefix, "│ ", width)
+        {
+            return wrapped;
+        }
+    }
     wrap_semantic_commit_line(spans.clone(), width).unwrap_or_else(|| {
-        wrap_live_spans(spans, width)
+        wrap_live_spans_greedy(spans, width)
             .into_iter()
             .map(Line::from)
             .collect()

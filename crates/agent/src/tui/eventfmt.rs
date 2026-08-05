@@ -1,10 +1,22 @@
 use super::*;
 
+fn final_payload(rest: &str) -> Option<&str> {
+    if rest.is_empty() {
+        Some(rest)
+    } else {
+        rest.strip_prefix(' ')
+    }
+}
+
 pub(crate) fn final_answer_text(m: &str) -> Option<&str> {
-    m.strip_prefix("(final) ").or_else(|| {
-        m.strip_prefix("reason#")
-            .and_then(|rest| rest.split_once(": (final) ").map(|(_, text)| text))
-    })
+    m.strip_prefix("(final)")
+        .and_then(final_payload)
+        .or_else(|| {
+            m.strip_prefix("reason#").and_then(|rest| {
+                rest.split_once(": (final)")
+                    .and_then(|(_, text)| final_payload(text))
+            })
+        })
 }
 
 pub(crate) fn is_final_event(m: &str) -> bool {
@@ -13,7 +25,13 @@ pub(crate) fn is_final_event(m: &str) -> bool {
 
 pub(crate) fn format_event_plain(m: &str) -> String {
     final_answer_text(m)
-        .map(|x| format!("🤖 {x}"))
+        .map(|x| {
+            if x.trim().is_empty() {
+                "🤖 [empty answer]".to_owned()
+            } else {
+                format!("🤖 {x}")
+            }
+        })
         .unwrap_or_else(|| m.to_owned())
 }
 

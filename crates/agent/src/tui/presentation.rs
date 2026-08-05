@@ -116,6 +116,22 @@ impl PresentationLedger {
             .map(|record| record.status)
     }
 
+    pub(crate) fn metrics(
+        &self,
+        channel: PresentationChannel,
+        id: PresentationId,
+    ) -> Option<PresentationMetrics> {
+        self.records
+            .iter()
+            .find(|record| record.channel == channel && record.id == id)
+            .map(|record| PresentationMetrics {
+                step: record.step,
+                elapsed_s: record.elapsed_s,
+                tokens: record.tokens,
+                chars: record.chars,
+            })
+    }
+
     pub(crate) fn touch(
         &mut self,
         channel: PresentationChannel,

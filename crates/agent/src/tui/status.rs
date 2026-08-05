@@ -244,9 +244,35 @@ fn compact_busy_actions(
     has_live_history: bool,
     live_inspecting: bool,
 ) -> String {
+    if width <= 8 {
+        // At the smallest usable width the top chrome may be collapsed to
+        // preserve an editable draft. Keep queue depth, takeover, and the
+        // freshest observed channel in the input title instead of losing the
+        // Answer/Reasoning/Tool signal with right-side clipping.
+        let channel = if has_live_answer {
+            Some(" A ")
+        } else if has_reasoning {
+            Some(" R ")
+        } else if has_tools {
+            Some(" T ")
+        } else {
+            None
+        };
+        let budget = width.saturating_sub(2) as usize;
+        let mut text = "Q".to_owned();
+        for token in [Some(" C"), channel].into_iter().flatten() {
+            if str_cells(&text) + str_cells(token) > budget {
+                break;
+            }
+            text.push_str(token);
+        }
+        return text;
+    }
     let budget = width.saturating_sub(2);
     let mut text = format!(" Q:[{}]", compact_count(&queued.to_string()));
+    let enqueue = if width >= 24 { "↵ queue" } else { "↵" };
     for token in [
+        Some(enqueue),
         Some("^C"),
         has_live_answer.then_some("^A"),
         live_inspecting.then_some("^Space"),
@@ -321,9 +347,10 @@ fn busy_live_inspection_actions(
     text
 }
 
-/// Idle narrow chrome keeps archive entry points discoverable even when the
-/// session has no live tool/reasoning block. Answer and reasoning history are
-/// the primary audit surfaces; tool/live inspection follows when cells remain.
+/// Idle narrow chrome keeps submit plus archive entry points discoverable even
+/// when the session has no live tool/reasoning block. Answer and reasoning
+/// history are the primary audit surfaces; tool/live inspection follows when
+/// cells remain.
 fn compact_idle_history_actions(
     width: u16,
     has_answer_history: bool,
@@ -332,8 +359,15 @@ fn compact_idle_history_actions(
     has_live_history: bool,
 ) -> String {
     let budget = width.saturating_sub(2) as usize;
-    let mut text = " Input".to_owned();
+    // At tiny widths, save two cells for the submit and audit tokens rather
+    // than letting the first label crowd out the only actionable shortcuts.
+    let mut text = if width < 24 {
+        " In".to_owned()
+    } else {
+        " Input".to_owned()
+    };
     for token in [
+        Some(" ↵"),
         has_answer_history.then_some(" ^A"),
         has_reasoning_history.then_some(" ^R"),
         has_tools.then_some(" ^O"),
@@ -456,7 +490,6 @@ pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
     } else {
         wide_live_prefix
     };
-    let push_hint = if busy { " · Ctrl+Enter push now" } else { "" };
     let text = match (busy, width) {
         (true, width) if width >= 96 && has_tools => format!(
                 " Queue [{queued}]{reasoning_suffix}{answer_suffix}{toggle_separator}{toggle_hint}{focus_hint}{inspect_hint} · Ctrl+T activity · Enter queue · Ctrl+Enter front · Ctrl+C takeover{scroll_hint}{live_hint}"
@@ -490,7 +523,14 @@ pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
         (true, width) if width >= 56 && has_tools => {
             let reasoning = if has_reasoning { " · ^R" } else { "" };
             let answer = if has_live_answer { " · ^A" } else { "" };
-            format!(" Q:[{queued}] · ^Enter front · ^C takeover · ^O details{reasoning}{answer}{inspect_compact} ")
+            let (queue_separator, front, takeover) = if width >= 64 {
+                ("", "^Enter front", "^C takeover")
+            } else {
+                (" · ", "^Enter", "^C")
+            };
+            format!(
+                " Q:[{queued}]{queue_separator}↵ queue · {front} · {takeover} · ^O details{reasoning}{answer}{inspect_compact} "
+            )
         }
         (true, width) if width >= 56 => {
                 format!(" Queue [{queued}] · Enter queue · Ctrl+Enter front · Ctrl+C takeover{reasoning_suffix}{answer_suffix}{inspect_hint}{live_hint} ")
@@ -518,9 +558,9 @@ pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
                 )
             }
         }
-        (false, width) if width >= 56 => {
-            format!(" Input{push_hint}{reasoning_suffix}{answer_suffix}{focus_hint}{toggle_separator}{toggle_hint}{inspect_hint}{scroll_hint}{live_hint} ")
-        }
+        (false, width) if width >= 56 => format!(
+            " Input · Enter send{reasoning_suffix}{answer_suffix}{focus_hint}{toggle_separator}{toggle_hint}{inspect_hint}{scroll_hint}{live_hint} "
+        ),
         (false, width)
             if width >= 18
                 && (has_tools
@@ -535,7 +575,15 @@ pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
             has_live_history,
         ),
         (false, width) if width >= 18 && has_reasoning => {
-            format!(" Input · {}{inspect_compact} ", reasoning_hint.unwrap_or("Ctrl+R reasoning"))
+            let text = if width < 32 {
+                " In ↵ Ctrl+R ".to_owned()
+            } else {
+                format!(
+                    " Input · ↵ · {} ",
+                    reasoning_hint.unwrap_or("Ctrl+R reasoning")
+                )
+            };
+            clip_display_cells(&text, width.saturating_sub(2))
         }
         (false, width)
             if width >= 14
@@ -551,7 +599,7 @@ pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
             has_live_history,
         ),
         (false, width) if width >= 14 && has_reasoning => {
-            format!(" In · ^R{inspect_compact} ")
+            compact_idle_history_actions(width, false, true, false, has_live_history)
         }
         (false, _) => " Input ".to_owned(),
     };
