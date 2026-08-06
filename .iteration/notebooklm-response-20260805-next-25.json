@@ -1,0 +1,67 @@
+{
+  "status": "REJECT_DUPLICATE",
+  "confirmed_facts": [
+    {
+      "fact": "NLM first proposed KKP, Windows release-event filtering, Shift+Enter semantics, and Ctrl+J fallback.",
+      "evidence": "NotebookLM conversation 68791fb7-659a-4ad8-a86c-beb7ac694781 queried with source 8862d715-ffad-4288-b7eb-173260e2dcff."
+    },
+    {
+      "fact": "The repository already has best-effort PushKeyboardEnhancementFlags/REPORT_EVENT_TYPES, symmetric PopKeyboardEnhancementFlags cleanup, decide_key Press/Repeat/Release de-duplication, Shift/Alt+Enter, and Ctrl+J fallback.",
+      "evidence": "CodeGraph crates/agent/src/tui/mod.rs, input.rs, status.rs and physical_enter_spellings_share_queue_and_front_queue_routing."
+    },
+    {
+      "fact": "NLM's follow-up candidates—narrow adaptive layout, folded-tool structural search, Markdown Alert borders, and dirty-frame skipping—are already present in bounded local projections and tests.",
+      "evidence": "CodeGraph LiveFramePlan/input_chrome, live_inspector_search_expands_matching_folded_tool, AlertEdge/markdown alert tests, and should_draw/draw_only_when_dirty."
+    },
+    {
+      "fact": "The target notebook has exactly one current Active Note; no stale or completed Note was identified for safe deletion.",
+      "evidence": "NotebookLM note list returned count=1, retained note aeb2c29a-3d94-4190-a458-aaa2c642abd5."
+    }
+  ],
+  "contradictions": [
+    "KKP is not a new local gap; Windows intentionally defaults to the legacy path because enabling KKP can swallow ordinary spaces in Windows Terminal.",
+    "The follow-up narrow-layout, folded-search, alert-border, and dirty-flag suggestions are already implemented; adding another renderer, virtualizer, parser, or dependency would duplicate current architecture."
+  ],
+  "unverified_hypotheses": [
+    "A future physical Windows Terminal run may still reveal a protocol-specific Shift+Enter defect, but current ConPTY evidence does not authorize changing the Windows default."
+  ],
+  "candidates": [],
+  "recommendation": "Reject the repeated candidates. Keep local CodeGraph, deterministic tests, and ConPTY evidence authoritative; if deep research is attempted, use one bounded cold-loop run and do not import advice without a concrete local contradiction.",
+  "next_step": {
+    "type": "cold_loop",
+    "value": "Refresh state snapshot and run the milestone_review NotebookLM gate before one new deep-research attempt."
+  },
+  "stop_conditions": [
+    "Do not query or poll old user-owned deep-research tasks.",
+    "Do not delete the sole Active Note without explicit stale/completed evidence.",
+    "Do not add KKP, a second virtualizer, a second parser, a fixed CPU threshold, or a new dependency from repeated NLM prose."
+  ],
+  "question": "Find one new, non-duplicate RidgeCode TUI gap after KKP, adaptive layout, folded search, alert borders, and dirty rendering are verified locally.",
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "conversation_id": "68791fb7-659a-4ad8-a86c-beb7ac694781",
+  "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+  "sources_used": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+  "citations": {
+    "1": "8862d715-ffad-4288-b7eb-173260e2dcff",
+    "2": "8862d715-ffad-4288-b7eb-173260e2dcff",
+    "3": "8862d715-ffad-4288-b7eb-173260e2dcff",
+    "4": "8862d715-ffad-4288-b7eb-173260e2dcff",
+    "5": "8862d715-ffad-4288-b7eb-173260e2dcff",
+    "6": "8862d715-ffad-4288-b7eb-173260e2dcff",
+    "7": "8862d715-ffad-4288-b7eb-173260e2dcff"
+  },
+  "references": [
+    "NotebookLM KKP recommendation and local CodeGraph adjudication",
+    "NotebookLM follow-up adaptive-layout/search/alert/dirty recommendations and local tests"
+  ],
+  "research_start": {
+    "status": "pending_cold_gate",
+    "task_id": null,
+    "error": null
+  },
+  "note_audit": {
+    "count": 1,
+    "retained_note_id": "aeb2c29a-3d94-4190-a458-aaa2c642abd5",
+    "deleted": []
+  }
+}

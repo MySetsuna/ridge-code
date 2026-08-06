@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-reasoning-rail",
+  "at": "2026-08-05T10:20:00+08:00",
+  "type": "iteration",
+  "facts": [
+    "Static reasoning commits begin with the existing `┊ THK[...]` marker and are reflowed through the shared commit wrapper.",
+    "The shared semantic prefix table now recognizes `┊` and supplies the existing `│` continuation rail for physical narrow rows; logical reasoning lines keep their existing `│` prefix.",
+    "The change is presentation-only: reasoning body, step/elapsed/token metadata, Answer/Tool projections, native scrollback, and execution/key semantics remain unchanged."
+  ],
+  "evidence": [
+    "committed_reasoning_text_keeps_its_continuation_rail_after_narrow_reflow initially failed at 18 columns, then passed after the prefix fix",
+    "reasoning_commit_renders_in_inline_scrollback, actual_reasoning_is_committed_separately_from_answer, committed_semantic_prefixes_survive_narrow_reflow, cjk_reasoning_and_answer_reflow_keep_semantic_rails_within_cells, and static_scrollback_preserves_order_and_sanitizes_controls passed",
+    "NLM same-session query returned RESOURCE_EXHAUSTED; no research-status operation was used",
+    "Existing Ridge member notebooklm-mcp-maintainer was found and reused; no new member was created",
+    "Release package contains install.ps1, README.md, ridgecode.exe; SHA-256 AA91E76B517A7BB772F1AB3DE6AA1CD18E9FD3950FD718FA541E60B061E2B062"
+  ],
+  "paths": [
+    "crates/agent/src/tui/app.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260805-next-9.json"
+  ],
+  "symbols": [
+    "commit_semantic_prefix",
+    "reasoning_commit_text",
+    "wrap_semantic_commit_line",
+    "committed_reasoning_text_keeps_its_continuation_rail_after_narrow_reflow"
+  ],
+  "next": [
+    "运行 workspace、fmt、Clippy、Release PTY 与安装包闸；继续保持思考/回答展示为单一 presentation-only 投影。"
+  ]
+}

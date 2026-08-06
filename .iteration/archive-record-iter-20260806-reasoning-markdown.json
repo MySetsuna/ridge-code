@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260806-reasoning-markdown",
+  "at": "2026-08-06T00:00:00+08:00",
+  "type": "iteration",
+  "status": "verified",
+  "facts": [
+    "静态 Reasoning native scrollback 原先经 plain commit_lines，所有正文共用 DIM/ITALIC 单色；Answer scrollback 与 Reasoning history detail 已有有界 Markdown 语义 span 投影。",
+    "reasoning_commit_lines 现复用 md_line_spans_with_alert，保留 THK 元数据、Reasoning rails、Ctrl+R history hint、bounded fold 与 cell-width wrapping。",
+    "Markdown 标题、代码 fence/type/literal、列表与 alert 的视觉角色在静态 Reasoning 回放中保留；未改变执行、provider、MCP、队列、状态机或按键语义。",
+    "本轮未增加 parser、cache、dependency、renderer 或第二执行状态机。"
+  ],
+  "evidence": [
+    "CodeGraph 确认 flush_commits 的 CommitBlock::Reasoning 原先调用 reasoning_commit_text + plain commit_lines，而 md_line_spans_with_alert 已被 Answer/detail 路径复用。",
+    "cargo test -p agent --bin ridgecode reasoning_scrollback --locked --offline --quiet：1 passed。",
+    "cargo test -p agent --bin ridgecode reasoning --locked --offline --quiet：42 passed。",
+    "cargo test --workspace --locked --offline --quiet：agent 104、TUI 313、eval 1、langgraph 9、mcp 2、provider 52、tools 18 等均通过。",
+    "cargo fmt --all -- --check、cargo clippy --workspace --all-targets --locked --offline -- -D warnings、cargo build --release --workspace --locked --offline 均通过。",
+    "Release target/windows-pty-e2e.ps1 BusyFixture 与 StressFixture/InspectAnswer 均 status=passed，含 resize、live/history/answer inspection 与双 Ctrl-C。",
+    "NLM 仅有一个有用 Active Note，未删除；限定 notebook_query 返回 RESOURCE_EXHAUSTED，未重试；未查询用户深研状态。"
+  ],
+  "paths": [
+    "crates/agent/src/tui/app.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260806-reasoning-markdown.json",
+    ".iteration/context.json",
+    ".iteration/decision.json"
+  ],
+  "symbols": [
+    "flush_commits",
+    "reasoning_commit_lines",
+    "md_line_spans_with_alert",
+    "wrap_commit_lines",
+    "reasoning_scrollback_preserves_markdown_roles",
+    "reasoning_commit_renders_in_inline_scrollback"
+  ],
+  "notebook": {
+    "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "note_count": 1,
+    "note_action": "retained exactly one useful Active Note; no stale/completed Note deleted",
+    "response": ".iteration/notebooklm-response-20260806-reasoning-markdown.json",
+    "query_error": "RESOURCE_EXHAUSTED",
+    "research_status_queried": false,
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"]
+  },
+  "next": [
+    "Continue from the refreshed snapshot; keep the next TUI slice presentation-only, bounded, and locally falsifiable."
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "status": "error",
+  "error": "Failed to start research — Google API error code 8 (UserDisplayableError). This is likely a transient issue. Try again in a few minutes, or use --mode fast.",
+  "query": "RidgeCode TUI 下一轮性能与可观察性设计深度研究",
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "source": "web",
+  "mode": "deep",
+  "source_ids": [
+    "8862d715-ffad-4288-b7eb-173260e2dcff"
+  ],
+  "trigger": "milestone_review"
+}

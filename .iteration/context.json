@@ -1,321 +1,22 @@
 {
   "schema_version": 1,
-    "task": "沿 REQ-20260801-01 继续推进 TUI：以手动导入理论和本地 CodeGraph 证据，闭合模型思考/回答/状态展示与快捷键发现性。",
-  "symbols": [
-    "LineIndex",
-    "append_bounded",
-    "append_answer_bounded",
-    "append_text_tail",
-    "answer_tail_ranges",
-    "render_live_line",
-    "live_markdown_spans_with_alert",
-    "code_line_spans",
-    "code_token_role",
-    "tail_display_cells",
-    "audit_channel",
-    "panel_item_with_rail",
-    "wrap_panel_lines",
-    "draw_history_detail_panel",
-    "draw_history_detail_split",
-    "audit_detail_text",
-    "md_line_spans_with_alert",
-    "panel_micro_hint",
-    "panel_hint",
-    "DetailLayoutCache",
-                    "PanelItemsCache",
-                    "panel_viewport_range",
-                    "PanelLayoutCache",
-    "LiveOutputCache",
-    "LiveOutputCache::lines",
-    "LiveLineAnchor",
-    "render_live_tail_projection",
-    "render_live_line_with_alert_edge",
-    "live_block_end_rail",
-    "live_reasoning_chrome_modifier",
-    "idle_detail_line",
-    "PresentationLedger::status",
-    "answer_commit_lines_with_status",
-    "LiveTranscript::focused_block",
-    "Paragraph::line_count",
-    "compact_busy_actions",
-    "busy_live_inspection_actions",
-    "compact_busy_phase",
-    "compact_idle_status",
-    "top_chrome",
-    "pending_queue_lines",
-    "MAX_PENDING_PREVIEW_CHARS",
-    "responsive_live_layout",
-    "input_viewport",
-    "draw_with_cache",
-    "draw_panel_with_cache",
-    "ActivityKind::tag",
-    "ActivityKind::Plan",
-    "Ui::record_plan",
-    "unfinished_answer_reason",
-    "live_lifecycle_badge",
-    "input_chrome",
-    "live_inspection_chip",
-    "live_phase_anchor",
-    "live_surface_state",
-    "live_channel_state",
-    "live_surface_title_line",
-    "LiveTranscript::active_channel",
-    "live_rail",
-    "reasoning_commit_text",
-    "commit_lines",
-    "activity_commit_lines",
-    "colored_commit_lines",
-    "insert_bounded_commit_lines",
-    "ToolBlock::has_details",
-    "static_tool_lines",
-    "answer_commit_hint",
-                    "Panel::content_revision",
-    "LiveTranscript::push_answer",
-    "LiveTranscript::toggle_reasoning",
-    "answer_commit_rail",
-    "answer_commit_measure",
-    "answer_commit_lines",
-    "fmt_reasoning_meta",
-    "AnswerEntry",
-    "answer_history_panel",
-    "Ui::open_answer_history",
-    "MAX_ANSWER_HISTORY_CHARS",
-    "bound_answer_history_text",
-    "activity_signal_chip",
-    "panel_attention_action",
-    "Ui::toggle_details_or_history",
-    "Ui::toggle_reasoning_or_history",
-    "ToolBlock::can_merge_read_batch",
-    "ToolBlock::merge_read_batch",
-    "LiveTranscript::coalesce_read_batch",
-    "MAX_REASONING_HISTORY_CHARS",
-    "bound_reasoning_history_text",
-    "InputAction::ToggleAnswer",
-    "panel_attention_action",
-    "Ui::toggle_answer_or_history",
-    "Ui::note_markdown_with_meta",
-    "AnswerEntry::step",
-    "ActivityKind::is_retained_signal",
-    "activity_commit_text",
-    "activity_role",
-    "status_line_projection",
-    "Role::Metric",
-    "Role::Label",
-    "draw_device_auth",
-    "rounded_surface_block",
-    "BorderType::Rounded",
-    "panel_title_role",
-    "ChromeRail",
-    "MAX_ACTIVITY_HISTORY",
-    "Ui::record_activity",
-    "activity_panel",
-    "LiveTranscript::drain_answers",
-    "Ui::commit_live_answers",
-    "AnswerEntry::partial",
-    "Ui::retain_answer_history",
-    "summarize_event",
-    "ToolBlock::details_text",
-    "PresentationLedger",
-    "PresentationRecord",
-    "Ui::stream_presentation_id",
-    "LiveTranscript::push_answer_with_id",
-    "LiveTranscript::push_reasoning_with_id",
-    "LiveTranscript::drain_reasoning_with_ids",
-    "LiveTranscript::drain_answers_with_ids",
-    "handle_command",
-    "input_action"
-  ],
+  "task": "Apply content-aware horizontal sizing only to the completed idle result card: center short Answer/THK/SUM summaries within a bounded card while preserving full-width streaming and native scrollback.",
+  "symbols": [],
   "files": [
-    "Cargo.toml",
-    "crates/agent/src/tui/transcript.rs",
     "crates/agent/src/tui/draw.rs",
-    "crates/agent/src/tui/app.rs",
-    "crates/agent/src/tui/input.rs",
-    "crates/agent/src/tui/mod.rs",
-    "crates/agent/src/tui/panel.rs",
-    "crates/agent/src/tui/presentation.rs",
-    "crates/agent/src/tui/render.rs",
-    "crates/agent/src/tui/status.rs",
     "crates/agent/src/tui/tests.rs"
   ],
   "tests": [
-    "incremental_line_index_tracks_utf8_appends_and_trimmed_prefix",
-    "live_code_highlighting_is_bounded_to_visible_tail",
-    "answer_tail_ranges_only_keep_requested_viewport_rows",
-    "long_live_frames_are_bounded_and_profiled",
-    "reasoning_history_panel_exposes_think_rail_and_detail_anchor",
-    "live_inspector_detail_anchor_tracks_answer_and_thinking_focus",
-    "wide_live_inspector_keeps_block_list_and_detail_side_by_side",
-    "audit_detail_reuses_markdown_heading_style",
-    "responsive_panel_chrome_keeps_actions_visible_in_narrow_frames",
-    "detail_layout_cache_reuses_same_snapshot_and_invalidates_on_width_or_panel",
-                  "panel_items_cache_reuses_wrapped_snapshot_and_invalidates_on_view_changes",
-                  "panel_viewport_range_respects_wrapped_item_heights",
-                  "detail_layout_cache_uses_ratatui_rendered_height_for_cjk_markdown",
-                  "input_chrome_exposes_submit_or_queue_mode",
-                  "answer_arrival_preserves_explicit_reasoning_inspection",
-                  "held_live_view_preserves_semantic_line_when_width_reflows",
-                  "narrow_idle_chrome_keeps_activity_kind_and_full_takeover_outcome",
-                  "narrow_busy_chrome_keeps_hold_beacon_visible",
-    "live_inspector_panel_exposes_hold_follow_controls",
-    "reasoning_commit_renders_in_inline_scrollback",
-    "busy_live_inspection_prioritizes_follow_and_takeover",
-    "committed_answer_keeps_a_semantic_rail_after_leaving_live_view",
-    "answer_history_is_bounded_searchable_and_expandable",
-    "answer_history_bounds_large_detail_without_changing_scrollback_commit",
-    "medium_busy_chrome_exposes_semantic_activity_chip_without_live_channel",
-    "medium_busy_chrome_keeps_hold_priority_over_activity_chip",
-    "panel_attention_shortcuts_remain_global_while_browsing",
-    "panel_attention_shortcuts_ignore_editor_and_popup",
-    "consecutive_read_file_results_group_into_one_collapsed_batch",
-    "read_file_batch_preserves_detail_order_and_bound",
-    "read_file_batch_does_not_cross_other_tools",
-    "reasoning_history_bounds_large_detail_without_changing_scrollback_commit",
-    "answer_history_shortcut_opens_and_closes_without_mutating_input",
-    "panel_attention_shortcuts_ignore_editor_and_popup",
-    "answer_history_rows_expose_step_elapsed_and_tokens",
-    "activity_history_retains_actionable_boundaries_during_node_chatter",
-    "interrupted_live_answer_is_retained_without_faking_completion",
-    "partial_answer_archive_bounds_and_expands_long_detail",
-    "answer_archive_evicts_partial_before_completed_conclusions",
-    "top_chrome_surfaces_reasoning_visibility_alongside_tools"
-    ,"busy_tool_action_rail_preserves_reasoning_and_focus_at_medium_widths",
-    "pending_queue_stays_above_wrapped_draft_and_cursor_tail",
-    "pending_queue_preview_bounds_large_pasted_message",
-    "tool_history_is_collapsed_and_expandable_after_static_commit",
-    "actual_reasoning_is_committed_separately_from_answer",
-    "empty_tool_observation_is_explicit_across_projections",
-    "presentation_anchor_survives_live_history_and_static_projection",
-    "presentation_ledger_is_bounded_and_keeps_channel_identity"
-    ,"retained_activity_leaves_a_static_anchor_with_a_detail_affordance"
-    ,"retained_activity_anchor_wraps_in_native_scrollback"
-    ,"plan_snapshot_uses_a_bounded_reasoning_activity_anchor"
-    ,"compact_status_projection_separates_labels_without_changing_text"
-    ,"input_surface_uses_rounded_frame"
-    ,"device_auth_code_is_visible_in_live_frame"
-    ,"audit_panel_titles_keep_answer_and_reasoning_roles_distinct"
-    ,"live_surface_prefers_current_answer_over_stale_conclusion_activity"
-    ,"audit_focus_emphasizes_selected_tool_without_restyling_follow_view"
-    ,"semantic_boundary_closes_visible_reasoning_before_answer"
-    ,"narrow_live_reasoning_keeps_readability_floor"
-    ,"idle_reasoning_detail_keeps_the_same_readability_floor"
-    ,"partial_answer_scrollback_keeps_answer_channel_and_marks_partial"
-    ,"static_scrollback_preserves_order_and_sanitizes_controls"
-    ,"unfinished_answer_is_retained_for_error_and_non_final_stops"
-    ,"live_surface_keeps_lifecycle_badge_during_answer_inspection"
-    ,"narrow_audit_modal_clears_underlying_gutters"
-    ,"narrow_answer_metadata_wraps_at_word_boundaries"
-    ,"medium_answer_hint_preserves_expand_and_close_actions"
+    "crates/agent/src/tui/tests.rs::cjk_reasoning_and_answer_reflow_keep_semantic_rails_within_cells",
+    "crates/agent/src/tui/tests.rs::wide_completed_idle_surface_uses_bounded_result_card",
+    "crates/agent/src/tui/tests.rs::wide_short_result_card_is_content_aware_and_centered"
   ],
   "constraints": [
-    "Presentation-only; preserve Answer/Reasoning line text, Markdown fence state, ANSI16/cell-width behavior, physical row cap, tool folding, queue/takeover/hold semantics.",
-    "PresentationLedger stores only bounded scalar identity/status/metrics; live, history, and static projections may share its anchor but execution graph, provider history, queue routing, and full transcript bodies remain untouched.",
-    "LineIndex must stay synchronized across UTF-8 appends and bounded-prefix eviction; no full transcript copy or second execution state machine.",
-    "Reuse existing tail_display_cells and bounded lexer; no syntect/tree-sitter, provider/MCP/graph/queue/execution changes.",
-    "Semantic rails and THINK/ANSWER/TOOL detail anchors are presentation-only; reserve their display cells before wrapping so narrow terminals cannot overflow or hide observed content.",
-    "Expanded detail may reuse the existing Markdown parser only in the modal path; preserve exact body text, alert/fence state, bounded detail sizes, search/scroll semantics, and do not add a second lexer.",
-    "Below 14 columns, retain a truthful micro legend for the active panel (navigation, expand/delete, Esc); do not repurpose Tab, which remains completion selection.",
-    "DetailLayoutCache stores only the current selected detail snapshot keyed by panel content revision, selection, and cell width; it must invalidate on live panel rebuild or resize and must not become execution state.",
-                        "PanelItemsCache stores only one presentation snapshot for the active panel, keyed by panel revision, kind, query, selection, detail state, and cell width; it never stores execution, queue, or provider state.",
-                        "PanelItemsCache may cache presentation-only ListItem physical heights and project a selected, height-bounded viewport window; it must remap selection locally and preserve multi-line rows without changing panel actions.",
-                        "DetailLayoutCache uses Ratatui 0.29 Paragraph::line_count with Wrap{trim:false} for the actual Markdown detail widget; the width key and panel revision remain invalidation boundaries.",
-                        "Busy narrow input chrome must preserve a compact Ctrl-C takeover token before optional tool-detail, reasoning, or Inspector tokens; it may compress text but may not change key routing or hide required token/effort status.",
-                        "An explicit Ctrl+R reasoning expansion persists across later Answer chunks until the user toggles it or a new task clears streams; model output must not silently take back the audit view.",
-                        "A held live viewport may reuse a semantic block ID plus logical-line anchor only for same-revision width/height reflow; FOLLOW, user scrolling, new stream content, and execution state remain unchanged.",
-    "Narrow idle chrome must expose the latest non-system ActivityKind tag and complete critical takeover/waiting/conclusion outcome when cell budget permits; it must not increase telemetry height or alter input routing.",
-    "Wide detail Inspector may split the existing modal into 40/60 list/detail columns only at inner width>=72 and height>=8; narrow frames retain vertical stacking, existing detail cache/scroll/Markdown paths, and all key/action semantics.",
-    "When busy and live_inspecting, narrow top chrome must show HOLD before right-clipped phase text and narrow input chrome must preserve ^C takeover plus the existing Ctrl+Space follow affordance; this is presentation-only and cannot alter key routing.",
-    "LiveHistory modal hints must keep HOLD/FOLLOW discoverable after the modal covers the underlying live chrome: use Ctrl+Space at wide hint widths and a truthful ^Space compact token while retaining Enter/Space, Delete, queue and Esc actions.",
-    "Committed multi-line reasoning must retain a visible continuation rail after leaving the live viewport; preserve the existing first-line metadata and DIM/ITALIC styling without changing reasoning text or execution state.",
-    "When busy live inspection is active at medium or wide widths, the input action rail must expose FOLLOW and takeover before optional long labels; preserve cell-width bounds and existing narrow shortcuts.",
-    "Committed Answer scrollback must expose the same explicit ANSWER channel used by live output while preserving Markdown roles and cell-width measurement.",
-    "Committed reasoning metadata must expose a compact THK channel marker in narrow terminals while retaining observed step, elapsed time, token count, continuation rail, and DIM/ITALIC styling.",
-    "Completed Markdown Answer bodies must remain bounded and recoverable after scrollback folding; /answers is presentation-only and must provide filtering plus Enter detail expansion without changing execution history.",
-    "Retained Answer detail must have a per-entry character bound with head/tail preservation and an explicit omission marker; transient native scrollback may keep the original text until flush.",
-    "Retained Reasoning history detail must have the same per-entry character bound with head/tail preservation and an explicit omission marker; the transient native reasoning commit may keep the original observed text.",
-    "Medium busy chrome at 48-63 columns may expose one bounded latest ActivityKind chip (CHK/SUM/WAIT/etc.); it must suppress duplicate live-channel labels and never displace HOLD/FOLLOW/takeover priority.",
-    "Ctrl+R/Ctrl+O/Ctrl+T remain global audit attention shortcuts while a panel is being browsed; they must not mutate panel queries or editor buffers, and must remain disabled in completion popups or panel edit fields.",
-    "Adjacent completed read_file call/result pairs may share one presentation-only batch block; each file's ordered call/path and bounded observation details remain available through expansion, and an intervening non-read tool breaks the batch.",
-    "Ctrl+A is a presentation-only Answer-history attention switch: it must open/close the bounded searchable Answer panel without interrupting execution or changing input; panel editor fields and completion popups retain precedence.",
-    "Each retained completed Answer row may carry only bounded scalar presentation metadata (step, elapsed seconds, estimated/observed tokens) alongside the already bounded body; metadata must not alter provider history, queue routing, or scrollback text."
-    ,"Activity audit history remains bounded at 12 entries, preferentially evicts transient node chatter, and retains WAIT/ASK/SUM/TAKE/DONE/ERR signals with sequence numbers; this is presentation-only and must not alter execution or queue state."
-    ,"If a run is interrupted or errors before `(final)`, the bounded streamed Answer may be committed exactly once to static Markdown and the unified Answer archive as PARTIAL with an explicit marker; it must remain expandable/searchable without entering completed-answer semantics or changing successful final-answer routing."
-    ,"When the bounded Answer archive is full, eviction must preferentially remove an older PARTIAL row before a completed ANSWER conclusion; this is presentation-only and preserves the archive bound."
-    ,"When a live Answer follows Reasoning and Tool blocks, top chrome at widths >=48 and the busy input rail at widths >=72 must retain a compact THINKING/Ctrl+R visibility affordance; tool folding and focus semantics remain independent."
-    ,"When pending work exists, the input rail reserves an editor row before queue preview rows so queued intent stays above a wrapped draft; the cursor follows the visible draft tail, and tiny frames retain a truthful compact queue count without replacing editable input."
-    ,"Pending queue presentation must bound both rendered rows and preview preprocessing: oversized pasted messages are truncated before wrapping, with an overflow affordance preserved; the full queued string remains untouched for execution."
-    ,"Static committed Tool summaries with hidden details must retain a compact folded affordance (`Ctrl+O details`) so scrollback remains discoverable; expansion continues through the existing bounded history/Inspector path."
-    ,"Static committed reasoning must retain its THK metadata and append a compact `Ctrl+R history` affordance on the first line; the existing bounded reasoning history remains the only expansion path."
-    ,"Static committed Answers must retain the ANSWER rail and append a compact `Ctrl+A answers` affordance on the first line; AnswerHistory remains the only recovery/expansion path."
-    ,"An empty completed tool observation must project one explicit `no output` row consistently in live output, native static commit, Inspector, and Tool History; call/standalone blocks must not claim an observation."
-    ,"Retained WAIT/ASK/SUM/TAKE/DONE/ERR activity events may add one bounded presentation-only static scrollback anchor with a Ctrl+T activity affordance; the activity ledger remains the detail source and execution, queue, provider, and MCP semantics remain unchanged."
-    ,"Compact bottom telemetry may style provider/model, context, input/output tokens, effort, and total labels as semantic spans, but must preserve the exact compact string, cell width, wrapping height, custom status templates, and telemetry values."
-    ,"Metric and Label roles are reserved for telemetry hierarchy; do not reuse them to recolor user commands, model output, tools, warnings, or approval semantics."
-    ,"Prominent input and device-auth surfaces use the same rounded border grammar as interactive list, completion, Inspector, and approval surfaces; this is render-only and must preserve cell geometry, cursor placement, wrapping, overlay order, and all key/execution semantics."
-    ,"Audit panel titles use the same semantic channel role as their rows: Answer/Live stay primary, Reasoning/Tool/Activity/Queue stay informational; this changes title styling only and must not alter panel selection, filtering, detail expansion, or key routing."
-    ,"ChromeRail owns only top-chrome display-cell accounting and bounded insertion; top_chrome remains the sole owner of semantic priority and must preserve safety/channel/HOLD/queue/reasoning/activity/status ordering, exact text, ANSI16 roles, and width bounds."
-    ,"LiveFramePlan owns only live-surface measurement: bounded queue preview, input/output token and effort status projection, wrapped status height, and four-slot geometry; draw_with_cache consumes this immutable plan and keeps painting/interaction semantics separate."
-    ,"draw_input_surface owns only wrapped editor rendering, sticky pending-intent projection, rounded input framing, and cursor placement; it must consume the planned queue preview without mutating queue/input/execution state."
-    ,"draw_live_output owns only cached bounded-tail painting plus transient phase-anchor and breathing-cursor decoration; draw_audit_overlays owns only read-only panel/device-auth overlays; neither may own execution or interaction state."
-    ,"Partial Answer native scrollback must retain the ANSWER rail and expose a bounded PARTIAL marker derived from PresentationLedger status; do not mutate Answer body text, history, successful final semantics, queue, takeover, or execution."
-    ,"Idle THK result-card detail must reuse the live width-aware Reasoning contrast policy: retain italic channel separation, drop DIM only at <=40 columns, and leave Answer/SUM roles, card geometry, text, keys, queue, takeover, and execution unchanged."
-    ,"flush_commits may coalesce presentation-only wrapped CommitBlock lines before the existing bounded insert_before batches, but must retain block order, separators, folding, sanitization, cell-width behavior, Viewport::Inline, and all input/queue/HOLD/FOLLOW/takeover/execution semantics."
-    ,"TODO snapshots may enter the existing bounded Activity/scrollback projection as PLAN anchors; retain the execution-owned todo values, expose bounded detail through Ctrl+T, and do not add a second task state machine or alter routing."
-    ,"If a graph returns normally without an `(final)` message, retain any already-streamed Answer through the existing bounded PARTIAL archive before clearing live streams; inspect only AgentState.messages, never fake completion, and preserve provider/graph/queue/execution semantics."
-     ,"When a live channel coexists with an actionable lifecycle ActivityKind, expose only its bounded CHK/SUM/ASK/ERR badge in the existing full title and HOLD anchor; do not add rows, per-block borders, new focus state, or alter Tab/Enter/approval/takeover routing."
-     ,"User-facing help must advertise every global audit shortcut that input_action already supports; empty-state feedback must describe recoverable Answer history, including PARTIAL entries, without changing key routing."
-     ,"Audit panels own the complete supplied overlay viewport: clear it before rendering an inset modal so narrow gutters cannot leak live/idle rows; preserve existing panel geometry, detail scrolling, and all key/action semantics."
-     ,"Panel metadata prefers whitespace-boundary wrapping and hard-wraps only unbroken tokens; semantic rails repeat on every continuation row, and no execution, queue, focus, or panel geometry semantics may change."
-     ,"At medium AnswerHistory widths, preserve the actionable `Enter expand` and `Esc close` affordances in one bounded hint; keep LiveHistory HOLD/FOLLOW wording unchanged and do not alter panel routing."
-     ,"When a wide idle input title would clip the final reasoning/activity actions, compact only lower-priority submit/newline/tab labels; keep `Ctrl+R history`, `Ctrl+T activity`, live prefixes, queue/takeover, cell bounds, and input routing truthful."
+    "Apply only at wide completed idle result-card widths; keep narrow, low-height, streaming, and native-scrollback projections unchanged.",
+    "Presentation-only; derive card width from existing rendered detail cell counts and preserve Answer/Reasoning/Conclusion text and roles.",
+    "Reuse idle_result_card_lines, idle_detail_line, str_cells, and existing result-card recovery actions; no new state/cache/parser/renderer/dependency/surface."
   ],
-  "failed_knowledge": [
-    "NLM proposed a whole virtualized layout layer and O(k/n)/2ms claims; CodeGraph shows the live viewport is already bounded and cached. The measured remaining gap was reverse line scanning plus full code lexing for a single long visible line, so the smaller existing presentation boundary was strengthened instead.",
-                             "NLM's latest global-height-cache direction is still broader than the measured surface: the live tail is physically bounded, while static modal list wrapping was rebuilt every redraw. The local fix is a one-panel snapshot cache, not a second whole-document layout state machine."
-                             ,
-                             "NLM's global virtualization recommendation has now been narrowed to a measured Phase 4A boundary: active modal ListItems use cached physical heights and a selected viewport window; full transcript virtualization remains unproven and is not added."
-                             ,
-                             "NLM's sidebar-culling proposal does not map to the current inline four-slot layout; the measured narrow gap was missing busy Ctrl-C takeover discovery, not a real sidebar or telemetry allocation failure.",
-                             "NLM's semantic anchored reflow proposal is broader than needed: existing LiveBlockFocus/LineIndex/LiveOutputCache make a presentation-only preferred anchor sufficient. Do not add a whole-document physical layout index or vertical telemetry redesign without a measured defect."
-                             ,
-    "NLM's latest vertical-telemetry recommendation returned no sources_used/citations; local 32/40-column frames already preserve compact token/effort status. The measured defect was activity outcome clipping in top_chrome, not bottom telemetry height.",
-    "NLM's latest virtualized viewport/Adaptive Splitting proposal returned no sources_used/citations and its full-transcript/performance premise is unverified; current bounded live projection already protects the hot path. The locally justified slice is adaptive wide Inspector presentation, not a second global layout engine.",
-    "NLM's latest panel-culling/syntax-highlighting proposal returned no sources_used/citations and mismatched local geometry: Inspector is a covering modal, not a height-consuming sidebar, while live_markdown_spans_with_alert already reaches bounded code_line_spans/code_token_role coloring. Do not hide the user's live Inspector or add a second highlighter without a measured defect.",
-    "NLM's cited semantic-phase-rails recommendation overlaps existing live_rail/live_phase_marker/live_phase_anchor/live_inspection_chip surfaces. Local narrow-frame measurement found only a real HOLD discoverability gap: compact_busy_phase clipped a trailing HOLD marker and compact busy input omitted FOLLOW; fix by prefixing HOLD and exposing the existing Ctrl+Space as ^Space, without adding a new shortcut or state machine.",
-    "NLM's latest uncited narrow-panel-culling proposal assumes Inspector consumes responsive live height; CodeGraph shows draw_with_cache allocates the four live slots first and draw_panel_with_cache later paints a modal_rect overlay. The measured gap was the LiveHistory panel_hint hiding HOLD/FOLLOW after overlay; retain modal inspection and add width-tiered Ctrl+Space/^Space guidance.",
-    "NLM's current logged-in query returned RESOURCE_EXHAUSTED (error code 8); authentication was already valid, so no new NLM conclusion was accepted. Local CodeGraph found static multi-line reasoning lost its continuation rail after the first `┊` line; the measured fix adds `│` to later logical lines only.",
-    "NLM remained rate-limited on the next query. CodeGraph found medium busy input_chrome put `Alt+End follow` after long labels, so right clipping could hide FOLLOW while HOLD remained visible; the local fix uses a bounded priority rail only during live inspection.",
-    "A short-timeout 32-column PTY matrix can report an isolated partial when the follow snapshot is sampled during the raw ConPTY timing window; 15-second reruns observed the same hold/follow/reasoning state, so do not treat one timing partial as a render regression. Stabilize the probe before using it as release evidence.",
-    "The latest same-session NLM query still returned RESOURCE_EXHAUSTED (error code 8); valid login plus the user's no-research-status boundary means no new NLM conclusion is accepted.",
-    "The wide idle input title clipped `Ctrl+T activity` to `Ctrl+T activi…` after reasoning history existed; preserve both recovery actions with an adaptive presentation-only legend rather than adding a new input protocol or renderer.",
-    "Static Markdown Answer scrollback folds after 20 lines and CommitBlock::Markdown is then discarded; without a bounded history surface, long final conclusions cannot be searched or expanded.",
-    "Answer history's eight-entry bound did not bound one entry's size; retaining an arbitrarily large final response would undermine long-session TUI memory stability.",
-    "The latest same-session NLM activity query returned RESOURCE_EXHAUSTED (error code 8); no research_status query or re-authentication was performed. CodeGraph showed medium 48-63 busy chrome lacked a stable semantic latest-activity chip, so the local measured slice adds one with HOLD priority.",
-    "Panel routing consumed Ctrl+R/Ctrl+O as query characters whenever a non-editing panel was open, making the promised thinking/tool audit shortcuts context-dependent; fix at the input boundary with a presentation-only attention dispatch.",
-    "Consecutive read_file call/result pairs remained separate ToolBlocks, so file-heavy investigation output consumed one live/history row per file; group only completed adjacent read observations and retain each bounded detail payload.",
-    "Reasoning history was bounded only by entry count; each retained entry could still carry the full 32K-character live cap, unlike AnswerHistory's 8192-character head/tail projection.",
-    "Completed Answer history was recoverable through /answers but had no global keyboard path; relying on command discovery made post-completion audit slower and left Ctrl+R/Ctrl+O/Ctrl+T asymmetrical.",
-    "AnswerHistory rows exposed only ordinal and character count; multiple long-running conclusions could not be tied to observed superstep, elapsed time, or token telemetry without reopening unrelated scrollback.",
-    "The five-entry Activity ledger could evict waiting, conclusion, approval, takeover, completion, or error evidence during long node chatter; local retention test justified a bounded prioritized eviction policy."
-    ,"Static-only partial Answer retention still folded long interrupted output after 20 lines without a user-accessible expansion/search path; reuse the existing bounded Answer archive instead of creating a second history surface."
-    ,"A naive FIFO Answer archive bound could evict a completed conclusion while retaining recoverable PARTIAL output; prefer PARTIAL eviction when the bounded archive is saturated."
-    ,"The top chrome previously suppressed the THINKING/Ctrl+R affordance whenever any live Tool block existed, so a live Answer could hide the available reasoning inspection path; preserve the affordance alongside folded tools."
-    ,"The 72–95-cell busy input rail previously omitted Ctrl+R whenever tools existed; full labels overflowed before Alt+↑/↓ focus, so use bounded ^Enter/^C/^R/^O tokens until the 96-cell full tier."
-    ,"The pending queue preview was allocated only from unused input rows, so a long wrapped draft could hide queued intent and leave the cursor outside the visible editor window; reserve the queue first and project the cursor-near draft tail."
-    ,"Pending queue output was capped at three rows but `wrap_input` still scanned the full queued string every redraw; one huge pasted intent could also append a fourth overflow row."
-    ,"Static committed Tool blocks were collapsed and recoverable through history, but their scrollback summary gave no visible indication that details existed or that `Ctrl+O` could reveal them."
-    ,"Static reasoning scrollback exposed THK metadata but gave no visible indication that the same reasoning was retained and expandable/searchable through `Ctrl+R`."
-    ,"Static Answer scrollback exposed the ANSWER rail but gave no visible indication that long/folded conclusions remained recoverable through `Ctrl+A`."
-    ,"Empty tool observations previously left the summary as a successful-looking blank tail and gave Inspector/Tool History an empty detail, so completion could not be distinguished from missing presentation data."
-    ,"draw_with_cache previously mixed queue/status measurement, responsive slot allocation, live-tail painting, input cursor placement, and overlay rendering in one monolith; the measured architectural gap is presentation coupling, not a missing execution state."
-    ,"The editor slice was still coupled to live orchestration: queue-row reservation, CJK cursor math, input chrome, and draft viewport were interleaved with status and overlay rendering; isolate them at draw_input_surface without duplicating input state."
-     ,"After measurement and editor extraction, draw_with_cache still interleaved cached live-tail decoration and audit overlays; isolate those rendering responsibilities while preserving cache reuse, modal precedence, and snapshot timing."
-     ,"The latest same-session NLM lifecycle-closure proposal returned sources_used:[] and empty citations; CodeGraph shows existing live rails and static closure already cover the proposed container boundary. The concrete local gap was narrower: the first /help branch omitted Ctrl+R/Ctrl+O and the no-answer feedback said completed although PARTIAL history is recoverable; the accepted slice updates presentation text only."
-     ,"The latest same-session NLM lifecycle-closure follow-up again returned sources_used:[] and empty citations. Dev ConPTY at 40 columns reproduced an AnswerHistory modal leaking the underlying DONE/ANS projection through its inset gutters; clear the complete audit viewport before painting the existing modal, rather than adding per-block borders or a second renderer."
-     ,"The latest same-session NLM hanging-indent/highlighter recommendation returned sources_used:[] and empty citations. CodeGraph already showed same-cell continuation rails and bounded visible-tail highlighting; Dev ConPTY instead reproduced 18-column AnswerHistory metadata splitting inside words, so the local slice adds word-boundary panel wrapping with hard-wrap fallback."
-     ,"The latest same-session NLM KKP recommendation returned sources_used:[] and empty citations and conflicts with local evidence: Ctrl+Space HOLD is presentation-only, matched key releases are intentionally discarded by the current Windows-compatible input filter, and the terminal does not request REPORT_EVENT_TYPES. Do not change HOLD/FOLLOW into a momentary release protocol without a reproduced defect; the measured local gap was the medium AnswerHistory hint, fixed by preserving `Enter expand` and `Esc close`."
-     ,"The next same-session NLM query returned Google error code 8 RESOURCE_EXHAUSTED before an answer; it yielded no new recommendation or source evidence, so local TUI conclusions remain unchanged and no retry/status query is justified."
-  ],
+  "failed_knowledge": [],
   "requirements": {
     "source": "docs/REQUIREMENTS-SPEC.md",
     "ids": [
@@ -334,109 +35,40 @@
   "codegraph": {
     "mode": "targeted",
     "queries": [
-      "LiveTranscript visible_lines append_answer_bounded append_text_tail",
-      "LineIndex tail_ranges trim_prefix",
-      "render_live_line tail_display_cells live_markdown_spans_with_alert"
+      "idle_result_card_lines idle_result_summary live_empty_state draw_live_output full-width streaming native scrollback"
     ],
     "full_rebuild": false
   },
   "read_policy": {
     "allowed_files": [
-    "crates/agent/src/tui/transcript.rs",
-    "crates/agent/src/tui/draw.rs",
-    "crates/agent/src/tui/app.rs",
-    "crates/agent/src/tui/tests.rs",
-      "incremental_line_index_tracks_utf8_appends_and_trimmed_prefix",
-      "live_code_highlighting_is_bounded_to_visible_tail",
-      "answer_tail_ranges_only_keep_requested_viewport_rows",
-      "long_live_frames_are_bounded_and_profiled"
+      "crates/agent/src/tui/draw.rs",
+      "crates/agent/src/tui/tests.rs",
+      "crates/agent/src/tui/tests.rs::cjk_reasoning_and_answer_reflow_keep_semantic_rails_within_cells",
+      "crates/agent/src/tui/tests.rs::wide_completed_idle_surface_uses_bounded_result_card",
+      "crates/agent/src/tui/tests.rs::wide_short_result_card_is_content_aware_and_centered"
     ],
     "deny_unlisted": true,
     "max_files": 30
   },
   "write_policy": {
     "allowed_paths": [
-      "Cargo.toml",
-      "Cargo.lock",
-      ".iteration/PROJECT-STATE.snapshot.md",
-      ".iteration/approved-operation-20260803.json",
-      ".iteration/context.json",
-      ".iteration/decision.json",
-      ".iteration/intake-decision.json",
-      ".iteration/intakes/INTAKE-20260803-01.json",
-      ".iteration/intakes/INTAKE-20260803-02.json",
-      ".iteration/intakes/INTAKE-20260803-03.json",
-      ".iteration/intakes/INTAKE-20260803-04.json",
-      ".iteration/intakes/INTAKE-20260803-05.json",
-      ".iteration/notebooklm-response-20260803-tui.json",
-      ".iteration/notebooklm-response-20260804-space.json",
-      ".iteration/notebooklm-response-20260805-esc-takeover.json",
-      ".iteration/notebooklm-response-20260805-active-containers.json",
-      ".iteration/notebooklm-response-20260805-dssc.json",
-      ".iteration/notebooklm-response-20260805-focus-contrast.json",
-      ".iteration/notebooklm-response-20260805-semantic-boundary.json",
-      ".iteration/notebooklm-response-20260805-contrast-floor.json",
-      ".iteration/notebooklm-response-20260805-partial-answer.json",
-      ".iteration/notebooklm-response-20260805-idle-reasoning.json",
-      ".iteration/notebooklm-response-20260805-scrollback-batch.json",
-      ".iteration/notebooklm-response-20260805-hardware-scroll-followup.json",
-      ".iteration/notebooklm-response-20260805-incremental-highlight.json",
-      ".iteration/notebooklm-response-20260805-lifecycle-badge.json",
-      ".iteration/notebooklm-response-20260805-lifecycle-closure.json",
-      ".iteration/notebooklm-response-20260806-lifecycle-closure-followup.json",
-      ".iteration/notebooklm-response-20260806-hanging-indent.json",
-      ".iteration/notebooklm-response-20260806-kkp-audit.json",
-      ".iteration/notebooklm-response-20260806-next.json",
-      ".iteration/archive-record-iter-20260805-plan-anchor.json",
-      ".iteration/archive-record-iter-20260805-partial-answer.json",
-      ".iteration/archive-record-iter-20260805-lifecycle-badge.json",
-      ".iteration/archive-record-iter-20260805-help-affordance.json",
-      ".iteration/archive-record-iter-20260806-modal-gutter.json",
-      ".iteration/archive-record-iter-20260806-panel-wrap.json",
-      ".iteration/archive-record-iter-20260806-panel-hint.json",
-      ".iteration/archive-record-iter-20260806-input-chrome.json",
-      ".iteration/pending-operation-20260803.json",
-      ".iteration/request.txt",
-      "README.md",
-      "crates/agent/examples/stdio_mcp_chain.rs",
-      "crates/agent/Cargo.toml",
-      "crates/agent/src/config.rs",
-      "crates/agent/src/context.rs",
-      "crates/agent/src/goal.rs",
-      "crates/agent/src/graph.rs",
-      "crates/agent/src/lib.rs",
-      "crates/agent/src/login.rs",
-      "crates/agent/src/main.rs",
-      "crates/agent/src/state.rs",
-      "crates/agent/src/tui/app.rs",
-      "crates/agent/src/tui/command.rs",
       "crates/agent/src/tui/draw.rs",
-      "crates/agent/src/tui/eventfmt.rs",
-      "crates/agent/src/tui/input.rs",
-      "crates/agent/src/tui/mod.rs",
-      "crates/agent/src/tui/panel.rs",
-      "crates/agent/src/tui/presentation.rs",
-      "crates/agent/src/tui/render.rs",
-      "crates/agent/src/tui/status.rs",
       "crates/agent/src/tui/tests.rs",
-      "crates/agent/src/tui/transcript.rs",
-      "crates/provider/src/anthropic.rs",
-      "crates/provider/src/chatgpt.rs",
-      "crates/provider/src/lib.rs",
-      "crates/provider/src/models.rs",
-      "crates/provider/src/openai.rs",
-      "crates/provider/src/responses.rs",
-      "crates/provider/src/tests.rs",
-      "crates/tools/src/lib.rs",
-      "docs/REQUIREMENTS-SPEC.md",
-      "scripts/windows-pty-e2e.ps1"
-      ,"docs/archive/events-2026-08.jsonl"
+      "docs/archive/events-2026-08.jsonl"
     ],
     "deny_unlisted": true
   },
   "response_policy": {
     "format": "delta_evidence_next",
     "forbid_background_recap": true
+  },
+  "baseline": {
+    "files": {
+      "crates/agent/src/tui/draw.rs": "8a8865eb4d71da067151842007d1291938c9f78df89b9eb21220e0a146072e7f",
+      "crates/agent/src/tui/status.rs": "32809f0e955f1e6a3f2d00c1566a2939e7717d686b72fe940c5eeb289b25f6d2",
+      "crates/agent/src/tui/tests.rs": "91f00365e7a932f40d16878ccc9d0bb9221f32726953774dfa451a76fea13a15",
+      "docs/archive/events-2026-08.jsonl": "f6cbe1f9d3f85d1591f1804cf21ab55d62aee559a37bdf8fd8af95a4c8dedfdd"
+    }
   },
   "budget": {
     "schema_version": 1,

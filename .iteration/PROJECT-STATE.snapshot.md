@@ -791,13 +791,13 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 <!-- PROJECT_STATE_RUNTIME -->
 ## 运行元数据
 
-- repository_head:`d72dcb50454e0ffad8bca4bd07c9279125b09b52`
+- repository_head:`e95063596e99b81bdbfae0d814cad3eb0b844883`
 - requirements_version:`v0.2.0`
 - requirements_hash:`2d7ac09fabbb88323085eb5c4e888ada7ba76d1028b2dbe9d5f76c1331a98237`
 - pending_hash:`3b2a1c2d01c1d0e6c33d8e5ec0365873066e4b3b541c2f63d703025b8f44425a`
-- decision_hash:`d78f0eae03c62806fd863c268e349fe11f7d94a0b2b470e6b35c39f234fa9aa9`
-- generated_at:`2026-08-04T23:13:42+00:00`
-- current_git_diff:`.iteration/PROJECT-STATE.snapshot.md,.iteration/approved-operation-20260803.json,.iteration/archive-record-iter-20260805-help-affordance.json,.iteration/archive-record-iter-20260805-lifecycle-badge.json,.iteration/archive-record-iter-20260805-partial-answer.json,.iteration/archive-record-iter-20260805-plan-anchor.json,.iteration/archive-record-iter-20260806-input-chrome.json,.iteration/archive-record-iter-20260806-modal-gutter.json,.iteration/archive-record-iter-20260806-panel-hint.json,.iteration/archive-record-iter-20260806-panel-wrap.json,.iteration/context.json,.iteration/decision.json,.iteration/intake-decision.json,.iteration/intakes/INTAKE-20260803-01.json,.iteration/intakes/INTAKE-20260803-02.json,.iteration/intakes/INTAKE-20260803-03.json,.iteration/intakes/INTAKE-20260803-04.json,.iteration/intakes/INTAKE-20260803-05.json,.iteration/notebooklm-response-20260803-tui.json,.iteration/notebooklm-response-20260804-space.json,.iteration/notebooklm-response-20260805-active-containers.json,.iteration/notebooklm-response-20260805-contrast-floor.json,.iteration/notebooklm-response-20260805-dssc.json,.iteration/notebooklm-response-20260805-esc-takeover.json,.iteration/notebooklm-response-20260805-focus-contrast.json,.iteration/notebooklm-response-20260805-hardware-scroll-followup.json,.iteration/notebooklm-response-20260805-idle-reasoning.json,.iteration/notebooklm-response-20260805-incremental-highlight.json,.iteration/notebooklm-response-20260805-lifecycle-badge.json,.iteration/notebooklm-response-20260805-lifecycle-closure.json,.iteration/notebooklm-response-20260805-partial-answer.json,.iteration/notebooklm-response-20260805-scrollback-batch.json,.iteration/notebooklm-response-20260805-semantic-boundary.json,.iteration/notebooklm-response-20260806-hanging-indent.json,.iteration/notebooklm-response-20260806-kkp-audit.json,.iteration/notebooklm-response-20260806-lifecycle-closure-followup.json,.iteration/notebooklm-response-20260806-next.json,.iteration/pending-operation-20260803.json,.iteration/request.txt,Cargo.lock,Cargo.toml,README.md,crates/agent/Cargo.toml,crates/agent/examples/stdio_mcp_chain.rs,crates/agent/src/config.rs,crates/agent/src/context.rs,crates/agent/src/goal.rs,crates/agent/src/graph.rs,crates/agent/src/lib.rs,crates/agent/src/login.rs,crates/agent/src/main.rs,crates/agent/src/state.rs,crates/agent/src/tui/app.rs,crates/agent/src/tui/command.rs,crates/agent/src/tui/draw.rs,crates/agent/src/tui/eventfmt.rs,crates/agent/src/tui/input.rs,crates/agent/src/tui/mod.rs,crates/agent/src/tui/panel.rs,crates/agent/src/tui/presentation.rs,crates/agent/src/tui/render.rs,crates/agent/src/tui/status.rs,crates/agent/src/tui/tests.rs,crates/agent/src/tui/transcript.rs,crates/provider/src/anthropic.rs,crates/provider/src/chatgpt.rs,crates/provider/src/lib.rs,crates/provider/src/models.rs,crates/provider/src/openai.rs,crates/provider/src/responses.rs,crates/provider/src/tests.rs,crates/tools/src/lib.rs,docs/REQUIREMENTS-SPEC.md,docs/archive/events-2026-08.jsonl,scripts/windows-pty-e2e.ps1`
+- decision_hash:`c93dbaaba4784d2bc7b2f2a843b76df52b3768523d1163ee97fde8cd1287825e`
+- generated_at:`2026-08-05T12:30:56+00:00`
+- current_git_diff:`.iteration/archive-record-iter-20260805-activity-rail.json,.iteration/archive-record-iter-20260805-answer-meta.json,.iteration/archive-record-iter-20260805-attention-feedback.json,.iteration/archive-record-iter-20260805-chatgpt-bridge.json,.iteration/archive-record-iter-20260805-hold-e2e.json,.iteration/archive-record-iter-20260805-idle-tab-affordance.json,.iteration/archive-record-iter-20260805-lifecycle-closure.json,.iteration/archive-record-iter-20260805-lifecycle-phase.json,.iteration/archive-record-iter-20260805-live-channel-order.json,.iteration/archive-record-iter-20260805-live-word-boundary.json,.iteration/archive-record-iter-20260805-nlm-plan-rate-limit-2.json,.iteration/archive-record-iter-20260805-nlm-plan-rate-limit.json,.iteration/archive-record-iter-20260805-partial-result-card.json,.iteration/archive-record-iter-20260805-reasoning-history-meta.json,.iteration/archive-record-iter-20260805-reasoning-rail.json,.iteration/archive-record-iter-20260805-reasoning-word-boundary.json,.iteration/archive-record-iter-20260805-result-card-meta.json,.iteration/archive-record-iter-20260805-result-card-width.json,.iteration/archive-record-iter-20260805-run-boundary.json,.iteration/archive-record-iter-20260805-tiny-editor-rail.json,.iteration/archive-record-iter-20260805-ultra-low-editor.json,.iteration/archive-record-iter-20260805-ultra-low-queue.json,.iteration/archive-record-iter-20260806-activity-phase-tags.json,.iteration/archive-record-iter-20260806-empty-answer.json,.iteration/archive-record-iter-20260806-error-partial.json,.iteration/archive-record-iter-20260806-hold-wait-priority.json,.iteration/archive-record-iter-20260806-hold-wait-target.json,.iteration/archive-record-iter-20260806-idle-submit-affordance.json,.iteration/archive-record-iter-20260806-live-history-hint.json,.iteration/archive-record-iter-20260806-live-takeover-hint.json,.iteration/archive-record-iter-20260806-medium-queue.json,.iteration/archive-record-iter-20260806-narrow-history-hint.json,.iteration/archive-record-iter-20260806-nlm-plan-reconcile.json,.iteration/archive-record-iter-20260806-queue-affordance.json,.iteration/archive-record-iter-20260806-reasoning-markdown.json,.iteration/archive-record-iter-20260806-slash-discoverability.json,.iteration/archive-record-iter-20260806-verification-anchor.json,.iteration/archive-record-iter-20260806-wait-target.json,.iteration/context.json,.iteration/decision.json,.iteration/intake-decision.json,.iteration/intakes/INTAKE-20260805-01.json,.iteration/intakes/INTAKE-20260805-02.json,.iteration/intakes/INTAKE-20260805-03.json,.iteration/notebooklm-research-start-20260806-26.json,.iteration/notebooklm-response-20260805-next-10.json,.iteration/notebooklm-response-20260805-next-11.json,.iteration/notebooklm-response-20260805-next-12.json,.iteration/notebooklm-response-20260805-next-13.json,.iteration/notebooklm-response-20260805-next-14.json,.iteration/notebooklm-response-20260805-next-15.json,.iteration/notebooklm-response-20260805-next-16.json,.iteration/notebooklm-response-20260805-next-17.json,.iteration/notebooklm-response-20260805-next-18.json,.iteration/notebooklm-response-20260805-next-19.json,.iteration/notebooklm-response-20260805-next-20.json,.iteration/notebooklm-response-20260805-next-21.json,.iteration/notebooklm-response-20260805-next-22.json,.iteration/notebooklm-response-20260805-next-23.json,.iteration/notebooklm-response-20260805-next-24.json,.iteration/notebooklm-response-20260805-next-25.json,.iteration/notebooklm-response-20260805-next-9.json,.iteration/notebooklm-response-20260805-width-squeeze.json,.iteration/notebooklm-response-20260806-empty-answer.json,.iteration/notebooklm-response-20260806-error-partial.json,.iteration/notebooklm-response-20260806-medium-queue.json,.iteration/notebooklm-response-20260806-next-2.json,.iteration/notebooklm-response-20260806-next-26.json,.iteration/notebooklm-response-20260806-next-27.json,.iteration/notebooklm-response-20260806-next-3.json,.iteration/notebooklm-response-20260806-next-4.json,.iteration/notebooklm-response-20260806-next-5.json,.iteration/notebooklm-response-20260806-next-6.json,.iteration/notebooklm-response-20260806-next-7.json,.iteration/notebooklm-response-20260806-next-8.json,.iteration/notebooklm-response-20260806-next.json,.iteration/notebooklm-response-20260806-postrelease.json,.iteration/notebooklm-response-20260806-queue.json,.iteration/notebooklm-response-20260806-reasoning-markdown.json,.iteration/request.txt,docs/archive/events-2026-08.jsonl,events-2026-08.jsonl`
 
 ## 非权威 Pending 索引
 
@@ -808,79 +808,174 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 ```json
 {
   "approved_constraints": [
-    "REQ-20260801-01 and INTAKE-20260803-05 are approved and executable.",
+    "REQ-20260801-01 and INTAKE-20260805-03 are approved and executable.",
     "Use only manually imported NotebookLM theory source 8862d715-ffad-4288-b7eb-173260e2dcff; do not inspect user-owned research status.",
     "Do not create another Ridge member; use the existing notebooklm-mcp-maintainer only.",
     "Do not change langgraph/provider/MCP execution semantics or add a second execution state machine.",
     "Keep Answer separate from reasoning_content; preserve ANSI16, cell-width wrapping, bounded details, queue/takeover/HOLD/FOLLOW, and native scrollback.",
     "Tools remain folded by default and expandable with bounded detail; user intervention remains non-blocking.",
-    "TestBackend is supplementary; Windows ConPTY is required for terminal claims."
+    "TestBackend is supplementary; Windows ConPTY is required for terminal claims.",
+    "Error idle result cards with retained partial Answer must preserve visible PARTIAL body/metadata/recovery affordances without changing execution, queue, provider, MCP, or key-routing semantics.",
+    "Static Reasoning commit projection may reuse existing md_line_spans_with_alert for Markdown/code semantic roles; keep native scrollback, rails/meta/history hint, bounded fold/wrap, and all key semantics unchanged.",
+    "Static Reasoning scrollback and audit detail may reuse existing alert_edges/apply_alert_edge; preserve body, rails, cell width, and no new parser/cache/dependency/renderer/execution/key change."
   ],
   "attempts": [
     {
       "evidence": {
-        "command": "notebook_gate validation, CodeGraph, workspace tests, and Windows ConPTY",
+        "command": "notebook_gate validation, CodeGraph, workspace tests, Release ConPTY, and scripts/dist.ps1",
         "exit_code": 0,
-        "pointer": ".iteration/notebooklm-response-20260806-next.json; crates/agent/src/tui/status.rs; crates/agent/src/tui/tests.rs"
+        "pointer": ".iteration/notebooklm-response-20260806-medium-queue.json; crates/agent/src/tui/status.rs; crates/agent/src/tui/tests.rs"
       },
-      "experiment": "Evaluate same-session NLM recommendations and local TUI presentation gaps one bounded slice at a time.",
+      "experiment": "Evaluate same-session NLM planning and local medium-width queue affordance evidence.",
       "result": {
         "status": "failed",
-        "summary": "NLM query was RESOURCE_EXHAUSTED and uncited proposals were rejected; local evidence selected the adaptive input legend instead."
+        "summary": "NLM returned RESOURCE_EXHAUSTED; local CodeGraph identified and fixed the missing ordinary Enter queue affordance in the 56–71-column busy-with-tools rail."
+      }
+    },
+    {
+      "evidence": {
+        "command": "CodeGraph, focused/workspace tests, fmt, Clippy, Release ConPTY, and scripts/dist.ps1",
+        "exit_code": 0,
+        "pointer": ".iteration/notebooklm-response-20260806-next-6.json; crates/agent/src/tui/draw.rs; crates/agent/src/tui/tests.rs"
+      },
+      "experiment": "Evaluate same-session NLM planning and local narrow waiting-target visibility evidence.",
+      "result": {
+        "status": "failed",
+        "summary": "NLM remained RESOURCE_EXHAUSTED; local CodeGraph identified and fixed the loss of model/tool waiting target in narrow busy chrome."
+      }
+    },
+    {
+      "evidence": {
+        "command": "CodeGraph, focused/workspace tests, fmt, Clippy, Release ConPTY, and scripts/dist.ps1",
+        "exit_code": 0,
+        "pointer": ".iteration/notebooklm-response-20260806-next-7.json; crates/agent/src/tui/draw.rs; crates/agent/src/tui/tests.rs"
+      },
+      "experiment": "Evaluate same-session NLM planning and local HOLD waiting-target visibility evidence.",
+      "result": {
+        "status": "failed",
+        "summary": "NLM remained RESOURCE_EXHAUSTED; local CodeGraph identified and fixed the stale literal waiting label in the HOLD anchor by sharing the existing pending-call projection."
+      }
+    },
+    {
+      "evidence": {
+        "command": "NotebookLM query, CodeGraph, focused regression, and local source audit",
+        "exit_code": 0,
+        "pointer": ".iteration/notebooklm-response-20260806-next-8.json; .iteration/archive-record-iter-20260806-hold-wait-priority.json; crates/agent/src/tui/draw.rs; crates/agent/src/tui/tests.rs"
+      },
+      "experiment": "Evaluate same-session NLM planning and reproduce HOLD waiting-target clipping with channel/lifecycle breadcrumbs.",
+      "result": {
+        "status": "failed",
+        "summary": "NLM remained RESOURCE_EXHAUSTED; local CodeGraph reproduced the target loss at width 32 and the bounded priority projection fixed it without changing execution semantics."
+      }
+    },
+    {
+      "evidence": {
+        "command": "NotebookLM query, CodeGraph, focused reasoning reflow regressions",
+        "exit_code": 0,
+        "pointer": ".iteration/notebooklm-response-20260805-next-9.json; crates/agent/src/tui/app.rs; crates/agent/src/tui/tests.rs"
+      },
+      "experiment": "Evaluate same-session NLM planning and reproduce static reasoning continuation-rail loss at narrow width.",
+      "result": {
+        "status": "failed",
+        "summary": "NLM returned RESOURCE_EXHAUSTED before an answer; CodeGraph and the focused regression reproduced missing `│` continuation rails for a real `┊ THK[...]` commit, and the shared semantic prefix fix passed the focused matrix."
+      }
+    },
+    {
+      "evidence": {
+        "command": "cargo test --workspace --locked --offline --quiet; cargo fmt --all -- --check; cargo clippy --workspace --all-targets --locked --offline -- -D warnings; Release BusyFixture; Release StressFixture; scripts/dist.ps1",
+        "exit_code": 0,
+        "pointer": ".iteration/notebooklm-response-20260805-next-10.json; crates/agent/src/tui/app.rs; crates/agent/src/tui/tests.rs; dist/ridgecode-x86_64-pc-windows-msvc.zip"
+      },
+      "experiment": "Reproduce and remove ordinary-word splits introduced by the restored reasoning continuation rail at the Release PTY 40-column probe.",
+      "result": {
+        "status": "failed",
+        "summary": "NotebookLM remained RESOURCE_EXHAUSTED; the local semantic commit wrapper now groups styled graphemes into whitespace/word units, prefers a word boundary, and preserves hard wrapping for long unbroken tokens."
+      }
+    },
+    {
+      "evidence": {
+        "command": "CodeGraph, focused TUI regression, cargo test --workspace --locked --offline --quiet, cargo fmt --all -- --check, cargo clippy --workspace --all-targets --locked --offline -- -D warnings, Release BusyFixture, Release StressFixture, scripts/dist.ps1",
+        "exit_code": 0,
+        "pointer": ".iteration/notebooklm-response-20260805-next-11.json; crates/agent/src/tui/draw.rs; crates/agent/src/tui/app.rs; crates/agent/src/tui/tests.rs; dist/ridgecode-x86_64-pc-windows-msvc.zip"
+      },
+      "experiment": "Reproduce and remove ordinary-word splits in live reasoning/Answer physical reflow while preserving bounded tail performance and synthetic ellipsis visibility.",
+      "result": {
+        "status": "failed",
+        "summary": "NotebookLM remained RESOURCE_EXHAUSTED; local CodeGraph/test evidence identified the live forward and reverse-tail wrappers as the remaining presentation boundary, and the word-aware implementation passed all regression and Release PTY checks."
       }
     }
   ],
   "candidate_solutions": [
     {
-      "core": "Clear the complete audit viewport before rendering inset history modals.",
-      "disposition": "accepted_local_slice",
+      "constraints": [
+        "presentation-only",
+        "reuse LiveTranscript/LiveOutputCache",
+        "no second renderer or state machine"
+      ],
+      "core": "Measure high-frequency live Answer/Reasoning projection work under stable-prefix stream updates before changing cache architecture.",
+      "disposition": "next_local_experiment",
       "scope": [
+        "crates/agent/src/tui/transcript.rs",
         "crates/agent/src/tui/draw.rs",
         "crates/agent/src/tui/tests.rs"
       ],
       "validation": [
-        "narrow gutter regression",
-        "workspace/fmt/clippy",
-        "Dev/Release ConPTY"
-      ]
-    },
-    {
-      "core": "Preserve Enter expand and Esc close in medium AnswerHistory hints without changing LiveHistory HOLD/FOLLOW.",
-      "disposition": "accepted_local_slice",
-      "scope": [
-        "crates/agent/src/tui/draw.rs",
-        "crates/agent/src/tui/tests.rs"
-      ],
-      "validation": [
-        "medium_answer_hint_preserves_expand_and_close_actions",
-        "workspace tests/fmt/clippy",
-        "Debug/Release ConPTY"
+        "deterministic profile",
+        "cargo test --workspace",
+        "cargo clippy",
+        "ConPTY StressFixture"
       ]
     },
     {
       "constraints": [
-        "presentation-only",
-        "reuse input_chrome and existing cell-width accounting",
-        "preserve live prefixes, queue/takeover, Ctrl+R/Ctrl+T routing, and final title bounds"
+        "reuse existing panels and cell-width wrappers",
+        "tools folded by default",
+        "no execution-semantics change"
       ],
-      "core": "Use an adaptive wide input legend that preserves reasoning-history and activity actions while compacting lower-priority labels only on overflow.",
-      "disposition": "accepted_local_slice",
+      "core": "Keep completed Answer/Reasoning recovery and folded Tool detail reachable at narrow widths without adding a persistent sidebar.",
+      "disposition": "verify_local_only",
       "scope": [
-        "crates/agent/src/tui/status.rs",
+        "crates/agent/src/tui/draw.rs",
+        "crates/agent/src/tui/panel.rs",
         "crates/agent/src/tui/tests.rs"
       ],
       "validation": [
-        "input_chrome_exposes_submit_or_queue_mode",
-        "Debug BusyFixture",
-        "Release BusyFixture and StressFixture"
+        "narrow-width matrix",
+        "ConPTY StressFixture/BusyFixture",
+        "workspace tests"
+      ]
+    },
+    {
+      "constraints": [
+        "only source 8862d715-ffad-4288-b7eb-173260e2dcff",
+        "do not poll old research tasks",
+        "no second agent/member"
+      ],
+      "core": "Treat new NLM design suggestions as hypotheses and require a locally reproduced visual or performance defect before implementation.",
+      "disposition": "guardrail",
+      "scope": [],
+      "validation": [
+        "CodeGraph",
+        "deterministic tests",
+        "ConPTY"
       ]
     }
   ],
   "failure_signals": [
-    "NotebookLM Deep Research UI/API remains quota-exhausted (RESOURCE_EXHAUSTED).",
-    "The KKP recommendation was uncited and contradicted the current non-destructive HOLD plus Windows release filtering; no input protocol change is justified.",
-    "No local live-stream reflow, stale-width, or cache defect is reproduced beyond the fixed bounded input-title clipping gap.",
-    "CompletionFixture with immediate ScriptedProvider may report partial when Answer inspection is requested after the fixture completes; Release StressFixture provides the authoritative delayed streaming evidence."
+    "NotebookLM query remains quota-exhausted (RESOURCE_EXHAUSTED); no new design recommendation is accepted.",
+    "Immediate CompletionFixture Answer inspection can miss its send window because the ScriptedProvider completes before the snapshot probe; delayed StressFixture is the authoritative Answer-inspection path.",
+    "No local live-stream reflow, stale-width, cache, or execution defect is reproduced beyond the fixed history/LiveHistory and action-rail affordance gaps; the empty-final boundary is parser-level and presentation-only.",
+    "The initial default StressFixture + InspectAnswer harness invocation exposed a timeout mismatch, not a product failure; the harness now gives the 5000 ms probe enough time and the default combination passes.",
+    "Before the local classifier fix, node_label's `running tools` and `wrapping up` phrases fell through to SYS; the focused regression now proves TLS/SUM mapping without changing execution.",
+    "Idle submit discoverability was missing in the 56–87 column branch and could be crowded out by narrow archive shortcuts; the local rail now reserves Enter/↵ before optional history tokens.",
+    "Narrow waiting status previously discarded pending_call and showed only `waiting`; the local projection now preserves the model/tool target without adding execution state.",
+    "HOLD live_phase_anchor still used a literal `waiting` after the narrow top rail was fixed; the shared waiting_phase projection now keeps the target visible while inspecting older live rows.",
+    "HOLD waiting target could still be clipped by optional trace/lifecycle/step text at narrow widths; the priority fallback now drops optional breadcrumbs before the target.",
+    "Static reasoning long lines could wrap through the body without a visible continuation rail because `┊` was absent from the shared semantic prefix table; the bounded projection now preserves the existing `│` rail.",
+    "The first rail fix used grapheme-greedy physical wrapping, so a 40-column Release PTY preview inserted `│` in the middle of ordinary words; the word-aware presentation boundary now moves a whole word when whitespace permits and only hard-wraps unbroken tokens.",
+    "The committed-word fix did not cover the live reverse-tail path: CodeGraph/local regression reproduced `netwo`/`rk` and `availabl`/`e` at width 40; the live path now has one whitespace-aware forward/tail projection with an explicit bounded fallback for synthetic ellipsis tails and unbroken tokens.",
+    "A new NLM deep-research start was attempted only after the cold gate passed, but Google API error code 8 prevented task creation; no task ID exists and no old task was polled.",
+    "NLM follow-up proposed an invented Widget::is_sealed/StatefulWidget::freeze interaction boundary without a current-code symbol or reproducible defect; CodeGraph shows the existing history-panel recovery contract, so the proposal is rejected."
   ],
   "hypotheses": [
     {
@@ -909,41 +1004,113 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
     "Do not add a whole-document virtualizer, fixed CPU/frame threshold, momentary KKP protocol, persistent sidebar, or second renderer from uncited NLM prose.",
     "Do not modify the main repository while the independent MCP member works."
   ],
-  "question": "What is the next measurable RidgeCode TUI improvement after the current semantic channels, history, folded tools, lifecycle anchors, cache boundaries, and ConPTY coverage?",
+  "question": "What is the next measurable RidgeCode TUI improvement after KKP HOLD/FOLLOW, static Markdown roles/alert edges, and the current semantic channels, history, folded tools, lifecycle anchors, cache boundaries, and ConPTY coverage?",
   "questions": [],
   "target": "Make model reasoning, answers, waiting, conclusions, tools, queue, and takeover visible, searchable, expandable, bounded, adaptive, and responsive without changing execution semantics.",
   "verified_facts": [
     {
-      "evidence": "draw_panel_with_cache; narrow_audit_modal_clears_underlying_gutters; Dev CompletionFixture at 40 columns.",
-      "fact": "The presentation-only modal fix clears the complete audit viewport before rendering inset history panels, preventing narrow gutters from leaking live/idle rows."
+      "evidence": "panel_hint, clip_hint_with_close, narrow_history_hint_names_expand_action, narrow_live_history_hint_names_expand_action",
+      "fact": "Live and history panels now preserve explicit narrow Enter expansion and Esc closure affordances without changing panel routing."
     },
     {
-      "evidence": "draw.rs; CodeGraph; cache and long-live profile tests.",
-      "fact": "LiveOutputCache, DetailLayoutCache, and PanelItemsCache bound hot-path/live detail work and resize invalidation; no whole-document virtualizer is justified."
+      "evidence": "input_chrome and input_chrome_exposes_submit_or_queue_mode",
+      "fact": "The wide input legend preserves Ctrl+R history and Ctrl+T activity by compacting lower-priority labels within its cell budget."
     },
     {
-      "evidence": "windows-pty-e2e.ps1 Debug BusyFixture and Release StressFixture.",
-      "fact": "Debug/Release ConPTY coverage passed lifecycle WAIT/CHK/SUM/DONE, Answer/Reasoning visibility, Inspector/detail, queue switching/removal, HOLD/FOLLOW, resize, effort, and two-Ctrl-C behavior."
+      "evidence": "compact_busy_actions; input_chrome_exposes_submit_or_queue_mode at widths 12, 18, and 24",
+      "fact": "The compact busy rail previously showed queue depth but not the ordinary Enter-to-queue action; it now shows `↵ queue` at wider compact widths and `↵` at narrow widths before optional audit tokens."
     },
     {
-      "evidence": "NotebookLM note listing, login check, existing response artifacts, and member capture.",
-      "fact": "The focused notebook has exactly one useful Active Note; NLM authentication works, but the attempted new Deep Research flow was quota-exhausted before task creation and produced no task/report/import."
+      "evidence": "windows-pty-e2e.ps1 Release BusyFixture and Release StressFixture status=passed",
+      "fact": "Release ConPTY coverage passed busy queue/Inspector/Reasoning/HOLD/FOLLOW/resize/takeover and narrow StressFixture Answer inspection with dual Ctrl-C."
     },
     {
-      "evidence": "Current Ridge workspace profile and captured pane.",
-      "fact": "The existing Ridge member notebooklm-mcp-maintainer is the only member; no new member was created."
+      "evidence": "dist/ridgecode-x86_64-pc-windows-msvc.zip; SHA-256 AA91E76B517A7BB772F1AB3DE6AA1CD18E9FD3950FD718FA541E60B061E2B062",
+      "fact": "The current Windows package contains README.md, install.ps1, ridgecode.exe, and a SHA-256 sidecar."
     },
     {
-      "evidence": "panel_hint/clip_hint_with_close; medium_answer_hint_preserves_expand_and_close_actions.",
-      "fact": "At 32/40-column AnswerHistory modals, the final hint preserves Enter expand and Esc close; LiveHistory HOLD/FOLLOW wording remains unchanged."
+      "evidence": "final_answer_gets_assistant_marker; crates/agent/src/tui/eventfmt.rs; focused test passed",
+      "fact": "The exact empty final markers `(final)` and `reason#N: (final)` were not classified as Answer events, while malformed `(final)not-a-marker` must remain ordinary text; the presentation parser now distinguishes these cases and renders `[empty answer]`."
     },
     {
-      "evidence": "input_chrome; input_chrome_exposes_submit_or_queue_mode; Debug BusyFixture frame/output at 96 columns before and after the fix.",
-      "fact": "A wide idle input title clipped Ctrl+T activity to Ctrl+T activi… after reasoning history existed; the adaptive legend now keeps Ctrl+R history and Ctrl+T activity whole by compacting lower-priority labels within the cell budget."
+      "evidence": "input_chrome_exposes_submit_or_queue_mode at widths 56 and 64; Release BusyFixture 96/64/56 and StressFixture 18x14 status=passed",
+      "fact": "Busy-with-tools 56–71-column input chrome omitted ordinary Enter queue even though the wider 72+ branch exposed it; the rail now keeps `↵ queue`, front queue, takeover, tool detail, and reasoning-history affordances through width-aware compression."
     },
     {
-      "evidence": "Release StressFixture with Answer inspection/resize status=passed; Release BusyFixture with Inspector/Queue/Reasoning/HOLD/FOLLOW/Resize/dual Ctrl-C status=passed.",
-      "fact": "Release v0.5.2 candidate passed end-to-end completion and busy interaction probes."
+      "evidence": "ActivityKind::is_retained_signal includes Verification; verification_activity_leaves_a_static_anchor_with_a_detail_affordance passed; workspace TUI 297 and Release PTY matrix passed",
+      "fact": "Verification activity was classified as CHK and visible in the Activity panel/live lifecycle path, but it was not retained as a native scrollback activity anchor; it now produces the same bounded static activity anchor and Ctrl+T recovery affordance as other actionable lifecycle signals."
+    },
+    {
+      "evidence": "live_empty_state_keeps_takeover_affordance_across_widths at 6/11/18/32/48/80 columns; Release BusyFixture preview shows `Esc takeover` at 96/64/56; Release StressFixture and dual Ctrl-C passed",
+      "fact": "Busy LIVE empty-state content exposed HOLD/Inspect but omitted Esc/Ctrl-C takeover; its width-aware action candidates now retain Esc takeover from 80 columns down to a truthful one-token `Esc` micro hint."
+    },
+    {
+      "evidence": "NotebookLM note/chat listing and .iteration/notebooklm-response-20260806-queue.json",
+      "fact": "The focused notebook has exactly one useful Active Note; the attempted new NLM query remains quota-exhausted before an answer and no research-status operation was performed."
+    },
+    {
+      "evidence": "Current Ridge workspace profile and captured pane",
+      "fact": "The existing Ridge member notebooklm-mcp-maintainer is the only relevant member; no new member was created."
+    },
+    {
+      "evidence": "slash_popup_surfaces_goal_and_attention_commands; cargo test --workspace --locked --offline --quiet passed",
+      "fact": "The TUI dispatcher accepted /goal, /inspect, and /reasoning, but the slash completion popup omitted them; the static completion list now exposes all three without changing routing."
+    },
+    {
+      "evidence": "scripts/windows-pty-e2e.ps1 default run; status=passed; snapshot_answer_inspect_live_view=hold; snapshot_answer_inspect_live_focus=answer:1",
+      "fact": "The release harness default timeout was shorter than the 5000 ms InspectAnswer probe; the default is now 6500 ms, and Release StressFixture + InspectAnswer passes with Answer focus observed."
+    },
+    {
+      "evidence": "dist/ridgecode-x86_64-pc-windows-msvc.zip; SHA-256 AA91E76B517A7BB772F1AB3DE6AA1CD18E9FD3950FD718FA541E60B061E2B062",
+      "fact": "The current Windows package contains README.md, install.ps1, ridgecode.exe, and a SHA-256 sidecar after the slash-completion/doc fix."
+    },
+    {
+      "evidence": "activity_classifier_exposes_investigation_verification_and_conclusion; focused cargo test passed; CodeGraph node_label call path",
+      "fact": "The lifecycle classifier now maps the exact `node · running tools` and `node · wrapping up` phases to Tool/TLS and Conclusion/SUM instead of the generic System kind."
+    },
+    {
+      "evidence": "input_chrome_exposes_submit_or_queue_mode; focused cargo test passed; crates/agent/src/tui/status.rs",
+      "fact": "Idle input chrome now exposes `Enter send` at medium widths and reserves a compact `↵` token in narrow archive rails, while preserving existing cell bounds and audit shortcuts."
+    },
+    {
+      "evidence": "compact_busy_phase derives the target from the existing pending_call fact; narrow_busy_chrome_keeps_waiting_target_without_live_channel passed at 18/24/32/40 columns.",
+      "fact": "Narrow busy chrome now distinguishes waiting for the model from waiting for a pending tool call, instead of collapsing both states to `waiting`."
+    },
+    {
+      "evidence": "waiting_target/waiting_phase; held_live_anchor_keeps_waiting_target_visible passed for model/tool targets at 40 columns.",
+      "fact": "The HOLD live-phase anchor now preserves the same model/tool waiting target as the top busy rail, using one shared presentation helper."
+    },
+    {
+      "evidence": "held_wait_anchor_prioritizes_waiting_target_over_optional_breadcrumbs initially failed at width 32, then passed at 18/24/32/40 after compact_waiting_anchor was added.",
+      "fact": "When a held stream also carried a T›L›A channel trace and CHK lifecycle badge, narrow clipping could erase the model/tool portion of the waiting target; the anchor now prioritizes HOLD, waiting, and its target before optional breadcrumbs."
+    },
+    {
+      "evidence": "committed_reasoning_text_keeps_its_continuation_rail_after_narrow_reflow initially failed at 18 columns, then passed after adding the existing `┊` prefix to commit_semantic_prefix; reasoning_commit_renders_in_inline_scrollback and CJK reflow regressions pass.",
+      "fact": "Static reasoning commits use a `┊ THK[...]` first-line prefix, but the semantic commit wrapper did not recognize that prefix; long reasoning lines therefore lost the `│` continuation rail during narrow reflow."
+    },
+    {
+      "evidence": "semantic_reasoning_rail_prefers_word_boundaries_on_narrow_reflow passed; Release BusyFixture preview no longer showed `reason│ing`, `an│d`, or `h│istory`; all continuation rows remained within 40 cells.",
+      "fact": "After the rail was restored, Release BusyFixture at the 40-column resize probe showed the rail could still be inserted inside ordinary words; the semantic commit wrapper now defers whitespace and keeps a whole word together when the next row can hold it, while long unbroken tokens still hard-wrap by grapheme/cell."
+    },
+    {
+      "evidence": "dist/ridgecode-x86_64-pc-windows-msvc.zip; entries exactly install.ps1, README.md, ridgecode.exe; SHA-256 265AD4E409A5C0A0396FAD100605EE26A607CDB7E9065ABCFFA847DF9B39C705",
+      "fact": "The rebuilt local Windows package contains the complete README, install.ps1, and release ridgecode.exe with a matching SHA-256 sidecar."
+    },
+    {
+      "evidence": "live_output_prefers_word_boundaries_before_hard_wrapping passed for wrap_live_spans and wrap_live_spans_tail; live_markdown_highlighting_tails_long_prose_before_span_scan and live_tail_wrap_bounds_unbroken_output passed; Release BusyFixture resize 40x12 preview no longer showed the split words.",
+      "fact": "Live reasoning/Answer physical wrapping previously split ordinary words at the 40-column viewport; the existing forward wrapper and bounded reverse-tail wrapper now prefer whitespace boundaries, while unbroken output and synthetic ellipsis tails retain bounded hard-wrap behavior."
+    },
+    {
+      "evidence": "dist/ridgecode-x86_64-pc-windows-msvc.zip; entries exactly install.ps1, README.md, ridgecode.exe; SHA-256 176DC646BB021685D9A46B9AA846FB9400B71FD791BC53439A1F2D375AD10CDA",
+      "fact": "The latest local Windows package contains the complete README, install.ps1, and release ridgecode.exe with a matching SHA-256 sidecar after the live-wrap fix."
+    },
+    {
+      "evidence": "CodeGraph: LiveTranscript::visible_lines, LineIndex::tail_ranges, LiveOutputCache::prepare, DetailLayoutCache::prepare; long_live_frames_are_bounded_and_profiled passed.",
+      "fact": "NLM's proposed virtualized layout-height cache is not an unimplemented gap: current code already bounds visible logical/physical tails and caches live/detail layout by revision and width."
+    },
+    {
+      "evidence": "CodeGraph: flush_commits/insert_bounded_commit_lines plus answer_history_panel, reasoning_history_panel, tool_history_panel, live_history_panel_with_queue, and Ctrl+R/Ctrl+O routing.",
+      "fact": "NLM's follow-up claim that native scrollback makes Answer/Reasoning/Tool blocks unrecoverable is not true for this TUI contract: static scrollback is intentionally non-interactive, while bounded Answer/Reasoning/Tool/Live history panels recover and expand those records."
     }
   ]
 }

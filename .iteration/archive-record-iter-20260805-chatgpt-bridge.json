@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-chatgpt-bridge",
+  "at": "2026-08-05T11:50:00+08:00",
+  "type": "integration",
+  "facts": [
+    "Independent C:\\code\\chatgpt-nlm-research-mcp is on main at 1228bbb7e3321b11f449a043dd88594792e709ef with a clean worktree and no remote.",
+    "Codex config registers chatgpt-nlm-research as an independent stdio MCP pointing to its release executable; existing notebooklm-mcp remains untouched.",
+    "Completed task chatgpt-web-1785898376338-84776-0 report is 28934 bytes with SHA-256 7618085979B1A2AED8744F8B2C62882A31FF80011F72A303981E525FB843A405.",
+    "NLM notebook f6ffd900-708d-44ee-9818-1a3269c533fc contains imported source df4d5dcc-9813-4c61-ae9f-1e9199cb7555; raw source content was successfully read.",
+    "The follow-up NLM query against the imported report returned RESOURCE_EXHAUSTED before an answer; no recommendation was accepted and the real task ID was not cleaned."
+  ],
+  "evidence": [
+    "git status --short --branch and git rev-parse in the independent repository",
+    "local report Get-FileHash and Get-Item",
+    "C:\\Users\\12867\\.codex\\config.toml registration block",
+    "NotebookLM notebook_get and source_get_content",
+    "notebook_query returned Google error code 8 RESOURCE_EXHAUSTED"
+  ],
+  "paths": [
+    ".iteration/context.json",
+    ".iteration/notebooklm-response-20260805-next-17.json"
+  ],
+  "next": [
+    "Resume the bounded ultra-low pending queue presentation experiment in ridge-code."
+  ]
+}

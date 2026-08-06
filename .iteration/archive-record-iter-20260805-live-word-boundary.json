@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-live-word-boundary",
+  "at": "2026-08-05T10:53:22+08:00",
+  "type": "iteration",
+  "facts": [
+    "CodeGraph and a focused regression reproduced ordinary-word splits in live physical reflow at width 40: `network` became `netwo`/`rk` and `available` became `availabl`/`e`.",
+    "The existing live forward wrapper and bounded reverse-tail wrapper now defer whitespace and prefer whole-word breaks while preserving styled spans; unbroken long output keeps the established grapheme/cell hard-wrap path.",
+    "Bounded synthetic ellipsis tails retain `…` through a greedy fallback when word-preferred packing would waste a visible row; static commit fallback remains unchanged.",
+    "No execution, provider, MCP, queue, history, cursor, or key-routing semantics changed."
+  ],
+  "evidence": [
+    "live_output_prefers_word_boundaries_before_hard_wrapping passed for both wrap_live_spans and wrap_live_spans_tail",
+    "live_markdown_highlighting_tails_long_prose_before_span_scan passed with the ellipsis and visible tail preserved",
+    "live_tail_wrap_bounds_unbroken_output passed with bounded newest rows and the existing unbroken tail contract",
+    "cargo test --workspace --locked --offline --quiet passed: agent 104, TUI 305, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest passed",
+    "cargo fmt --all -- --check and cargo clippy --workspace --all-targets --locked --offline -- -D warnings passed",
+    "Release BusyFixture status=passed with live reasoning inspection, queue/HOLD/FOLLOW/takeover, resize 40x12, and dual Ctrl-C; preview no longer showed the split words",
+    "Release StressFixture status=passed with live Answer/Reasoning/Conclusion, Answer inspection, resize 40x12, and dual Ctrl-C",
+    "Release package contains install.ps1, README.md, ridgecode.exe; SHA-256 176DC646BB021685D9A46B9AA846FB9400B71FD791BC53439A1F2D375AD10CDA",
+    "NotebookLM same-session query returned RESOURCE_EXHAUSTED; no research-status operation was used and no recommendation was accepted"
+  ],
+  "paths": [
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/app.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260805-next-11.json",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip.sha256"
+  ],
+  "symbols": [
+    "live_wrap_units",
+    "wrap_live_spans",
+    "wrap_live_spans_tail",
+    "LiveTailWrap",
+    "wrap_live_spans_greedy",
+    "live_output_prefers_word_boundaries_before_hard_wrapping"
+  ],
+  "next": [
+    "完成 snapshot、requirements_gate、notebook_gate、iteration_gate、preflight 与 JSON/diff 校验；安装包仍为本地产物，未提交、未推送、未创建 GitHub Release。"
+  ]
+}

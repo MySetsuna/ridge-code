@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260806-slash-discoverability",
+  "at": "2026-08-06",
+  "type": "iteration",
+  "facts": [
+    "The TUI dispatcher accepted /goal, /inspect, and /reasoning, but SLASH_COMMANDS omitted them, so the input completion popup could not discover three important task/audit entry points.",
+    "The static slash completion list now includes /goal, /inspect, and /reasoning; existing aliases and command routing remain unchanged.",
+    "README now documents /effort, its accepted values, and /find [query] alongside the existing goal and audit commands.",
+    "The PTY harness default timeout was shorter than its valid InspectAnswer interrupt point; raising the default to 6500 ms makes the documented default StressFixture + InspectAnswer combination executable."
+  ],
+  "evidence": [
+    "slash_popup_surfaces_goal_and_attention_commands passed",
+    "cargo test --workspace --locked --offline --quiet: all workspace tests passed (agent 104, TUI 299, remaining workspace suites passed)",
+    "cargo fmt --all -- --check; cargo clippy --workspace --all-targets --locked --offline -- -D warnings; Release build: passed",
+    "Release BusyFixture with Inspector/Queue/Reasoning/HOLD/FOLLOW/Resize/Esc takeover/dual Ctrl-C: status=passed",
+    "Release StressFixture + InspectAnswer with default timeout: status=passed; Answer live focus and hold snapshot observed",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip contains install.ps1, README.md, ridgecode.exe; SHA-256 129c22a51d0694e0d5f5a8e8928156e36996731ffab0932a346cd108d0180302"
+  ],
+  "paths": [
+    "crates/agent/src/tui/input.rs",
+    "crates/agent/src/tui/tests.rs",
+    "README.md",
+    "scripts/windows-pty-e2e.ps1",
+    ".iteration/notebooklm-response-20260806-next-3.json"
+  ],
+  "symbols": [
+    "SLASH_COMMANDS",
+    "build_popup",
+    "run_command",
+    "slash_popup_surfaces_goal_and_attention_commands"
+  ],
+  "next": [
+    "继续以本地证据寻找新的思考/回答展示缺口；保持单一 renderer/cache/state 边界。"
+  ]
+}

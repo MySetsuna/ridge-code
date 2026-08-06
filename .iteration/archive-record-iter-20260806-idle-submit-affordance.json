@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260806-idle-submit-affordance",
+  "at": "2026-08-06",
+  "type": "iteration",
+  "facts": [
+    "The idle 56–87 column input rail displayed only optional reasoning/archive actions and did not state that Enter submits a new turn.",
+    "The narrow archive rail could spend its cell budget on Ctrl+A/Ctrl+R/Ctrl+O/Ctrl+I tokens before exposing a submit affordance.",
+    "The presentation-only fix reserves `Enter send` for medium idle frames and a compact `↵` token for narrow idle frames; tiny labels use `In` to preserve submit plus audit tokens within the existing cell budget."
+  ],
+  "evidence": [
+    "input_chrome_exposes_submit_or_queue_mode passed with medium `Enter send`, narrow `↵`, and cell-bound assertions",
+    "cargo test -p agent --bin ridgecode input_chrome_exposes_submit_or_queue_mode --locked --offline --quiet: passed",
+    "Existing input_action Enter/Submit routing and busy Queue branches were not edited",
+    "workspace tests (104 agent, 299 TUI, remaining workspace suites), fmt, Clippy, Release build, Release BusyFixture and StressFixture + InspectAnswer all passed",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip contains install.ps1, README.md, ridgecode.exe; SHA-256 73e1dcc85ad9e488b80382c3d2a52f04db7d476846f1bc0c35ca8312a1f3c94c"
+  ],
+  "paths": [
+    "crates/agent/src/tui/status.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260806-next-5.json"
+  ],
+  "symbols": [
+    "compact_idle_history_actions",
+    "input_chrome",
+    "input_chrome_exposes_submit_or_queue_mode"
+  ],
+  "next": [
+    "跑全量 workspace、Clippy、Release、ConPTY 与安装包门禁。"
+  ]
+}

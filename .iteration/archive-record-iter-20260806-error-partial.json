@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260806-error-partial",
+  "at": "2026-08-06T00:00:00+08:00",
+  "type": "iteration",
+  "status": "verified",
+  "facts": [
+    "When a streamed Answer was retained after a provider Error, the idle result card showed only the activity recovery shortcut and hid the partial Answer body and its existing metadata.",
+    "Error result cards now reuse the existing bounded Answer recovery, excerpt, and metadata projections; retained output is labeled PARTIAL and remains reachable through Ctrl+A.",
+    "The change is presentation-only: execution, queue, provider, MCP, key routing, bounded history, and native scrollback semantics remain unchanged."
+  ],
+  "evidence": [
+    "error_idle_surface_keeps_partial_answer_recoverable failed before the fix because the Error card hid `partial provider response` and Answer metadata.",
+    "The same focused regression passed after the fix and observed ERR, PARTIAL body, step, and task-token metadata.",
+    "CodeGraph confirmed idle_result_summary is the sole projection caller and the existing idle_answer_recovery/idle_channel_meta helpers are bounded presentation helpers.",
+    "NLM note/chat audit found exactly one Active Note; no stale or completed Note was safe to delete.",
+    "The bounded NLM query returned RESOURCE_EXHAUSTED; no recommendation or Deep Research status was consumed."
+  ],
+  "paths": [
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260806-error-partial.json",
+    ".iteration/context.json",
+    ".iteration/decision.json"
+  ],
+  "symbols": [
+    "idle_result_summary",
+    "idle_answer_recovery",
+    "idle_answer_excerpt",
+    "idle_channel_meta",
+    "error_idle_surface_keeps_partial_answer_recoverable"
+  ],
+  "notebook": {
+    "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "note_count": 1,
+    "note_action": "retained exactly one useful Active Note; no stale/completed Note deleted",
+    "response": ".iteration/notebooklm-response-20260806-error-partial.json",
+    "query_error": "RESOURCE_EXHAUSTED",
+    "research_status_queried": false,
+    "source_ids": [
+      "8862d715-ffad-4288-b7eb-173260e2dcff"
+    ]
+  },
+  "next": [
+    "Continue the active TUI objective from the refreshed snapshot; keep the next slice presentation-only and locally falsifiable."
+  ]
+}

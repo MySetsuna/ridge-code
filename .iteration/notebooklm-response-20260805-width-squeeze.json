@@ -1,0 +1,75 @@
+{
+  "status": "PROCEED",
+  "confirmed_facts": [
+    {
+      "fact": "NLM proposed content-aware width squeezing for short Thinking/Answer blocks, with narrow-terminal fallback and no streaming jitter.",
+      "evidence": "NotebookLM chat conversation 68791fb7-659a-4ad8-a86c-beb7ac694781 queried with source 8862d715-ffad-4288-b7eb-173260e2dcff."
+    },
+    {
+      "fact": "The literal proposal does not match this repository: no render/transcript.rs exists, and live/static output is not a set of independent full-width block surfaces.",
+      "evidence": "CodeGraph draw_live_output/live_surface_block/idle_result_card_lines; current files under crates/agent/src/tui."
+    },
+    {
+      "fact": "The repository has a real completed idle result card containing Answer, Reasoning, and Conclusion presentation details, while streaming output and native scrollback intentionally remain full width.",
+      "evidence": "CodeGraph idle_result_summary/live_empty_state/idle_result_card_lines and existing wide_completed_idle_surface_uses_bounded_result_card regression."
+    },
+    {
+      "fact": "The target notebook has exactly one current Active Note; no stale or completed Note was identified for safe deletion.",
+      "evidence": "NotebookLM note list returned count=1 with retained note aeb2c29a-3d94-4190-a458-aaa2c642abd5."
+    }
+  ],
+  "contradictions": [
+    "NLM's named render path and per-logical-block full-width Surface premise contradict the current repository architecture; only the compatible result-card portion was retained."
+  ],
+  "unverified_hypotheses": [],
+  "candidates": [
+    {
+      "core": "Apply content-aware horizontal sizing only to the completed idle result card: center short Answer/THK/SUM summaries within a bounded card while preserving full-width streaming and native scrollback.",
+      "constraints": [
+        "presentation-only",
+        "wide completed idle card only",
+        "reuse existing rendered detail cell counts and existing recovery actions",
+        "no second renderer, virtualizer, cache, parser, execution state machine, dependency, or surface"
+      ],
+      "risks": [
+        "CJK/emoji display-cell mismatch could misalign a centered border",
+        "long Answer/Markdown detail must fall back to the full available width",
+        "resize must recompute width without affecting native scrollback"
+      ],
+      "reversibility": "Remove the content-width calculation and left padding; the prior full-width result-card projection remains intact.",
+      "scope": ["crates/agent/src/tui/draw.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": [
+        "wide_short_result_card_is_content_aware_and_centered",
+        "wide_completed_idle_surface_uses_bounded_result_card",
+        "workspace tests, fmt, clippy, Release BusyFixture and CompletionFixture"
+      ]
+    }
+  ],
+  "recommendation": "Accept only the adapted completed-result-card slice after local tests and ConPTY verify cell bounds; reject applying width squeezing to streaming or native-scrollback projections.",
+  "next_step": {
+    "type": "implementation",
+    "value": "Run the full workspace quality gates and Release BusyFixture/CompletionFixture, then archive the verified result-card width slice."
+  },
+  "stop_conditions": [
+    "Do not query or poll the old user-owned Deep Research task.",
+    "Do not delete the sole Active Note without explicit stale/completed evidence.",
+    "If CJK/emoji or resize tests fail, revert the width adaptation rather than changing the native scrollback or adding a second layout engine."
+  ],
+  "question": "Give one local, presentation-only TUI gap for model reasoning/final-answer visibility under the existing bounded and user-interruptible architecture.",
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "conversation_id": "68791fb7-659a-4ad8-a86c-beb7ac694781",
+  "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+  "sources_used": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+  "citations": {"1": "8862d715-ffad-4288-b7eb-173260e2dcff"},
+  "references": ["NotebookLM recommendation and local CodeGraph adjudication"],
+  "research_start": {
+    "status": "error",
+    "task_id": null,
+    "error": "Failed to start research — Google API error code 8 (UserDisplayableError)."
+  },
+  "note_audit": {
+    "count": 1,
+    "retained_note_id": "aeb2c29a-3d94-4190-a458-aaa2c642abd5",
+    "deleted": []
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [],
+  "contradictions": [],
+  "unverified_hypotheses": [],
+  "candidates": [],
+  "recommendation": "No recommendation accepted: the same-session query was rejected before NotebookLM returned an answer.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Use local CodeGraph and deterministic terminal evidence to identify one presentation-only TUI gap; do not retry the exhausted query in this turn."
+  },
+  "stop_conditions": [
+    "Google rejected the query with RESOURCE_EXHAUSTED (error code 8).",
+    "No research-status operation was performed and no deep-research state was inspected."
+  ],
+  "meta": {
+    "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "source_ids": [
+      "8862d715-ffad-4288-b7eb-173260e2dcff"
+    ],
+    "queried_at": "2026-08-05T10:00:00+08:00"
+  },
+  "error": {
+    "code": "RESOURCE_EXHAUSTED",
+    "message": "Google rejected the query (error code 8: RESOURCE_EXHAUSTED)."
+  }
+}

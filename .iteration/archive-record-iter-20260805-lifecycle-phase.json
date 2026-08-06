@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-lifecycle-phase",
+  "at": "2026-08-05",
+  "type": "iteration",
+  "facts": [
+    "Ui.phase stayed on the last NodeFinished label after task completion while activity became completed; this made diagnostic snapshots report phase=verifying alongside activity_kind=DONE.",
+    "Lifecycle presentation now owns terminal/intervention projection: completed or stopped outcome, error, takeover, and approval update phase and activity together; prior node transitions remain in the bounded activity history.",
+    "The Windows ConPTY completion probe previously required a contiguous raw phrase even though cursor-addressed redraws split visible cells; it now combines snapshot row evidence with normalized fixture markers."
+  ],
+  "evidence": [
+    "lifecycle_boundaries_keep_phase_and_activity_aligned passed",
+    "cargo test --workspace: 104 + 325 + 1 + 9 + 2 + 52 + 18 + doctests passed",
+    "cargo fmt --all -- --check passed",
+    "cargo clippy --workspace --all-targets -- -D warnings passed",
+    "cargo build --workspace --release passed",
+    "windows-pty-e2e.ps1 -CompletionFixture -ResizeProbe -TimeoutMs 20000 -KeepDiagnostics: status=passed, snapshot_phase=completed, completion_evidence_satisfied=true",
+    "windows-pty-e2e.ps1 -BusyFixture -InspectLive -InspectReasoning -InspectQueue -ResizeProbe -TimeoutMs 20000 -KeepDiagnostics: status=passed, snapshot_phase=takeover"
+  ],
+  "paths": [
+    "crates/agent/src/tui/app.rs",
+    "crates/agent/src/tui/mod.rs",
+    "crates/agent/src/tui/tests.rs",
+    "scripts/windows-pty-e2e.ps1",
+    ".iteration/decision.json"
+  ],
+  "symbols": [
+    "Ui::mark_task_outcome",
+    "Ui::mark_error",
+    "Ui::mark_takeover_ready",
+    "Ui::mark_approval_required",
+    "lifecycle_boundaries_keep_phase_and_activity_aligned",
+    "windows-pty-e2e.ps1 completion evidence"
+  ],
+  "next": [
+    "保留现有单一 Active Note；下一轮若有新可复现展示缺口，先走热循环与 CodeGraph。"
+  ]
+}

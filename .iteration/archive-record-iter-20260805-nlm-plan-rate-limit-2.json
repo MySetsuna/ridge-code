@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-nlm-plan-rate-limit-2",
+  "at": "2026-08-05T11:30:00+08:00",
+  "type": "iteration",
+  "facts": [
+    "NLM authentication and notebook/session inventory remained valid; the target still has one Active Note and one active planning conversation.",
+    "The next-plan query restricted to the manual TUI theory source again failed with RESOURCE_EXHAUSTED before returning a recommendation.",
+    "Local CodeGraph found no untested cache invalidation defect: telemetry-only changes already reuse the LiveOutputCache, while transcript or geometry changes rebuild it as intended.",
+    "No research status was inspected, no source or Note was created/deleted, and no code architecture was changed without a reproducible defect."
+  ],
+  "evidence": [
+    "nlm login --check: Authentication valid",
+    "notebook_list/note list/chat_list: target notebook, one Active Note, and one active conversation",
+    ".iteration/notebooklm-response-20260805-next-14.json: structured failed-query record",
+    "live_output_cache_reuses_rows_until_transcript_or_geometry_changes: telemetry-only cache hit regression passed",
+    "Release StressFixture + InspectAnswer: Answer/Reasoning/Conclusion/resize/dual Ctrl-C passed"
+  ],
+  "paths": [
+    ".iteration/notebooklm-response-20260805-next-14.json",
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/tests.rs",
+    "scripts/windows-pty-e2e.ps1"
+  ],
+  "symbols": [
+    "LiveOutputCache",
+    "live_output_cache_reuses_rows_until_transcript_or_geometry_changes",
+    "draw_live_output",
+    "status_line_projection"
+  ],
+  "next": [
+    "Require a new locally reproducible UI defect before the next presentation-only implementation; do not retry this session's exhausted NLM query."
+  ]
+}

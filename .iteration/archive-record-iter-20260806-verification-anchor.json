@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260806-verification-anchor",
+  "at": "2026-08-06",
+  "type": "iteration",
+  "facts": [
+    "Verification activity was classified as CHK and remained available in the Activity panel/live lifecycle path, but it was not retained as a native scrollback activity anchor after the live phase advanced.",
+    "The presentation-only fix adds ActivityKind::Verification to the existing retained-signal boundary; it reuses activity_commit_lines, the bounded Activity ledger, and the Ctrl+T detail surface.",
+    "Execution, provider, MCP, queue, tool folding, Answer/Reasoning separation, activity ordering, and key routing are unchanged."
+  ],
+  "evidence": [
+    "verification_activity_leaves_a_static_anchor_with_a_detail_affordance passed",
+    "cargo test --workspace --locked --offline --quiet: agent 104, TUI 297, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest passed",
+    "cargo fmt --all -- --check and cargo clippy --workspace --all-targets --locked --offline -- -D warnings passed",
+    "cargo build --workspace --release --locked --offline passed",
+    "Release BusyFixture 96/64/56 and StressFixture 18x14 passed with Inspector/detail, queue, reasoning, HOLD/FOLLOW, resize, takeover, Answer, and dual Ctrl-C evidence",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip contains install.ps1, README.md, ridgecode.exe; SHA-256 fc9d3b640e687c8a14709294ebf04d243d865709d8b05c7f6248a6a8df7a6b10"
+  ],
+  "paths": [
+    "crates/agent/src/tui/app.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260806-next.json",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip"
+  ],
+  "symbols": [
+    "ActivityKind::is_retained_signal",
+    "Ui::record_activity",
+    "activity_commit_lines",
+    "verification_activity_leaves_a_static_anchor_with_a_detail_affordance"
+  ],
+  "next": [
+    "继续以本地证据寻找一个新的思考/回答展示缺口；不新增渲染器、虚拟化器或执行状态。"
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260806-queue-affordance",
+  "at": "2026-08-06",
+  "type": "iteration",
+  "facts": [
+    "忙态窄输入栏原先仅显示 `Q:[n]`，用户能看到队列深度，却看不到普通 Enter 会追加到队尾。",
+    "presentation-only action rail 现按优先级在队列数后加入 `↵ queue`（较宽）或 `↵`（窄屏），随后保留 `^C` 接管及可选审计键；队列路由、Ctrl+Enter 队首、Ctrl-C 与执行状态均未改变。",
+    "Release 包已由当前代码重建，包含 README、Windows 本地安装脚本、ridgecode.exe 与 SHA-256。"
+  ],
+  "evidence": [
+    "input_chrome_exposes_submit_or_queue_mode: widths 12/18/24 preserve Enter queue token within the cell budget",
+    "cargo test --workspace --locked --offline --quiet: all workspace tests passed (TUI 296; agent 104)",
+    "cargo fmt --all -- --check; cargo clippy --workspace --all-targets --locked --offline -- -D warnings: passed",
+    "Release BusyFixture with Inspector/Queue/Reasoning/HOLD/FOLLOW/Resize/dual Ctrl-C: status=passed; queue_affordance_observed=true",
+    "Release StressFixture 18x14 with Answer inspection, reasoning/answer visibility, resize, and dual Ctrl-C: status=passed",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip; SHA-256 ae064b82f5bd86c5348b38c8ac308fe22d054d84dea6792ebdf1fb5826e891c"
+  ],
+  "paths": [
+    "crates/agent/src/tui/status.rs",
+    "crates/agent/src/tui/tests.rs",
+    "scripts/dist.ps1",
+    "README.md",
+    "scripts/install.ps1",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip.sha256"
+  ],
+  "symbols": [
+    "compact_busy_actions",
+    "input_chrome",
+    "input_chrome_exposes_submit_or_queue_mode"
+  ],
+  "next": [
+    "继续以本地证据寻找一个新的思考/回答展示缺口；不新增渲染器、虚拟化器或执行状态。",
+    "若用户要求发布，再提交、推送并创建新的 GitHub Release；当前仅保留本地未提交包。"
+  ]
+}

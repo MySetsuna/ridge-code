@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-hold-e2e",
+  "at": "2026-08-05",
+  "type": "iteration",
+  "facts": [
+    "BusyFixture InspectHold initially reported partial because Windows ConPTY delivered Ctrl+Space press/release together; the app rendered a transient `HOLD · thinking` frame and immediately returned to follow before JSON polling sampled it.",
+    "The harness now treats a visible HOLD lifecycle marker plus final `live_view=follow` as valid momentary HOLD/FOLLOW evidence, while direct snapshot observation remains preferred.",
+    "The input regression proves Ctrl+Shift+2 press/release survives `decide_key` and reaches the dedicated hold toggle/release classifiers."
+  ],
+  "evidence": [
+    "decide_key_preserves_momentary_hold_press_and_release passed",
+    "cargo test -p agent hold: 8 passed",
+    "BusyFixture -InspectHold -ResizeProbe -TimeoutMs 20000 -KeepDiagnostics: status=passed",
+    "hold_observed=true; follow_observed=true; hold_frame_observed=true",
+    "raw ConPTY output contained `HOLD · thinking`; final snapshot reported `live_view=follow` and `phase=takeover`"
+  ],
+  "paths": [
+    "crates/agent/src/tui/tests.rs",
+    "scripts/windows-pty-e2e.ps1",
+    ".iteration/decision.json"
+  ],
+  "symbols": [
+    "decide_key",
+    "live_hold_toggle_action",
+    "live_hold_release_action",
+    "hold_frame_observed"
+  ],
+  "next": [
+    "继续以真实可见字节与快照双证据审计其他注意力快捷键。"
+  ]
+}

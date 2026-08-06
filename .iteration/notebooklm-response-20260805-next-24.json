@@ -1,0 +1,76 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "目标 Notebook 当前仍仅有一个 Active Note；没有可安全删除的过期或已完成 Note。",
+      "evidence": "notebook_list、note(action=list)：notebook_id=24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57，note_count=1。"
+    },
+    {
+      "fact": "当前 NLM 对话第 9 轮的 KKP HOLD/FOLLOW 建议已在本地实现；第 10 轮共享工作区/移动端方案不属于本轮 TUI 范围。",
+      "evidence": "chat_get conversation_id=68791fb7-659a-4ad6-a86c-beb7ac694781，turn 9/10；本地 input/mod/tests 已覆盖 HOLD/FOLLOW 与回退。"
+    },
+    {
+      "fact": "CodeGraph 显示静态 Answer Markdown 投影在 render.rs，而 Reasoning、Activity、Tool 与语义 commit wrapping 原先散落 app.rs；flush_commits 仍是编排边界。",
+      "evidence": "CodeGraph exploration of flush_commits, reasoning_commit_lines, activity_commit_lines, static_tool_lines, commit_semantic_prefix, wrap_commit_lines。"
+    },
+    {
+      "fact": "本轮仅将既有静态展示 helper 归拢至 render.rs，未增加 renderer/parser/cache/state/dependency，也未改变输出、队列、按键、执行或 terminal insert_before 语义。",
+      "evidence": "app.rs 仅保留 CommitBlock drain/ledger lookup/batch insertion；render.rs 统一承载四类静态 projection；workspace/PTY 验证通过。"
+    },
+    {
+      "fact": "本轮没有发起新的 notebook_query 或 research_status；此前 RESOURCE_EXHAUSTED 继续按规则退避。",
+      "evidence": "本轮仅 notebook_list、note list、chat_list/chat_get 与本地 CodeGraph/gates。"
+    }
+  ],
+  "contradictions": [],
+  "hypotheses": [],
+  "unverified_hypotheses": [],
+  "candidates": [
+    {
+      "core": "以既有 render.rs 作为静态 Answer/Reasoning/Activity/Tool 提交 projection 的单一展示归属，app.rs 只做提交编排。",
+      "disposition": "accepted_local_refactor",
+            "constraints": [
+                "保留 cell-width rails、Markdown roles、fold limits、native scrollback 与 insert_before batching",
+                "保留 PresentationLedger partial/metrics lookup、CommitBlock order 与所有交互语义",
+                "不新增 renderer/parser/cache/dependency/state/file"
+            ],
+            "risks": [
+                "静态投影 helper 移动时可能引入可见文本、折叠边界或宽度计算回归",
+                "app.rs 与 render.rs 的可见性边界变化可能造成编译或测试耦合"
+            ],
+            "reversibility": "高：仅移动既有展示 helper；可按单一提交回退，不触及状态、协议或数据格式",
+            "scope": [
+                "crates/agent/src/tui/app.rs",
+                "crates/agent/src/tui/render.rs",
+                "crates/agent/src/tui/tests.rs"
+            ],
+            "validation": [
+        "cargo test --workspace --locked --offline --quiet",
+        "cargo fmt --all -- --check",
+        "cargo clippy --workspace --all-targets --locked --offline -- -D warnings",
+        "cargo build --release --workspace --locked --offline",
+        "Release BusyFixture and StressFixture"
+      ]
+    }
+  ],
+  "recommendation": "保留唯一 Active Note；拒绝第 10 轮偏题方案。当前静态 projection 归拢已完成并通过全仓/Release PTY，下一轮继续从 CodeGraph 找真实可见缺口，不扩大成第二 renderer 或全局虚拟化。",
+  "next_step": {
+    "type": "experiment",
+    "value": "审计统一后的静态提交与 Audit/History projection 是否仍有可本地复现的 Answer/Reasoning status 或工具详情可见性缺口。"
+  },
+  "stop_conditions": [
+    "不删除唯一 Active Note。",
+    "不查询任何 research status。",
+    "不重试此前 RESOURCE_EXHAUSTED 的 notebook_query。",
+    "不新增第二 renderer/parser/cache/virtualizer/execution state machine。",
+    "保持 Tab 补全、Enter 提交、Ctrl+Space HOLD/FOLLOW、Esc/Ctrl-C 接管语义不变。"
+  ],
+  "question": "静态提交展示职责是否已高内聚归拢，同时保持模型思考、最终回答、工具折叠与生命周期投影可读且可验证？",
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+  "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+  "sources_used": [],
+  "citations": {},
+  "references": [],
+  "error": "RESOURCE_EXHAUSTED from prior constrained notebook_query; back off and use chat/code evidence"
+}

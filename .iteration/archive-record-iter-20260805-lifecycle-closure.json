@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-lifecycle-closure",
+  "at": "2026-08-05T16:00:00+08:00",
+  "type": "iteration",
+  "status": "verified",
+  "facts": [
+    "NLM target notebook still has exactly one useful Active Note; no stale or completed Note was safe to delete, so it was retained.",
+    "The bounded planning query was attempted once against the manual theory source and returned RESOURCE_EXHAUSTED; no research status was queried and no research task or Note was created or deleted.",
+    "CodeGraph confirmed Answer, Reasoning, and Activity static projections already share the bounded commit/wrap path; the remaining defect was missing visual closure on the final logical line of multiline static blocks.",
+    "Static multiline Answer now ends with ╰, while Reasoning and Activity end with └; intermediate lines retain their existing semantic continuation rails.",
+    "The slice changes only presentation projection and tests: no body text, Markdown roles, metadata, state, parser, cache, virtualizer, dependency, renderer, execution, provider, MCP, or key-routing change."
+  ],
+  "evidence": [
+    "CodeGraph exploration of flush_commits, reasoning_commit_lines, answer_commit_lines_with_status_and_metrics, activity_commit_lines, commit_semantic_prefix, and wrap_commit_lines.",
+    "cargo test -p agent --bin ridgecode --locked --offline --quiet: 318 passed.",
+    "cargo test --workspace --locked --offline --quiet passed.",
+    "cargo fmt --all -- --check passed.",
+    "cargo clippy --workspace --all-targets --locked --offline -- -D warnings passed.",
+    "cargo build --release --workspace --locked --offline passed.",
+    "Release BusyFixture with Inspector/queue/reasoning/resize/double Ctrl-C returned status=passed.",
+    "Release StressFixture with Answer inspection/resize/double Ctrl-C returned status=passed; completion reasoning and answer remained observable.",
+    "NLM notebook_list/note list/chat_get showed one Active Note; notebook_query returned RESOURCE_EXHAUSTED and was not retried."
+  ],
+  "paths": [
+    "crates/agent/src/tui/app.rs",
+    "crates/agent/src/tui/render.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260805-next-23.json",
+    ".iteration/context.json",
+    ".iteration/decision.json"
+  ],
+  "symbols": [
+    "reasoning_commit_lines",
+    "activity_commit_lines",
+    "answer_commit_rail",
+    "answer_commit_lines_with_status_and_metrics",
+    "commit_semantic_prefix",
+    "wrap_commit_lines",
+    "reasoning_scrollback_closes_multiline_block",
+    "answer_scrollback_closes_multiline_block",
+    "activity_scrollback_closes_multiline_block"
+  ],
+  "notebook": {
+    "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "note_count": 1,
+    "note_action": "retained exactly one useful Active Note; no stale/completed Note deleted",
+    "response": ".iteration/notebooklm-response-20260805-next-23.json",
+    "query_error": "RESOURCE_EXHAUSTED",
+    "research_status_queried": false,
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"]
+  },
+  "next": [
+    "Do not retry the exhausted NLM query in this turn; continue from the refreshed snapshot only after a new reproducible presentation defect or quota recovery.",
+    "Keep the next TUI slice bounded and presentation-only, with a deterministic test and release PTY evidence."
+  ]
+}

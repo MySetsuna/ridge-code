@@ -1,0 +1,55 @@
+{
+  "status": "success",
+  "answer": "根据现有资料和 CodeGraph 已验证的组件，当前计划中仍未解决的、且对用户可见的 **Answer/Reasoning 观察与展开交互缺口** 在于：**“硬件滚动区与交互式组件的隔离冲突” (Interactive-Log Paradox)**。\n\n### 缺口描述\n在 Phase 3 的计划中，为了解决高频流式输出带来的闪烁问题，引入了 `Terminal::insert_before` 机制来利用终端的硬件滚动区（Scrolling Regions） [1]。然而，硬件滚动区处理的是**终端模拟器的回滚缓冲区 (Scrollback Buffer)**，这些内容一旦被“推入”历史，就会脱离 Ratatui 的事件系统和 `StatefulWidget` 状态机的控制 [1-3]。\n\n这意味着：当 Reasoning（推理）流式输出过长触发滚动时，**已经进入硬件回滚区的推理步骤或工具调用块（Tool Calls）将失去交互能力**。用户无法使用 `Spacebar` 展开/折叠那些已经向上滚动出当前“活跃视口”的内容，也无法通过 `Tab` 键将焦点移入这些历史块 [4]。\n\n### 现有代码定位与最小改动符号\n*   **定位位置**：`Phase 3: Task 3.2` (Implement dynamic log writing using `Terminal::insert_before`) [1]。\n*   **最小改动符号**：`insert_before` 调用逻辑。\n*   **修正逻辑**：需要引入 **“交互边界保护” (Interaction Anchor)**。改动符号为 `Widget::is_sealed` 或 `StatefulWidget::freeze`。\n    *   **逻辑说明**：禁止对处于“非密封（未完成流式传输或仍需交互）”状态的 Markdown 块调用 `insert_before`。只有当一个 Reasoning 块完全结束且被用户手动或自动标记为 `Static` 时，才允许将其推入硬件滚动区 [1, 2]。\n\n### 确定性验收测试\n1.  **操作步骤**：\n    *   启动一个会产生长文本（超过当前终端高度）且包含工具调用（Tool Call）的推理任务 [5, 6]。\n    *   等待推理流持续输出，直到该工具调用块的顶部因 `insert_before` 机制向上滚动并进入终端的硬件历史区域 [1]。\n    *   尝试按下 `Tab` 键尝试选中该已进入历史区域的工具调用块标题，并按下 `Spacebar` [4]。\n2.  **预期结果（缺口证明）**：\n    *   **失败（当前缺口）**：按键无响应，或者只能滚动终端原生滚动条，交互式 TUI 无法感知并展开该折叠块 [2, 7]。\n    *   **通过（修正后）**：即使推理内容极长，所有尚未完成交互生命周期的块都必须保留在“活跃视口”内参与布局计算，只有纯文本 Log 允许进入硬件滚动区。",
+  "question": "CodeGraph 已证明当前已有 LineIndex 有界尾部、LiveOutputCache、DetailLayoutCache、Markdown 预算与长流 profile；所以你前述虚拟化/高度缓存不是缺口。请修正计划：排除所有缓存、虚拟化、第二渲染器、全屏重绘建议，只给一个仍未解决的用户可见 Answer/Reasoning 观察或展开交互缺口；必须能在现有代码中定位、给出最小改动符号与一个确定性验收测试。若找不到，请明确说当前资料不足，不要编造。",
+  "conversation_id": "68791fb7-659a-4ad8-a86c-beb7ac694781",
+  "sources_used": [
+    "8862d715-ffad-4288-b7eb-173260e2dcff"
+  ],
+  "citations": {
+    "1": "8862d715-ffad-4288-b7eb-173260e2dcff",
+    "2": "8862d715-ffad-4288-b7eb-173260e2dcff",
+    "3": "8862d715-ffad-4288-b7eb-173260e2dcff",
+    "4": "8862d715-ffad-4288-b7eb-173260e2dcff",
+    "5": "8862d715-ffad-4288-b7eb-173260e2dcff",
+    "6": "8862d715-ffad-4288-b7eb-173260e2dcff",
+    "7": "8862d715-ffad-4288-b7eb-173260e2dcff"
+  },
+  "references": [
+    {
+      "source_id": "8862d715-ffad-4288-b7eb-173260e2dcff",
+      "citation_number": 1,
+      "cited_text": "Phase 3: Flicker-Free Logging via Hardware Scrolling Regions Task 3.1 : Enable the scrolling-regions feature flag in Ratatui to allow targeting of specific scroll ranges on the screen [cite: 4, 17]. Task 3.2 : Implement dynamic log writing using Terminal::insert_before [cite: 18, 56]. This scrolls historical logging streams upward without clearing or flickering the active inline TUI viewport [cite: 17, 18]. Phase 4: Virtualized Dynamic Layouts and Dynamic Height Caching Task 4.1 : Implement a lightweight layout cache that tracks calculated line heights relative to the terminal's current column width [cite: 16, 32]. Task 4.2 : Use the unstable-rendered-line-info API ( Paragraph::line_count ) to calculate wrapped text dimensions on demand, avoiding expensive layouts for off-screen text [cite: 33, 34, 35]."
+    },
+    {
+      "source_id": "8862d715-ffad-4288-b7eb-173260e2dcff",
+      "citation_number": 2,
+      "cited_text": "These expandable blocks are built using specialized interactive widgets, such as ratatui-sectioned-list or custom collapsible state trees [cite: 19, 27]. The visual status of each block is managed by a persistent state machine ( StatefulWidget ) [cite: 27, 28, 29]. When a section is collapsed, the application sets the effective height of the enclosed rows to zero [cite: 27]. The layout engine then removes these rows from the visible viewport, total height calculations, and scrolling calculations [cite: 27]."
+    },
+    {
+      "source_id": "8862d715-ffad-4288-b7eb-173260e2dcff",
+      "citation_number": 3,
+      "cited_text": "However, the state machine retains the collapsed rows' indices and structural data [cite: 27]. This allows users to search or navigate through the collapsed content, and lets keyboard and mouse event handlers easily toggle the blocks open or closed [cite: 27]. -------------------------------------------------------------------------------- Static Scrollback vs. Virtualized Viewports under Bounded Memory To ensure that long-running terminal applications remain highly performant, developers must carefully manage how scrollback history is stored and rendered [cite: 15, 30]. Standard scrolling widgets draw content by applying a simple vertical offset to the entire text block [cite: 31]. While this approach is simple to implement, it struggles to scale to large amounts of data [cite: 31, 32]."
+    },
+    {
+      "source_id": "8862d715-ffad-4288-b7eb-173260e2dcff",
+      "citation_number": 4,
+      "cited_text": "Tab / Shift-Tab : Cycles the active focus between interactive components, such as the prompt input, collapsible panels, and the sidebar [cite: 24, 29]. Up / Down Arrow Keys : Scrolls the active document or list by a single row [cite: 16, 31]. PageUp / PageDown : Scrolls the viewport by the number of lines currently visible in the terminal window [cite: 31, 39]. Spacebar : Acts as the primary activation key, allowing users to collapse or expand tool call sections [cite: 7, 27, 40]. Escape : Cancels active selections or closes open menus [cite: 7, 40]."
+    },
+    {
+      "source_id": "8862d715-ffad-4288-b7eb-173260e2dcff",
+      "citation_number": 5,
+      "cited_text": "-------------------------------------------------------------------------------- Streaming Model Reasoning and Typed Transcript Blocks An effective AI agent terminal interface must display real-time, streaming updates of the model’s internal reasoning alongside its final answers [cite: 2, 3]. Standard text output methods can cause the screen to flicker or layout blocks to collapse when parsing rich markup streams like Markdown [cite: 17, 18]. To prevent this, applications use specialized formatting parsers to structure streaming outputs on the fly [cite: 4, 19]."
+    },
+    {
+      "source_id": "8862d715-ffad-4288-b7eb-173260e2dcff",
+      "citation_number": 6,
+      "cited_text": "-------------------------------------------------------------------------------- Interactive Document Layouts: Expandable Tool Calls and Code Folding When an AI agent runs shell commands or calls tools, the resulting outputs are often verbose [cite: 4, 26]. Printing these outputs directly to the terminal screen can clutter the session history, making it difficult for users to track the overall workflow [cite: 1]. To address this, developers use interactive layouts with collapsible blocks to hide tool outputs by default [cite: 23, 27]."
+    },
+    {
+      "source_id": "8862d715-ffad-4288-b7eb-173260e2dcff",
+      "citation_number": 7,
+      "cited_text": "3. Log Performance and Flicker Verification Verify that high-frequency streaming logs scroll smoothly without causing layout flickering or terminal crashes [cite: 17, 18]: Monitor CPU usage during the log benchmark to confirm that hardware scrolling regions successfully prevent full-screen redraws [cite: 6, 17]. The application's average single-core CPU usage should remain low even during high-frequency update bursts [cite: 6]. --------------------------------------------------------------------------------"
+    }
+  ]
+}

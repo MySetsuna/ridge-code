@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [],
+  "contradictions": [],
+  "unverified_hypotheses": [],
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+  "source_ids": [
+    "8862d715-ffad-4288-b7eb-173260e2dcff"
+  ],
+  "question": "基于唯一手动导入理论源，为 RidgeCode 当前 TUI 指定下一项且仅一项尚未实现、可本地复现并验证的 presentation-only 缺口。",
+  "recommendation": "No recommendation accepted: Google rejected the active same-session query before NotebookLM returned an answer.",
+  "candidates": [],
+  "next_step": {
+    "type": "experiment",
+    "value": "停止本轮 NotebookLM 重试，使用本地 CodeGraph、确定性测试与 ConPTY 证据找下一项真实缺口。"
+  },
+  "stop_conditions": [
+    "Google RESOURCE_EXHAUSTED 同会话不重试",
+    "不查询用户自有深度调研状态",
+    "不新增 Note 或 source",
+    "目标本保持唯一 Active Note"
+  ],
+  "error": {
+    "code": "RESOURCE_EXHAUSTED",
+    "message": "Google rejected the query with error code 8 (UserDisplayableError)."
+  },
+  "meta": {
+    "queried_at": "2026-08-05T11:10:00+08:00",
+    "mode": "cold_loop",
+    "trigger": "milestone_review",
+    "theory_basis": "manual_source_only"
+  }
+}

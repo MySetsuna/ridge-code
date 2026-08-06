@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-answer-meta",
+  "at": "2026-08-05",
+  "type": "iteration",
+  "status": "verified",
+  "facts": [
+    "CodeGraph found an observability asymmetry: committed reasoning scrollback displayed step/elapsed/task-token metadata, while committed Answer scrollback displayed only the ANSWER rail and recovery hint.",
+    "PresentationLedger already retained bounded Answer metrics by presentation id; the flush boundary now reads those metrics and adds a subordinate first-line context chip without copying body text or adding execution state.",
+    "Plain answer helper projections remain unchanged when no metrics are supplied; partial answers keep the PARTIAL marker and Ctrl+A recovery affordance."
+  ],
+  "evidence": [
+    "committed_answer_exposes_observed_context_alongside_its_rail passed",
+    "partial_answer_scrollback_keeps_answer_channel_and_marks_partial passed with step/task-token assertions",
+    "cargo test --workspace --locked --offline --quiet passed: agent 104, TUI 310, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest passed",
+    "cargo fmt --all -- --check passed",
+    "cargo clippy --workspace --all-targets --locked --offline -- -D warnings passed",
+    "cargo build --workspace --release --locked --offline passed",
+    "Release BusyFixture with Inspector/Reasoning/Queue/HOLD/FOLLOW/Esc takeover/resize/double Ctrl-C status=passed",
+    "Release StressFixture with Answer inspection/resize/double Ctrl-C status=passed; raw ConPTY output contained `ANSWER [step 1 · +2s · 44559 task tok]`",
+    "release package rebuilt with install.ps1, README.md, ridgecode.exe; SHA256 814d268917e64f990688c9e392131dd6275fb86e07049ce63bf6920ab300f9ab"
+  ],
+  "paths": [
+    "crates/agent/src/tui/app.rs",
+    "crates/agent/src/tui/presentation.rs",
+    "crates/agent/src/tui/render.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260805-next-20.json",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip.sha256"
+  ],
+  "symbols": [
+    "PresentationLedger::metrics",
+    "flush_commits",
+    "commit_lines_with_answer_metrics",
+    "answer_commit_lines_with_status_and_metrics",
+    "committed_answer_exposes_observed_context_alongside_its_rail"
+  ],
+  "notebook": {
+    "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "note_count": 1,
+    "note_action": "retained exactly one useful Active Note; no stale/completed Note deleted",
+    "response": ".iteration/notebooklm-response-20260805-next-20.json",
+    "query_error": "RESOURCE_EXHAUSTED",
+    "research_status_queried": false,
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"]
+  },
+  "next": [
+    "Refresh snapshot with decision hash, validate NotebookLM output, rerun requirements/preflight/iteration gates, JSON/diff checks, and retain this worktree without commit/push/release publication."
+  ]
+}

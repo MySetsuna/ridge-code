@@ -1,0 +1,38 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "No new same-session NLM recommendation is available for this slice; the last query was rejected with Google error code 8 RESOURCE_EXHAUSTED, and this turn did not retry it.",
+      "evidence": "The captured NLM response ended before an answer payload; no research-status operation was used."
+    },
+    {
+      "fact": "Narrow busy chrome previously exposed only `waiting`, so it could not distinguish waiting for the model from waiting for a pending tool call.",
+      "evidence": "CodeGraph and focused draw.rs inspection showed compact_busy_phase discarded pending_call while wide top_status retained the target."
+    },
+    {
+      "fact": "The presentation-only projection now keeps `waiting · model` or `waiting · tool` in narrow busy chrome without changing input, queue, or execution state.",
+      "evidence": "narrow_busy_chrome_keeps_waiting_target_without_live_channel; workspace tests, fmt, Clippy, Release PTY fixtures, and package verification passed."
+    }
+  ],
+  "contradictions": [],
+  "unverified_hypotheses": [],
+  "candidates": [],
+  "recommendation": "No new NLM recommendation is available. Keep the waiting target in the existing compact status projection, preserve the single execution state machine, and require full workspace plus Windows ConPTY evidence for further presentation slices.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Run deterministic iteration gates and inspect the rebuilt Windows package; do not query research status or create another member."
+  },
+  "stop_conditions": [
+    "Do not treat RESOURCE_EXHAUSTED as a design conclusion.",
+    "Do not query user-owned deep-research status.",
+    "Do not create another Ridge member or add a second input/rendering state machine."
+  ],
+  "question": "基于当前唯一手动导入理论源，窄屏等待状态如何保留模型/工具目标并维持现有交互语义？",
+  "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+  "sources_used": [],
+  "citations": {},
+  "references": [],
+  "error": "Google rejected the query (error code 8: RESOURCE_EXHAUSTED)"
+}

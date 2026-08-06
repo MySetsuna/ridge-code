@@ -1,0 +1,71 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "目标 Notebook 当前仅有一个 Active Note，未发现可安全删除的过期或已完成 Note。",
+      "evidence": "notebook_list/note list：notebook_id=24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57，note_id=aeb2c29a-3d94-4190-a458-aaa2c642abd5，count=1。"
+    },
+    {
+      "fact": "既有 NLM 对话第 9 轮 KKP HOLD/FOLLOW 建议已在本地实现；第 10 轮转向共享工作区/移动端，超出本轮 TUI 范围。",
+      "evidence": "chat_get conversation_id=68791fb7-659a-4ad6-a86c-beb7ac694781，turn 9/10；本地 input.rs、mod.rs、tests.rs。"
+    },
+    {
+      "fact": "本轮限定理论源的 NotebookLM 查询在产生结论前再次被 Google 以 RESOURCE_EXHAUSTED code 8 拒绝。",
+      "evidence": "notebook_query 仅使用 source_id=8862d715-ffad-4288-b7eb-173260e2dcff，返回 Google error code 8；本轮不重试。"
+    },
+    {
+      "fact": "本轮未查询任何用户拥有的深度调研任务状态，也未创建 Note/source。",
+      "evidence": "本轮仅使用 notebook_list、note list、chat_list/chat_get、限定 notebook_query 与本地 gates/CodeGraph。"
+    },
+    {
+      "fact": "本地 CodeGraph 显示 Answer 静态提交已有 ANSWER rail/metrics/hint/Markdown alert 投影，Reasoning 静态提交已有 THK metadata/rails/history hint/Markdown roles/alert edges，Activity 与 Tool 各有独立静态投影。",
+      "evidence": "crates/agent/src/tui/app.rs::flush_commits/reasoning_commit_lines/activity_commit_lines/static_tool_lines；crates/agent/src/tui/render.rs::answer_commit_lines_with_status_and_metrics。"
+    }
+  ],
+  "contradictions": [],
+  "hypotheses": [],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "静态 Answer/Reasoning/Activity 之间仍可能缺少可快速识别的生命周期交接/闭合提示。",
+      "support": ["当前各通道静态投影由不同函数生成"],
+      "against": ["已有 Activity anchor、Answer rail、Reasoning rail 与历史详情"],
+      "experiment": "用 CodeGraph 对照静态提交顺序、Activity anchor 与 ConPTY scrollback，要求先复现缺口再改。"
+    }
+  ],
+  "candidates": [
+    {
+      "core": "静态多行 Answer/Reasoning/Activity 输出末行补一格闭合 rail 的最小 presentation-only 投影",
+      "disposition": "accepted_local_slice",
+      "constraints": [
+        "CodeGraph 与 ConPTY 先复现静态多行块缺少闭合边界",
+        "复用既有 ActivityKind/PresentationLedger/Answer/Reasoning rails 与 commit wrapper",
+        "不新增 per-block 大边框、renderer、parser、cache、virtualizer、execution state machine",
+        "保持 Tab/Enter/Ctrl+Space/Esc/Ctrl-C 语义不变"
+      ],
+      "risks": ["窄终端宽度优先级", "与已有 Activity anchor 重复", "误增 native scrollback 行数"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/app.rs", "crates/agent/src/tui/render.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["reasoning_scrollback_closes_multiline_block", "answer_scrollback_closes_multiline_block", "activity_scrollback_closes_multiline_block", "workspace tests/fmt/clippy", "Release ConPTY Busy/Stress", "no duplicate lifecycle rows"]
+    }
+  ],
+  "recommendation": "NLM fresh query quota exhausted; retain the sole Active Note and reject the out-of-scope turn 10 plan. Local CodeGraph plus deterministic TUI/ConPTY checks reproduced and verified the minimal static closure-rail slice; keep it bounded and do not broaden architecture.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Audit static scrollback and history/detail projections for a concrete lifecycle handoff or closure gap; implement only if a deterministic regression reproduces it."
+  },
+  "stop_conditions": [
+    "不查询任何 research status。",
+    "不删除唯一 Active Note。",
+    "不重复重试 RESOURCE_EXHAUSTED 的 notebook_query。",
+    "不新增 per-block 大边框、第二 renderer/cache/virtualizer/parser 或 execution state machine。",
+    "保持 Tab/Enter/Ctrl+Space/Esc/Ctrl-C 语义不变。"
+  ],
+  "question": "KKP HOLD/FOLLOW 与静态 Markdown/alert 投影均已落地后，模型思考/回答的生命周期交接展示是否仍存在可本地证伪缺口？",
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+  "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+  "sources_used": [],
+  "citations": {},
+  "references": [],
+  "error": "RESOURCE_EXHAUSTED (Google error code 8) on constrained notebook_query; back off"
+}

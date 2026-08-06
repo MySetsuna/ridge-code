@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-reasoning-history-meta",
+  "at": "2026-08-05T23:59:00+08:00",
+  "type": "iteration",
+  "status": "verified",
+  "facts": [
+    "Reasoning History rows now identify THINK and show bounded character count, aligning recovery metadata with Answer archive rows.",
+    "The body remains in the existing PanelRow value; filtering, Enter expansion, Ctrl+R routing, width-aware wrapping, and execution semantics are unchanged."
+  ],
+  "evidence": [
+    "reasoning_history_row_identifies_thinking_and_character_count",
+    "reasoning_history_panel_exposes_think_rail_and_detail_anchor",
+    "cargo test --workspace --locked --offline --quiet",
+    "cargo fmt --all -- --check",
+    "cargo clippy --workspace --all-targets --locked --offline -- -D warnings",
+    "cargo build --release --workspace --locked --offline",
+    "Release BusyFixture -InspectLive -InspectReasoning -ResizeProbe",
+    "Release CompletionFixture"
+  ],
+  "paths": [
+    "crates/agent/src/tui/panel.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/context.json",
+    ".iteration/decision.json"
+  ],
+  "symbols": [
+    "reasoning_history_panel",
+    "PanelRow",
+    "draw_panel_with_cache",
+    "reasoning_history_row_identifies_thinking_and_character_count"
+  ],
+  "notebook": {
+    "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "note_count": 1,
+    "note_action": "retained exactly one useful Active Note; no stale/completed Note deleted",
+    "source_id": "8862d715-ffad-4288-b7eb-173260e2dcff",
+    "query_status": "not retried; prior same-session RESOURCE_EXHAUSTED and user boundary"
+  },
+  "next": [
+    "Continue with one concrete local TUI presentation gap at a time.",
+    "Do not add a second renderer/cache/parser or query user-owned deep-research status."
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "The same-session NLM query did not return a recommendation or source-backed conclusion.",
+      "evidence": "NotebookLM MCP returned Google error code 8 RESOURCE_EXHAUSTED before an answer payload was produced."
+    },
+    {
+      "fact": "The local lifecycle classifier had two real presentation gaps: `node · running tools` and `node · wrapping up` were not mapped to Tool and Conclusion respectively.",
+      "evidence": "CodeGraph/node_label shows those exact activity strings; focused classifier regression now passes with Tool and Conclusion kinds."
+    }
+  ],
+  "contradictions": [],
+  "unverified_hypotheses": [],
+  "candidates": [],
+  "recommendation": "No new NLM recommendation is available. Keep the lifecycle fix presentation-only and validate it through workspace, lint, release, and ConPTY gates.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Run the full quality and terminal matrix after correcting the Tool and wrap-up ActivityKind mappings; do not add a second renderer or execution state."
+  },
+  "stop_conditions": [
+    "Do not treat RESOURCE_EXHAUSTED as a design conclusion.",
+    "Do not query user-owned deep-research status.",
+    "Do not create another Ridge member or broaden the current TUI slice."
+  ],
+  "question": "基于当前唯一手动导入理论源，如何确保 Agent 节点 running tools 与 wrapping up 在 TUI 活动/生命周期展示中保持可发现、可恢复且不引入第二状态机；若无可用 NLM 回答，则以本地 CodeGraph 与终端证据优先。",
+  "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+  "sources_used": [],
+  "citations": {},
+  "references": [],
+  "error": "Google rejected the query (error code 8: RESOURCE_EXHAUSTED)"
+}

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260806-empty-answer",
+  "at": "2026-08-06",
+  "type": "iteration",
+  "facts": [
+    "TUI 仅识别 `(final) ` 与 `reason#N: (final) `；无正文的精确 `(final)` 边界此前会落入普通事件路径，Answer 通道可能缺失。",
+    "展示层现识别带正文和无正文的精确终答标记，拒绝 `(final)not-a-marker` 这类前缀误判；空/空白正文显示 `🤖 [empty answer]`，明确这是空终答而非隐藏推理或未完成状态。",
+    "改动限于事件格式解析与展示测试；图、provider、执行状态、history/queue 路由均未改变。"
+  ],
+  "evidence": [
+    "final_answer_gets_assistant_marker: exact empty and reason-prefixed empty final events are classified as Answer; malformed prefix is rejected",
+    "cargo test -p agent --bin ridgecode final_answer_gets_assistant_marker --locked --offline: passed",
+    "Release 12/14/24-column Busy/Stress ConPTY matrix before this slice: all status=passed; no wider layout defect reproduced",
+    "CodeGraph over final_answer_text, is_final_event, format_event_plain, Superstep final handling, and commit/Answer history paths",
+    "NLM same-session query returned RESOURCE_EXHAUSTED; no new recommendation was accepted",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip rebuilt after this slice; SHA-256 c6785013d0a55e7d78fe6325819f5528d41ad0042f9f3144be64564c494ea456; contents verified as README.md/install.ps1/ridgecode.exe"
+  ],
+  "paths": [
+    "crates/agent/src/tui/eventfmt.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260806-empty-answer.json"
+  ],
+  "symbols": [
+    "final_payload",
+    "final_answer_text",
+    "is_final_event",
+    "format_event_plain",
+    "final_answer_gets_assistant_marker"
+  ],
+  "next": [
+    "继续寻找一个新的本地思考/回答展示缺口；当前安装包已重建并待用户决定是否发布。"
+  ]
+}

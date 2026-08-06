@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-ultra-low-queue",
+  "at": "2026-08-05T11:50:00+08:00",
+  "type": "iteration",
+  "facts": [
+    "The first ultra-low editor fallback preserved the draft but dropped the pending message preview at height 3; only the generic `1 pending` lifecycle count remained at height 2.",
+    "The fallback now renders the next pending message on its own row when two editor rows exist, or a bounded queue-count prefix when only one editor row exists; the draft and cursor remain visible.",
+    "Queue order, Ctrl+Enter front insertion, execution, and key routing are unchanged."
+  ],
+  "evidence": [
+    "ultra_low_height_pending_queue_stays_visible_above_or_with_draft initially failed at height 3 with `queue preview lost`, then passed after the compact queue projection.",
+    "The height-2 case retains the existing `1 pending` lifecycle count and draft; the height-3 case exposes `queued intent` above the draft.",
+    "Only the existing draw_input_surface ultra-low branch changed; no second renderer or state path was added."
+  ],
+  "paths": [
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/context.json"
+  ],
+  "symbols": [
+    "draw_input_surface",
+    "ultra_low_height_pending_queue_stays_visible_above_or_with_draft"
+  ],
+  "next": [
+    "Run TUI/workspace quality gates, Release PTY, rebuild dist package, and refresh deterministic metadata."
+  ]
+}

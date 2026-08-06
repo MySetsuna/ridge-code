@@ -1,0 +1,61 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "目标 notebook 当前仅有一个有用的 Active Note，未发现可安全清理的过期或已完成 Note。",
+      "evidence": "NotebookLM note list：count=1，id=aeb2c29a-3d94-4190-a458-aaa2c642abd5。"
+    },
+    {
+      "fact": "同一 NLM 会话第 9 轮建议 Ctrl+Space 按下进入 HOLD、释放回 FOLLOW；不支持 release 事件的终端回退既有按键切换。",
+      "evidence": "chat_get conversation_id=68791fb7-659a-4ad6-a86c-beb7ac694781，turn 9。"
+    },
+    {
+      "fact": "上述 KKP HOLD/FOLLOW 建议已在本地 v0.5.4 源码、确定性测试与 Release ConPTY 路径落地。",
+      "evidence": "crates/agent/src/tui/input.rs、mod.rs、tests.rs；commit 9352d57；Release PTY 回归通过。"
+    },
+    {
+      "fact": "本轮限定 source 的 notebook_query 在产生结论前被 Google 以 RESOURCE_EXHAUSTED code 8 拒绝。",
+      "evidence": "notebook_query 返回 Google error code 8: RESOURCE_EXHAUSTED；按规则退避，未重试。"
+    },
+    {
+      "fact": "本轮未调用用户拥有的深研任务状态接口。",
+      "evidence": "仅使用 notebook/chat/note 与本地 CodeGraph；未执行 research_status。"
+    }
+  ],
+  "contradictions": [],
+  "hypotheses": [],
+  "unverified_hypotheses": [],
+  "candidates": [
+    {
+      "core": "静态 Reasoning native scrollback 复用 Markdown 语义样式",
+      "constraints": [
+        "复用既有 md_line_spans_with_alert",
+        "保留 reasoning rails、meta、Ctrl+R history hint 与 wrap_commit_lines",
+        "不新增 parser、cache、dependency、renderer 或状态机"
+      ],
+      "risks": ["跨行 code fence 状态与 cell-width wrapping"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/app.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["Markdown headings/lists/alerts/code fences", "CJK widths 18/24/40/80/96", "TestBackend", "Release ConPTY"]
+    }
+  ],
+  "recommendation": "因 fresh notebook_query 配额耗尽，视 KKP 建议为已实现；由 CodeGraph 与本地路径裁定新的最小缺口：静态 Reasoning 提交仍经 plain commit_lines，未复用 Answer scrollback 与 Reasoning detail 已有 md_line_spans_with_alert，导致 code/header/alert 语义线索丢失。",
+  "next_step": {
+    "type": "implementation",
+    "value": "在静态 Reasoning commit projection 中调用既有 md_line_spans_with_alert，保留 rails/meta/history hint 与 bounded fold/wrap，并增加语义样式和宽度回归。"
+  },
+  "stop_conditions": [
+    "不查询 research status。",
+    "不删除唯一 Active Note。",
+    "不新增 parser/cache/dependency/renderer/execution state machine。",
+    "保持 Tab/Enter/Ctrl+Space/Esc/Ctrl-C 语义不变。"
+  ],
+  "question": "KKP 建议已落地后，静态 Reasoning 回放还有何可验证展示缺口？",
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+  "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+  "sources_used": [],
+  "citations": {},
+  "references": [],
+  "error": "RESOURCE_EXHAUSTED (Google error code 8) on constrained notebook_query; back off"
+}

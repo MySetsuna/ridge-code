@@ -1,0 +1,40 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "The target NotebookLM notebook contains exactly one useful current Active Note; no stale or completed Note was identified for safe deletion.",
+      "evidence": "mcp__notebooklm_mcp__note action=list returned one note aeb2c29a-3d94-4190-a458-aaa2c642abd5 titled RidgeCode TUI — Active baseline — iter-20260804."
+    },
+    {
+      "fact": "The existing NLM conversation remains active and its request is to identify one real, not-yet-implemented, locally verifiable TUI gap without adding a second renderer, cache, parser, execution state machine, or sidebar.",
+      "evidence": "mcp__notebooklm_mcp__chat_list returned conversation 68791fb7-659a-4ad6-a86c-beb7ac694781 with the current constraint preview."
+    }
+  ],
+  "contradictions": [],
+  "unverified_hypotheses": [],
+  "candidates": [],
+  "recommendation": "No NLM recommendation accepted: the single bounded next-plan query was rejected before an answer.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Record the rate-limit signal and continue one bounded presentation-only TUI experiment using local CodeGraph, deterministic tests, and ConPTY evidence; do not retry this NLM query in the same loop."
+  },
+  "stop_conditions": [
+    "Google rejected the existing-chat query with RESOURCE_EXHAUSTED (error code 8).",
+    "No research-status operation was performed and no user-owned deep-research state was inspected.",
+    "No Note, source, or real research task was deleted or changed."
+  ],
+  "meta": {
+    "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "source_ids": [
+      "8862d715-ffad-4288-b7eb-173260e2dcff"
+    ],
+    "queried_at": "2026-08-05T12:10:00+08:00",
+    "mode": "existing_chat_next_plan",
+    "trigger": "user_requested"
+  },
+  "error": {
+    "code": "RESOURCE_EXHAUSTED",
+    "message": "Google rejected the query before returning a planning answer."
+  }
+}

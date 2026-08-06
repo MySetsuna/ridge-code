@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260806-hold-wait-priority",
+  "at": "2026-08-06",
+  "type": "iteration",
+  "facts": [
+    "A held live stream with T›L›A channel trace and CHK lifecycle badge could clip the `model`/`tool` portion of `waiting · target` at 32 columns.",
+    "compact_waiting_anchor preserves HOLD, waiting, and the responsible model/tool target first; optional trace, lifecycle, and step details yield only when the full anchor cannot fit.",
+    "No execution state, queue routing, takeover behavior, or second renderer was introduced."
+  ],
+  "evidence": [
+    "held_wait_anchor_prioritizes_waiting_target_over_optional_breadcrumbs initially failed at width 32, then passed at 18/24/32/40 after the priority projection fix",
+    "held_live_anchor_keeps_waiting_target_visible and live_phase_anchor regressions passed",
+    "NLM same-session query returned RESOURCE_EXHAUSTED; no research-status operation was used",
+    "Existing Ridge member notebooklm-mcp-maintainer was found and reused; no new member was created",
+    "Release package contains install.ps1, README.md, ridgecode.exe; SHA-256 D4EF12A2674432AC07AB7699CBF7B1C1F8F554C864DCE01DE0D9A8C1271F38D3"
+  ],
+  "paths": [
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260806-next-8.json"
+  ],
+  "symbols": [
+    "compact_waiting_anchor",
+    "live_phase_anchor",
+    "held_wait_anchor_prioritizes_waiting_target_over_optional_breadcrumbs"
+  ],
+  "next": [
+    "运行 workspace、fmt、Clippy、Release PTY 与安装包闸；继续寻找一个新的本地思考/回答展示缺口。"
+  ]
+}

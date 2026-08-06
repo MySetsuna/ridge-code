@@ -2,32 +2,32 @@
   "status": "NEEDS_MORE_EVIDENCE",
   "confirmed_facts": [
     {
-      "fact": "NLM authentication was refreshed successfully, but the same-session query was rejected with Google error code 8 RESOURCE_EXHAUSTED before an answer.",
-      "evidence": "nlm_auth_flow verify returned login_check_exit=0 and notebook_list_exit=0; NotebookLM MCP returned RESOURCE_EXHAUSTED for the query."
-    },
-    {
       "fact": "The target notebook contains exactly one Active Note; no stale or completed Note was identified for safe deletion.",
       "evidence": "NotebookLM note list returned count=1 with title RidgeCode TUI — Active baseline — iter-20260804."
     },
     {
       "fact": "Only the manually imported theory source 8862d715-ffad-4288-b7eb-173260e2dcff was selected, and no Deep Research status was queried.",
       "evidence": "notebook_query source_ids contained only 8862d715-ffad-4288-b7eb-173260e2dcff; no research-status tool was called."
+    },
+    {
+      "fact": "The NLM next-plan query was rejected before an answer with Google error code 8 RESOURCE_EXHAUSTED.",
+      "evidence": "NotebookLM MCP returned RESOURCE_EXHAUSTED for the bounded query."
     }
   ],
   "contradictions": [],
   "unverified_hypotheses": [],
   "candidates": [],
-  "recommendation": "Do not treat the rejected query as design evidence; use the current repository, CodeGraph, and deterministic terminal tests to identify and verify the next presentation-only gap.",
+  "recommendation": "No NLM design recommendation is accepted; use the current repository, CodeGraph, deterministic tests, and ConPTY as authoritative evidence.",
   "next_step": {
     "type": "experiment",
-    "value": "Audit one remaining live/static/history visibility or action-discoverability gap locally, without adding a second renderer, cache, parser, execution state machine, or sidebar."
+    "value": "Keep the Error idle result card presentation-only and expose retained partial Answer body, metadata, and Ctrl+A recovery affordance."
   },
   "stop_conditions": [
     "Do not retry the quota-exhausted NLM query in this turn.",
     "Do not delete the sole Active Note.",
     "Do not inspect or poll user-owned Deep Research status."
   ],
-  "question": "继续当前同一迭代会话，询问一个唯一、尚未实现、可本地验证的 TUI 展示/交互切片；NLM 若限流则以本地 CodeGraph 与终端证据为准。",
+  "question": "基于唯一手动导入理论源，询问一个尚未实现且可本地验证的 TUI 展示缺口。",
   "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
   "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
   "source_ids": [

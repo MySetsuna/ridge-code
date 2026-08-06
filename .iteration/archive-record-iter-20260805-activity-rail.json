@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "iteration_id": "iter-20260805-activity-rail",
+  "status": "verified",
+  "scope": "presentation-only static lifecycle anchor wrapping",
+  "question": "Do static WAIT/CHK/SUM activity anchors keep semantic continuity and whole-word wrapping at narrow terminal widths?",
+  "verified_facts": [
+    {
+      "fact": "Static activity anchors were falling through wrap_live_spans_greedy; at width 40 the word model split into mod/el and continuation rows had no semantic rail.",
+      "evidence": "The new regression initially failed with rows containing ... background mod, el response ..., and no continuation prefix."
+    },
+    {
+      "fact": "The existing semantic commit wrapper now recognizes the bounded lifecycle prefix shape and uses the existing word-aware body units with a vertical continuation rail.",
+      "evidence": "activity_commit_prefix and wrap_semantic_commit_line_with_prefix in crates/agent/src/tui/app.rs; no new renderer/parser/state path."
+    },
+    {
+      "fact": "Explicit multiline activity details now receive the same existing continuation rail before semantic wrapping, so the second logical line remains visually attached to its WAIT/CHK/SUM anchor.",
+      "evidence": "activity_anchor_keeps_rail_across_explicit_detail_lines initially failed with an unprefixed second detail row, then passed after activity_commit_lines added the existing rail."
+    }
+  ],
+  "changed": [
+    "crates/agent/src/tui/app.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/context.json"
+  ],
+  "symbols": [
+    "activity_commit_prefix",
+    "wrap_semantic_commit_line_with_prefix",
+    "wrap_commit_line",
+    "activity_anchor_preserves_semantic_continuation_rail_when_wrapped",
+    "activity_anchor_keeps_rail_across_explicit_detail_lines"
+  ],
+  "validation": [
+    "Focused activity-anchor regressions passed after reproducing both the greedy word split and unprefixed explicit-detail failure.",
+    "cargo test -p agent --bin ridgecode --locked --offline --quiet: 309 passed.",
+    "cargo test --workspace --locked --offline --quiet passed.",
+    "cargo fmt --all -- --check, cargo clippy --workspace --all-targets --locked --offline -- -D warnings, and git diff --check passed.",
+    "Release BusyFixture with Inspector/queue/reasoning/HOLD/FOLLOW/resize/double Ctrl-C passed.",
+    "Release StressFixture with Answer inspection/resize/double Ctrl-C passed; WAIT/CHK/SUM/DONE/ANS evidence remained observable.",
+    "scripts/dist.ps1 produced install.ps1, README.md, ridgecode.exe; SHA256 F8C924A755379CC3D4ACAA17169128B28FF99662FA1C8A4E19F2584305CA3206."
+  ],
+  "notebook": {
+    "status": "RESOURCE_EXHAUSTED",
+    "response": ".iteration/notebooklm-response-20260805-next-19.json",
+    "note_action": "Exactly one useful Active Note retained; no stale/completed Note deleted.",
+    "research_status": "Not queried."
+  },
+  "next": [
+    "Keep unknown static commit lines on the existing greedy fallback.",
+    "Continue only after the iteration snapshot, archive JSONL, output contract, and final gates are refreshed."
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-ultra-low-editor",
+  "at": "2026-08-05T11:34:07+08:00",
+  "type": "iteration",
+  "facts": [
+    "At heights 2–3, the existing bordered input renderer consumed its two border rows and hid the editable draft while the Answer row remained visible.",
+    "A presentation-only plain-text editor fallback now activates below three rows, reusing wrap_input and input_viewport and placing the cursor in the same bounded visible rows.",
+    "Height 1 remains a no-panic output-priority frame because one terminal row cannot truthfully contain both Answer output and an editable input surface.",
+    "No execution, provider, MCP, queue, history, shortcut, or second rendering/state path was added."
+  ],
+  "evidence": [
+    "Reverse regression without the fallback failed at height 2: `draft lost at 2` while Answer survived.",
+    "Restored fallback regression passed for heights 2 and 3; height 1 draw also completed without panic.",
+    "CodeGraph traced responsive_live_layout → draw_input_surface → wrap_input/input_viewport before the change."
+  ],
+  "paths": [
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/context.json"
+  ],
+  "symbols": [
+    "draw_input_surface",
+    "responsive_live_layout",
+    "wrap_input",
+    "input_viewport",
+    "responsive_live_layout_handles_ultra_low_height_editor_fallback"
+  ],
+  "next": [
+    "Run full TUI/workspace quality gates, Release PTY, rebuild dist package, and refresh deterministic metadata."
+  ]
+}

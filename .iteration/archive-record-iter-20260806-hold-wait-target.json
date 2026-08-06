@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260806-hold-wait-target",
+  "at": "2026-08-06",
+  "type": "iteration",
+  "facts": [
+    "HOLD live-phase anchors collapsed model-wait and pending-tool-wait to `waiting`, even after the narrow top rail learned to show the target.",
+    "waiting_target/waiting_phase now provide one bounded presentation projection shared by top chrome, compact busy phase, and HOLD anchor.",
+    "No execution state, queue routing, takeover behavior, or second renderer was introduced."
+  ],
+  "evidence": [
+    "held_live_anchor_keeps_waiting_target_visible passed for model/tool targets at 40 columns",
+    "workspace tests, fmt, and Clippy passed; TUI suite reached 301 tests",
+    "Release BusyFixture and StressFixture + InspectAnswer passed with resize, takeover, history, answer, and dual Ctrl-C evidence",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip contains install.ps1, README.md, ridgecode.exe; SHA-256 74B1FD6EB553A57A5DA4D159649F9A12792FD832ABE06FC66998F8386AC9DAED"
+  ],
+  "paths": [
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260806-next-7.json",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip"
+  ],
+  "symbols": [
+    "waiting_target",
+    "waiting_phase",
+    "live_phase_anchor",
+    "held_live_anchor_keeps_waiting_target_visible"
+  ],
+  "next": [
+    "继续以本地可复现证据审计模型思考/回答恢复路径；NLM 配额恢复前不重复查询。"
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-run-boundary",
+  "at": "2026-08-05T16:35:00+08:00",
+  "type": "iteration",
+  "status": "verified",
+  "facts": [
+    "NLM target notebook still has exactly one useful Active Note; no stale or completed Note was safe to delete, so it was retained.",
+    "The prior bounded NLM planning query against the manual theory source returned RESOURCE_EXHAUSTED; this slice did not retry the query or query research status.",
+    "CodeGraph showed that the exact existing task-start activity text was classified as System and excluded from retained Activity commits, leaving long native scrollback without a task-start boundary.",
+    "The presentation-only slice classifies exact task-start text as ActivityKind::Run, retains one RUN Activity anchor, and reuses the existing activity ledger, Ctrl+T detail affordance, ANSI16 roles, cell wrapping, and native scrollback insertion.",
+    "Generic agent ready System chatter remains transient and is not promoted into native scrollback; execution state, queue semantics, provider/MCP behavior, and key routing are unchanged."
+  ],
+  "evidence": [
+    "task_start_leaves_run_anchor_in_native_scrollback passed",
+    "task_start_does_not_promote_agent_ready_system_chatter passed",
+    "cargo test --workspace --locked --offline --quiet passed: agent 104, TUI 320, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest passed",
+    "cargo fmt --all -- --check passed",
+    "cargo clippy --workspace --all-targets --locked --offline -- -D warnings passed",
+    "cargo build --release --workspace --locked --offline passed",
+    "Release CompletionFixture returned status=passed and showed RUN task-start activity plus reasoning/answer history",
+    "Release BusyFixture with live inspection, queue, reasoning, resize, takeover, and dual Ctrl-C returned status=passed"
+  ],
+  "paths": [
+    "crates/agent/src/tui/app.rs",
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/render.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/context.json",
+    ".iteration/decision.json",
+    ".iteration/notebooklm-response-20260805-next-24.json"
+  ],
+  "symbols": [
+    "ActivityKind::from_text",
+    "ActivityKind::is_retained_signal",
+    "Ui::set_activity",
+    "Ui::record_activity",
+    "activity_commit_lines",
+    "flush_commits",
+    "live_lifecycle_badge"
+  ],
+  "notebook": {
+    "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "note_count": 1,
+    "note_action": "retained exactly one useful Active Note; no stale or completed Note deleted",
+    "response": ".iteration/notebooklm-response-20260805-next-24.json",
+    "query_error": "RESOURCE_EXHAUSTED (prior; not retried)",
+    "research_status_queried": false,
+    "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"]
+  },
+  "next": [
+    "Continue local CodeGraph-led TUI audit from the current snapshot; do not query research status or retry the exhausted NLM query until quota recovery or a new reproducible defect."
+  ]
+}

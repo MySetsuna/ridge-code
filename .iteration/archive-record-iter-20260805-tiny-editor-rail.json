@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-tiny-editor-rail",
+  "at": "2026-08-05T11:45:00+08:00",
+  "type": "iteration",
+  "facts": [
+    "A new deterministic regression reproduced a real height-4 defect: the bordered input slot had no inner row, so an editable draft disappeared while the Input frame remained visible.",
+    "The existing four-slot layout now collapses the optional activity chrome until height 5, preserving one output row and a real editable input row at height 4; no execution or key routing changed.",
+    "The change exposed a width-8 follow-on: after chrome collapse, the current Answer badge disappeared. The compact busy input title now preserves queue presence, takeover, and the freshest available Answer/Reasoning/Tool channel as `Q C A`, `Q C R`, or `Q C T` within the existing cell budget.",
+    "No second renderer, cache, parser, execution state, provider, MCP, queue, or shortcut path was added."
+  ],
+  "evidence": [
+    "responsive_live_layout_preserves_output_and_input_under_vertical_pressure initially failed at height 4 with `editable draft lost`, then passed after chrome priority change",
+    "full_tui_frame_survives_narrow_cjk_and_escape_text and live_frame_pressure_stays_bounded_and_stable initially failed at width 8 after chrome collapse, then passed after compact channel rail change",
+    "cargo test -p agent --bin ridgecode --locked --offline --quiet: 305 passed",
+    "CodeGraph traced responsive_live_layout → draw_input_surface and compact_busy_actions → input_chrome",
+    "Release BusyFixture/StressFixture PTY remains the next runtime closure gate"
+  ],
+  "paths": [
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/status.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/context.json"
+  ],
+  "symbols": [
+    "responsive_live_layout",
+    "compact_busy_actions",
+    "input_chrome",
+    "responsive_live_layout_preserves_output_and_input_under_vertical_pressure",
+    "full_tui_frame_survives_narrow_cjk_and_escape_text",
+    "live_frame_pressure_stays_bounded_and_stable"
+  ],
+  "next": [
+    "Run full workspace quality gates and Release PTY at the tiny-width/height matrix; inspect the compact title for queue, takeover, and channel evidence."
+  ]
+}

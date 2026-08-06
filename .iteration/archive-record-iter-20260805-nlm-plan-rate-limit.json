@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-nlm-plan-rate-limit",
+  "at": "2026-08-05T11:10:00+08:00",
+  "type": "iteration",
+  "facts": [
+    "NLM authentication, target notebook inventory, note listing, and active chat listing succeeded.",
+    "The target notebook still has exactly one Active Note; no stale or completed Note was identified for safe deletion.",
+    "The single next-plan query using only the manually imported TUI theory source was rejected by Google with RESOURCE_EXHAUSTED before any recommendation was returned.",
+    "No research-status operation, source import, Note creation, or Note deletion was performed; local CodeGraph and ConPTY remain the authoritative evidence for this slice."
+  ],
+  "evidence": [
+    "nlm login --check: Authentication valid; 22 notebooks found",
+    "notebook_list/note list/chat_list: target notebook and one active conversation confirmed",
+    ".iteration/notebooklm-response-20260805-next-13.json: structured failed-query record validated",
+    "Release BusyFixture with Inspector/Reasoning/HOLD/FOLLOW/queue/takeover/resize/double Ctrl-C: status=passed",
+    "Release StressFixture with Answer inspection/Reasoning/Conclusion/resize/double Ctrl-C: status=passed",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip: install.ps1, README.md, ridgecode.exe; SHA-256 176DC646BB021685D9A46B9AA846FB9400B71FD791BC53439A1F2D375AD10CDA"
+  ],
+  "paths": [
+    ".iteration/notebooklm-response-20260805-next-13.json",
+    "crates/agent/src/tui/app.rs",
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/transcript.rs",
+    "crates/agent/src/tui/tests.rs",
+    "scripts/windows-pty-e2e.ps1",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip.sha256"
+  ],
+  "symbols": [
+    "record_plan",
+    "live_empty_state",
+    "live_lifecycle_anchor",
+    "draw_with_cache",
+    "LiveOutputCache",
+    "coalesce_read_batch"
+  ],
+  "next": [
+    "On a later bounded turn, require a concrete local reproduction before changing the cache or rendering architecture; do not retry this session's RESOURCE_EXHAUSTED query."
+  ]
+}

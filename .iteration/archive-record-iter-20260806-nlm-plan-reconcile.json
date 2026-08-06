@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260806-nlm-plan-reconcile",
+  "at": "2026-08-06",
+  "type": "iteration",
+  "facts": [
+    "目标 NotebookLM has exactly one retained current Note: RidgeCode TUI — Active baseline — iter-20260804; no stale or completed Note was found safe to delete.",
+    "Cold gate passed after decision compaction: decision package 21660 bytes, state snapshot consistent with HEAD e950635.",
+    "NLM query recommended virtualized layout-height caching, but CodeGraph shows LineIndex bounded tails, LiveOutputCache, DetailLayoutCache, Markdown budget, and long-live profile already cover that premise.",
+    "A follow-up NLM claim that native scrollback makes blocks unrecoverable is rejected: scrollback is intentionally non-interactive and Answer/Reasoning/Tool/Live history panels provide bounded recovery and expansion.",
+    "New deep research start was attempted after the cold gate but failed with Google API error code 8; no task ID was created and no old task was polled."
+  ],
+  "evidence": [
+    "mcp__notebooklm_mcp__note list: count=1, id=aeb2c29a-3d94-4190-a458-aaa2c642abd5",
+    "notebook_gate.py assert-allowed --trigger milestone_review: allowed=true, mode=cold_loop",
+    "CodeGraph: LiveTranscript::visible_lines, LineIndex::tail_ranges, LiveOutputCache::prepare, DetailLayoutCache::prepare",
+    "cargo test -p agent --bin ridgecode long_live_frames_are_bounded_and_profiled -- --nocapture: passed; 100 cached draws 68/135/192ms at widths 18/40/80",
+    "CodeGraph: flush_commits, answer_history_panel, reasoning_history_panel, tool_history_panel, live_history_panel_with_queue",
+    ".iteration/notebooklm-response-20260806-next-26.json; .iteration/notebooklm-response-20260806-next-27.json; .iteration/notebooklm-research-start-20260806-26.json"
+  ],
+  "paths": [
+    ".iteration/decision.json",
+    ".iteration/PROJECT-STATE.snapshot.md",
+    ".iteration/notebooklm-response-20260806-next-26.json",
+    ".iteration/notebooklm-response-20260806-next-27.json",
+    ".iteration/notebooklm-research-start-20260806-26.json",
+    "crates/agent/src/tui/transcript.rs",
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/panel.rs",
+    "crates/agent/src/tui/app.rs"
+  ],
+  "symbols": [
+    "LiveTranscript::visible_lines",
+    "LineIndex::tail_ranges",
+    "LiveOutputCache::prepare",
+    "DetailLayoutCache::prepare",
+    "flush_commits",
+    "answer_history_panel",
+    "reasoning_history_panel",
+    "tool_history_panel",
+    "live_history_panel_with_queue"
+  ],
+  "next": [
+    "Do not implement NLM's duplicate virtualizer or invented scrollback interaction boundary.",
+    "Choose the next locally reproducible Answer/Reasoning display defect or measured hot-path regression before changing architecture.",
+    "Keep the single Active Note; no Note deletion was warranted."
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-reasoning-word-boundary",
+  "at": "2026-08-05T10:36:09+08:00",
+  "type": "iteration",
+  "facts": [
+    "Release BusyFixture exposed a real 40-column presentation defect after the `┊` rail fix: the physical continuation rail could appear inside ordinary reasoning words.",
+    "The existing semantic commit wrapper now groups styled graphemes into whitespace and word units, moves a whole word to the continuation row when it fits there, and retains grapheme/cell hard wrapping for unbroken tokens.",
+    "The change is presentation-only: reasoning text, metadata, Span styles, logical newlines, Answer/Tool projections, native scrollback, and execution/key semantics remain unchanged."
+  ],
+  "evidence": [
+    "semantic_reasoning_rail_prefers_word_boundaries_on_narrow_reflow passed and verified complete reasoning words remain on one physical row at width 40",
+    "Release BusyFixture status=passed with resize 40x12, reasoning inspector focus, HOLD/FOLLOW, queue, takeover, and dual Ctrl-C; preview no longer shows `reason│ing`, `an│d`, or `h│istory`",
+    "Release StressFixture status=passed with Answer/Reasoning/Conclusion, Answer inspection, resize 40x12, and dual Ctrl-C",
+    "cargo test --workspace --locked --offline --quiet, cargo fmt --all -- --check, and cargo clippy --workspace --all-targets --locked --offline -- -D warnings passed",
+    "Release package contains install.ps1, README.md, ridgecode.exe; SHA-256 265AD4E409A5C0A0396FAD100605EE26A607CDB7E9065ABCFFA847DF9B39C705",
+    "NotebookLM same-session query returned RESOURCE_EXHAUSTED; no research-status operation was used and no new recommendation was accepted"
+  ],
+  "paths": [
+    "crates/agent/src/tui/app.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260805-next-10.json",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip.sha256"
+  ],
+  "symbols": [
+    "commit_body_units",
+    "append_commit_fragments",
+    "wrap_semantic_commit_line",
+    "wrap_commit_lines",
+    "semantic_reasoning_rail_prefers_word_boundaries_on_narrow_reflow"
+  ],
+  "next": [
+    "完成 iteration_gate、notebook_gate、requirements_gate、snapshot check 与 preflight；安装包暂为本地产物，未提交、未推送、未创建 GitHub Release。"
+  ]
+}

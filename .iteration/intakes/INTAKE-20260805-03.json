@@ -3,17 +3,18 @@
   "intake_id": "INTAKE-20260805-03",
   "classification": "active",
   "summary": "按已批准 TUI 需求继续推进模型思考/回答可见性、工具折叠展开、科技感界面、交互可发现性、性能与终端适配。",
-  "requirement_ids": ["REQ-20260801-01"],
+  "requirement_ids": [
+    "REQ-20260801-01"
+  ],
   "pending_ids": [],
   "approval_reasons": [],
   "open_questions": [],
   "approval_evidence": "",
-  "request_sha256": "",
-  "requirements_sha256": "",
-  "pending_sha256": "",
+  "request_sha256": "f5511a636096edb446113c1cedbf4c1704112fd8186b62b590e331cc0b0a0198",
+  "requirements_sha256": "2d7ac09fabbb88323085eb5c4e888ada7ba76d1028b2dbe9d5f76c1331a98237",
+  "pending_sha256": "3b2a1c2d01c1d0e6c33d8e5ec0365873066e4b3b541c2f63d703025b8f44425a",
   "draft_sha256": "",
   "previous_intake_sha256": "",
-  "reasons": [],
   "executable": true,
-  "notes": "NLM 同轮查询返回 RESOURCE_EXHAUSTED；不重试、不查深研状态、不创建 Note/source。当前切片先修复 Error 后已保留 partial Answer 的结果卡可见性。"
+  "reasons": []
 }

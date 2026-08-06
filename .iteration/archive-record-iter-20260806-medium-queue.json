@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260806-medium-queue",
+  "at": "2026-08-06",
+  "type": "iteration",
+  "facts": [
+    "忙态且存在工具时，56–71 列分支原先只有 Q、队首、接管、工具/思考提示，漏掉普通 Enter 入队；72 列以上已有该提示，极窄 compact rail 也已有。",
+    "现按 cell budget 分层压缩：64–71 列保留 `↵ queue`、`^Enter front`、`^C takeover`、`^O details`、`^R`；56–63 列将队首/接管缩为 `^Enter`/`^C`，仍保留完整队列、工具详情与思考入口。",
+    "这是 presentation-only action rail 调整；Enter/Ctrl+Enter/Ctrl-C、工具展开、Reasoning 历史与执行状态未改变。"
+  ],
+  "evidence": [
+    "input_chrome_exposes_submit_or_queue_mode: width 56 preserves ↵ queue, ^O details, ^R; width 64 preserves full front/takeover/detail/reasoning labels",
+    "cargo test --workspace --locked --offline --quiet: all workspace tests passed (TUI 296; agent 104)",
+    "cargo fmt --all -- --check; cargo clippy --workspace --all-targets --locked --offline -- -D warnings: passed",
+    "Release BusyFixture 96/64/56 columns and StressFixture 18x14: status=passed; Inspector/queue/reasoning/HOLD/FOLLOW/resize/takeover/answer/double Ctrl-C evidence remained green",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip rebuilt; SHA-256 14299e0f58214ec2b0dc5125d72ed0a2cb04e114382c974fa210348b80fbc53a"
+  ],
+  "paths": [
+    "crates/agent/src/tui/status.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260806-medium-queue.json",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip.sha256"
+  ],
+  "symbols": [
+    "input_chrome",
+    "compact_busy_actions",
+    "input_chrome_exposes_submit_or_queue_mode"
+  ],
+  "next": [
+    "继续以本地证据寻找一个新的思考/回答展示缺口；不新增渲染器、虚拟化器或执行状态。"
+  ]
+}

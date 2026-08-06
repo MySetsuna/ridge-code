@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-idle-tab-affordance",
+  "at": "2026-08-05",
+  "type": "iteration",
+  "facts": [
+    "Idle input chrome previously exposed Enter but could hide Tab completion when archive shortcuts or narrow width consumed the action rail.",
+    "The existing input_chrome projection now keeps a truthful submit token and Tab-completion token visible from 10 columns upward; roomier idle frames use full labels and compact frames use ↵/⇥.",
+    "Answer, Reasoning, Tool, archive, queue, execution, and key-routing state remain unchanged; no second renderer, cache, parser, execution state machine, dependency, or surface was added.",
+    "Tab remains completion-only and Enter remains submit/queue according to the existing input_action route."
+  ],
+  "evidence": [
+    "input_chrome_exposes_submit_or_queue_mode passed with idle history widths 14/18/24, no-history widths 10/18/24/40, and medium width 64.",
+    "input_action_routes_keys and narrow_idle_history_keeps_answer_and_reasoning_entrypoints_visible passed.",
+    "cargo test --workspace --locked --offline --quiet passed: agent 104, TUI 323, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctests passed.",
+    "cargo fmt --all -- --check and cargo clippy --workspace --all-targets --locked --offline -- -D warnings passed.",
+    "cargo build --release --workspace --locked --offline passed.",
+    "Release BusyFixture with Inspector, Reasoning, resize, queue, takeover, and dual Ctrl-C passed; CompletionFixture with Answer/Reasoning, completion, and dual Ctrl-C passed.",
+    "NLM target notebook has exactly one current Active Note; manual theory source 8862d715-ffad-4288-b7eb-173260e2dcff remains authoritative. A new deep-research start was rate-limited before task creation (Google code 8), so no task status or import was attempted; old user-owned research was not queried."
+  ],
+  "paths": [
+    "crates/agent/src/tui/status.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/context.json",
+    ".iteration/PROJECT-STATE.snapshot.md"
+  ],
+  "symbols": [
+    "input_chrome",
+    "compact_idle_history_actions",
+    "compact_idle_input_actions",
+    "input_chrome_exposes_submit_or_queue_mode",
+    "input_action_routes_keys"
+  ],
+  "next": [
+    "继续从本地 CodeGraph 与可复现终端证据寻找单一思考/回答展示缺口；保持不新增渲染器、虚拟化器或执行状态。"
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-partial-result-card",
+  "at": "2026-08-05",
+  "type": "iteration",
+  "status": "verified",
+  "facts": [
+    "A completed-state result card can contain an interrupted Answer marked `partial answer retained`; before this slice its excerpt, metrics, and Ctrl+A recovery row all used the completed `ANS` label.",
+    "Partial result-card projections now use `PARTIAL` with a warning role for excerpt, step/elapsed/task-token metadata, and recovery affordance; completed Answer cards keep `ANS`.",
+    "The change is presentation-only: bounded Answer history, native scrollback, execution, queue, provider, MCP, and key-routing semantics remain unchanged."
+  ],
+  "evidence": [
+    "partial_completed_idle_surface_keeps_partial_answer_truthful failed before the fix with `partial label missing` and showed `ANS · partial response`, `ANS · step 3`, and `ANS · Ctrl+A expand`",
+    "The same partial result-card regression passed after the fix; idle_surface filter passed 6 tests",
+    "cargo test -p agent --bin ridgecode --locked --offline --quiet passed: 311 TUI tests",
+    "cargo test --workspace --locked --offline --quiet passed: agent 104, TUI 311, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest passed",
+    "cargo fmt --all -- --check passed",
+    "cargo clippy --workspace --all-targets --locked --offline -- -D warnings passed",
+    "cargo build --workspace --release --locked --offline passed",
+    "Release StressFixture with completion/Answer inspection/resize/double Ctrl-C status=passed",
+    "Release BusyFixture with live Inspector/queue/reasoning/HOLD/FOLLOW/resize/double Ctrl-C status=passed",
+    "release package entries are install.ps1, README.md, ridgecode.exe; SHA256 2FAED921EB5BA6D525F26ED1B1780EDB8CC9F6BFA01810C90C600E985DA0043C"
+  ],
+  "paths": [
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260805-next-22.json",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip.sha256"
+  ],
+  "symbols": [
+    "idle_answer_recovery",
+    "idle_answer_excerpt",
+    "idle_detail_line",
+    "idle_result_summary",
+    "partial_completed_idle_surface_keeps_partial_answer_truthful"
+  ],
+  "notebook": {
+    "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "note_count": 1,
+    "note_action": "retained exactly one useful Active Note; no stale/completed Note deleted",
+    "response": ".iteration/notebooklm-response-20260805-next-22.json",
+    "query_error": "RESOURCE_EXHAUSTED",
+    "research_status_queried": false,
+    "source_ids": [
+      "8862d715-ffad-4288-b7eb-173260e2dcff"
+    ]
+  },
+  "next": [
+    "Continue the active TUI objective from the refreshed snapshot; keep the next slice presentation-only and locally falsifiable."
+  ]
+}

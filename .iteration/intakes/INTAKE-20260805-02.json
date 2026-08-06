@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260805-02",
+  "classification": "active",
+  "summary": "按已批准 TUI 需求继续推进模型思考/回答可见性、错误恢复、工具折叠与终端适配的 presentation-only 迭代。",
+  "requirement_ids": [
+    "REQ-20260801-01"
+  ],
+  "pending_ids": [],
+  "approval_reasons": [],
+  "open_questions": [],
+  "approval_evidence": "",
+  "request_sha256": "702b4f947234088b5dbf6b4fa93a7f789e27d25c113b93d2428ae00aa2928dd0",
+  "requirements_sha256": "2d7ac09fabbb88323085eb5c4e888ada7ba76d1028b2dbe9d5f76c1331a98237",
+  "pending_sha256": "3b2a1c2d01c1d0e6c33d8e5ec0365873066e4b3b541c2f63d703025b8f44425a",
+  "draft_sha256": "",
+  "previous_intake_sha256": "",
+  "executable": true,
+  "reasons": []
+}

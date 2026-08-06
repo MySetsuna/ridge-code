@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-result-card-meta",
+  "at": "2026-08-05",
+  "type": "iteration",
+  "status": "verified",
+  "facts": [
+    "The completed wide result card previously displayed Answer and Reasoning body excerpts but dropped the step, elapsed-time, and task-token metadata already retained by AnswerEntry and ReasoningEntry.",
+    "A focused regression reproduced the missing Answer metadata before the implementation; the fix adds a presentation-only idle_channel_meta projection for sufficiently wide and tall completed cards.",
+    "Narrow or height-pressured result-card projections keep the existing compact shortcuts and do not change execution, routing, queue, provider, MCP, or Note/source state."
+  ],
+  "evidence": [
+    "wide_completed_idle_surface_uses_bounded_result_card passed after asserting Answer step metadata and THK step metadata; the pre-fix assertion failed with `completed result card should retain Answer context metadata`",
+    "cargo test -p agent --bin ridgecode --locked --offline --quiet passed: 310 TUI tests",
+    "cargo test --workspace --locked --offline --quiet passed: agent 104, TUI 310, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctest passed",
+    "cargo fmt --all -- --check passed",
+    "cargo clippy --workspace --all-targets --locked --offline -- -D warnings passed",
+    "cargo build --workspace --release --locked --offline passed",
+    "Release StressFixture with Answer inspection, resize, and double Ctrl-C status=passed; raw ConPTY output retained `ANSWER [step 1 · +2s · 44559 task tok]`",
+    "Release BusyFixture with resize status=passed",
+    "release package contains exactly install.ps1, README.md, and ridgecode.exe; SHA256 44F32BA67DFDE4185EE53A7C4A4C748EDDF433CDB10E45619A9600ADF7DFC56A"
+  ],
+  "paths": [
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260805-next-21.json",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip.sha256"
+  ],
+  "symbols": [
+    "idle_channel_meta",
+    "idle_result_summary",
+    "idle_result_card_lines",
+    "wide_completed_idle_surface_uses_bounded_result_card"
+  ],
+  "notebook": {
+    "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "note_count": 1,
+    "note_action": "retained exactly one useful Active Note; no stale/completed Note deleted",
+    "response": ".iteration/notebooklm-response-20260805-next-21.json",
+    "query_error": "RESOURCE_EXHAUSTED",
+    "research_status_queried": false,
+    "source_ids": [
+      "8862d715-ffad-4288-b7eb-173260e2dcff"
+    ]
+  },
+  "next": [
+    "Continue the active TUI objective from the refreshed snapshot; do not publish, commit, push, or delete unrelated dirty worktree changes."
+  ]
+}

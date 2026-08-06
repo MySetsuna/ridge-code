@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260806-wait-target",
+  "at": "2026-08-06",
+  "type": "iteration",
+  "facts": [
+    "Narrow busy chrome reduced both model-wait and pending-tool-wait to the same `waiting` label, hiding the next responsible subsystem.",
+    "compact_busy_phase now derives the target from the existing pending_call fact and renders `waiting · model` or `waiting · tool`; no execution state or input routing was added.",
+    "The existing queue, takeover, HOLD/FOLLOW, and terminal-width priorities remain intact."
+  ],
+  "evidence": [
+    "narrow_busy_chrome_keeps_waiting_target_without_live_channel passed for model/tool targets at 18, 24, 32, and 40 columns",
+    "cargo test --workspace --locked --offline --quiet: all workspace suites passed, including TUI 300 tests",
+    "cargo fmt --all -- --check passed",
+    "cargo clippy --workspace --all-targets --locked --offline -- -D warnings passed",
+    "Release BusyFixture and StressFixture + InspectAnswer passed with resize, takeover, history, answer, and dual Ctrl-C evidence",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip contains install.ps1, README.md, ridgecode.exe; SHA-256 6B72E2E91719D192D18ED6BE2D9A08EF0894C062B4E72AE42E3905E7CD3F7E87"
+  ],
+  "paths": [
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260806-next-6.json",
+    "dist/ridgecode-x86_64-pc-windows-msvc.zip"
+  ],
+  "symbols": [
+    "compact_busy_phase",
+    "top_chrome",
+    "narrow_busy_chrome_keeps_waiting_target_without_live_channel"
+  ],
+  "next": [
+    "继续以本地可复现证据审计模型思考/回答与干预提示；NLM 配额恢复前不重复查询。"
+  ]
+}

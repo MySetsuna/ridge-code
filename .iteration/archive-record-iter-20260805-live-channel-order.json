@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-live-channel-order",
+  "at": "2026-08-05T23:59:00+08:00",
+  "type": "iteration",
+  "status": "verified",
+  "facts": [
+    "Wide LIVE title now follows first-seen unique LiveTranscript phase order; Reasoning→Tool→Answer renders THK/TLS/ANS.",
+    "Existing active-channel, lifecycle badge, HOLD/FOLLOW, narrow-title, role-color, and width behavior remain unchanged."
+  ],
+  "evidence": [
+    "live_surface_title_preserves_observed_channel_order",
+    "cargo test --workspace --locked --offline --quiet",
+    "cargo fmt --all -- --check",
+    "cargo clippy --workspace --all-targets --locked --offline -- -D warnings",
+    "cargo build --release --workspace --locked --offline",
+    "Release CompletionFixture",
+    "Release BusyFixture -InspectLive -InspectQueue -InspectReasoning -ResizeProbe"
+  ],
+  "paths": [
+    "crates/agent/src/tui/draw.rs",
+    ".iteration/context.json",
+    ".iteration/decision.json"
+  ],
+  "symbols": [
+    "live_channel_tags",
+    "LiveTranscript::phase_trace",
+    "live_surface_title_line",
+    "live_surface_title_preserves_observed_channel_order"
+  ],
+  "notebook": {
+    "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "note_count": 1,
+    "note_action": "retained exactly one useful Active Note; no stale/completed Note deleted",
+    "source_id": "8862d715-ffad-4288-b7eb-173260e2dcff",
+    "query_status": "not queried; prior same-session RESOURCE_EXHAUSTED and user boundary"
+  },
+  "next": [
+    "Continue one bounded CodeGraph-led presentation gap at a time.",
+    "Do not retry exhausted NLM query or query user-owned research status."
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260805-01",
+  "classification": "active",
+  "summary": "为已批准的稳定 ReRelease 补齐跨 PC 的 GitHub 快速安装、版本固定、校验和、README 与 Release 资产说明。",
+  "requirement_ids": [
+    "REQ-20260802-02"
+  ],
+  "pending_ids": [],
+  "approval_reasons": [],
+  "open_questions": [],
+  "approval_evidence": "",
+  "request_sha256": "53fd516d3707e812e356825a4df2f3cb7c0c8aa181fe3e3eecf258b6ddbf42fd",
+  "requirements_sha256": "2d7ac09fabbb88323085eb5c4e888ada7ba76d1028b2dbe9d5f76c1331a98237",
+  "pending_sha256": "3b2a1c2d01c1d0e6c33d8e5ec0365873066e4b3b541c2f63d703025b8f44425a",
+  "draft_sha256": "",
+  "previous_intake_sha256": "",
+  "executable": true,
+  "reasons": []
+}

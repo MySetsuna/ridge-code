@@ -1,0 +1,41 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "The independent chatgpt-nlm-research MCP is registered in the local Codex config and its release executable is present.",
+      "evidence": "C:\\Users\\12867\\.codex\\config.toml and C:\\code\\chatgpt-nlm-research-mcp\\target\\release\\chatgpt-nlm-research-mcp.exe"
+    },
+    {
+      "fact": "The completed report source is imported in notebook f6ffd900-708d-44ee-9818-1a3269c533fc as source df4d5dcc-9813-4c61-ae9f-1e9199cb7555 and raw content is readable.",
+      "evidence": "NotebookLM notebook_get and source_get_content returned source_count=2 and 17051 characters for the imported source."
+    }
+  ],
+  "contradictions": [],
+  "unverified_hypotheses": [],
+  "candidates": [],
+  "recommendation": "No NLM recommendation accepted: the query against the imported ChatGPT Deep Research report was rejected before an answer.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Use the imported report as advisory context and local CodeGraph/TestBackend evidence; continue one bounded presentation-only TUI experiment without retrying the same NLM query."
+  },
+  "stop_conditions": [
+    "Google rejected the imported-report query with RESOURCE_EXHAUSTED (error code 8).",
+    "No research-status result was consumed and no deep-research state was inspected or used.",
+    "The real completed task ID was preserved; no Note or source was deleted."
+  ],
+  "meta": {
+    "notebook_id": "f6ffd900-708d-44ee-9818-1a3269c533fc",
+    "source_ids": [
+      "df4d5dcc-9813-4c61-ae9f-1e9199cb7555"
+    ],
+    "task_id": "chatgpt-web-1785898376338-84776-0",
+    "report_sha256": "7618085979B1A2AED8744F8B2C62882A31FF80011F72A303981E525FB843A405",
+    "queried_at": "2026-08-05T11:50:00+08:00",
+    "mode": "bridge_import_followup",
+    "trigger": "milestone_review"
+  },
+  "error": {
+    "code": "RESOURCE_EXHAUSTED",
+    "message": "Google rejected the query (error code 8: RESOURCE_EXHAUSTED)."
+  }
+}

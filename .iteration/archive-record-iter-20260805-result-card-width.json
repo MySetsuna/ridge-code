@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260805-result-card-width",
+  "at": "2026-08-05",
+  "type": "iteration",
+  "facts": [
+    "NLM proposed content-aware width squeezing for short Thinking/Answer blocks, but its named render path and independent-surface premise do not match this repository.",
+    "The compatible local slice applies only to the existing completed idle result card: short Answer/THK/SUM details now determine a bounded card width and horizontal centering; long details naturally consume the available width.",
+    "Streaming output, native scrollback, narrow frames, low-height frames, recovery actions, and execution/key semantics remain unchanged; no second renderer, virtualizer, cache, parser, or execution state was added.",
+    "A new deep-research start was attempted once and failed before task creation with Google API code 8; no task ID, status poll, report, or import exists."
+  ],
+  "evidence": [
+    "wide_short_result_card_is_content_aware_and_centered passed; the 96-column top border is centered and narrower than the viewport.",
+    "wide_completed_idle_surface_uses_bounded_result_card and cjk_reasoning_and_answer_reflow_keep_semantic_rails_within_cells passed.",
+    "cargo test --workspace --locked --offline --quiet passed: agent 104, TUI 324, eval 1, langgraph 9, mcp 2, provider 52, tools 18, doctests passed.",
+    "cargo fmt --all -- --check, cargo clippy --workspace --all-targets --locked --offline -- -D warnings, git diff --check, and cargo build --release --workspace --locked --offline passed.",
+    "Release BusyFixture 96x24 with Inspector/Reasoning/resize/takeover/double Ctrl-C, CompletionFixture 96x24 and 80x20, and StressFixture 18x14 with CJK/emoji/resize all passed.",
+    "NotebookLM note audit returned exactly one current Active Note aeb2c29a-3d94-4190-a458-aaa2c642abd5; no stale/completed Note was safe to delete."
+  ],
+  "paths": [
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260805-width-squeeze.json",
+    ".iteration/context.json",
+    ".iteration/PROJECT-STATE.snapshot.md"
+  ],
+  "symbols": [
+    "idle_result_card_lines",
+    "idle_result_summary",
+    "pad_result_card_line",
+    "wide_short_result_card_is_content_aware_and_centered"
+  ],
+  "next": [
+    "Continue with one new locally reproduced reasoning/answer presentation gap; keep the streaming/native-scrollback boundary and do not add a second layout engine."
+  ]
+}

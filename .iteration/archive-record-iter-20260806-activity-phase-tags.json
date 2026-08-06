@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260806-activity-phase-tags",
+  "at": "2026-08-06",
+  "type": "iteration",
+  "facts": [
+    "node_label emits `running tools` for the tool-execution node, but ActivityKind::from_text only recognized text starting with `tool`; the activity row therefore lost the TLS semantic tag.",
+    "node_label emits `wrapping up` for the wrap-up node, but ActivityKind::from_text did not recognize that conclusion phrase; the final lifecycle transition therefore lost the SUM tag and retained recovery anchor.",
+    "The classifier now maps `running tool` to Tool and `wrapping up` to Conclusion; existing routing, activity text, queue, native scrollback, and execution state remain unchanged."
+  ],
+  "evidence": [
+    "activity_classifier_exposes_investigation_verification_and_conclusion passed with running-tools and wrapping-up assertions",
+    "focused cargo test -p agent --bin ridgecode activity_classifier --locked --offline --quiet: 2 passed",
+    "CodeGraph node_label and ActivityKind::from_text call path inspected before editing"
+  ],
+  "paths": [
+    "crates/agent/src/tui/app.rs",
+    "crates/agent/src/tui/tests.rs",
+    ".iteration/notebooklm-response-20260806-next-4.json"
+  ],
+  "symbols": [
+    "ActivityKind::from_text",
+    "node_label",
+    "activity_classifier_exposes_investigation_verification_and_conclusion"
+  ],
+  "next": [
+    "跑全量 workspace、Clippy、Release、ConPTY 与安装包门禁。"
+  ]
+}

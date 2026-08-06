@@ -1,0 +1,38 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "The same-session NLM planning query was rejected with Google error code 8 RESOURCE_EXHAUSTED before an answer.",
+      "evidence": "NotebookLM MCP returned RESOURCE_EXHAUSTED for the query after note/chat listing succeeded."
+    },
+    {
+      "fact": "The target notebook still contains exactly one Active Note; no stale or completed Note was identified for safe deletion.",
+      "evidence": "NotebookLM note list returned count=1 with title RidgeCode TUI — Active baseline — iter-20260804."
+    },
+    {
+      "fact": "Only the manually imported theory source 8862d715-ffad-4288-b7eb-173260e2dcff was selected, and no Deep Research status was queried.",
+      "evidence": "notebook_query source_ids contained only 8862d715-ffad-4288-b7eb-173260e2dcff; no research-status tool was called."
+    }
+  ],
+  "contradictions": [],
+  "unverified_hypotheses": [],
+  "candidates": [],
+  "recommendation": "No new NLM recommendation is available. Use local CodeGraph and deterministic terminal evidence to select and validate one presentation-only TUI gap; do not retry while the account remains RESOURCE_EXHAUSTED.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Audit one remaining model-stage, answer-recovery, activity, or folded-tool affordance gap without adding a second renderer, cache, parser, execution state machine, or sidebar."
+  },
+  "stop_conditions": [
+    "Do not treat RESOURCE_EXHAUSTED as a design conclusion.",
+    "Do not query user-owned Deep Research status.",
+    "Do not create another Note, source, or Ridge member."
+  ],
+  "question": "继续同一迭代会话，询问一个唯一、尚未实现、可本地验证的 RidgeCode TUI 展示/交互切片。",
+  "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "source_ids": ["8862d715-ffad-4288-b7eb-173260e2dcff"],
+  "sources_used": [],
+  "citations": {},
+  "references": [],
+  "error": "Google rejected the query (error code 8: RESOURCE_EXHAUSTED)"
+}
