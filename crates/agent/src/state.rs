@@ -50,6 +50,10 @@ pub struct AgentState {
     /// 连续**工具/provider 报错**轮数(与 `stall` 正交:stall 认「输出相同」,本字段认「输出为错误」,
     /// 故报错内容**每轮不同**时 stall 不触发、由本字段兜底)。到 [`MAX_ERR_STREAK`] 熔断,防无人值守烧预算。
     pub err_streak: usize,
+    /// 连续**纯侦察**轮数(read_file/search/web_search/fetch_url/dispatch_agent,输出每轮不同故 stall 不触发)。
+    /// 成功写改(`write_file`/`edit_file`/`apply_edits`)或模型收尾时清零。到 [`MAX_EXPLORE`] 软暂停,
+    /// 防「无休止只查不改 → 撞 step_cap → 再开一轮又从侦察重来」。
+    pub explore_streak: usize,
     /// **模型面向**的多轮对话历史(system 之外的部分):user / assistant(可带 tool_calls)/ tool 结果。
     /// 这是发给 provider 的真身;REPL 跨轮携带它实现多轮上下文。
     pub history: Vec<Message>,
@@ -108,6 +112,7 @@ pub enum Patch {
     AddUsage(Usage),
     SetStall(usize),
     SetErrStreak(usize),
+    SetExploreStreak(usize),
     PushHistory(Message),
     SetTodos(Vec<Todo>),
     RecordModified(String),
@@ -134,6 +139,7 @@ impl GraphState for AgentState {
             }
             Patch::SetStall(n) => self.stall = n,
             Patch::SetErrStreak(n) => self.err_streak = n,
+            Patch::SetExploreStreak(n) => self.explore_streak = n,
             Patch::PushHistory(m) => self.history.push(m),
             Patch::SetTodos(t) => self.todos = t,
             Patch::RecordModified(p) => {
@@ -151,6 +157,13 @@ pub const MAX_STALL: usize = 3;
 
 /// 连续工具/provider 报错多少轮就熔断(circuit breaker,防无人值守 `--every` 循环持续失败烧预算)。
 pub const MAX_ERR_STREAK: usize = 5;
+
+/// 连续纯侦察多少轮就软暂停(explore thrash)。低于此数仅在 durable 事实块里轻 nudge;
+/// 达此数 → `must_stop`/`no_progress`,逼模型先交接已定位的问题再开新轮,而非空烧到 `MAX_STEPS`。
+pub const MAX_EXPLORE: usize = 12;
+
+/// 连续纯侦察达此数起,在 durable 事实块注入「定位后立即动手」提醒(仍不硬停)。
+pub const EXPLORE_NUDGE_AFTER: usize = 5;
 
 /// 权限门:执行**有副作用的**工具(shell / 写文件 / MCP)前征询批准(human-in-the-loop)。
 /// REPL 用 stdin y/n;测试用 [`AutoApprove`] / [`AutoDeny`]。`read_file` 等只读工具不走它。

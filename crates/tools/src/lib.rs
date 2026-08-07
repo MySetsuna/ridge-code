@@ -55,12 +55,12 @@ pub fn edit_file(path: impl AsRef<Path>, old: &str, new: &str) -> io::Result<()>
     match content.matches(old).count() {
         0 => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "old_string 未找到 —— 先 read_file 核对原文",
+            "old_string 未找到 —— 从最近一次该 path 的 read 结果原样复制锚点再 edit;勿重启全库侦察",
         )),
         1 => write_file(path, &content.replacen(old, new, 1)),
         n => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("old_string 匹配 {n} 处,需唯一 —— 带上更多上下文"),
+            format!("old_string 匹配 {n} 处,需唯一 —— 加长锚点上下文保证唯一;勿另开一轮全库搜索"),
         )),
     }
 }

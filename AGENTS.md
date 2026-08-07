@@ -24,6 +24,12 @@ cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings   # CI 
 
 ⚠️ 产品名 **RidgeCode**,二进制/命令是 **`ridgecode`**,但它住在 `crates/agent`(package 名 `agent`)。跑 demo 用 `-p agent --bin ridgecode`。环境变量前缀仍是 `RIDGE_*`(不改,避免破坏现有配置)。
 
+## 跑起来(交互)
+
+- `ridgecode`(TTY)-> **TUI**(ratatui:流式 + 状态行 + 权限弹窗);斜杠命令 `/model /provider /agent /config /compact /tools` 等**只在 TUI**。
+- 非 TTY(管道/CI/重定向)-> **headless**:逐行 stdin 当任务串行跑,无斜杠命令,恒 `AutoApprove`(危险命令仍硬拦截)。
+- **文本 REPL 已退役**:交互统一走 TUI,命令逻辑不再双份(见 `docs/` 决策记录)。改交互相关代码时,只有 `tui.rs`(TTY)与 `main.rs::headless`(非 TTY)两处,别再找 repl。
+
 ## 架构:两层
 
 ```
@@ -39,6 +45,12 @@ crates/agent      (装配 agent 图 + 二进制 ridge)
   main.rs        demo:跑通闭环 + 打印每个超步的 checkpoint
 ```
 
+周边 crate(由 agent 依赖,按需改):
+- `provider` - LLM provider 边界:归一化 Anthropic(`tool_use`)/ OpenAI(`tool_calls`)到统一 `Completion` + `ToolCall`。HTTP 客户端是薄一层,可纯函数单测、不烧 key。
+- `mcp` - 最小 MCP 客户端(JSON-RPC 2.0):`initialize`/`tools/list`/`tools/call` + `<server>__<tool>` 命名空间。传输走 `McpTransport` trait 可插拔(内置 stdio;生产可换 `rmcp`)。
+- `tools` - agent 的真实工具集(文件读写 + 跨平台 shell),纯 std。轻量内核护栏(非 OS 隔离):`jail_path` 限写 cwd 子树、`is_dangerous_command` 拦致命命令。
+- `eval` - eval harness:批量跑 agent 量 pass-rate + token 成本,只收 `approved` 确定性闸,不看模型自述。
+
 ## 引擎的关键设计(改动时心里有数)
 
 - **reducer 显式**:`GraphState::apply` 强制每种状态声明合并语义(默认覆盖会在并发下丢更新)。
@@ -53,6 +65,8 @@ crates/agent      (装配 agent 图 + 二进制 ridge)
 - **maker ≠ checker**:`reason`/`act` 生成,`verify` **独立**判定且只认确定性信号(工具输出的 `tests: passed`),不信模型自述。
 - **双保险停机**:`MAX_STEPS` 硬上限 + `approved` 闸门。
 - **`Brain` trait** 是接真实 LLM provider 的接缝 —— 换实现,图不动。当前是离线 `ScriptedBrain`(零联网可测)。
+- **sub-agent(只读)**:agent 定义 = 带 frontmatter 的 `.md`(内置 fastcontext/explorer/reviewer 编进二进制 + 用户 `~/.ridge/agents/*.md`,同名覆盖内置)。主 agent 用 `dispatch_agent` 工具自动派 / `/agent` 手动派;子 agent 独立上下文、只回结论(省主上下文/token)、恒**只读**(仅 `read_file`/`search`,双重防御不下放写/shell)。`provider:` 字段引 `config.providers` 的廉价档 = **FastContext** 省钱。cwd 的 `CLAUDE.md`/`AGENTS.md` 经 `load_project_rules` 注入 system prompt。
+- **内核 token 节约(愿景已收束,2026-07-16)**:四层已落地,发 LLM 的上下文对**长任务**保持有界。改这块前先看 `docs/iterations/VISION-token-runtime-state-COMPLETE.md`。四判据:①**历史有界** -- `to_messages` 按加权字符估算(`est_tokens`,CJK≈1tok/字,不引 tiktoken)超阈值自动 `compact_history`(压缩窗口首端裁悬空 `role=tool` 防端点 400);②**静态底噪极小** -- 工具 `description` 精简(`tool_descriptions_stay_terse` 守 <120 字/工具);③**Lean 输出** -- `BASE_SYSTEM` 含简洁 + 最小 diff 约束;④**事实驱动** -- `AgentState.modified_files`(`BTreeSet` 有序稳态)/`last_error` 由 `durable_updates` 在 act 后确定性回填,`durable_state_block` 编成事实块注入 messages **末尾**(role=system;首部 system prompt 冻结利缓存),体量 O(去重文件数)不随步数膨胀。**内核精简铁律**:squeez/向量库(RAG)/AST 骨架(syn)/tiktoken 等**外置可装能力一律走 MCP/SKILL,不进 Rust 内核**;动态工具加载/模型路由附条件推迟(见 VISION 文档)。
 
 ## 工程约定
 

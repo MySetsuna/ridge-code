@@ -1,4 +1,4 @@
-use crate::brain::{circuit_broken, over_budget, stalled};
+use crate::brain::{circuit_broken, explore_exhausted, over_budget, stalled};
 use crate::context::context_rotted;
 use crate::graph::build_llm_agent;
 use crate::state::{AgentState, MAX_STEPS};
@@ -84,7 +84,8 @@ pub fn halt_reason(s: &AgentState) -> HaltReason {
         HaltReason::ContextRot
     } else if circuit_broken(s) {
         HaltReason::CircuitBroken
-    } else if stalled(s) {
+    } else if stalled(s) || explore_exhausted(s) {
+        // 同标签 no_progress:输出重复 或 纯侦察耗尽(一直查不落盘),用户侧语义都是「没推进」
         HaltReason::Stall
     } else if s.steps >= MAX_STEPS {
         HaltReason::StepCap
@@ -263,6 +264,58 @@ mod tests {
         );
     }
 
+    /// 纯侦察耗尽:每轮 read 不同文件 → stall 不触发,但 explore_streak 触顶后 soft-stop(no_progress),
+    /// 不得烧到 MAX_STEPS 后再「重新触发一轮全库侦察」。
+    #[tokio::test]
+    async fn explore_thrash_stops_before_step_cap() {
+        use provider::{Completion, ScriptedProvider, ToolCall};
+        let dir = std::env::temp_dir().join(format!("ridge_explore_thrash_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // MAX_EXPLORE 次不同读 + wrapup 补全;多备几条防边界
+        let n = MAX_EXPLORE + 4;
+        let mut script = Vec::with_capacity(n + 1);
+        for i in 0..n {
+            let p = dir.join(format!("f{i}.txt"));
+            std::fs::write(&p, format!("content-{i}")).unwrap();
+            script.push(Completion {
+                tool_calls: vec![ToolCall {
+                    id: format!("r{i}"),
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": p.to_str().unwrap()}),
+                }],
+                ..Default::default()
+            });
+        }
+        script.push(Completion {
+            text: "已定位,建议下一步写改".into(),
+            ..Default::default()
+        });
+        let app = build_llm_agent(Arc::new(ScriptedProvider::new(script))).unwrap();
+        let out = app
+            .invoke(AgentState::new("fix the bug then edit"))
+            .await
+            .unwrap();
+        assert!(!out.approved, "只读侦察不得伪造成功");
+        assert!(
+            out.explore_streak >= MAX_EXPLORE,
+            "explore_streak={}",
+            out.explore_streak
+        );
+        assert_eq!(halt_reason(&out), HaltReason::Stall);
+        assert!(
+            out.steps < MAX_STEPS,
+            "侦察熔断应远早于 step_cap: steps={}",
+            out.steps
+        );
+        assert!(
+            out.steps <= MAX_EXPLORE + 2,
+            "应在触顶后很快 wrapup, steps={}",
+            out.steps
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 停机原因分类:据终态确定性判定,优先级 成功 > 预算 > 无进展 > 回合上限 > 未验证。
     #[test]
     fn halt_reason_classifies_each_outcome() {
@@ -285,6 +338,13 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(halt_reason(&stall), HaltReason::Stall);
+
+        // 纯侦察耗尽:输出每轮不同 stall 不触发,但 explore_streak 触顶 → 同 no_progress
+        let explore = AgentState {
+            explore_streak: MAX_EXPLORE,
+            ..Default::default()
+        };
+        assert_eq!(halt_reason(&explore), HaltReason::Stall);
 
         let cap = AgentState {
             steps: MAX_STEPS,

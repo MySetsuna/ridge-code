@@ -87,10 +87,11 @@ pub(crate) fn context_rotted(s: &AgentState) -> bool {
         > CONTEXT_ROT_TOKENS
 }
 
-/// 把 Durable State 编译成一段紧凑事实块(已改文件 / 上次报错);无事实 → `None`(不注入)。
-/// 体量 O(去重文件数 + 一条报错),**不随步数膨胀** —— 这是「事实驱动而非消息驱动」的 O(1) 关键。
+/// 把 Durable State 编译成一段紧凑事实块(已改文件 / 上次报错 / 侦察未落盘提醒);无事实 → `None`。
+/// 体量 O(去重文件数 + 一条报错 + 可选一行 explore nudge),**不随步数膨胀**。
 pub(crate) fn durable_state_block(s: &AgentState) -> Option<String> {
-    if s.modified_files.is_empty() && s.last_error.is_none() {
+    let explore_nudge = s.explore_streak >= EXPLORE_NUDGE_AFTER;
+    if s.modified_files.is_empty() && s.last_error.is_none() && !explore_nudge {
         return None;
     }
     let mut b = String::from("<durable_state>\n");
@@ -100,6 +101,12 @@ pub(crate) fn durable_state_block(s: &AgentState) -> Option<String> {
     }
     if let Some(e) = &s.last_error {
         b.push_str(&format!("上次报错: {e}\n"));
+    }
+    if explore_nudge {
+        b.push_str(&format!(
+            "侦察未落盘: 已连续 {} 步只读/搜索、尚无 write/edit。若任务需改文件,下一步必须 edit_file/write_file/apply_edits 或 finish 汇报已定位结论;禁止重复通读同一区域。\n",
+            s.explore_streak
+        ));
     }
     b.push_str("</durable_state>");
     Some(b)
@@ -316,6 +323,20 @@ mod tests {
             .unwrap()
             .content
             .contains("durable_state"));
+
+        // 连续纯侦察达 nudge 阈值 → 注入「定位后立即动手」提醒(无改文件也有块)。
+        let thrash = AgentState {
+            explore_streak: EXPLORE_NUDGE_AFTER,
+            history: vec![Message::user("t")],
+            ..Default::default()
+        };
+        let msgs = to_messages("SYS", &thrash);
+        let last = msgs.last().unwrap();
+        assert!(
+            last.content.contains("侦察未落盘") && last.content.contains("edit_file"),
+            "应 nudge 切入写改: {}",
+            last.content
+        );
     }
 
     /// 压缩窗口首端的悬空 role=tool(配对 assistant 已被压掉)必须裁掉,防 OpenAI 兼容端点 400。

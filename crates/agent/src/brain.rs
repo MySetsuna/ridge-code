@@ -7,11 +7,16 @@ use std::sync::Arc;
 /// 通用 agent 的基础 system prompt(不再只面向编码)。
 pub(crate) const BASE_SYSTEM: &str =
     "You are a capable agent. Use the provided tools to accomplish the \
-     user's task. To change existing files, prefer edit_file (surgical, unique-match replace) over \
-     rewriting the whole file with write_file; use search and ranged read_file to explore before \
-     editing. For external/real-time info, web_search to find links then fetch_url to read the \
-     actual page — trust the page text, not just the snippet. When there is an objective way to \
-     verify (compiler exit code, tests), rely on it and don't trust your own claim. \
+     user's task. Work in two phases: (1) locate — minimal search/ranged read_file (or codegraph if \
+     available) until the root cause or exact edit target is known; (2) act — immediately call \
+     edit_file/write_file/apply_edits (or run the verifying command). Do not re-list the repo or \
+     re-read whole files once the target is known. Prefer edit_file (surgical, unique-match) over \
+     rewriting with write_file. If edit_file fails on unique-match, copy the exact anchor from the \
+     last successful read of that path and retry once — do not restart full-repo reconnaissance. \
+     Prefer read_file/search over run_shell for reading source. For external/real-time info, \
+     web_search to find links then fetch_url to read the actual page — trust the page text, not just \
+     the snippet. When there is an objective way to verify (compiler exit code, tests), rely on it \
+     and don't trust your own claim. \
      Harness contract: large tool outputs are truncated to a head+tail preview — for detail from a \
      big file use ranged read_file or search, never rely on one giant read. Never delete or empty \
      tests to make a check pass: it is blocked and counts as failure. Record a reusable finding, \
@@ -71,6 +76,25 @@ pub(crate) fn circuit_broken(s: &AgentState) -> bool {
     s.err_streak >= MAX_ERR_STREAK
 }
 
+/// 纯侦察耗尽?(连续 [`MAX_EXPLORE`] 轮只读/搜索且未落盘改动)。
+/// 与 stall 正交:stall 要「输出相同」,本条认「一直在查、从不 edit/write」。
+pub(crate) fn explore_exhausted(s: &AgentState) -> bool {
+    s.explore_streak >= MAX_EXPLORE
+}
+
+/// 纯侦察类内置/MCP 入口(不含 run_shell:测构建/跑命令算干活)。
+pub(crate) fn is_explore_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "read_file" | "search" | "web_search" | "fetch_url" | "dispatch_agent"
+    ) || name.starts_with("codegraph__")
+}
+
+/// 成功后清零 explore_streak 的落盘改写工具。
+pub(crate) fn is_land_edit_tool(name: &str) -> bool {
+    matches!(name, "write_file" | "edit_file" | "apply_edits")
+}
+
 /// 确定性**成功**信号(编码任务:shell `exit 0` 或测试 `passed`)。
 /// shell 成功恒以 harness 产出的前缀 `"exit 0:"` 打头 —— 用 `starts_with` 而非 `contains`:
 /// ①修正确性 bug(失败命令 `exit 7: ...` 正文若含 "exit 0" 文本会被 `contains` 误判成功);
@@ -102,10 +126,14 @@ pub(crate) fn verify_ok(s: &AgentState) -> bool {
         || (s.last_action.as_deref() == Some("finish") && !out.is_some_and(tool_output_failed))
 }
 
-/// 多层独立退出:到回合上限 / 超预算 / 无进展 / 熔断任一命中,循环都该停(loop engineering:停机是设计的一半)。
+/// 多层独立退出:到回合上限 / 超预算 / 无进展 / 侦察耗尽 / 熔断任一命中,循环都该停(loop engineering:停机是设计的一半)。
 /// 全是 O(1) 字段判定;上下文腐烂(需算压缩)不进此热路径,只在终态 [`halt_reason`] 里作诊断重标签。
 pub(crate) fn must_stop(s: &AgentState) -> bool {
-    s.steps >= MAX_STEPS || over_budget(s) || stalled(s) || circuit_broken(s)
+    s.steps >= MAX_STEPS
+        || over_budget(s)
+        || stalled(s)
+        || explore_exhausted(s)
+        || circuit_broken(s)
 }
 
 /// reason 之后的路由(scripted / llm 两条路径共用):finish 或需停机 → verify,否则 → act。
@@ -329,5 +357,33 @@ mod tests {
         assert!(BASE_SYSTEM.contains("ranged read_file"), "应导向分段读");
         assert!(BASE_SYSTEM.contains("delete or empty"), "应禁删/清空测试");
         assert!(BASE_SYSTEM.contains("signal_write"), "应鼓励沉淀复利信号");
+        assert!(
+            BASE_SYSTEM.contains("two phases") && BASE_SYSTEM.contains("locate"),
+            "应要求先定位再动手"
+        );
+        assert!(
+            BASE_SYSTEM.contains("do not restart full-repo"),
+            "edit 失败后禁止重启全库侦察"
+        );
+    }
+
+    #[test]
+    fn explore_exhausted_and_must_stop() {
+        let ok = AgentState {
+            explore_streak: MAX_EXPLORE - 1,
+            ..Default::default()
+        };
+        assert!(!explore_exhausted(&ok));
+        assert!(!must_stop(&ok));
+        let thrash = AgentState {
+            explore_streak: MAX_EXPLORE,
+            ..Default::default()
+        };
+        assert!(explore_exhausted(&thrash));
+        assert!(must_stop(&thrash));
+        assert!(is_explore_tool("read_file"));
+        assert!(is_explore_tool("codegraph__codegraph_explore"));
+        assert!(!is_explore_tool("run_shell"));
+        assert!(is_land_edit_tool("edit_file"));
     }
 }

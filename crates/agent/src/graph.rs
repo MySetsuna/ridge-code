@@ -300,6 +300,16 @@ fn build_core(
                     } else {
                         0
                     };
+                    // 纯侦察计数:read/search 等每轮+1;成功落盘改写清零;其余(run_shell/todo/…)保持。
+                    // 修「输出每轮不同 → stall 永不触发 → 只查不改烧到 step_cap」的根因。
+                    let explore_streak =
+                        if is_land_edit_tool(&call.name) && !is_error_observation(&obs) {
+                            0
+                        } else if is_explore_tool(&call.name) {
+                            s.explore_streak + 1
+                        } else {
+                            s.explore_streak
+                        };
                     // Durable State 回填(事实驱动):在 obs 被移动前算好。
                     let durable = durable_updates(call, &obs);
                     let mut patches = vec![
@@ -308,6 +318,7 @@ fn build_core(
                         Patch::PushHistory(Message::tool_result(call.id.clone(), obs.clone())),
                         Patch::SetStall(stall),
                         Patch::SetErrStreak(err_streak),
+                        Patch::SetExploreStreak(explore_streak),
                         Patch::ToolOutput(Some(obs)),
                         Patch::PendingCall(None),
                     ];
