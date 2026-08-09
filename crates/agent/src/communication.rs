@@ -18,6 +18,8 @@ use tokio::sync::{mpsc, Notify};
 pub const AGENT_PROTOCOL_VERSION: u16 = 1;
 pub const AGENT_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(300);
 pub const MAX_AGENT_FRAME_BYTES: usize = 64 * 1024;
+pub const MAX_AGENT_CONTEXT_ENTRIES: usize = 32;
+pub const MAX_AGENT_CONTEXT_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Default)]
 pub struct AgentCancellation {
@@ -121,6 +123,8 @@ impl AgentHello {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentTask {
     pub task: String,
+    #[serde(default)]
+    pub context: std::collections::BTreeMap<String, String>,
     pub read_only: bool,
     pub allowed_tools: Vec<String>,
     pub required_capabilities: Vec<String>,
@@ -136,11 +140,38 @@ impl AgentTask {
     ) -> Self {
         Self {
             task: task.into(),
+            context: std::collections::BTreeMap::new(),
             read_only,
             allowed_tools,
             required_capabilities: Vec::new(),
             budget_steps,
         }
+    }
+
+    pub fn with_context(mut self, context: std::collections::BTreeMap<String, String>) -> Self {
+        self.context = context;
+        self
+    }
+
+    fn validate_context(&self) -> Result<(), AgentProtocolError> {
+        if self.context.len() > MAX_AGENT_CONTEXT_ENTRIES {
+            return Err(AgentProtocolError::Invalid(format!(
+                "agent context has too many entries: {}",
+                self.context.len()
+            )));
+        }
+        let bytes = self
+            .context
+            .iter()
+            .map(|(key, value)| key.len() + value.len())
+            .sum::<usize>();
+        if bytes > MAX_AGENT_CONTEXT_BYTES {
+            return Err(AgentProtocolError::Invalid(format!(
+                "agent context exceeds {} bytes",
+                MAX_AGENT_CONTEXT_BYTES
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -316,6 +347,16 @@ impl AgentEnvelope {
             if value.trim().is_empty() {
                 return Err(AgentProtocolError::Invalid(format!("{name} is empty")));
             }
+        }
+        if let AgentMessage::Task(task) = &self.message {
+            task.validate_context()?;
+        }
+        let encoded = serde_json::to_vec(self)
+            .map_err(|error| AgentProtocolError::Invalid(error.to_string()))?;
+        if encoded.len() > MAX_AGENT_FRAME_BYTES {
+            return Err(AgentProtocolError::Invalid(
+                "agent envelope exceeds size limit".to_string(),
+            ));
         }
         Ok(())
     }
@@ -873,6 +914,45 @@ mod tests {
             "corr-1",
             AgentTask::new("read README", true, vec!["read_file".to_string()], 4),
         )
+    }
+
+    #[test]
+    fn task_context_round_trips_and_stays_bounded() {
+        let mut context = std::collections::BTreeMap::new();
+        context.insert("cwd".to_string(), "C:/code/ridge-code".to_string());
+        context.insert("parent_goal".to_string(), "inspect protocol".to_string());
+        let envelope = AgentEnvelope::task(
+            "task-context",
+            "main",
+            "worker",
+            "corr-context",
+            AgentTask::new("inspect", true, vec!["read_file".to_string()], 1).with_context(context),
+        );
+        envelope.validate().expect("bounded context");
+        let decoded: AgentEnvelope =
+            serde_json::from_str(&serde_json::to_string(&envelope).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn envelope_rejects_oversized_context() {
+        let mut context = std::collections::BTreeMap::new();
+        context.insert(
+            "payload".to_string(),
+            "x".repeat(MAX_AGENT_CONTEXT_BYTES + 1),
+        );
+        let envelope = AgentEnvelope::task(
+            "task-context",
+            "main",
+            "worker",
+            "corr-context",
+            AgentTask::new("inspect", true, Vec::new(), 1).with_context(context),
+        );
+        let error = envelope.validate().expect_err("context limit");
+        assert!(
+            matches!(error, AgentProtocolError::Invalid(message) if message.contains("context"))
+        );
     }
 
     async fn exercise_transport<C, S>(mut client: C, mut server: S)

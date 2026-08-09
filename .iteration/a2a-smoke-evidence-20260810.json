@@ -4,7 +4,7 @@
   "protocol_tests": {
     "command": "cargo test -p agent communication::tests --locked --offline",
     "exit_code": 0,
-    "passed": 11,
+    "passed": 13,
     "failed": 0,
     "transports": ["in_process", "newline_json_rpc"]
   },
@@ -15,7 +15,8 @@
     "bounded timeout",
     "wire cancellation",
     "structured error",
-    "read-only side-effect rejection"
+    "read-only side-effect rejection",
+    "bounded task context"
   ],
   "secrets_observed": false
 }

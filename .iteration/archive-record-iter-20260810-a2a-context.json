@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260810-a2a-context",
+  "at": "2026-08-10",
+  "type": "iteration_verification",
+  "facts": [
+    "AgentTask now carries bounded context metadata",
+    "Envelope validation rejects oversized context before transport",
+    "Protocol regression suite passes 13 tests"
+  ],
+  "evidence": [
+    ".iteration/a2a-smoke-evidence-20260810.json",
+    "cargo test -p agent communication::tests --locked --offline",
+    "cargo clippy -p agent --all-targets --locked --offline -- -D warnings"
+  ],
+  "paths": ["crates/agent/src/communication.rs"],
+  "symbols": ["AgentTask", "AgentEnvelope::validate"],
+  "next": [
+    "poll the existing NotebookLM research task after interactive re-authentication",
+    "re-run the same-version release after this verified context change"
+  ],
+  "requirement_id": "REQ-20260810-A2A-01",
+  "status": "implemented_and_verified"
+}
