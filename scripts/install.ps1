@@ -41,7 +41,7 @@ if ($Local) {
     Write-Host "下载 $url"
     $zip = Join-Path $tmp "a.zip"
     Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-    $checksumUrl = "$url.sha256"
+    $checksumUrl = $url -replace '\.zip$', '.sha256'
     $checksumText = (Invoke-WebRequest -Uri $checksumUrl -UseBasicParsing).Content
     $expected = (($checksumText -split '\s+')[0]).Trim().ToLowerInvariant()
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()

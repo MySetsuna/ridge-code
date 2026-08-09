@@ -66,7 +66,8 @@ else
   tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
   echo "↓ 下载 $url"
   download "$url" "$tmp/a.tgz"
-  download "$url.sha256" "$tmp/a.sha256"
+  checksum_url="${url%.tar.gz}.sha256"
+  download "$checksum_url" "$tmp/a.sha256"
   expected="$(awk 'NF {print $1; exit}' "$tmp/a.sha256" | tr 'A-F' 'a-f')"
   if command -v sha256sum >/dev/null 2>&1; then
     actual="$(sha256sum "$tmp/a.tgz" | awk '{print $1}')"
