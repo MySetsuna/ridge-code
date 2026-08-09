@@ -1,0 +1,27 @@
+{
+  "iteration_id": "iter-20260809-real-config-smoke",
+  "mode": "headless_read_only_real_config",
+  "config_scope": "user .ridge/config.json",
+  "provider_initialized": true,
+  "mcp_servers_connected": 2,
+  "cases": [
+    {
+      "name": "single_read",
+      "steps": 2,
+      "tokens": 11817,
+      "approved": true,
+      "read_marker": true
+    },
+    {
+      "name": "tui_gap_audit",
+      "timeout_ms": 30000,
+      "timed_out": true,
+      "manifest_count": 0,
+      "observed_phase": "planning_then_search",
+      "writes_requested": false,
+      "shell_requested": false
+    }
+  ],
+  "interpretation": "真实配置可完成单步读取；代表性审查任务在 planning/search 阶段超时，故查码列清单停滞仍可复现。模型自述不作通过依据。",
+  "cleanup": "仅临时脚本、marker、session、run 目录；无新增仓库 run artifact。"
+}

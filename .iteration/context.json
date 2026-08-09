@@ -1,33 +1,45 @@
 {
   "schema_version": 1,
-  "task": "Apply content-aware horizontal sizing only to the completed idle result card: center short Answer/THK/SUM summaries within a bounded card while preserving full-width streaming and native scrollback.",
-  "symbols": [],
+  "task": "Close provider model runtime failure handling discovered by the approved route smoke: one deterministic main-provider fallback for subagent planner and teammate execution, with bounded safe audit labels and preserved safety semantics.",
+  "symbols": [
+    "Agents::select_provider",
+    "dispatch_obs",
+    "plan_attempt",
+    "provider_failure_label",
+    "run_planned_routed",
+    "run_subagent_attempt"
+  ],
   "files": [
-    "crates/agent/src/tui/draw.rs",
-    "crates/agent/src/tui/tests.rs"
+    "crates/agent/src/config.rs",
+    "crates/agent/src/knowledge.rs",
+    "crates/agent/src/orchestrate.rs",
+    "crates/agent/src/route.rs"
   ],
   "tests": [
-    "crates/agent/src/tui/tests.rs::cjk_reasoning_and_answer_reflow_keep_semantic_rails_within_cells",
-    "crates/agent/src/tui/tests.rs::wide_completed_idle_surface_uses_bounded_result_card",
-    "crates/agent/src/tui/tests.rs::wide_short_result_card_is_content_aware_and_centered"
+    "crates/agent/src/knowledge.rs",
+    "crates/agent/src/orchestrate.rs",
+    "crates/agent/src/route.rs"
   ],
   "constraints": [
-    "Apply only at wide completed idle result-card widths; keep narrow, low-height, streaming, and native-scrollback projections unchanged.",
-    "Presentation-only; derive card width from existing rendered detail cell counts and preserve Answer/Reasoning/Conclusion text and roles.",
-    "Reuse idle_result_card_lines, idle_detail_line, str_cells, and existing result-card recovery actions; no new state/cache/parser/renderer/dependency/surface."
+    "Provider error bodies, secrets, cookies, and raw logs never enter route output or evidence.",
+    "Runtime fallback is at most one main-provider attempt; no unbounded retry or background task.",
+    "Subagent remains read-only; teammate/planner execution retains existing bounded graph, permission, maker-checker, and verify semantics.",
+    "Unknown route capabilities remain unknown; never infer from model names."
   ],
-  "failed_knowledge": [],
+  "failed_knowledge": [
+    ".iteration/research-route-failure-20260810.json"
+  ],
   "requirements": {
     "source": "docs/REQUIREMENTS-SPEC.md",
     "ids": [
-      "REQ-20260801-01"
+      "REQ-20260809-ROUTE-01"
     ],
     "records": [
       {
-        "id": "REQ-20260801-01",
+        "id": "REQ-20260809-ROUTE-01",
         "section": "active",
-        "title": "TUI 视觉、交互与展示层迭代",
-        "markdown": "### REQ-20260801-01 · TUI 视觉、交互与展示层迭代\n\n- 批准依据:`批准`\n- 状态:`ACTIVE`\n- 版本:`v0.2.0`\n- 行为:`RidgeCode TUI 以清晰、科技感强且终端主题友好的界面呈现实际收到且允许展示的模型输出与最终回答；Answer 与实际 reasoning_content 分层呈现，不伪造隐藏推理；模型回复、调查结论、等待/执行状态与当前 Agent 活动须持续可见，长内容先展示摘要并可展开查看有界详情；文件读取与工具输出默认合并为可折叠摘要，展开时显示有界、按终端宽度换行的有效细节；支持有界、无外部解析依赖的行级 Markdown 展示（bold、code、header）与 ANSI 16 色语义角色；关键交互可发现、可操作，长任务期间保持响应并允许用户取消当前执行后接管输入；底部状态区明确区分输入 token 与输出 token；忙碌时待提交消息粘性显示于输入框上方，Enter 追加至队尾，Ctrl+Enter 立即推至队首且不打断当前模型回合。`\n- 边界:`范围限于 crates/agent/src/tui 及其直接交互/渲染依赖、展示状态模型、布局、事件处理、渲染与测试，以及按迭代门进行的 NotebookLM 架构/业界方案调研与本轮 Note 清理。不改变 langgraph 核心语义，不把具体 LLM/MCP SDK 耦合进 TUI，不牺牲安全门、确定性验证、跨平台终端兼容或数据完整性，不升级无关依赖；保留 maker/checker、权限门、危险命令拦截、输入排队/取消、事件驱动主环、Viewport::Inline、insert_before 原生 scrollback 与 ANSI 16 色主题适配方向；不覆盖 samples/config.json 与 test_codegraph.ps1。工具摘要须保留，工具详情默认折叠且有界；Markdown 仅作展示层解析。`\n- 验收:`通过 cargo fmt --all --check、cargo test --workspace、cargo clippy --workspace --all-targets -- -D warnings；TUI 纯逻辑测试覆盖 Markdown span、语义色角色、折叠/展开、状态迁移、窄终端布局、CJK/emoji 宽度、长行物理换行、Ctrl+R/Ctrl+O、输入/输出 token 分栏、Agent 活动状态、取消后接管与待提交队列预览/队首推送；证明静态提交文本无 ANSI 逃逸残留、文件读取/工具详情默认折叠且展开不越界、LiveTranscript 64 块上限有效；完成真实终端或可复现渲染验收，证明长输出按宽度换行不刷屏、模型回复/调查结论/等待/当前活动可见、摘要可展开、工具默认收起且可展开、待提交消息不遮挡当前输入，Enter/Ctrl+Enter 不打断当前回合，Ctrl-C 可交还输入控制，且单帧刷新无明显卡顿；NotebookLM 建议经 CodeGraph、当前代码与测试核验后方可落地。`\n- 追踪:`REQ → crates/agent/src/tui/*.rs 的状态/事件/渲染符号 → crates/agent/src/tui/tests.rs 与 workspace 质量闸；NLM 建议证据存于 .iteration/notebooklm-response.json；Note 清理以本轮迭代 ID、闭环证据与本地 archive 记录为准。"
+        "title": "Agent route 按任务特性选择 provider/model",
+        "markdown": "### REQ-20260809-ROUTE-01 · Agent route 按任务特性选择 provider/model\n\n- Approval evidence:`用户明确回复：批准`\n- Status:`ACTIVE`\n- Version:`v0.4.0`\n- Behavior:`RidgeCode 从已加载且当前可用的 provider/model 配置构建可解释、可测试的 route 决策：根据任务难度、规模、类型与角色/派发方式选择或排序候选 provider/model；支持 subagent 与 agent teammate 派发路径；缺省、不可用或失败时确定性回退并可观测记录原因；不以模型自述替代路由结果。`\n- Boundary:`范围含项目初始化所需 .iteration 状态、需求与状态快照、CodeGraph 查询、经批准的 NotebookLM/深度调研证据；crates/agent 的 route/dispatch 配置与决策模型、provider/model 能力元数据、subagent/teammate 派发接缝、确定性测试及必要 CLI/TUI 可观测性；仅改动证据证明必要的直接依赖。不得上传密钥、cookie、原始会话或未批准需求；不改变 langgraph 核心 BSP 语义、权限门、危险命令拦截、maker/checker 与 verify；不引入无界后台任务、具体第三方 SDK 耦合、无证据的 provider 重试/计费策略或无关 UI 重构；保留 provider trait/配置边界、MCP 协议语义、子 agent 只读约束及当前工作区脏改动。`\n- Acceptance:`完成 request-intake、requirements gate、PROJECT-STATE 快照、context/iteration gate 与有界调研记录；形成经当前代码、CodeGraph、测试与真实配置核验的 route 设计与实现；测试覆盖任务特性分类/显式覆盖、候选过滤与排序、provider/model 不可用回退、subagent 与 teammate 派发、可观测选择原因及权限/只读边界；通过 cargo fmt --all --check、cargo test --workspace、cargo clippy --workspace --all-targets -- -D warnings、cargo build --workspace，并完成真实可用配置 route smoke，证明实际选择仅来自当前可用 providers/models。`\n- Traceability:`REQ → provider/model 配置解析、route 决策、dispatch_agent/teammate 派发接缝 → crates/agent/provider/tests 与 workspace quality gates → 脱敏 smoke/调研证据；NotebookLM 报告仅作假设，闭环时清理或归档。"
       }
     ],
     "max_bytes": 16384
@@ -35,25 +47,32 @@
   "codegraph": {
     "mode": "targeted",
     "queries": [
-      "idle_result_card_lines idle_result_summary live_empty_state draw_live_output full-width streaming native scrollback"
+      "Agents::select_provider",
+      "dispatch_obs",
+      "dispatch_obs run_subagent provider failure fallback",
+      "plan_attempt",
+      "provider_failure_label",
+      "run_planned_routed",
+      "run_planned_routed planner teammate GraphError fallback",
+      "run_subagent_attempt"
     ],
     "full_rebuild": false
   },
   "read_policy": {
     "allowed_files": [
-      "crates/agent/src/tui/draw.rs",
-      "crates/agent/src/tui/tests.rs",
-      "crates/agent/src/tui/tests.rs::cjk_reasoning_and_answer_reflow_keep_semantic_rails_within_cells",
-      "crates/agent/src/tui/tests.rs::wide_completed_idle_surface_uses_bounded_result_card",
-      "crates/agent/src/tui/tests.rs::wide_short_result_card_is_content_aware_and_centered"
+      "crates/agent/src/config.rs",
+      "crates/agent/src/knowledge.rs",
+      "crates/agent/src/orchestrate.rs",
+      "crates/agent/src/route.rs"
     ],
     "deny_unlisted": true,
     "max_files": 30
   },
   "write_policy": {
     "allowed_paths": [
-      "crates/agent/src/tui/draw.rs",
-      "crates/agent/src/tui/tests.rs",
+      ".iteration/route-fallback-smoke-evidence-20260810.json",
+      "crates/agent/src/knowledge.rs",
+      "crates/agent/src/orchestrate.rs",
       "docs/archive/events-2026-08.jsonl"
     ],
     "deny_unlisted": true
@@ -64,10 +83,27 @@
   },
   "baseline": {
     "files": {
-      "crates/agent/src/tui/draw.rs": "8a8865eb4d71da067151842007d1291938c9f78df89b9eb21220e0a146072e7f",
-      "crates/agent/src/tui/status.rs": "32809f0e955f1e6a3f2d00c1566a2939e7717d686b72fe940c5eeb289b25f6d2",
-      "crates/agent/src/tui/tests.rs": "91f00365e7a932f40d16878ccc9d0bb9221f32726953774dfa451a76fea13a15",
-      "docs/archive/events-2026-08.jsonl": "f6cbe1f9d3f85d1591f1804cf21ab55d62aee559a37bdf8fd8af95a4c8dedfdd"
+      "README.md": "3bf42983a4473960d8a8a83e832cb7cb08ba54e9eeca05d1e027a77e9c700578",
+      "crates/agent/src/auth.rs": "ff4cc817bc1fb4db611ca209d280ea9393ba8d89750ee31455f26d46c305a423",
+      "crates/agent/src/brain.rs": "4b3ef4b2acfe7ef7235de729e3ad245ef580685a5f0ab38869c66959f642ee87",
+      "crates/agent/src/config.rs": "d98520240f5832c97299e6076d67907a06a175b74033f7a90687bfab2cebeb12",
+      "crates/agent/src/context.rs": "e5b84f5f753e488a1d0093a4424a639faf434394c6ed773d3430d4fff3c7ee3c",
+      "crates/agent/src/graph.rs": "0e67cb13189a5208a1000ddd2d087ce70ec315ef373b67f9e75a0bba5e2cb15d",
+      "crates/agent/src/knowledge.rs": "f1461e870e4946fb0b55f2e32a418a2303a44ce129e2ecbd4a655325fff578c9",
+      "crates/agent/src/lib.rs": "45f477b5784d5f599aa3233f3bbf8bc62bed720dffa495b895681ff7fda80b5b",
+      "crates/agent/src/login.rs": "8d8031c0c3e646cfe91bd2649759d9f39ec13824c86352e2c29a460e41cb4abd",
+      "crates/agent/src/main.rs": "fe3c78925b4b5bf45356eb973076a39868c4894c71ac978b7b58e5a207e9f7ac",
+      "crates/agent/src/orchestrate.rs": "0d0f4fb851fde25dc06c2b5719a758355bc27c5f29b54e5c83a2fbdf8ca70b6f",
+      "crates/agent/src/route.rs": "ea1ae172e23ba646230252f8a0d7516ad77caac3876a29c4c2347d26896406e9",
+      "crates/agent/src/tui/app.rs": "f745b7fd4828b06faec5eedae325c62c95ca77537dbcc6808f5f83ff6c6e5d5b",
+      "crates/agent/src/tui/draw.rs": "26eaa2dc60067ff42de8ca342485896640a7caa2abeca8cb7300075d7422fa43",
+      "crates/agent/src/tui/mod.rs": "5c736b5e1ebc7d8540b6a4c710308ee174617b3baeb420af7f57589e5dee51bd",
+      "crates/agent/src/tui/status.rs": "0b65446cae17d332fae6abde16f69e07a499cab11f5b1d4871b98405364e11fc",
+      "crates/agent/src/tui/tests.rs": "2d70b85c1bbbc8f660354e53f5cbf92a9dee8a7f4572bd23b2ca952a79fa85d7",
+      "docs/ARCHITECTURE.md": "f91f2653eabcd13f3b7169d493f4223983f039d464bdfb15ad30a81fe1bb53ed",
+      "docs/PENDING-REQUIREMENTS.md": "a653cd735491bf6593b289e50840a5b084fe90ed2e89cd912d283366297387f3",
+      "docs/REQUIREMENTS-SPEC.md": "d4f918d8532fbd90ea9c1a3180ec3e56dcf9680a52bf99b3e856103dc2eac9e8",
+      "docs/archive/events-2026-08.jsonl": "765467ad0140d18e2f16cfd5ed409f81e90769dfa98d9ad9b209aedec27c90aa"
     }
   },
   "budget": {

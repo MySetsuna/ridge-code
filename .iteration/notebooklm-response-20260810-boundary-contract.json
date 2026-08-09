@@ -1,0 +1,93 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "notebook": {
+    "id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "title": "RidgeCode现状、愿景、路线图",
+    "source_count": 27,
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "note_ids": [
+      "7e702c62-a035-44b1-a968-3d843c67f223",
+      "aeb2c29a-3d94-4190-a458-aaa2c642abd5"
+    ]
+  },
+  "nlm_evidence": {
+    "sources_used": [],
+    "citations": {},
+    "references": [],
+    "role": "hypothesis_only",
+    "path_errors": [
+      "NLM referred to crates/agent/src/agent/context.rs and crates/agent/src/agent/prompts.rs; current symbols are under crates/agent/src/context.rs and crates/agent/src/brain.rs."
+    ]
+  },
+  "confirmed_facts": [
+    {
+      "fact": "The current conversation and vision Note emphasize overthinking, unclear action boundaries, Lean output, physical verification, transparent stopping, and takeover.",
+      "evidence": "NotebookLM chat 68791fb7-659a-4ad6-a86c-beb7ac694781; Note 7e702c62-a035-44b1-a968-3d843c67f223"
+    },
+    {
+      "fact": "The code already injects explore_streak at EXPLORE_NUDGE_AFTER and exposes exact TUI counters; the NLM suggestion to add the counter is not a missing feature.",
+      "evidence": "CodeGraph and crates/agent/src/context.rs:92-112; crates/agent/src/state.rs:163-166; crates/agent/src/tui/status.rs:168-182"
+    },
+    {
+      "fact": "A presentation/prompt-only boundary clause was added; deterministic prompt tests pass; an isolated normal-mode edit smoke completed in 3 steps and a simple read smoke completed in 2 steps.",
+      "evidence": "crates/agent/src/brain.rs; crates/agent/src/context.rs; .iteration/smoke-evidence-20260810-boundary.json"
+    }
+  ],
+  "contradictions": [
+    {
+      "claim": "A stronger read-only call budget should make the open-ended three-document investigation converge.",
+      "evidence_against": ".iteration/smoke-evidence-20260810-boundary.json: same task timed out after 120000 ms with no manifest"
+    }
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "The open-ended investigation timeout may be provider/task-shape latency or model noncompliance, not necessarily a missing prompt clause.",
+      "support": ["same task timed out before and after stronger prompt wording"],
+      "against": ["no per-provider latency/tool trace was retained"],
+      "experiment": "Capture only sanitized first-response latency, tool-call count/names, explore_streak, and whether the fourth read/search call occurs."
+    },
+    {
+      "hypothesis": "Showing exploration debt earlier may improve model boundary selection, but the existing threshold nudge already contains a numeric streak.",
+      "support": ["durable_state_block already emits the streak at EXPLORE_NUDGE_AFTER"],
+      "against": ["no same-task trace A/B proves a benefit"],
+      "experiment": "Compare current threshold injection with an unchanged control on one bounded task before altering the nudge threshold."
+    }
+  ],
+  "candidates": [
+    {
+      "core": "General action-boundary clause plus mode-safe exploration nudge: stop repeated evidence gathering, choose the smallest permitted action and verifier, or report supported facts/blocker.",
+      "constraints": ["prompt/context presentation only", "reuse existing counters and durable facts", "read-only remains report-only"],
+      "risks": ["prompt compliance may vary by provider", "too-early action can reduce investigation quality"],
+      "reversibility": "high; two prompt strings and deterministic tests",
+      "scope": ["crates/agent/src/brain.rs", "crates/agent/src/context.rs"],
+      "validation": ["brain/context tests", "isolated real-config edit smoke", "same-task read-only trace A/B"]
+    },
+    {
+      "core": "Exploration-streak context injection.",
+      "constraints": ["reuse existing durable_state_block"],
+      "risks": ["duplicate existing nudge and possible counter-gaming"],
+      "reversibility": "high",
+      "scope": [],
+      "validation": ["CodeGraph confirms already implemented; no new implementation justified"]
+    },
+    {
+      "core": "Stall-pressure heatmap busy bar.",
+      "constraints": ["presentation only", "no new stop rule"],
+      "risks": ["duplicate exact HUD and anxiety/false urgency"],
+      "reversibility": "high",
+      "scope": [],
+      "validation": ["reject pending a reproduced user decision gap"]
+    }
+  ],
+  "recommendation": "Keep the bounded prompt change, but do not claim general convergence. Next local experiment should capture a bounded same-task trace comparing prompt variants and distinguish provider latency, repeated tool calls, and model noncompliance before any more HUD or stop-rule work.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Add a sanitized trace-only measurement for the same open-ended read-only task: first provider response latency, tool-call count/names, explore_streak, and whether the fourth read/search call occurs; do not change execution semantics."
+  },
+  "stop_conditions": [
+    "Do not claim overthinking root cause or prompt fix from this run.",
+    "Do not remove or relax MAX_STALL/MAX_EXPLORE.",
+    "Do not add another HUD, virtualizer, renderer, state machine, or provider/MCP change without a reproduced gap.",
+    "Do not retain raw model output, trace, credentials, or temporary workspace."
+  ]
+}

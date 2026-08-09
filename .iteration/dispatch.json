@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "dispatch": {
+    "enabled": true,
+    "backend": "serial",
+    "max_workers": 1,
+    "max_packet_bytes": 16384,
+    "max_total_packet_bytes": 16384
+  },
+  "tasks": [
+    {
+      "id": "worker-1",
+      "result_path": ".iteration/agents/result-worker-1.json",
+      "objective": "主 Agent 串行执行：让 TUI 结果卡与原生 scrollback 显示人类可读的确定性停机原因和接管提示，尤其 no_progress/stall。",
+      "difficulty": "medium",
+      "reasoning_effort": "medium",
+      "execution_kind": "write",
+      "isolation": "shared",
+      "requirements": ["REQ-20260801-01"],
+      "symbols": ["Ui::mark_task_outcome", "idle_result_summary", "halt_reason"],
+      "codegraph": {
+        "queries": ["Ui::mark_task_outcome, idle_result_summary, halt_reason call path", "CommitBlock, flush_commits, idle_history_actions"],
+        "facts": [
+          {
+            "fact": "执行层已有 HaltReason::Stall；TUI 结果面只展示 no_progress 机器码与 generic stopped 文案。",
+            "evidence": "codegraph: orchestrate.rs:36-95; tui/mod.rs:1316-1326; tui/app.rs:322-334; tui/draw.rs:4248-4390"
+          }
+        ]
+      },
+      "files": [
+        "crates/agent/src/tui/app.rs",
+        "crates/agent/src/tui/mod.rs",
+        "crates/agent/src/tui/draw.rs",
+        "crates/agent/src/tui/tests.rs"
+      ],
+      "tests": ["crates/agent/src/tui/tests.rs"],
+      "write_paths": [
+        "crates/agent/src/tui/app.rs",
+        "crates/agent/src/tui/mod.rs",
+        "crates/agent/src/tui/draw.rs",
+        "crates/agent/src/tui/tests.rs"
+      ],
+      "exclusive_resources": ["tui presentation state"],
+      "constraints": [
+        "presentation-only; do not change execution, stall thresholds, provider, MCP, queue, or key routing",
+        "preserve bounded width-aware ANSI16 rendering, native scrollback, partial Answer semantics, and folded tools",
+        "do not infer hidden reasoning; use deterministic HaltReason text only"
+      ],
+      "verification": [
+        {
+          "command": "cargo test -p agent --bin ridgecode --locked --offline",
+          "expected_exit": 0
+        },
+        {
+          "command": "cargo fmt --all -- --check",
+          "expected_exit": 0
+        },
+        {
+          "command": "cargo clippy --workspace --all-targets --locked --offline -- -D warnings",
+          "expected_exit": 0
+        }
+      ],
+      "depends_on": []
+    }
+  ]
+}

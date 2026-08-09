@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "upsert": [
+    {
+      "id": "PENDING-REQ-20260809-ROUTE-01",
+      "section": "pending",
+      "markdown": "### PENDING-REQ-20260809-ROUTE-01 · Agent route 按任务特性选择 provider/model\n\n- Type:`NEW`\n- Original intent:`使用 NotebookLM 迭代工作流完成项目初始化与深度调研，并让 RidgeCode 可按任务难度、规模、类型，在拆分 subagent 或 agent teammate 时，从当前可用 providers/models 中选择合适模型。`\n- Related Active requirement:`REQ-20260803-01、REQ-20260803-02；若涉及子 agent/teammate 派发，须保持现有 agent 定义与 provider 配置边界。`\n- Target behavior:`RidgeCode 能从已加载的可用 provider/model 配置构建可解释、可测试的 route 决策：根据任务难度、规模、类型与角色/派发方式选择或排序候选 provider/model；支持 subagent 与 agent teammate 的派发路径；缺省、不可用或失败时有确定性回退与可观测原因；不以模型自述替代路由结果。`\n- Scope:`项目初始化所需的 .iteration 状态、需求与状态快照、CodeGraph 查询、经批准的 NotebookLM/深度调研证据；crates/agent 的 route/dispatch 配置与决策模型、provider/model 能力元数据、subagent/teammate 派发接缝、确定性测试及必要 CLI/TUI 可观测性；仅改动被证据证明必要的直接依赖。`\n- Non-goals:`不上传密钥、cookie、原始会话或未批准需求；不凭 NotebookLM 输出直接定根因；不改变 langgraph 核心 BSP 语义、权限门、危险命令拦截、maker/checker 与 verify；不引入无界后台任务、具体第三方 SDK 耦合、无证据的 provider 重试/计费策略或无关 UI 重构。`\n- Frozen boundary:`只使用当前配置中实际可用的 provider/model；保持 provider trait/配置边界与 MCP 协议语义；子 agent 只读约束、主 agent 权限门、确定性验收与现有工作区脏改动均须保留；NotebookLM 仅作假设来源，报告须经当前代码、CodeGraph、测试和真实配置实验核验。`\n- Assumptions/open questions:`需调研并核验现有 provider/model 配置如何暴露能力、当前 dispatch_agent 与 teammate 接缝是否存在、route 决策应在派发前还是 provider 调用边界完成、任务特性由显式请求还是确定性分类器提供、如何在无候选/不可用时回退；最终字段与验收阈值以审批后的调研方案为准。`\n- Deterministic acceptance:`完成初始化 request-intake、requirements gate、PROJECT-STATE 快照、context/iteration gate 与有界调研记录；形成经核验的 route 设计与实现；测试覆盖任务特性分类/显式覆盖、候选过滤与排序、provider/model 不可用回退、subagent 与 teammate 派发、可观测选择原因及权限/只读边界；通过 cargo fmt --all --check、cargo test --workspace、cargo clippy --workspace --all-targets -- -D warnings、cargo build --workspace，并完成真实可用配置的 route smoke，证明实际选择仅来自当前可用 providers/models。`\n- Expected traceability:`PENDING-REQ → docs/REQUIREMENTS-SPEC.md（审批后）→ provider/model 配置解析、route 决策、dispatch_agent/teammate 派发接缝 → crates/agent/provider/tests 与 workspace quality gates → 脱敏 smoke/调研证据；NotebookLM 报告仅存本地并在闭环时清理/归档。"
+    }
+  ],
+  "remove": []
+}

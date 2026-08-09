@@ -1,4 +1,5 @@
 use crate::exec::{builtin_tool_specs, execute_tool_call};
+use crate::route::{choose_route, ModelProfile, RouteDecision, RouteRequest, RouteRole};
 use provider::{CompletionRequest, LlmProvider, Message, Role, ToolCall, ToolSpec};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -286,6 +287,82 @@ pub fn load_project_rules(global: Option<&std::path::Path>) -> Option<Skill> {
 pub struct Agents {
     pub defs: Vec<Agent>,
     pub providers: HashMap<String, Arc<dyn LlmProvider>>,
+    /// Only credential-resolvable profiles enter this registry.
+    pub route_candidates: Vec<AgentProvider>,
+}
+
+/// A usable provider handle paired with non-secret routing metadata.
+pub struct AgentProvider {
+    pub profile: ModelProfile,
+    pub provider: Arc<dyn LlmProvider>,
+}
+
+pub struct RoutedProvider {
+    pub provider: Arc<dyn LlmProvider>,
+    pub decision: RouteDecision,
+}
+
+impl Agents {
+    /// Select a usable provider deterministically. If preferences cannot be
+    /// satisfied, retry selection without them before using the caller's main
+    /// provider; the decision always explains which fallback occurred.
+    pub fn select_provider(
+        &self,
+        request: &RouteRequest,
+        fallback: Arc<dyn LlmProvider>,
+    ) -> RoutedProvider {
+        let profiles: Vec<ModelProfile> = self
+            .route_candidates
+            .iter()
+            .map(|candidate| candidate.profile.clone())
+            .collect();
+        let mut decision = choose_route(request, &profiles);
+        if decision.selected.is_none()
+            && (request.preferred_provider.is_some() || request.preferred_model.is_some())
+        {
+            let mut fallback_decision = choose_route(&request.without_preferences(), &profiles);
+            if fallback_decision.selected.is_some() {
+                fallback_decision.used_fallback = true;
+                fallback_decision.reason = format!(
+                    "{}; explicit preference unavailable, automatic fallback: {}",
+                    decision.reason, fallback_decision.reason
+                );
+                decision = fallback_decision;
+            }
+        }
+        if let Some(selected) = decision.selected.as_ref() {
+            if let Some(candidate) = self
+                .route_candidates
+                .iter()
+                .find(|candidate| candidate.profile.key() == selected.key())
+            {
+                tracing::debug!(
+                    selected = %selected.key(),
+                    fallback = decision.used_fallback,
+                    reason = %decision.reason,
+                    "agent route decision"
+                );
+                return RoutedProvider {
+                    provider: candidate.provider.clone(),
+                    decision,
+                };
+            }
+        }
+        decision.used_fallback = true;
+        decision.reason = format!(
+            "{}; no usable routed handle, caller main provider fallback",
+            decision.reason
+        );
+        tracing::debug!(
+            fallback = true,
+            reason = %decision.reason,
+            "agent route decision"
+        );
+        RoutedProvider {
+            provider: fallback,
+            decision,
+        }
+    }
 }
 
 /// sub-agent 允许的**只读**工具(不下放写/改/shell,免绕过主 agent 的权限门)。
@@ -310,7 +387,13 @@ fn readonly_tool_specs(allow: &Option<Vec<String>>) -> Vec<ToolSpec> {
 /// 跑一个**只读** sub-agent:独立 system(=定义正文)+ 只读工具,自成一轮 reason-act 循环,
 /// 返回它的最终结论文本(不回灌工具轨迹到主上下文 —— 这正是省 token 的关键)。
 /// ponytail: 只读(read_file/search),要写让主 agent 写;放开写权限需接权限门。
-pub async fn run_subagent(def: &Agent, provider: Arc<dyn LlmProvider>, task: &str) -> String {
+/// Keep provider failures typed at the dispatch boundary so one selected
+/// candidate can fail over exactly once to the caller's main provider.
+async fn run_subagent_attempt(
+    def: &Agent,
+    provider: Arc<dyn LlmProvider>,
+    task: &str,
+) -> Result<String, String> {
     let system = format!(
         "你是 '{}' sub-agent。{}\n\n{}\n\n你是**只读**的:只能用 read_file / search 搜集信息,不能改文件或跑命令。查完后用纯文本回一个精炼结论。",
         def.name, def.description, def.body
@@ -324,10 +407,10 @@ pub async fn run_subagent(def: &Agent, provider: Arc<dyn LlmProvider>, task: &st
             messages: msgs,
             tools: tools.clone(),
         };
-        let completion = match provider.complete(&req).await {
-            Ok(c) => c,
-            Err(e) => return format!("[{} 出错: {e}]", def.name),
-        };
+        let completion = provider
+            .complete(&req)
+            .await
+            .map_err(|error| provider_failure_label(error.as_ref()))?;
         match completion.tool_calls.into_iter().next() {
             Some(call) => {
                 // 深度防御:即便模型幻觉调了非只读工具,也挡下,绝不执行副作用工具。
@@ -340,10 +423,39 @@ pub async fn run_subagent(def: &Agent, provider: Arc<dyn LlmProvider>, task: &st
                     .push(Message::assistant(completion.text).with_tool_calls(vec![call.clone()]));
                 history.push(Message::tool_result(call.id.clone(), obs));
             }
-            None => return completion.text,
+            None => return Ok(completion.text),
         }
     }
-    format!("[{} 达到步数上限,未收敛]", def.name)
+    Ok(format!("[{} 达到步数上限,未收敛]", def.name))
+}
+
+/// Provider errors may contain response bodies or transport details. Keep the
+/// user-visible route audit bounded and never echo a secret-bearing payload.
+pub(crate) fn provider_failure_label(error: &(dyn std::error::Error + Send + Sync)) -> String {
+    let text = error.to_string();
+    let parts: Vec<&str> = text.split_whitespace().collect();
+    for window in parts.windows(2) {
+        if window[0] == "http" {
+            let status = window[1].trim_matches(|character: char| !character.is_ascii_digit());
+            if status.len() == 3 {
+                return format!("http {status}");
+            }
+        }
+    }
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("timeout") || lower.contains("timed out") {
+        "provider request timed out".to_string()
+    } else {
+        "provider request failed".to_string()
+    }
+}
+
+/// Run a read-only sub-agent without exposing raw provider error payloads.
+pub async fn run_subagent(def: &Agent, provider: Arc<dyn LlmProvider>, task: &str) -> String {
+    match run_subagent_attempt(def, provider, task).await {
+        Ok(out) => out,
+        Err(reason) => format!("[{} 出错: {reason}]", def.name),
+    }
 }
 
 /// `dispatch_agent` 工具 spec(仅在有 agent 定义时暴露)。让主 agent 自主把只读子任务派出去。
@@ -367,14 +479,19 @@ pub(crate) fn dispatch_spec(agents: &Agents) -> Option<ToolSpec> {
             "type":"object",
             "properties":{
                 "agent":{"type":"string","enum":names},
-                "task":{"type":"string","description":"交给该 sub-agent 的具体只读子任务"}
+                "task":{"type":"string","description":"交给该 sub-agent 的具体只读子任务"},
+                "difficulty":{"type":"string","enum":["simple","moderate","complex"],"description":"可选：任务难度覆盖；省略则由任务文本确定性推断"},
+                "size":{"type":"string","enum":["small","medium","large"],"description":"可选：任务规模覆盖"},
+                "kind":{"type":"string","enum":["read_only","research","planning","coding","review","general"],"description":"可选：任务类型覆盖"},
+                "provider":{"type":"string","description":"可选：provider profile 名；不可用时确定性回退"},
+                "model":{"type":"string","description":"可选：模型名覆盖；不可用时确定性回退"}
             },
             "required":["agent","task"]
         }),
     })
 }
 
-/// 执行 `dispatch_agent`:选 provider(定义指定的档案,缺则主 provider)→ 跑 sub-agent → 回结论。
+/// 执行 `dispatch_agent`:按任务特性选择可用 provider/model → 跑只读 sub-agent → 回结论与路由原因。
 pub(crate) async fn dispatch_obs(
     agents: &Agents,
     main: &Arc<dyn LlmProvider>,
@@ -393,14 +510,40 @@ pub(crate) async fn dispatch_obs(
     let Some(def) = agents.defs.iter().find(|a| a.name == name) else {
         return format!("没有名为 {name} 的 sub-agent(dispatch_agent 的 enum 里选)");
     };
-    let provider = def
-        .provider
-        .as_ref()
-        .and_then(|p| agents.providers.get(p))
-        .cloned()
-        .unwrap_or_else(|| main.clone());
-    let out = run_subagent(def, provider, task).await;
-    format!("[sub-agent {name} 的结论]\n{out}")
+    let request = RouteRequest::from_task(task, RouteRole::Subagent).with_overrides(
+        call.arguments.get("difficulty").and_then(|v| v.as_str()),
+        call.arguments.get("size").and_then(|v| v.as_str()),
+        call.arguments.get("kind").and_then(|v| v.as_str()),
+        call.arguments
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .or(def.provider.as_deref()),
+        call.arguments.get("model").and_then(|v| v.as_str()),
+    );
+    let routed = agents.select_provider(&request, main.clone());
+    let mut decision = routed.decision;
+    let out = match run_subagent_attempt(def, routed.provider, task).await {
+        Ok(out) => out,
+        Err(first_failure) if decision.selected.is_some() => {
+            decision.used_fallback = true;
+            decision.reason = format!(
+                "{}; selected provider failed ({first_failure}), deterministic main-provider fallback",
+                decision.reason
+            );
+            match run_subagent_attempt(def, main.clone(), task).await {
+                Ok(out) => out,
+                Err(fallback_failure) => format!(
+                    "[{} 出错: selected provider failed ({first_failure}); main-provider fallback failed ({fallback_failure})]",
+                    def.name
+                ),
+            }
+        }
+        Err(failure) => format!("[{} 出错: {failure}]", def.name),
+    };
+    format!(
+        "[sub-agent {name} route: {}]\n[sub-agent {name} 的结论]\n{out}",
+        decision
+    )
 }
 
 #[cfg(test)]
@@ -448,6 +591,144 @@ mod tests {
             .iter()
             .any(|x| x.name == "fastcontext" && x.provider.as_deref() == Some("fast")));
         assert!(a.iter().any(|x| x.name == "reviewer"));
+    }
+
+    #[test]
+    fn route_registry_reports_preference_fallback_without_exposing_secrets() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(provider::ScriptedProvider::new(Vec::new()));
+        let profile = crate::ModelProfile {
+            provider: "fast".into(),
+            model: "small".into(),
+            kind: "openai".into(),
+            context_window: Some(64_000),
+            cost_tier: Some(1),
+            latency_tier: Some(1),
+            supports_tools: Some(true),
+            supports_reasoning: Some(false),
+            tags: vec!["readonly".into()],
+        };
+        let agents = Agents {
+            defs: Vec::new(),
+            providers: HashMap::new(),
+            route_candidates: vec![AgentProvider {
+                profile,
+                provider: provider.clone(),
+            }],
+        };
+        let request = RouteRequest::from_task("read the file", RouteRole::Subagent).with_overrides(
+            None,
+            None,
+            None,
+            Some("missing"),
+            None,
+        );
+        let routed = agents.select_provider(&request, provider.clone());
+        assert_eq!(
+            routed.decision.selected_key().as_deref(),
+            Some("fast::small")
+        );
+        assert!(routed.decision.used_fallback);
+        assert!(!routed.decision.reason.contains("api_key"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_agent_returns_route_audit_and_conclusion() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(provider::ScriptedProvider::new(vec![
+            provider::Completion {
+                text: "read-only result".into(),
+                ..Default::default()
+            },
+        ]));
+        let agents = Agents {
+            defs: vec![Agent {
+                name: "explorer".into(),
+                description: "read files".into(),
+                provider: None,
+                tools: Some(vec!["search".into()]),
+                body: "inspect only".into(),
+            }],
+            providers: HashMap::new(),
+            route_candidates: vec![AgentProvider {
+                profile: crate::ModelProfile {
+                    provider: "fast".into(),
+                    model: "small".into(),
+                    kind: "openai".into(),
+                    context_window: Some(64_000),
+                    cost_tier: Some(1),
+                    latency_tier: Some(1),
+                    supports_tools: Some(true),
+                    supports_reasoning: Some(false),
+                    tags: vec![],
+                },
+                provider: provider.clone(),
+            }],
+        };
+        let call = ToolCall {
+            id: "route-1".into(),
+            name: "dispatch_agent".into(),
+            arguments: serde_json::json!({"agent":"explorer","task":"read the README"}),
+        };
+        let out = dispatch_obs(&agents, &provider, &call).await;
+        assert!(out.contains("fast::small"));
+        assert!(out.contains("read-only result"));
+    }
+
+    struct FailingProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for FailingProvider {
+        async fn complete(
+            &self,
+            _req: &CompletionRequest,
+        ) -> Result<provider::Completion, provider::ProviderError> {
+            Err("http 429: secret-api-body".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_agent_falls_back_once_after_selected_provider_failure() {
+        let failing: Arc<dyn LlmProvider> = Arc::new(FailingProvider);
+        let main: Arc<dyn LlmProvider> = Arc::new(provider::ScriptedProvider::new(vec![
+            provider::Completion {
+                text: "main fallback result".into(),
+                ..Default::default()
+            },
+        ]));
+        let agents = Agents {
+            defs: vec![Agent {
+                name: "explorer".into(),
+                description: "read files".into(),
+                provider: None,
+                tools: Some(vec!["search".into()]),
+                body: "inspect only".into(),
+            }],
+            providers: HashMap::new(),
+            route_candidates: vec![AgentProvider {
+                profile: crate::ModelProfile {
+                    provider: "failing".into(),
+                    model: "limited".into(),
+                    kind: "openai".into(),
+                    context_window: Some(64_000),
+                    cost_tier: Some(1),
+                    latency_tier: Some(1),
+                    supports_tools: Some(true),
+                    supports_reasoning: Some(false),
+                    tags: vec![],
+                },
+                provider: failing,
+            }],
+        };
+        let call = ToolCall {
+            id: "route-fallback".into(),
+            name: "dispatch_agent".into(),
+            arguments: serde_json::json!({"agent":"explorer","task":"read the README"}),
+        };
+
+        let out = dispatch_obs(&agents, &main, &call).await;
+        assert!(out.contains("selected provider failed (http 429)"), "{out}");
+        assert!(out.contains("deterministic main-provider fallback"));
+        assert!(out.contains("main fallback result"));
+        assert!(!out.contains("secret-api-body"));
     }
 
     /// 官方样例 skills 必须能被 load_skills 正确解析(守住 samples/ 不腐坏)。

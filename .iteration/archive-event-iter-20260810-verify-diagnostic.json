@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260810-verify-diagnostic",
+  "at": "2026-08-10",
+  "type": "iteration_completed",
+  "facts": [
+    "Verify rejection now exposes a deterministic cause instead of generic `build/tests not passing` text.",
+    "The change preserves MAX_STALL/MAX_EXPLORE, maker-checker, deterministic approval, and user takeover semantics.",
+    "Real user-config read-only smoke approved in 2 steps; TUI ConPTY BusyFixture and StressFixture regressions passed."
+  ],
+  "evidence": [
+    {"path":".iteration/smoke-evidence-20260810-verify-diagnostic.json","validation":"approved=true, halt_reason=approved, steps=2"},
+    {"path":".iteration/notebooklm-response-20260810-verify-diagnostic.json","validation":"notebook_gate validate-output: valid"},
+    {"command":"cargo test --workspace --locked --offline --quiet","exit_code":0},
+    {"command":"cargo clippy --workspace --all-targets --locked --offline -- -D warnings","exit_code":0},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -BusyFixture -ResizeProbe -TimeoutMs 9000","exit_code":0,"result":"passed"},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -StressFixture -InspectAnswer -TimeoutMs 9000","exit_code":0,"result":"passed"}
+  ],
+  "paths": [
+    "crates/agent/src/brain.rs",
+    "crates/agent/src/graph.rs"
+  ],
+  "symbols": [
+    "verify_ok",
+    "verify_failure_reason",
+    "verify_node",
+    "verify_route_llm"
+  ],
+  "next": [
+    "Do not remove or relax max stall from this usability complaint.",
+    "Do not add duplicate stall pressure or intercept icon surfaces without a reproduced gap.",
+    "Measure user actionability of the rejection reason before another stop-surface change."
+  ]
+}

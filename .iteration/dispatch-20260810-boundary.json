@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "dispatch": {
+    "enabled": true,
+    "backend": "serial",
+    "max_workers": 1,
+    "max_packet_bytes": 16384,
+    "max_total_packet_bytes": 16384
+  },
+  "tasks": [
+    {
+      "id": "worker-1",
+      "result_path": ".iteration/agents/iter-20260810-boundary/result-worker-1.json",
+      "objective": "复核并实现一个不改变执行语义的模糊任务行动边界契约：已有证据时停止重复侦察，选择最小行动、验证或事实报告。",
+      "difficulty": "medium",
+      "reasoning_effort": "medium",
+      "execution_kind": "write",
+      "isolation": "shared",
+      "requirements": ["REQ-20260801-01", "REQ-20260803-01"],
+      "symbols": ["build_system_prompt_with_mode", "durable_state_block", "to_messages"],
+      "codegraph": {
+        "queries": ["build_system_prompt_with_mode BASE_SYSTEM durable_state_block to_messages call path"],
+        "facts": [
+          {
+            "fact": "Durable State 已在 explore_streak 达到 EXPLORE_NUDGE_AFTER 时注入计数与停侦察提醒；BASE_SYSTEM 尚缺通用的停止重复调查/选择最小下一动作条款。",
+            "evidence": "CodeGraph: crates/agent/src/brain.rs:8-25, crates/agent/src/context.rs:92-112"
+          }
+        ]
+      },
+      "files": ["crates/agent/src/brain.rs", "crates/agent/src/context.rs"],
+      "tests": ["crates/agent/src/brain.rs", "crates/agent/src/context.rs"],
+      "write_paths": ["crates/agent/src/brain.rs", "crates/agent/src/context.rs"],
+      "exclusive_resources": ["agent prompt contract"],
+      "constraints": [
+        "保留 MAX_STALL/MAX_EXPLORE、maker-checker、确定性 verify、权限门与 takeover",
+        "不改 provider/MCP/langgraph/工具执行语义，不新增状态机、renderer 或隐藏 classifier",
+        "read-only 模式仍须在证据充分后报告；正常模式不得因 nudge 强制提前 finish"
+      ],
+      "verification": [
+        {"command":"cargo test -p agent --lib brain::tests --locked --offline --quiet","expected_exit":0},
+        {"command":"cargo test -p agent --lib context::tests --locked --offline --quiet","expected_exit":0},
+        {"command":"cargo test --workspace --locked --offline --quiet","expected_exit":0},
+        {"command":"cargo clippy --workspace --all-targets --locked --offline -- -D warnings","expected_exit":0},
+        {"command":"cargo fmt --all -- --check","expected_exit":0}
+      ],
+      "depends_on": []
+    }
+  ]
+}

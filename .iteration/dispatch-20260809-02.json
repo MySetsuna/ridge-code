@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "dispatch": {
+    "enabled": true,
+    "backend": "serial",
+    "max_workers": 1,
+    "max_packet_bytes": 16384,
+    "max_total_packet_bytes": 16384
+  },
+  "tasks": [
+    {
+      "id": "worker-1",
+      "result_path": ".iteration/agents/iter-20260809-02/result-worker-1.json",
+      "objective": "主 Agent 串行执行：在每个 Superstep 边界提交已完成 Tool 块到 native scrollback，保持默认折叠与原有执行语义。",
+      "difficulty": "light",
+      "reasoning_effort": "low",
+      "execution_kind": "write",
+      "isolation": "shared",
+      "requirements": ["REQ-20260801-01"],
+      "symbols": ["Ui::commit_live_tools", "Ui::commit_live_reasoning", "StreamEvent::Superstep", "flush_commits"],
+      "codegraph": {
+        "queries": [
+          "Ui::commit_live_tools, Ui::commit_live_reasoning, StreamEvent::Superstep call path",
+          "flush_commits, LiveTranscript::drain_tools, ToolBlock static projection"
+        ],
+        "facts": [
+          {
+            "fact": "Reasoning is committed at each Superstep; Tool blocks are drained only at done/interrupt, so ongoing Tool history is not in native scrollback until task end.",
+            "evidence": "codegraph: tui/mod.rs:1295-1300, 1320-1332; tui/app.rs:662-704"
+          }
+        ]
+      },
+      "files": [
+        "crates/agent/src/tui/mod.rs",
+        "crates/agent/src/tui/tests.rs"
+      ],
+      "tests": ["crates/agent/src/tui/tests.rs"],
+      "write_paths": [
+        "crates/agent/src/tui/mod.rs",
+        "crates/agent/src/tui/tests.rs"
+      ],
+      "exclusive_resources": ["TUI Superstep presentation boundary"],
+      "constraints": [
+        "presentation-only; no graph/provider/MCP/queue/key/max-stall changes",
+        "drain each completed Tool block once; keep details folded and bounded",
+        "preserve native scrollback, ANSI16, width wrapping, partial Answer and ConPTY"
+      ],
+      "verification": [
+        {"command":"cargo test -p agent --bin ridgecode tui::tests --locked --offline --quiet","expected_exit":0},
+        {"command":"cargo fmt --all -- --check","expected_exit":0},
+        {"command":"cargo clippy --workspace --all-targets --locked --offline -- -D warnings","expected_exit":0}
+      ],
+      "depends_on": []
+    }
+  ]
+}

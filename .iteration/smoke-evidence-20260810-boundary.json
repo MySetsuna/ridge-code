@@ -1,0 +1,52 @@
+{
+  "iteration_id": "iter-20260810-boundary-contract",
+  "mode": "headless_real_config_boundary_experiment",
+  "config_scope": "user .ridge/config.json",
+  "binary": "target/debug/ridgecode.exe rebuilt after boundary-clause change",
+  "secrets_printed": false,
+  "cases": [
+    {
+      "name": "ambiguous_read_only_three_documents",
+      "task_shape": "inspect README.md, docs/DIRECTION.md, and docs/REQUIREMENTS-SPEC.md; read-only; at most three path-qualified facts",
+      "effort": "low_process_override",
+      "timeout_ms": 120000,
+      "timed_out": true,
+      "exit_code": null,
+      "manifest_count": 0,
+      "stdout_bytes": 0,
+      "stderr_bytes": 4088,
+      "run_artifact_retained": false,
+      "interpretation": "The stronger read-only prompt did not make this open-ended multi-document task converge within the bound; no completion or root cause is claimed."
+    },
+    {
+      "name": "isolated_ambiguous_edit",
+      "task_shape": "in temporary workspace, decide the smallest useful README clarity edit; inspect only README.md; apply exactly one edit; no shell",
+      "effort": "low_process_override",
+      "timeout_ms": 120000,
+      "timed_out": false,
+      "exit_code": 0,
+      "manifest_count": 1,
+      "approved": true,
+      "halt_reason": "approved",
+      "steps": 3,
+      "tokens": 24285,
+      "readme_changed": true,
+      "temporary_workspace_cleaned": true
+    },
+    {
+      "name": "simple_read_regression",
+      "task_shape": "read first three README lines with read_file only",
+      "effort": "low_process_override",
+      "timed_out": false,
+      "exit_code": 0,
+      "manifest_count": 1,
+      "approved": true,
+      "halt_reason": "approved",
+      "steps": 2,
+      "tokens": 12257,
+      "temporary_workspace_cleaned": true
+    }
+  ],
+  "interpretation": "Prompt contract unit tests and bounded edit behavior pass; open-ended read-only investigation remains an evidence gap for a later A/B/trace experiment.",
+  "cleanup": "temporary scripts, workspace, and new run artifacts removed; user config unchanged"
+}

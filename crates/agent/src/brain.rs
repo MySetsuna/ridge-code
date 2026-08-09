@@ -21,6 +21,12 @@ pub(crate) const BASE_SYSTEM: &str =
      big file use ranged read_file or search, never rely on one giant read. Never delete or empty \
      tests to make a check pass: it is blocked and counts as failure. Record a reusable finding, \
      pitfall or todo with signal_write so the next session inherits it. \
+     Boundary contract: before each search/read, identify the one unknown it resolves and prefer the \
+     smallest evidence-bearing call. Once enough evidence identifies the target or supports an \
+     answer, stop searching: if a change is permitted, take the smallest safe action and verify it; \
+     otherwise report the supported answer. If a search/read adds no new fact, do not repeat it; \
+     switch to the smallest next action or report the concrete blocker. Do not use a no-op tool call \
+     merely to reset exploration counters. \
      Reply concisely: no filler or restating the task; when changing code, emit only the minimal \
      edit (unique-match replace / diff), not a full-file rewrite. When done, stop.";
 
@@ -46,9 +52,28 @@ pub(crate) fn host_env_block() -> String {
 
 /// 把宿主环境 + 技能注入 system prompt(知识层 → 大脑偏好)。host_env 恒注入(令模型自主择 shell);
 /// 技能有则续附。
+#[allow(dead_code)]
 pub(crate) fn build_system_prompt(skills: &[Skill]) -> String {
+    build_system_prompt_with_mode(skills, false)
+}
+
+/// Build the prompt with the runtime tool boundary made explicit.
+/// Read-only mode must not inherit the write-oriented locate→act instruction:
+/// an inspection task is complete when its evidence-backed answer is ready.
+pub(crate) fn build_system_prompt_with_mode(skills: &[Skill], read_only: bool) -> String {
     let mut s = String::from(BASE_SYSTEM);
     s.push_str(&host_env_block());
+    if read_only {
+        s.push_str(
+            "\n\n<runtime_mode>\nread_only: true\nUse only the available read/search tools. \
+             This is an inspection task: after enough evidence answers the user's request, \
+             stop with concise findings. Hard inspection budget: at most 4 read/search calls \
+             total; on the fourth call, stop invoking tools and answer with the strongest \
+             supported findings, even if incomplete. State uncertainty instead of seeking more \
+             evidence. Do not search for a write/edit target, invent a mutation step, or keep \
+             exploring after the answer is supported.\n</runtime_mode>",
+        );
+    }
     if !skills.is_empty() {
         s.push_str("\n\n# Skills — domain knowledge to apply\n");
         for sk in skills {
@@ -124,6 +149,19 @@ pub(crate) fn verify_ok(s: &AgentState) -> bool {
     let out = s.tool_output.as_deref();
     out.is_some_and(tool_output_ok)
         || (s.last_action.as_deref() == Some("finish") && !out.is_some_and(tool_output_failed))
+}
+
+/// Deterministic reason shown when the checker rejects a turn. Keep this
+/// derived from the same signals as [`verify_ok`] instead of trusting model
+/// prose, so users can distinguish a tool failure from an unverified finish.
+pub(crate) fn verify_failure_reason(s: &AgentState) -> &'static str {
+    if s.tool_output.as_deref().is_some_and(tool_output_failed) {
+        "tool output failed"
+    } else if s.last_action.as_deref() == Some("finish") {
+        "finish lacked deterministic success signal"
+    } else {
+        "no deterministic success signal"
+    }
 }
 
 /// 多层独立退出:到回合上限 / 超预算 / 无进展 / 侦察耗尽 / 熔断任一命中,循环都该停(loop engineering:停机是设计的一半)。
@@ -277,10 +315,11 @@ pub(crate) async fn verify_node(s: AgentState) -> Result<Patch, Infallible> {
             Patch::Message("verify: PASS (deterministic gate)".to_string()),
         ])
     } else {
+        let reason = verify_failure_reason(&s);
         Patch::Batch(vec![
             Patch::Approved(false),
-            Patch::Issues(vec!["build/tests not passing".to_string()]),
-            Patch::Message("verify: FAIL -> back to reason".to_string()),
+            Patch::Issues(vec![reason.to_string()]),
+            Patch::Message(format!("verify: FAIL ({reason}) -> back to reason")),
         ])
     };
     Ok(patch)
@@ -304,6 +343,18 @@ mod tests {
             "首部须冻结 BASE_SYSTEM 利缓存"
         );
         assert!(!sys.contains("# Skills"), "无技能不该有技能段");
+    }
+
+    #[test]
+    fn read_only_prompt_closes_inspection_without_write_target() {
+        let sys = build_system_prompt_with_mode(&[], true);
+        assert!(sys.contains("read_only: true"));
+        assert!(sys.contains("after enough evidence answers"));
+        assert!(sys.contains("at most 4 read/search calls"));
+        assert!(sys.contains("on the fourth call, stop invoking tools"));
+        assert!(sys.contains("Do not search for a write/edit target"));
+        assert!(build_system_prompt(&[]).starts_with(BASE_SYSTEM));
+        assert!(!build_system_prompt(&[]).contains("read_only: true"));
     }
 
     /// 模型自主择 shell:host_env 事实块恒注入(OS + 可用/默认 shell),给模型自选的依据。
@@ -349,6 +400,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn verify_failure_reason_explains_deterministic_boundary() {
+        let tool_failed = AgentState {
+            last_action: Some("retry".into()),
+            tool_output: Some("exit 1: boom".into()),
+            ..Default::default()
+        };
+        assert_eq!(verify_failure_reason(&tool_failed), "tool output failed");
+
+        let unverified_finish = AgentState {
+            last_action: Some("finish".into()),
+            tool_output: Some("read output".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            verify_failure_reason(&unverified_finish),
+            "finish lacked deterministic success signal"
+        );
+
+        assert_eq!(
+            verify_failure_reason(&AgentState::default()),
+            "no deterministic success signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_failure_message_exposes_reason() {
+        use langgraph::GraphState;
+
+        let state = AgentState {
+            last_action: Some("retry".into()),
+            tool_output: Some("read error: missing".into()),
+            ..Default::default()
+        };
+        let mut out = AgentState::default();
+        out.apply(verify_node(state).await.unwrap());
+        assert_eq!(out.issues, vec!["tool output failed"]);
+        assert!(out
+            .messages
+            .iter()
+            .any(|m| m == "verify: FAIL (tool output failed) -> back to reason"));
+    }
+
     /// harness-aware 系统提示词:把 iter-17/19/20 后新成的**物理契约**讲给模型 ——
     /// 输出截断(用 ranged read)、勿删测试(被拦=失败)、signal_write 沉淀复利。
     #[test]
@@ -365,6 +459,9 @@ mod tests {
             BASE_SYSTEM.contains("do not restart full-repo"),
             "edit 失败后禁止重启全库侦察"
         );
+        assert!(BASE_SYSTEM.contains("Boundary contract"));
+        assert!(BASE_SYSTEM.contains("adds no new fact"));
+        assert!(BASE_SYSTEM.contains("smallest safe action"));
     }
 
     #[test]

@@ -45,6 +45,16 @@
 - 边界:`范围限于 crates/mcp、crates/agent 的 MCP 配置加载/握手/工具路由、Responses tool call/result 历史编排、会话恢复、provider/model 元信息解析与相关测试，以及用户级 ridge 配置的最小修正；不打印或提交 API key、OAuth token、原始会话内容；不修改用户无关配置，不改变 MCP 协议语义、权限门、危险命令拦截或 provider SDK 边界；保留用户工作区脏改动，兼容 Windows PATH 与 stdio。`
 - 验收:`新增/修改握手、工具注册、调用结果、启动失败可观测、Responses 配对、恢复与 provider/model 一致性测试；通过 cargo fmt --all --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked；本机 PATH 运行 /tools 或等价 smoke，确认 CodeGraph 工具可见且一次调用有结果。`
 - 追踪:`REQ → resolve_configured_mcp/McpClient/Responses history/provider resolution → mcp/provider/agent tests → 本机配置与 PATH smoke；敏感值只留本地。`
+
+### REQ-20260809-ROUTE-01 · Agent route 按任务特性选择 provider/model
+
+- Approval evidence:`用户明确回复：批准`
+- Status:`ACTIVE`
+- Version:`v0.4.0`
+- Behavior:`RidgeCode 从已加载且当前可用的 provider/model 配置构建可解释、可测试的 route 决策：根据任务难度、规模、类型与角色/派发方式选择或排序候选 provider/model；支持 subagent 与 agent teammate 派发路径；缺省、不可用或失败时确定性回退并可观测记录原因；不以模型自述替代路由结果。`
+- Boundary:`范围含项目初始化所需 .iteration 状态、需求与状态快照、CodeGraph 查询、经批准的 NotebookLM/深度调研证据；crates/agent 的 route/dispatch 配置与决策模型、provider/model 能力元数据、subagent/teammate 派发接缝、确定性测试及必要 CLI/TUI 可观测性；仅改动证据证明必要的直接依赖。不得上传密钥、cookie、原始会话或未批准需求；不改变 langgraph 核心 BSP 语义、权限门、危险命令拦截、maker/checker 与 verify；不引入无界后台任务、具体第三方 SDK 耦合、无证据的 provider 重试/计费策略或无关 UI 重构；保留 provider trait/配置边界、MCP 协议语义、子 agent 只读约束及当前工作区脏改动。`
+- Acceptance:`完成 request-intake、requirements gate、PROJECT-STATE 快照、context/iteration gate 与有界调研记录；形成经当前代码、CodeGraph、测试与真实配置核验的 route 设计与实现；测试覆盖任务特性分类/显式覆盖、候选过滤与排序、provider/model 不可用回退、subagent 与 teammate 派发、可观测选择原因及权限/只读边界；通过 cargo fmt --all --check、cargo test --workspace、cargo clippy --workspace --all-targets -- -D warnings、cargo build --workspace，并完成真实可用配置 route smoke，证明实际选择仅来自当前可用 providers/models。`
+- Traceability:`REQ → provider/model 配置解析、route 决策、dispatch_agent/teammate 派发接缝 → crates/agent/provider/tests 与 workspace quality gates → 脱敏 smoke/调研证据；NotebookLM 报告仅作假设，闭环时清理或归档。
 ## 修订账本 (Revision Ledger)
 
 关闭的 Pending、历史修订与审批证据写入 `docs/archive/events-YYYY-MM.jsonl`；本文件仅保留当前 Active 条款。

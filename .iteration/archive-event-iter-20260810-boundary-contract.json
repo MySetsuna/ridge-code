@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260810-boundary-contract",
+  "at": "2026-08-10",
+  "type": "iteration_completed",
+  "facts": [
+    "NLM candidate to inject explore_streak was already covered by durable_state_block and exact HUD; no duplicate counter surface was added.",
+    "Prompt/context boundary contract and mode-safe nudge were implemented without changing provider, MCP, langgraph, permissions, maker-checker, MAX_STALL/MAX_EXPLORE, or takeover semantics.",
+    "Isolated real user-config normal-mode edit approved in 3 steps; simple read-only regression approved in 2 steps; open-ended three-document read-only task timed out without manifest, so general convergence remains unproven."
+  ],
+  "evidence": [
+    {"path":".iteration/notebooklm-response-20260810-boundary-contract.json","validation":"notebook_gate validate-output: valid; NLM sources_used empty, hypothesis only"},
+    {"path":".iteration/smoke-evidence-20260810-boundary.json","validation":"isolated edit approved=true/3 steps; complex read timed_out=true/0 manifest"},
+    {"command":"cargo test --workspace --locked --offline --quiet","exit_code":0,"result":"passed"},
+    {"command":"cargo clippy --workspace --all-targets --locked --offline -- -D warnings","exit_code":0,"result":"passed"},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -BusyFixture -ResizeProbe -TimeoutMs 9000","exit_code":0,"result":"passed"},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -StressFixture -InspectAnswer -TimeoutMs 9000","exit_code":0,"result":"passed"}
+  ],
+  "paths": [
+    "crates/agent/src/brain.rs",
+    "crates/agent/src/context.rs"
+  ],
+  "symbols": [
+    "BASE_SYSTEM",
+    "build_system_prompt_with_mode",
+    "durable_state_block",
+    "to_messages"
+  ],
+  "next": [
+    "Capture sanitized provider latency, tool-call count/names, explore_streak, and fourth-call behavior for the same open-ended task.",
+    "Do not add another HUD, virtualizer, renderer, or runtime stop rule until that experiment isolates a local gap.",
+    "Retain both useful NotebookLM Notes; no open planning Note remains."
+  ]
+}

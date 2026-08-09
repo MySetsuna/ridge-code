@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260810-trace-recovery",
+  "at": "2026-08-10",
+  "type": "iteration_completed",
+  "facts": [
+    "Target NotebookLM notebook read: 27 sources, two useful retained Notes; no Note/source mutation.",
+    "NotebookLM query succeeded once after external CDP auth extraction; its transparent-wait recommendation conflicted with existing local activity-age and waiting projections in part.",
+    "Sanitized real-config stream metadata observed first reasoning at 15109ms, first stream chunk 5 bytes, first formatted reason/act at 24544/24547ms, and timeout at 45s without completion.",
+    "No new runtime/TUI implementation was justified; MAX_STALL/MAX_EXPLORE, permissions, maker-checker, takeover, provider/MCP/langgraph boundaries remain unchanged."
+  ],
+  "evidence": [
+    {"path":".iteration/notebooklm-response-20260810-trace-recovery.json","validation":"notebook_gate validate-output: valid; sources_used empty, advisory only"},
+    {"path":".iteration/trace-evidence-20260810-open-readonly.json","validation":"sanitized baseline/variant trace; raw trace removed"},
+    {"path":".iteration/trace-stream-metadata-20260810.json","validation":"sanitized first-stream metadata; raw trace removed"},
+    {"command":"cargo test --workspace --locked --offline --quiet","exit_code":0,"result":"passed on rerun"},
+    {"command":"cargo clippy --workspace --all-targets --locked --offline -- -D warnings","exit_code":0,"result":"passed"},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -BusyFixture -ResizeProbe -TimeoutMs 9000","exit_code":0,"result":"passed"},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -StressFixture -InspectAnswer -TimeoutMs 9000","exit_code":0,"result":"passed"}
+  ],
+  "paths": [
+    "crates/agent/src/brain.rs",
+    "crates/agent/src/context.rs",
+    ".iteration/notebooklm-response-20260810-trace-recovery.json",
+    ".iteration/trace-stream-metadata-20260810.json"
+  ],
+  "symbols": [
+    "build_system_prompt_with_mode",
+    "durable_state_block",
+    "Ui",
+    "activity_age_label",
+    "waiting_target",
+    "top_status"
+  ],
+  "next": [
+    "Do not add TTFT plumbing or token-inertia state on this evidence.",
+    "If another experiment is needed, repeat same-config sanitized traces and compare first-stream, first-act, deterministic completion, and tool counts.",
+    "Retain both useful NotebookLM Notes; no planning Note remains."
+  ]
+}

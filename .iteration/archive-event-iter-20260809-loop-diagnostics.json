@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260809-loop-diagnostics",
+  "at": "2026-08-09",
+  "type": "iteration_completed",
+  "facts": [
+    "Busy TUI now surfaces nonzero exact AgentState inspect, same-output stall, and error streak counters as bounded diagnostics.",
+    "Counters reset at task/retry boundaries and are never used to route, halt, infer hidden reasoning, or change thresholds.",
+    "Narrow width, workspace quality, busy/takeover/resize and stress Answer/Reasoning ConPTY paths remain passing."
+  ],
+  "evidence": [
+    {"command":"cargo test --workspace --locked --offline --quiet","exit_code":0},
+    {"command":"cargo clippy --workspace --all-targets --locked --offline -- -D warnings","exit_code":0},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -BusyFixture -ResizeProbe -TimeoutMs 9000","exit_code":0,"result":"passed"},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -StressFixture -InspectAnswer -TimeoutMs 9000","exit_code":0,"result":"passed"},
+    {"path":".iteration/notebooklm-response-20260809-diagnostic.json","validation":"notebook_gate validate-output: valid"}
+  ],
+  "paths": [
+    "crates/agent/src/tui/app.rs",
+    "crates/agent/src/tui/mod.rs",
+    "crates/agent/src/tui/status.rs",
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/tests.rs"
+  ],
+  "symbols": [
+    "AgentState::stall",
+    "AgentState::explore_streak",
+    "AgentState::err_streak",
+    "fmt_progress_diagnostic",
+    "top_chrome"
+  ],
+  "next": [
+    "Do not add heuristic OVER-BRANCHING alerts without a false-positive-safe local contract.",
+    "Reopen physical closures or dynamic width only after a concrete local visual/layout defect."
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "iteration": "route-20260810",
+  "attempts": [
+    {"provider":"chatgpt","status":"failed","error":"failed to reach Chrome CDP at http://127.0.0.1:9222","action":"recorded; no auto fallback"},
+    {"provider":"notebooklm","mode":"deep","status":"failed","error":"Google API error code 8 (UserDisplayableError)","action":"recorded; no immediate retry; continue with existing notebook sources and local/primary-source verification"}
+  ]
+}

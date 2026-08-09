@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260809-tool-scrollback",
+  "at": "2026-08-09",
+  "type": "iteration_completed",
+  "facts": [
+    "Completed Tool blocks now leave the bounded Live view at each Superstep boundary and enter the existing native-scrollback commit path.",
+    "Tool details remain folded and bounded in history; no execution, queue, provider, MCP, or MAX_STALL behavior changed.",
+    "Busy queue/takeover and completion Answer/Reasoning/resize ConPTY paths remain passing."
+  ],
+  "evidence": [
+    {"command":"cargo test --workspace --locked --offline --quiet","exit_code":0},
+    {"command":"cargo clippy --workspace --all-targets --locked --offline -- -D warnings","exit_code":0},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -BusyFixture -TimeoutMs 9000","exit_code":0,"result":"passed"},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -StressFixture -InspectAnswer -TimeoutMs 9000","exit_code":0,"result":"passed"},
+    {"path":".iteration/notebooklm-response-20260809-next.json","validation":"notebook_gate validate-output: valid"}
+  ],
+  "paths": [
+    "crates/agent/src/tui/mod.rs"
+  ],
+  "symbols": [
+    "Ui::commit_live_tools",
+    "StreamEvent::Superstep",
+    "flush_commits"
+  ],
+  "next": [
+    "Keep prompt/MAX_STALL/provider/MCP changes outside this approved TUI slice.",
+    "Use a new cold trigger only after a locally reproduced gap or explicit user request."
+  ]
+}

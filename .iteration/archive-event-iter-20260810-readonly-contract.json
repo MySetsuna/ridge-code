@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260810-readonly-contract",
+  "at": "2026-08-10",
+  "type": "iteration_completed",
+  "facts": [
+    "Read-only prompt and durable exploration nudge no longer contradict the available tool boundary.",
+    "Real user-config smoke approved a representative read-only TUI audit in 7 steps with three path-qualified findings; prior pre-fix run reached no_progress after 13 steps.",
+    "Normal write-enabled behavior, deterministic thresholds, and TUI execution semantics were unchanged."
+  ],
+  "evidence": [
+    {"path":".iteration/smoke-evidence-20260810.json","validation":"real-config smoke: approved=true, halt_reason=approved, steps=7"},
+    {"path":".iteration/notebooklm-response-20260810-readonly-contract.json","validation":"notebook_gate validate-output: valid"},
+    {"command":"cargo test --workspace --locked --offline --quiet","exit_code":0},
+    {"command":"cargo clippy --workspace --all-targets --locked --offline -- -D warnings","exit_code":0},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -BusyFixture -ResizeProbe -TimeoutMs 9000","exit_code":0,"result":"passed"},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -StressFixture -InspectAnswer -TimeoutMs 9000","exit_code":0,"result":"passed"}
+  ],
+  "paths": [
+    "crates/agent/src/brain.rs",
+    "crates/agent/src/context.rs",
+    "crates/agent/src/graph.rs"
+  ],
+  "symbols": [
+    "build_system_prompt_with_mode",
+    "build_core",
+    "durable_state_block",
+    "AgentState::explore_streak"
+  ],
+  "next": [
+    "Do not add heuristic exploration labels without a local false-positive-safe contract.",
+    "Do not parse model self-report as deterministic completion evidence.",
+    "Continue the NLM loop only after a new reproduced usability pain."
+  ]
+}

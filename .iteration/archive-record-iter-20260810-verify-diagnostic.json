@@ -1,0 +1,41 @@
+{
+  "iteration_id": "iter-20260810-verify-diagnostic",
+  "requirement": "REQ-20260803-01",
+  "intake": "INTAKE-20260810-01",
+  "objective": "Make deterministic verification rejections explainable without weakening max-stall convergence or maker-checker safety.",
+  "notebook": {
+    "id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "response": ".iteration/notebooklm-response-20260810-verify-diagnostic.json",
+    "note_reconciliation": "Retain the vision Note and the completed iter-20260809 Note; no open planning Note was created."
+  },
+  "implementation": [
+    "Added verify_failure_reason derived from the same deterministic tool-output and finish predicates used by verify_ok.",
+    "Normal and independently reviewed verify paths now report tool output failed, finish lacked deterministic success signal, or no deterministic success signal instead of generic/misleading text.",
+    "MAX_STALL, MAX_EXPLORE, approval, routing, provider, MCP, tool, and takeover semantics remain unchanged."
+  ],
+  "changed_paths": [
+    "crates/agent/src/brain.rs",
+    "crates/agent/src/graph.rs"
+  ],
+  "verification": [
+    {"command":"cargo fmt --all -- --check","exit_code":0},
+    {"command":"cargo test -p agent --lib brain::tests --locked --offline --quiet","exit_code":0,"summary":"8 passed"},
+    {"command":"cargo test -p agent --lib graph::tests --locked --offline --quiet","exit_code":0,"summary":"13 passed"},
+    {"command":"cargo test --workspace --locked --offline --quiet","exit_code":0,"summary":"workspace suites passed: agent 109, TUI 328, eval 1, langgraph 9, mcp 2, provider 52, tools 18 plus doctests"},
+    {"command":"cargo clippy --workspace --all-targets --locked --offline -- -D warnings","exit_code":0},
+    {"command":"cargo build --workspace --locked --offline","exit_code":0},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -BusyFixture -ResizeProbe -TimeoutMs 9000","exit_code":0,"summary":"status=passed"},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -StressFixture -InspectAnswer -TimeoutMs 9000","exit_code":0,"summary":"status=passed"},
+    {"command":"notebook_gate.py validate-output --response .iteration/notebooklm-response-20260810-verify-diagnostic.json","exit_code":0},
+    {"command":"requirements_gate.py assert-task-executable; notebook_gate.py assert-allowed; iteration_gate.py ...","exit_code":0,"summary":"all gates passed"}
+  ],
+  "local_config_smoke": {
+    "user_config": "C:/Users/12867/.ridge/config.json",
+    "secrets_printed": false,
+    "task": "read first three README lines with --read-only and read_file only",
+    "result": {"timed_out":false,"manifest_count":1,"approved":true,"halt_reason":"approved","steps":2,"tokens":12263},
+    "evidence": ".iteration/smoke-evidence-20260810-verify-diagnostic.json"
+  },
+  "next": "Keep max stall; next NLM-guided work should measure whether the explicit rejection reason improves user intervention before adding any new stop HUD."
+}

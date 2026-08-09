@@ -1,0 +1,108 @@
+{
+  "status": "PROCEED",
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+  "source_count": 27,
+  "note_ids": [
+    "7e702c62-a035-44b1-a968-3d843c67f223",
+    "aeb2c29a-3d94-4190-a458-aaa2c642abd5"
+  ],
+  "question": "Given real-config smoke evidence that a simple read approves but a representative code-audit task times out during planning/search, which new bounded TUI slice is locally justified?",
+  "confirmed_facts": [
+    {
+      "fact": "The real user config can initialize the provider and two MCP servers; a single read-only README task approved in two steps, while a read-only TUI audit timed out after planning/search at 30 seconds without a run manifest.",
+      "evidence": ".iteration/smoke-evidence-20260809.json"
+    },
+    {
+      "fact": "NotebookLM proposes semantic hanging indent, physical block closures, and lifecycle-anchor navigation as hypotheses for the repeated-search audit pain.",
+      "evidence": "notebook_query response in conversation 68791fb7-659a-4ad6-a86c-beb7ac694781"
+    },
+    {
+      "fact": "Current code already has semantic rails, bounded cell-width wrapping, block focus navigation, and lifecycle/activity history surfaces.",
+      "evidence": "CodeGraph exploration of render_live_line, reasoning_commit_lines, LiveTranscript::move_semantic_focus, and input routing"
+    }
+  ],
+  "contradictions": [
+    "NotebookLM's physical-closure proposal is not a reproduced layout defect; current static reasoning already emits a closing rail and the live renderer tracks block ends.",
+    "NotebookLM's Alt+Up/Alt+Down lifecycle navigation conflicts with existing tool-focus routing; Alt+Left/Alt+Right already moves semantic focus in the held live inspector.",
+    "The hanging-indent proposal identifies a plausible alignment preference, but no current ConPTY or deterministic regression proves that it causes the reported stall or audit failure."
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "Static reasoning continuation rows should hang under the first body column instead of only preserving the two-cell rail.",
+      "support": ["NotebookLM semantic hanging-indent proposal", "reasoning_commit_lines places metadata on the first row only"],
+      "against": ["existing rail and narrow reflow tests pass", "no user-visible misalignment reproduced"],
+      "experiment": "Add a deterministic cell-position regression for multiline reasoning at 18/32/40/80 columns before changing projection."
+    }
+  ],
+  "candidates": [
+    {
+      "core": "semantic hanging indent for multiline reasoning",
+      "constraints": ["presentation-only", "reuse current semantic rails and cell-width wrapper"],
+      "risks": ["narrow widths may lose body text", "CJK cell alignment drift"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/render.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["deterministic 18/32/40/80-column cell-position test", "ConPTY resize"],
+      "disposition": "defer_until_reproduced"
+    },
+    {
+      "core": "physical lifecycle block closures",
+      "constraints": ["presentation-only", "reuse existing rails", "no extra execution state"],
+      "risks": ["one-row viewport jump", "height/cache invalidation"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/transcript.rs", "crates/agent/src/tui/draw.rs"],
+      "validation": ["reproduce a missing boundary first", "ConPTY resize"],
+      "disposition": "reject_without_repro"
+    },
+    {
+      "core": "lifecycle-anchor navigation",
+      "constraints": ["reuse existing semantic focus", "preserve current Alt+Up/Down tool focus"],
+      "risks": ["key conflict", "anchor may be truncated from bounded live history"],
+      "reversibility": "medium",
+      "scope": ["crates/agent/src/tui/input.rs", "crates/agent/src/tui/transcript.rs"],
+      "validation": ["key-routing regression", "multi-tool held-inspector navigation"],
+      "disposition": "reject_as_stated"
+    }
+  ],
+  "local_adjudication": [
+    {
+      "candidate": "semantic hanging indent",
+      "result": "defer_until_reproduced",
+      "reason": "Potentially useful presentation refinement, but current rail/word-boundary behavior is already covered and no concrete failure was observed."
+    },
+    {
+      "candidate": "physical block closures",
+      "result": "reject_without_repro",
+      "reason": "Existing lifecycle rails and block-end handling cover the proposed boundary; extra rows risk viewport jumps."
+    },
+    {
+      "candidate": "lifecycle anchor navigation",
+      "result": "reject_as_stated",
+      "reason": "Proposed Alt+Up/Down keys conflict with tool focus; existing Alt+Left/Alt+Right semantic focus already provides bounded block navigation."
+    }
+  ],
+  "implementation": {
+    "core": "Keep the deterministic loop-counter HUD as the current completed usability slice; do not implement a new NLM candidate without a local visual regression.",
+    "constraints": [
+      "presentation-only",
+      "preserve execution semantics and current key routing",
+      "do not add hidden-reasoning heuristics, new renderer, sidebar, or virtualizer",
+      "retain native scrollback, bounded histories, ANSI16, CJK cell-width behavior, and ConPTY coverage"
+    ],
+    "validation": [
+      "retain smoke evidence as diagnostic only",
+      "run a focused hanging-indent regression before any future implementation",
+      "require workspace tests, clippy, build, and ConPTY for a future visual change"
+    ]
+  },
+  "recommendation": "Do not force any of the three NLM hypotheses into code this round; the local evidence supports the already-implemented deterministic counters, while the remaining candidates need reproduction.",
+  "next_step": {
+    "type": "experiment",
+    "value": "If continuing, measure multiline reasoning body-column alignment at narrow widths; otherwise archive this adjudication and reconcile the completed Note."
+  },
+  "stop_conditions": [
+    "Do not interpret counters as hidden reasoning or add new stop rules.",
+    "Do not add physical closures or lifecycle key bindings without a reproducible local defect.",
+    "Do not claim the real-config audit completed; it timed out before manifest creation."
+  ]
+}

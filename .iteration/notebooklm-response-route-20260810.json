@@ -1,0 +1,18 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [],
+  "contradictions": [],
+  "unverified_hypotheses": [
+    {"hypothesis":"用户痛点集中于模型过度思考、重复调查、模糊任务边界与 token 成本；route 应帮助角色与 effort 对齐，但不应把完成判定交给模型。","support":["NotebookLM 对话与愿景 Note 的归纳"],"against":["NLM 查询未返回 citations"],"experiment":"用现有 trace 与确定性 route 选择原因对齐任务类型、步数和停止信号。"},
+    {"hypothesis":"复杂 maker/planner 更需要高推理与较大上下文；只读检索、checker 或简单任务更偏向低延迟/低成本模型。","support":["NotebookLM 既有资料建议"],"against":["当前 Config.providers 未声明能力字段"],"experiment":"为候选 profile 增加可选能力元数据，并用矩阵测试验证过滤/排序与旧配置回退。"},
+    {"hypothesis":"subagent 应保持只读与上下文隔离，teammate/manager/handoff 需明确谁保留控制权，避免隐式第二执行状态机。","support":["当前 Agent 只读工具白名单","外部多 agent 文档的 manager/handoff 区分"],"against":["当前 RidgeCode 尚无 teammate runtime 抽象"],"experiment":"复用 planned planner/worker 角色接 route，验证权限、结果聚合与有界步数。"}
+  ],
+  "candidates": [
+    {"core":"确定性 route policy + provider/model capability registry，在派发前按任务特性过滤/排序并记录原因。","constraints":["保留 provider trait 与安全边界","当前可用 profile 才入候选"],"risks":["能力元数据缺失或漂移"],"reversibility":"高；独立纯函数模块","scope":["agent route/dispatch/orchestrate"],"validation":["矩阵单测","配置回退 smoke","路由原因审计"]},
+    {"core":"按角色固定模型档位，复杂 maker/planner 与轻量 checker/subagent 分层。","constraints":["显式配置覆盖","不可用时确定性回退"],"risks":["任务类型/规模差异覆盖不足"],"reversibility":"高","scope":["agent definitions/config"],"validation":["角色矩阵","旧配置回归"]},
+    {"core":"让 LLM planner 动态决定 provider/model。","constraints":["必须再经白名单/可用性校验"],"risks":["不可确定、延迟与自述不可信"],"reversibility":"高","scope":["orchestrator"],"validation":["仅对照实验，不作默认"]}
+  ],
+  "recommendation":"先实现确定性 registry/policy；任务特性可显式覆盖并由有限规则推断，选择结果带 provider/model/role/reason；模型只产生任务，不决定候选可用性。",
+  "next_step":{"type":"implementation","value":"新增 route 纯函数与配置元数据接缝，接入 dispatch_agent 与 planned teammate，并以 ScriptedProvider/当前配置做确定性验证。"},
+  "stop_conditions":["候选无可用凭据","所需上下文/工具能力无法证明","route 将绕过只读工具或权限门","只能依赖模型自述才能判定选择"]
+}

@@ -62,6 +62,8 @@ crates/eval        离线评测 harness(ScriptedProvider 场景:pass/stuck 等)
 
 agent 定义 = frontmatter `.md`:内置 fastcontext/explorer/reviewer 编进二进制 + `~/.ridge/agents/*.md` 用户目录(同名覆盖)。`Agents{defs, providers}` 注册表;`provider:` 字段引 config 命名档(FastContext 走廉价模型省钱)。主 agent 经 `dispatch_agent` 自动派 / TUI `/agent` 手动派。**双重防御只读**:`READONLY_TOOLS = ["read_file", "search"]` 白名单裁剪(`readonly_tool_specs`),不下放写/shell;`SUBAGENT_MAX_STEPS = 15`。独立上下文、只回结论文本,不回灌工具轨迹 —— 省主上下文 token 的关键。
 
+**Agent route**:可用且已解析凭据的 `providers[]` 档进入 `route_candidates`;`ProviderProfile.route` 声明 `context_window`、成本/延迟等级、工具/推理能力与标签。`RouteRequest` 按任务文本确定性推断 `difficulty/size/kind`,再按 `RouteRole` 过滤排序；未知能力不从模型名猜。`dispatch_agent` 工具结果携带 `selected=provider::model`、选择理由与 fallback 标记；`run_planned_routed` 为 planner/teammate 提供同一策略并返回结构化 `RouteAudit`。偏好不可用先无偏好重选，仍无可用句柄才回落主 provider，且不把密钥写入理由或日志。
+
 ### 2.7 Skills 与项目规则
 
 `SKILL.md` 声明式技能:`RIDGE_SKILLS_DIR` env > config `skills_dir` > `~/.ridge/skills`。cwd 的 `CLAUDE.md`/`AGENTS.md` 经 `load_project_rules` 注入 system prompt。`@file` 引用注入正文(MENTION_CAP=20000 截断)。

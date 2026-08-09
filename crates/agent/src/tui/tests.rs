@@ -269,7 +269,7 @@ fn lifecycle_boundaries_keep_phase_and_activity_aligned() {
         ..Ui::default()
     };
 
-    ui.mark_task_outcome(true);
+    ui.mark_task_outcome_with_reason(true, None);
     assert_eq!(ui.phase, "completed");
     assert_eq!(ui.activity, "completed");
     assert_eq!(
@@ -277,7 +277,7 @@ fn lifecycle_boundaries_keep_phase_and_activity_aligned() {
         ActivityKind::Completed
     );
 
-    ui.mark_task_outcome(false);
+    ui.mark_task_outcome_with_reason(false, None);
     assert_eq!(ui.phase, "stopped");
     assert_eq!(ui.activity, "stopped · not approved");
     assert_eq!(
@@ -296,6 +296,25 @@ fn lifecycle_boundaries_keep_phase_and_activity_aligned() {
     ui.mark_approval_required();
     assert_eq!(ui.phase, "approval");
     assert_eq!(ui.activity, "approval required · user can take over");
+}
+
+#[test]
+fn halt_reason_display_keeps_stall_diagnosis_and_recovery_bounded() {
+    assert_eq!(
+        halt_reason_display(HaltReason::Stall),
+        "no verified progress"
+    );
+    assert!(halt_reason_guidance(HaltReason::Stall).contains("inspect reasoning/tools"));
+    assert!(halt_reason_guidance(HaltReason::Stall).len() < 80);
+
+    let mut ui = Ui::default();
+    ui.mark_task_outcome_with_reason(false, Some(halt_reason_display(HaltReason::Stall)));
+    assert_eq!(ui.phase, "stopped");
+    assert_eq!(ui.activity, "stopped · not approved · no verified progress");
+    assert_eq!(
+        ui.activity_history.back().unwrap().kind,
+        ActivityKind::Error
+    );
 }
 
 #[test]
@@ -1869,7 +1888,7 @@ fn error_idle_surface_keeps_partial_answer_recoverable() {
         "partial provider response".into(),
     ));
     ui.commit_live_answers("provider failed after streaming", 4, 9);
-    ui.record_activity(ActivityKind::Error, "provider failed");
+    ui.mark_task_outcome_with_reason(false, Some(halt_reason_display(HaltReason::Stall)));
 
     let text = live_empty_state_for_test(&ui, 64, 10)
         .iter()
@@ -1884,6 +1903,10 @@ fn error_idle_surface_keeps_partial_answer_recoverable() {
     assert!(
         text.contains("step 4") && text.contains("task tok"),
         "error state hid partial Answer metadata: {text}"
+    );
+    assert!(
+        text.contains("no verified progress"),
+        "error state hid deterministic halt reason: {text}"
     );
 }
 
@@ -2572,6 +2595,45 @@ fn top_chrome_surfaces_reasoning_visibility_alongside_tools() {
         assert!(str_cells(&text) <= width as usize, "width={width}: {text}");
         if width >= 48 {
             assert!(text.contains("THINK"), "width={width}: {text}");
+        }
+    }
+}
+
+#[test]
+fn progress_diagnostic_surfaces_deterministic_loop_counters() {
+    assert_eq!(fmt_progress_diagnostic(0, 0, 0), None);
+    assert_eq!(
+        fmt_progress_diagnostic(2, 1, 5).as_deref(),
+        Some("inspect 5/12 · same 2/3 · errors 1/5")
+    );
+
+    let ui = Ui {
+        busy: true,
+        phase: "reasoning".into(),
+        stall: 2,
+        err_streak: 1,
+        explore_streak: 5,
+        ..Ui::default()
+    };
+    let vitals = Vitals {
+        step: 4,
+        elapsed_s: 8,
+        task_tokens: 40,
+        rate: 12,
+        ctx_used: 0,
+        queued: 0,
+    };
+    for width in [18, 24, 32, 40, 48, 64, 96, 120] {
+        let text = top_chrome(&ui, &vitals, width)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(str_cells(&text) <= width as usize, "width={width}: {text}");
+        if width == 120 {
+            assert!(text.contains("inspect 5/12"), "{text}");
+            assert!(text.contains("same 2/3"), "{text}");
+            assert!(text.contains("errors 1/5"), "{text}");
         }
     }
 }

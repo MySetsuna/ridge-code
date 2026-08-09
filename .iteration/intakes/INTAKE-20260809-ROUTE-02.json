@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260809-ROUTE-02",
+  "classification": "approved",
+  "summary": "新增按任务难度、规模、类型与派发角色选择可用 provider/model 的 agent route 能力，并以 NotebookLM 迭代工作流完成初始化、调研与核验。",
+  "requirement_ids": [
+    "REQ-20260809-ROUTE-01"
+  ],
+  "pending_ids": [
+    "PENDING-REQ-20260809-ROUTE-01"
+  ],
+  "approval_reasons": [],
+  "open_questions": [],
+  "approval_evidence": "批准",
+  "request_sha256": "b6f4b57ade409674cb0a60c9d9a67eb714f0c6bc2bfc9878f15547e39b444533",
+  "requirements_sha256": "d4f918d8532fbd90ea9c1a3180ec3e56dcf9680a52bf99b3e856103dc2eac9e8",
+  "pending_sha256": "a653cd735491bf6593b289e50840a5b084fe90ed2e89cd912d283366297387f3",
+  "draft_sha256": "13cb286a54fbff7b7d226a3b9466016940cb2611779d7cfcb952c8a7af53ce7f",
+  "previous_intake_sha256": "ba07a463bda17f1215a32d03b1fa2d9bba179155cbf95ddf0e560d36c3135b58",
+  "executable": true,
+  "reasons": []
+}

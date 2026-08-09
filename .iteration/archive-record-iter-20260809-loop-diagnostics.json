@@ -1,0 +1,44 @@
+{
+  "iteration_id": "iter-20260809-loop-diagnostics",
+  "requirement": "REQ-20260801-01",
+  "intake": "INTAKE-20260809-03",
+  "objective": "Expose exact AgentState stall, err_streak, and explore_streak counters in the busy TUI rail so users can see deterministic signs of investigation loops before halt.",
+  "notebook": {
+    "id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "response": ".iteration/notebooklm-response-20260809-diagnostic.json",
+    "note_reconciliation": "Retain the vision Note; mark the completed baseline Note with this iteration's loop-diagnostics closure after verification."
+  },
+  "implementation": [
+    "Ui copies stall, err_streak, and explore_streak from each Superstep AgentState snapshot and resets them at task/retry boundaries.",
+    "fmt_progress_diagnostic renders only nonzero exact counters as bounded inspect/same/errors labels; no heuristic anomaly classifier or new stop rule.",
+    "Busy top chrome appends the diagnostic within the existing width-aware projection; all execution, routing, threshold, scrollback and key semantics remain unchanged."
+  ],
+  "changed_paths": [
+    "crates/agent/src/tui/app.rs",
+    "crates/agent/src/tui/mod.rs",
+    "crates/agent/src/tui/status.rs",
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/tests.rs"
+  ],
+  "verification": [
+    {"command":"cargo fmt --all -- --check","exit_code":0},
+    {"command":"cargo test -p agent --bin ridgecode tui::tests --locked --offline --quiet","exit_code":0,"summary":"261 passed"},
+    {"command":"cargo test --workspace --locked --offline --quiet","exit_code":0,"summary":"workspace suites passed: 106, 328, 1, 9, 2, 52, 18 plus doctests"},
+    {"command":"cargo clippy --workspace --all-targets --locked --offline -- -D warnings","exit_code":0},
+    {"command":"cargo build --workspace --locked --offline --quiet","exit_code":0},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -BusyFixture -ResizeProbe -TimeoutMs 9000","exit_code":0,"summary":"status=passed; busy queue/takeover, resize 96x24 to 40x12 and ConPTY snapshot observed"},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -StressFixture -InspectAnswer -TimeoutMs 9000","exit_code":0,"summary":"status=passed; Answer/Reasoning history, answer inspection, resize and ConPTY snapshot observed"},
+    {"command":"notebook_gate.py validate-output --response .iteration/notebooklm-response-20260809-diagnostic.json","exit_code":0},
+    {"command":"requirements_gate.py assert-task-executable; iteration_gate.py ...","exit_code":0,"summary":"no pending requirements; outside_write_scope empty; budget within bounds"}
+  ],
+  "local_config_smoke": {
+    "workspace_config": ".ridge/config.json",
+    "user_config": "C:/Users/12867/.ridge/config.json",
+    "observed_without_secrets": [
+      "workspace provider=openai model=glm-4.6 base_url=https://open.bigmodel.cn/api/paas/v4 mcp_count=1",
+      "user provider=volc-coding model=glm-5-2-260617 effort=max base_url=https://ark.cn-beijing.volces.com/api/coding/v3 proxy=socks5h://127.0.0.1:51080 mcp_count=2",
+      "target/debug/ridgecode.exe --version/--help smoke passed; PTY used an isolated no-network fixture config"
+    ]
+  },
+  "next": "Keep heuristic anomaly labels, physical bottom closures, dynamic width squeezing, prompt/MAX_STALL/provider/MCP changes outside this slice until a new local defect is reproduced."
+}

@@ -1,0 +1,40 @@
+{
+  "iteration_id": "iter-20260810-readonly-contract",
+  "requirement": "REQ-20260803-01",
+  "intake": "INTAKE-20260810-01",
+  "objective": "Close the read-only exploration loop without asking for unavailable writes, while preserving normal write-enabled agent semantics.",
+  "notebook": {
+    "id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "response": ".iteration/notebooklm-response-20260810-readonly-contract.json",
+    "note_reconciliation": "Retain the vision Note and the completed iter-20260809 baseline Note; this closure is recorded locally and does not replace either Note."
+  },
+  "implementation": [
+    "Added a read-only runtime prompt contract that tells inspection tasks to answer after sufficient evidence and forbids searching for unavailable write/edit targets.",
+    "Made the durable exploration nudge mode-safe: it now asks the agent to stop and finish with a supported handoff instead of requiring edit_file/write_file/apply_edits.",
+    "Added a bounded four-call read/search hint; kept MAX_EXPLORE, verification, routing, provider, MCP, and write-enabled behavior unchanged."
+  ],
+  "changed_paths": [
+    "crates/agent/src/brain.rs",
+    "crates/agent/src/context.rs",
+    "crates/agent/src/graph.rs"
+  ],
+  "verification": [
+    {"command":"cargo fmt --all -- --check","exit_code":0},
+    {"command":"cargo test --workspace --locked --offline --quiet","exit_code":0,"summary":"workspace suites passed: 107, 328, 1, 9, 2, 52, 18 plus doctests"},
+    {"command":"cargo clippy --workspace --all-targets --locked --offline -- -D warnings","exit_code":0},
+    {"command":"cargo build --workspace --locked --offline","exit_code":0},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -BusyFixture -ResizeProbe -TimeoutMs 9000","exit_code":0,"summary":"status=passed; queue/takeover, resize 96x24 to 40x12 and snapshot checks"},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -StressFixture -InspectAnswer -TimeoutMs 9000","exit_code":0,"summary":"status=passed; Answer/Reasoning history, answer inspection, resize and snapshot checks"},
+    {"command":"notebook_gate.py validate-output --response .iteration/notebooklm-response-20260810-readonly-contract.json","exit_code":0},
+    {"command":"requirements_gate.py assert-task-executable; notebook_gate.py assert-allowed; iteration_gate.py ...","exit_code":0,"summary":"active intake executable, NotebookLM cold loop allowed, no outside write scope and budget within bounds"}
+  ],
+  "local_config_smoke": {
+    "user_config": "C:/Users/12867/.ridge/config.json",
+    "secrets_printed": false,
+    "provider_and_mcp_initialized": true,
+    "case": "--read-only with RIDGE_EFFORT=low and representative TUI audit",
+    "result": {"timed_out":false,"manifest_count":1,"approved":true,"halt_reason":"approved","steps":7,"tokens":63108,"finding_shape":"three concise findings with file paths"},
+    "evidence": ".iteration/smoke-evidence-20260810.json"
+  },
+  "next": "Keep the broad goal active; require a fresh reproduced pain before another NLM-guided usability slice."
+}

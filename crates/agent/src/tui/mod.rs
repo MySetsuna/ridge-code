@@ -27,6 +27,8 @@ use ratatui::{
     Terminal, TerminalOptions, Viewport,
 };
 
+use agent::HaltReason;
+
 use super::*;
 
 type Term = Terminal<CrosstermBackend<io::Stdout>>;
@@ -43,6 +45,36 @@ fn inline_height_cap() -> u16 {
     // Keep the viewport cap stable; ratatui clamps it to current terminal height
     // and can grow back to the cap after a small terminal is enlarged.
     LIVE_HEIGHT
+}
+
+/// Convert an execution halt into a short, user-facing presentation label.
+/// The execution enum remains the source of truth; this never changes routing.
+pub(crate) fn halt_reason_display(reason: HaltReason) -> &'static str {
+    match reason {
+        HaltReason::Approved => "approved",
+        HaltReason::Budget => "budget limit",
+        HaltReason::Stall => "no verified progress",
+        HaltReason::StepCap => "step limit",
+        HaltReason::ConstraintBreach => "safety constraint",
+        HaltReason::ContextRot => "context limit",
+        HaltReason::CircuitBroken => "repeated tool errors",
+        HaltReason::Unverified => "not verified",
+    }
+}
+
+/// Keep the recovery advice deterministic and bounded; do not infer hidden
+/// reasoning or add a second execution state machine to the TUI.
+pub(crate) fn halt_reason_guidance(reason: HaltReason) -> &'static str {
+    match reason {
+        HaltReason::Approved => "result verified",
+        HaltReason::Budget => "inspect activity before starting a smaller task",
+        HaltReason::Stall => "inspect reasoning/tools, then start the next task",
+        HaltReason::StepCap => "inspect activity, then narrow the next task",
+        HaltReason::ConstraintBreach => "inspect the blocked action and revise the request",
+        HaltReason::ContextRot => "start the next task with a smaller context",
+        HaltReason::CircuitBroken => "inspect the last tool error before retrying",
+        HaltReason::Unverified => "inspect the activity log before retrying",
+    }
 }
 
 /// Superstep 后仍有 frontier 即任务仍运行；空 frontier 才允许输入启动下一任务。
@@ -513,6 +545,9 @@ pub(super) async fn run(
                     ui.input_tokens = 0;
                     ui.output_tokens = 0;
                     ui.superstep = 0;
+                    ui.stall = 0;
+                    ui.err_streak = 0;
+                    ui.explore_streak = 0;
                     ui.pending_call = None;
                     task_started = Some(Instant::now());
                     last_activity = task_started;
@@ -1212,6 +1247,9 @@ pub(super) async fn run(
                         ui.superstep = step;
                         ui.input_tokens = state.input_tokens;
                         ui.output_tokens = state.output_tokens;
+                        ui.stall = state.stall;
+                        ui.err_streak = state.err_streak;
+                        ui.explore_streak = state.explore_streak;
                         ui.pending_call = state.pending_call.clone();
                         let active_label = active
                             .iter()
@@ -1264,6 +1302,10 @@ pub(super) async fn run(
                             ui.superstep,
                             task_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
                         );
+                        // Tool blocks that finished at this boundary leave the
+                        // bounded Live view too, so ongoing investigations stay
+                        // auditable in native scrollback before task completion.
+                        ui.commit_live_tools();
                         ui.clear_streams();
                         ui.busy = superstep_is_busy(&active);
                     }
@@ -1313,12 +1355,20 @@ pub(super) async fn run(
                         session_tokens += out.total_tokens;
                         session_turns += 1;
                         ui.todos = out.todos.clone();
-                        ui.mark_task_outcome(out.approved);
+                        let reason = halt_reason(&out);
+                        ui.mark_task_outcome_with_reason(
+                            out.approved,
+                            (!out.approved).then_some(halt_reason_display(reason)),
+                        );
                         // 显停机原因:未通过时把 halt_reason 一并播报(为何停一眼可见),配合「收束回合」的模型陈述。
                         let status = if out.approved {
                             "✓ approved".to_string()
                         } else {
-                            format!("✗ not approved ({})", halt_reason(&out).as_str())
+                            format!(
+                                "✗ not approved ({}) · {}",
+                                halt_reason_display(reason),
+                                halt_reason_guidance(reason)
+                            )
                         };
                         ui.note(
                             format!(
@@ -1356,6 +1406,9 @@ pub(super) async fn run(
                                 ui.phase = "reasoning".into();
                                 ui.set_activity(format!("retrying · reasoning {retry_count}/{MAX_RETRIES}"));
                                 ui.superstep = 0;
+                                ui.stall = 0;
+                                ui.err_streak = 0;
+                                ui.explore_streak = 0;
                                 ui.pending_call = None;
                                 task_started = Some(Instant::now());
                                 last_activity = task_started;

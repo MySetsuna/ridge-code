@@ -1,0 +1,28 @@
+{
+  "iteration_id": "iter-20260810-route-runtime-fallback",
+  "mode": "headless_read_only_dispatch_agent",
+  "config_scope": "user .ridge/config.json",
+  "provider_initialized": true,
+  "mcp_servers_connected": 2,
+  "task_profile": {
+    "difficulty": "simple",
+    "size": "small",
+    "kind": "read_only",
+    "role": "subagent"
+  },
+  "route": {
+    "initial_selected": "Zai::glm-4.6",
+    "candidate_count": 1,
+    "failure": "http 429",
+    "fallback": "deterministic main-provider fallback",
+    "fallback_observed": true
+  },
+  "execution": {
+    "readonly": true,
+    "write_or_shell_calls": 0,
+    "subagent_conclusion": "README entry and usage summary returned after fallback",
+    "main_verify": "PASS"
+  },
+  "interpretation": "The selected credential-resolvable route candidate failed once; dispatch performed one bounded fallback to the main provider and preserved an audit reason. No capability was inferred from omitted route metadata.",
+  "secrets": "not recorded"
+}

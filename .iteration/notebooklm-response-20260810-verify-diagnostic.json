@@ -1,0 +1,113 @@
+{
+  "status": "PROCEED",
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+  "source_count": 27,
+  "note_ids": [
+    "7e702c62-a035-44b1-a968-3d843c67f223",
+    "aeb2c29a-3d94-4190-a458-aaa2c642abd5"
+  ],
+  "question": "Given the active pain that the user distrusts model behavior, suspects RidgeCode tools cause repeated errors, and asks whether max stall should be removed, which bounded local slice can improve truthful recovery without disabling safety convergence?",
+  "confirmed_facts": [
+    {
+      "fact": "The active NotebookLM chat explicitly questions model trust, tool error quality, and whether max stall should exist; the vision Note prioritizes transparent, user-interruptible stopping.",
+      "evidence": "NotebookLM conversation 68791fb7-659a-4ad6-a86c-beb7ac694781 turns 1-5 and Note 7e702c62-a035-44b1-a968-3d843c67f223"
+    },
+    {
+      "fact": "NotebookLM proposed explicit verification rejection, semantic intercept rails, and stall-pressure HUD; its response returned sources_used=[] and citations={} so these remain hypotheses.",
+      "evidence": "notebook_query response in conversation 68791fb7-659a-4ad6-a86c-beb7ac694781"
+    },
+    {
+      "fact": "Current code already renders tool failures in red with bounded multi-line details and already exposes exact stall/error/explore counters in the busy rail.",
+      "evidence": "crates/agent/src/tui/eventfmt.rs summarize_event/event_color; crates/agent/src/tui/status.rs fmt_progress_diagnostic; CodeGraph exploration"
+    },
+    {
+      "fact": "Current verify rejection text was generic (`verify: FAIL -> back to reason`) and its Issues payload said `build/tests not passing` even for open-ended or read-only cases.",
+      "evidence": "crates/agent/src/brain.rs verify_node and crates/agent/src/graph.rs reviewed verify branch"
+    }
+  ],
+  "contradictions": [
+    "Removing or relaxing MAX_STALL would contradict the approved convergence and cost-safety boundary; the user need is explanation and recovery, not unlimited looping.",
+    "A new stall-pressure heatmap duplicates the exact counter HUD and risks prompting early intervention during legitimate investigation.",
+    "Intercept-specific icons would duplicate existing red, multi-line error rendering and introduce glyph/terminal-theme risk without a reproduced visual failure."
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "A deterministic rejection reason shown at the verify boundary will reduce the user's impression that RidgeCode arbitrarily distrusts a completed model answer.",
+      "support": ["active user pain", "generic current verify message", "vision Note's transparency requirement"],
+      "against": ["it explains the boundary but cannot make a bad model action correct", "provider/model behavior remains variable"],
+      "experiment": "Exercise deterministic verify with failed tool output, unverified finish, and no success signal; assert the rendered message identifies the reason while approval semantics remain unchanged."
+    }
+  ],
+  "candidates": [
+    {
+      "core": "explicit deterministic verify-rejection projection",
+      "constraints": ["reuse verify_ok/tool_output_failed", "presentation and issue text only", "keep MAX_STALL/MAX_EXPLORE and approval semantics"],
+      "risks": ["users may confuse checker explanation with model output", "reason text must remain concise"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/brain.rs", "crates/agent/src/graph.rs", "crates/agent/src/tui/eventfmt.rs"],
+      "validation": ["deterministic unit tests", "workspace tests/clippy/build", "real user-config read-only smoke", "ConPTY busy/stress regression"],
+      "disposition": "accepted_and_verified"
+    },
+    {
+      "core": "semantic rail icons for safety intercepts",
+      "constraints": ["ANSI16 fallback", "no tool-routing changes"],
+      "risks": ["duplicate existing error surface", "Nerd Font/glyph issues", "substring classification drift"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/eventfmt.rs", "crates/agent/src/tui/transcript.rs"],
+      "validation": ["blocked/error matrix", "CJK and narrow ConPTY"],
+      "disposition": "reject_duplicate_existing_surface"
+    },
+    {
+      "core": "stall-pressure heatmap HUD",
+      "constraints": ["exact counters only", "no threshold/routing change"],
+      "risks": ["duplicates current diagnostics", "false alarm during legitimate search", "visual noise"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/status.rs", "crates/agent/src/tui/draw.rs"],
+      "validation": ["counter rendering matrix", "real long-task smoke"],
+      "disposition": "reject_redundant_counter_signal"
+    }
+  ],
+  "local_adjudication": [
+    {
+      "candidate": "explicit deterministic verify-rejection projection",
+      "result": "accepted_and_verified",
+      "reason": "The local code showed a concrete semantic gap: failure reason was hidden behind generic text and a misleading build/test issue. The change reuses existing deterministic predicates and leaves routing/approval unchanged."
+    },
+    {
+      "candidate": "semantic rail icons for safety intercepts",
+      "result": "reject_duplicate_existing_surface",
+      "reason": "Current event formatting already turns BLOCKED, permission, nonzero exit, and tool errors into red bounded details; no additional visual failure was reproduced."
+    },
+    {
+      "candidate": "stall-pressure heatmap HUD",
+      "result": "reject_redundant_counter_signal",
+      "reason": "Exact stall/err_streak/explore_streak values already appear in the busy HUD; a heatmap adds inference and false-positive pressure without new evidence."
+    }
+  ],
+  "implementation": {
+    "core": "Derive a concise deterministic failure reason from the same tool-output and finish predicates used by verify_ok, and include it in verify Issues/messages for both normal and reviewed graph paths.",
+    "constraints": [
+      "do not remove or relax MAX_STALL/MAX_EXPLORE",
+      "do not trust model self-report or add hidden-reasoning classification",
+      "do not change provider/MCP/langgraph/tool routing, approval, or takeover semantics"
+    ],
+    "validation": [
+      "brain focused tests: 8 passed; graph focused tests: 13 passed",
+      "workspace tests: agent 109, TUI 328, eval 1, langgraph 9, mcp 2, provider 52, tools 18 plus doctests",
+      "cargo fmt, clippy -D warnings, workspace build",
+      "real user-config read-only smoke: approved=true, 2 steps, 12263 tokens",
+      "BusyFixture + ResizeProbe and StressFixture + InspectAnswer ConPTY passed"
+    ]
+  },
+  "recommendation": "Keep max stall as a safety convergence guard; accept explicit deterministic verify reasons as the next usability slice, and reject duplicate pressure/icon HUDs until a new visual defect is reproduced.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Archive this verify-diagnostic slice and retain the two useful Notes; next iteration should measure whether users can act on the new rejection reason before considering any further stop-surface change."
+  },
+  "stop_conditions": [
+    "Do not relax or remove MAX_STALL/MAX_EXPLORE from a presentation complaint.",
+    "Do not add a second warning surface when exact deterministic counters already cover the signal.",
+    "Do not claim model/tool behavior is fixed; this slice only makes the verification boundary explicit."
+  ]
+}

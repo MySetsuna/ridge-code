@@ -1,0 +1,40 @@
+{
+  "iteration_id": "iter-20260810-trace-recovery",
+  "requirement": "REQ-20260801-01 + REQ-20260803-01",
+  "intake": "INTAKE-20260810-01",
+  "objective": "Read the target NotebookLM notebook and adjudicate its usability candidates against current TUI facts and a sanitized real-config stream-boundary experiment.",
+  "notebook": {
+    "id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "response": ".iteration/notebooklm-response-20260810-trace-recovery.json",
+    "sources": 27,
+    "note_reconciliation": "Retain the vision Note and Completed iter-20260809 Note; no new planning Note or source was created."
+  },
+  "adjudication": [
+    "NLM preferred transparent waiting/step age, but local TUI already has activity_started, activity age, phase_duration_ms, waiting target, activity history, and takeover affordances.",
+    "NLM suggested testing whether the first delayed response was a large reasoning wall; the sanitized run observed first reasoning stream at 15109ms with a 5-byte first chunk, then first formatted reason/act at 24544/24547ms, and no completion by 45s.",
+    "The evidence narrows the symptom but does not distinguish provider latency, model behavior, or tool-boundary behavior; no new runtime or TUI change is promoted."
+  ],
+  "changed_paths": [
+    ".iteration/trace-stream-metadata-20260810.json",
+    ".iteration/notebooklm-response-20260810-trace-recovery.json"
+  ],
+  "verification": [
+    {"command":"notebook_gate.py validate-output --response .iteration/notebooklm-response-20260810-trace-recovery.json","exit_code":0,"summary":"valid"},
+    {"command":"cargo test --workspace --locked --offline --quiet","exit_code":0,"summary":"passed on rerun: agent 109, TUI 328, eval 1, langgraph 9, mcp 2, provider 52, tools 18 plus doctests; one first-run logging-capture flake reproduced as pass in focused rerun"},
+    {"command":"cargo clippy --workspace --all-targets --locked --offline -- -D warnings","exit_code":0},
+    {"command":"cargo fmt --all -- --check","exit_code":0},
+    {"command":"cargo build --workspace --locked --offline --quiet","exit_code":0},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -BusyFixture -ResizeProbe -TimeoutMs 9000","exit_code":0,"summary":"status=passed"},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -StressFixture -InspectAnswer -TimeoutMs 9000","exit_code":0,"summary":"status=passed"}
+  ],
+  "auth_diagnostics": {
+    "preflight": "nlm login --check timed out; CDP health returned Chrome metadata",
+    "extraction": "external CDP save succeeded with non-sensitive metadata only",
+    "verify": "nlm_auth_flow verify timed out; classified CLI wrapper/network diagnostic",
+    "query": "the exact NotebookLM query succeeded once after extraction",
+    "credentials_printed": false
+  },
+  "evidence_gap": "Repeated same-task A/B trials remain useful, but the current run does not justify TTFT plumbing, token-inertia state, a new HUD, or a runtime recovery rule.",
+  "next": "Run bounded repeated sanitized traces only if the next iteration needs discrimination; otherwise target a separately reproduced TUI visibility gap. Preserve all safety and maker-checker guards."
+}

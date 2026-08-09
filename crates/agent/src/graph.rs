@@ -175,7 +175,7 @@ fn build_core(
     }
     let router = Arc::new(mcp.router);
     graph_trace("specs.ready");
-    let system = Arc::new(build_system_prompt(&skills));
+    let system = Arc::new(build_system_prompt_with_mode(&skills, read_only));
     graph_trace("system.ready");
 
     let provider_c = provider.clone();
@@ -344,12 +344,13 @@ fn build_core(
                 async move {
                     let det_ok = verify_ok(&s);
                     if !det_ok {
+                        let reason = verify_failure_reason(&s);
                         return Ok::<_, provider::ProviderError>(Patch::Batch(vec![
                             Patch::Approved(false),
-                            Patch::Issues(vec!["build/tests not passing".to_string()]),
-                            Patch::Message(
-                                "verify: FAIL (deterministic) -> back to reason".to_string(),
-                            ),
+                            Patch::Issues(vec![reason.to_string()]),
+                            Patch::Message(format!(
+                                "verify: FAIL (deterministic: {reason}) -> back to reason"
+                            )),
                         ]));
                     }
                     // 独立模型复核:给它轨迹,问是否合法达成(没作弊)。

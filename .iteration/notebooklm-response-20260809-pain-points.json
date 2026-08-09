@@ -1,0 +1,121 @@
+{
+  "status": "PROCEED",
+  "notebook": {
+    "id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "title": "RidgeCode现状、愿景、路线图",
+    "source_count": 27,
+    "chat_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "chat_turns": 10
+  },
+  "source_titles": [
+    "ANSIPLUS Scrolling - Kristofer Sweger",
+    "Architectural Optimization of High-Frequency Inline Terminal User Interfaces for AI Coding Agents",
+    "Architecture of Context-Preserving Terminal Agent Interfaces: Design and Optimization for High-Frequency TUIs",
+    "Console documentation",
+    "Correct Grapheme Width · Issue #6012 · helix-editor/helix - GitHub",
+    "Fullscreen Rendering — a Flicker-Free Terminal UI | Claude Code Playbook",
+    "Fullscreen rendering - Claude Code Docs",
+    "GitHub - pg83/shitty: A serious terminal emulator with a stupid name",
+    "How to use ESC sequences to make terminal region scrollable",
+    "I built a proxy that fixes Claude Code's scroll-jumping on Windows : r/ClaudeAI",
+    "Inline viewport should support an Terminal::insert_lines_before method. #1426 - GitHub",
+    "Levels of Autonomy for AI Agents - | Knight First Amendment Institute",
+    "Mouse wheel scrolling doesn't work in legacy Windows console (conhost.exe) due to alternate screen buffer · Issue #12457 · openai/codex - GitHub",
+    "Option to disable ConPty wrapping/reflow functionality · Issue #5192 · microsoft/terminal",
+    "PROJECT-STATE",
+    "REQUIREMENTS-SPEC.md",
+    "RFC: Text Wrapping Design · Issue #293 · ratatui/ratatui - GitHub",
+    "Reflowing ConPTY: Add programmatic reflow & plain-text render · Issue #16985 · microsoft/terminal",
+    "Scaling Long-Horizon Agent via Context Folding - OpenReview",
+    "Scrolling within regions that include the top of the screen doesn't push lines into scrollback · Issue #3673 · microsoft/terminal - GitHub",
+    "Textual (Python) - Sparkles",
+    "What Makes a Good Reasoning Chain? Uncovering Structural Patterns in Long Chain-of-Thought Reasoning - ACL Anthology",
+    "Windows Terminal Preview v1.22.2362.0 · microsoft terminal · Discussion #17809 - GitHub",
+    "[Bug] Agent view uses stale terminal width after window resize on Windows (ConPTY) · Issue #80123 · anthropics/claude-code",
+    "codex/codex-rs/core/src/tools/handlers/unified_exec.rs at main · openai/codex - GitHub",
+    "v0.29.0 - Ratatui",
+    "wrapped text interaction with scrolling · Issue #2342 · ratatui/ratatui - GitHub"
+  ],
+  "notes": [
+    {
+      "id": "7e702c62-a035-44b1-a968-3d843c67f223",
+      "title": "RidgeCode 迭代愿景：透明、克制与深度协作",
+      "state": "active_useful",
+      "summary": "原生 scrollback 审计、Lean 输出/原子化行动契约、Help 收纳提示、effort 可视化、Esc/Ctrl-C 接管；建议保留护栏而增强退出诊断。"
+    },
+    {
+      "id": "aeb2c29a-3d94-4190-a458-aaa2c642abd5",
+      "title": "RidgeCode TUI — Active baseline — iter-20260804",
+      "state": "active_useful",
+      "summary": "记录现有 bounded Answer/Reasoning/Tool、native scrollback、历史面板、队列、HOLD/FOLLOW、ConPTY 与已验证切片；明确 NLM quota/深研失败事实。"
+    }
+  ],
+  "confirmed_facts": [
+    {
+      "fact": "用户痛点：模型常卡在查代码/列清单，迟迟不进入修改或验证，最终可能因 max stall/no_progress 停止。",
+      "evidence": "NotebookLM chat turn 2、4、5；用户原话记录于 chat_get transcript。"
+    },
+    {
+      "fact": "用户痛点：历史输入、输出、思考不够符合终端直觉；快捷键查历史不友好，希望直接向上滚动看到调查路径和改动机制。",
+      "evidence": "NotebookLM chat turn 3、4、9；愿景 Note 7e702c62-a035-44b1-a968-3d843c67f223。"
+    },
+    {
+      "fact": "用户愿景：TUI 少噪、硬核且科技感；快捷键提示收进专门的 /help；允许用户及时接管。",
+      "evidence": "NotebookLM chat turn 3、9；愿景 Note 的 Help、Esc/Ctrl-C、native scrollback 条目。"
+    },
+    {
+      "fact": "用户质疑 max stall 与 effort；NotebookLM建议保留确定性安全护栏，不以模型自述替代验证。",
+      "evidence": "NotebookLM chat turn 5、6、8；PROJECT-STATE 与本地 HaltReason/verify 代码事实交叉核验。"
+    },
+    {
+      "fact": "来源与 Note 的可落地建议集中于 scrollback、可见生命周期、宽度/性能有界、折叠详情与接管；结构化推理异常 HUD 属启发式建议。",
+      "evidence": "NotebookLM chat turn 10 的 8 candidates；NotebookLM notebook_get 的 27 source titles；本地 CodeGraph/PTY 复核。"
+    }
+  ],
+  "contradictions": [
+    "NotebookLM曾建议全局虚拟化/DECSTBM/第二侧栏等；本地 CodeGraph、现有 bounded caches、native scrollback 与 ConPTY 证据未复现相应缺陷，未采纳。",
+    "NotebookLM将 no_progress 解释为过度思考假设；本地只把它当确定性 HaltReason 展示，不推断隐藏 reasoning。"
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "effort 过高可能增加调查分支，但当前 TUI 不应从文本启发式判定模型内部思考。",
+      "support": ["NotebookLM chat turn 6、8"],
+      "against": ["当前没有把隐藏 reasoning 映射为结构化诊断的确定性信号"],
+      "experiment": "先复现本地可见缺陷，再评估 effort/活动信号；本轮不实现启发式 HUD。"
+    },
+    {
+      "hypothesis": "点击展开、DECRPM 2027、DECSTBM 的收益依赖终端能力，须独立 ConPTY/终端实验后再纳入。",
+      "support": ["NotebookLM chat turn 10 candidates 1、2、6"],
+      "against": ["当前 CodeGraph/ConPTY 已证明 native scrollback、bounded cache、宽度适配路径存在"],
+      "experiment": "分别用支持/不支持终端能力的最小 PTY fixture 验证，再决定是否新增迭代。"
+    }
+  ],
+  "candidates": [
+    {
+      "core": "deterministic halt-reason and recovery surface",
+      "constraints": ["REQ-20260801-01", "presentation-only", "native scrollback", "no execution changes"],
+      "risks": ["long diagnostic text can crowd narrow cards"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/app.rs", "crates/agent/src/tui/mod.rs", "crates/agent/src/tui/draw.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["TUI unit/render tests", "workspace tests", "clippy", "Windows ConPTY StressFixture"]
+    },
+    {
+      "core": "structural reasoning anomaly HUD",
+      "constraints": ["deterministic evidence required", "no hidden-CoT inference"],
+      "risks": ["heuristic false positives", "new state/parser surface"],
+      "reversibility": "medium",
+      "scope": [],
+      "validation": ["first reproduce a local user-visible defect"],
+      "disposition": "deferred"
+    }
+  ],
+  "recommendation": "先做确定性退出诊断，不取消 max stall，不改执行图：TUI 结果卡与 scrollback 应把 no_progress/stall 转为人类可读原因，并给出有限的 reasoning/tools/activity 检查建议。",
+  "next_step": {
+    "type": "implementation",
+    "value": "完成并验证 halt_reason_display + idle error detail；保持工具折叠、Answer/Reasoning 分层、队列/接管/scrollback 语义不变。"
+  },
+  "stop_conditions": [
+    "若需修改 MAX_STALL、prompt、provider、MCP 或 langgraph，另起 Pending 需求，不在本切片扩 scope。",
+    "若诊断文本破坏窄屏/CJK/ANSI16/ConPTY，回退该 presentation slice。"
+  ]
+}

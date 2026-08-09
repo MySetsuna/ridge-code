@@ -1,0 +1,25 @@
+{
+  "iteration_id": "iter-20260810-open-readonly-stream-metadata",
+  "config_scope": "user .ridge/config.json",
+  "task_shape": "same open-ended read-only inspection of README.md, docs/DIRECTION.md, and docs/REQUIREMENTS-SPEC.md",
+  "secrets_printed": false,
+  "raw_trace_retained": false,
+  "timeout_ms": 45000,
+  "observed": {
+    "timed_out": true,
+    "first_stream_ms": 15109,
+    "first_stream_kind": "reasoning",
+    "first_stream_chunk_bytes": 5,
+    "first_reason_ms": 24544,
+    "first_act_ms": 24547,
+    "stream_markers": 5,
+    "reason_markers": 2,
+    "act_markers": 2,
+    "completion_marker": false,
+    "final_marker": false,
+    "error_markers": 0
+  },
+  "interpretation": "The first observed reasoning stream chunk was small rather than a 1000+ byte reasoning wall, but the run still did not complete within 45 seconds. This narrows the symptom without isolating provider, model, or tool-boundary cause; no root cause is claimed.",
+  "measurement_limit": "First stream chunk is a sanitized process-boundary byte count, not provider-internal TTFT or token accounting.",
+  "cleanup": "temporary measurement script removed; user config unchanged"
+}

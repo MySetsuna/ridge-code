@@ -1,0 +1,36 @@
+{
+  "iteration_id": "iter-20260809-real-smoke",
+  "requirement": "REQ-20260801-01",
+  "intake": "INTAKE-20260809-04",
+  "objective": "Use the real user configuration in an isolated read-only headless smoke to test whether the reported code-reading/list-making stall is reproducible, then adjudicate new NotebookLM candidates against current TUI code.",
+  "notebook": {
+    "id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "response": ".iteration/notebooklm-response-20260809-smoke.json",
+    "note_reconciliation": "Retain the current completed vision/baseline Note; no new design claim is promoted because all three new candidates lacked a reproduced local defect or conflicted with existing TUI behavior."
+  },
+  "implementation": [],
+  "changed_paths": [
+    ".iteration/smoke-evidence-20260809.json",
+    ".iteration/notebooklm-response-20260809-smoke.json"
+  ],
+  "symbols": [
+    "run::headless",
+    "run_artifacts_dir",
+    "LiveTranscript::move_semantic_focus",
+    "semantic_focus_action",
+    "reasoning_commit_lines",
+    "wrap_semantic_commit_line_with_prefix"
+  ],
+  "verification": [
+    {"command":"isolated user-config read-only smoke: single_read","exit_code":0,"summary":"provider and 2 MCP servers initialized; approved=true; steps=2; tokens=11817"},
+    {"command":"isolated user-config read-only smoke: tui_gap_audit","exit_code":124,"summary":"30s timeout during planning/search; no run manifest; no write or shell request"},
+    {"command":"notebook_gate.py validate-output --response .iteration/notebooklm-response-20260809-smoke.json","exit_code":0},
+    {"command":"notebook_gate.py assert-allowed --trigger user_requested","exit_code":0,"summary":"cold_loop allowed; snapshot matched"},
+    {"command":"CodeGraph adjudication of current key routing, lifecycle focus, rails, and wrapping","exit_code":0}
+  ],
+  "local_config_smoke": {
+    "scope": "user .ridge/config.json; no secrets printed",
+    "cleanup": "temporary session, marker, script, and any new run directory removed; no new repository run artifact retained"
+  },
+  "next": "Keep the deterministic counter HUD as the accepted usability slice. Require a narrow multiline-reasoning alignment regression before considering semantic hanging indent; reject physical closures and the proposed Alt+Up/Alt+Down navigation without a reproduced defect and conflict-free key contract."
+}

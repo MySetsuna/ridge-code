@@ -3290,7 +3290,7 @@ fn top_status(ui: &Ui, vitals: &Vitals, width: usize) -> TopStatus {
             };
             fmt_busy_phase(activity, vitals.step).into_owned()
         };
-        format!(
+        let mut status_text = format!(
             " {spinner} {}",
             fmt_busy_signal(
                 &busy_phase,
@@ -3300,7 +3300,14 @@ fn top_status(ui: &Ui, vitals: &Vitals, width: usize) -> TopStatus {
                 vitals.queued,
                 ui.pending_call.as_ref(),
             )
-        )
+        );
+        if let Some(diagnostic) =
+            fmt_progress_diagnostic(ui.stall, ui.err_streak, ui.explore_streak)
+        {
+            status_text.push_str(" · ");
+            status_text.push_str(&diagnostic);
+        }
+        status_text
     } else {
         let todo = todo_progress(&ui.todos)
             .map(|(done, total)| format!(" · todo {done}/{total}"))
@@ -4245,6 +4252,11 @@ fn idle_conclusion_detail(width: usize, text: &str) -> String {
     fit_idle_line(width, &[full, "SUM · result".to_owned(), "SUM".to_owned()])
 }
 
+fn idle_error_detail(width: usize, text: &str) -> String {
+    let full = sanitize_display_text(text).trim().to_owned();
+    fit_idle_line(width, &[full, "ERR · stopped".to_owned(), "ERR".to_owned()])
+}
+
 fn idle_result_summary(ui: &Ui, width: usize, rows: usize) -> Option<(String, Role, Vec<String>)> {
     let signal = ui.activity_history.back()?;
     let has_answer = !ui.answer_history.is_empty();
@@ -4354,6 +4366,9 @@ fn idle_result_summary(ui: &Ui, width: usize, rows: usize) -> Option<(String, Ro
                 details.push(excerpt);
             }
         }
+    }
+    if signal.kind == ActivityKind::Error {
+        details.push(idle_error_detail(width, &signal.text));
     }
     details.push(detail.to_owned());
     details.push(idle_history_actions(width).to_owned());

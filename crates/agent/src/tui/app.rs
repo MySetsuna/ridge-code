@@ -285,6 +285,11 @@ pub(crate) struct Ui {
     pub(crate) output_tokens: usize,
     /// 最近收到的真实图超步；未收到同步点时为 0，不把本地帧数冒充执行步数。
     pub(crate) superstep: usize,
+    /// Deterministic loop counters copied from the latest AgentState snapshot;
+    /// presentation only, never used to route or stop execution.
+    pub(crate) stall: usize,
+    pub(crate) err_streak: usize,
+    pub(crate) explore_streak: usize,
     pub(crate) pending_call: Option<provider::ToolCall>,
     /// 排队待跑的提交(iter-33):busy 时 Enter 入队,任务 done 后自动取队首接跑;中断清空。
     pub(crate) queued: VecDeque<String>,
@@ -319,13 +324,16 @@ impl Ui {
         self.set_activity("approval required · user can take over");
     }
 
-    pub(crate) fn mark_task_outcome(&mut self, approved: bool) {
+    pub(crate) fn mark_task_outcome_with_reason(&mut self, approved: bool, reason: Option<&str>) {
         self.phase = if approved { "completed" } else { "stopped" }.into();
-        self.set_activity(if approved {
-            "completed"
+        let activity = if approved {
+            "completed".to_owned()
+        } else if let Some(reason) = reason {
+            format!("stopped · not approved · {reason}")
         } else {
-            "stopped · not approved"
-        });
+            "stopped · not approved".to_owned()
+        };
+        self.set_activity(activity);
     }
 
     pub(crate) fn mark_error(&mut self) {

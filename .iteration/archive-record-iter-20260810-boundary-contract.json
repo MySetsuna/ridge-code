@@ -1,0 +1,41 @@
+{
+  "iteration_id": "iter-20260810-boundary-contract",
+  "requirement": "REQ-20260801-01 + REQ-20260803-01",
+  "intake": "INTAKE-20260810-01",
+  "objective": "Use the existing exploration facts and prompt contract to help ambiguous tasks stop repeated investigation and choose the smallest permitted action, verifier, or factual report without changing execution semantics.",
+  "notebook": {
+    "id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "response": ".iteration/notebooklm-response-20260810-boundary-contract.json",
+    "note_reconciliation": "Retain the vision Note and the Completed iter-20260809 Note; no new planning Note was created."
+  },
+  "implementation": [
+    "BASE_SYSTEM now states a bounded action-boundary contract: identify the one unknown per search/read, stop when evidence supports the target/answer, take the smallest permitted action and verify it, or report supported facts/blockers.",
+    "The existing explore-streak durable nudge now distinguishes an approved minimal action, read-only report, and concrete blocker; it does not force normal-mode tasks to finish prematurely or alter MAX_EXPLORE routing.",
+    "Read-only mode now states an explicit four-call evidence budget and must report on the fourth call; this remains a model-facing contract, not a new runtime stop rule."
+  ],
+  "changed_paths": [
+    "crates/agent/src/brain.rs",
+    "crates/agent/src/context.rs"
+  ],
+  "verification": [
+    {"command":"cargo test -p agent --lib brain::tests --locked --offline --quiet","exit_code":0,"summary":"8 passed"},
+    {"command":"cargo test -p agent --lib context::tests --locked --offline --quiet","exit_code":0,"summary":"8 passed"},
+    {"command":"cargo test --workspace --locked --offline --quiet","exit_code":0,"summary":"workspace suites passed: agent 109, TUI 328, eval 1, langgraph 9, mcp 2, provider 52, tools 18 plus doctests"},
+    {"command":"cargo clippy --workspace --all-targets --locked --offline -- -D warnings","exit_code":0},
+    {"command":"cargo fmt --all -- --check","exit_code":0},
+    {"command":"cargo build --workspace --locked --offline","exit_code":0},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -BusyFixture -ResizeProbe -TimeoutMs 9000","exit_code":0,"summary":"status=passed"},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -StressFixture -InspectAnswer -TimeoutMs 9000","exit_code":0,"summary":"status=passed"},
+    {"command":"notebook_gate.py validate-output --response .iteration/notebooklm-response-20260810-boundary-contract.json","exit_code":0,"summary":"valid"},
+    {"command":"requirements_gate.py assert-task-executable; iteration_gate.py ...","exit_code":0,"summary":"passed"}
+  ],
+  "local_config_smoke": {
+    "user_config": "C:/Users/12867/.ridge/config.json",
+    "secrets_printed": false,
+    "evidence": ".iteration/smoke-evidence-20260810-boundary.json",
+    "result": "isolated ambiguous edit approved in 3 steps; simple read approved in 2 steps; open-ended three-document read-only task timed out after 120000 ms without a manifest"
+  },
+  "evidence_gap": "The prompt change improves a bounded edit shape but does not prove general open-ended read-only convergence; next round must capture sanitized per-call latency/tool-call traces before another prompt, HUD, or stop-rule change.",
+  "next": "Keep MAX_STALL/MAX_EXPLORE and run a same-task trace A/B; do not claim the provider/model root behavior is fixed."
+}

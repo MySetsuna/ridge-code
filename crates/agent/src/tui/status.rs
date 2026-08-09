@@ -165,6 +165,26 @@ pub(crate) fn fmt_busy_signal(
     s
 }
 
+/// Expose only deterministic counters already produced by AgentState.  This
+/// is a diagnostic projection, not a soft classifier or a second stop rule.
+pub(crate) fn fmt_progress_diagnostic(
+    stall: usize,
+    err_streak: usize,
+    explore_streak: usize,
+) -> Option<String> {
+    let mut signals = Vec::new();
+    if explore_streak > 0 {
+        signals.push(format!("inspect {explore_streak}/{}", agent::MAX_EXPLORE));
+    }
+    if stall > 0 {
+        signals.push(format!("same {stall}/{}", agent::MAX_STALL));
+    }
+    if err_streak > 0 {
+        signals.push(format!("errors {err_streak}/{}", agent::MAX_ERR_STREAK));
+    }
+    (!signals.is_empty()).then(|| signals.join(" · "))
+}
+
 /// 忙碌态已有阶段标签的轻量上下文：只显真实观测 step，不引入新状态或布局行。
 pub(crate) fn fmt_busy_phase(phase: &str, step: usize) -> Cow<'_, str> {
     if step > 0 {

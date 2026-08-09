@@ -1,0 +1,15 @@
+{
+  "iteration_id": "iter-20260810-verify-diagnostic",
+  "mode": "headless_read_only_real_config",
+  "config_scope": "user .ridge/config.json",
+  "secrets_printed": false,
+  "task_shape": "read first three README lines using read_file only",
+  "timed_out": false,
+  "exit_code": 0,
+  "manifest_count": 1,
+  "approved": true,
+  "halt_reason": "approved",
+  "steps": 2,
+  "tokens": 12263,
+  "cleanup": "temporary session, script, and new run artifact removed"
+}

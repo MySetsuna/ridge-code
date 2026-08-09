@@ -8,7 +8,7 @@ RidgeCode 是一个模块化、跨领域可扩展的通用 agent 框架，发布
 
 ### 其他 PC：通过 GitHub 快速安装（无需 Rust/Cargo）
 
-新 PC 无需 Rust/Cargo：复制当前平台的一条命令，安装器会从 GitHub Release 下载对应归档、校验 SHA256，并把 `ridgecode` 加入用户 PATH。当前稳定版为 `v0.5.14`；每个归档内同时带有完整 `README.md` 与安装脚本，便于离线转交和审计。
+新 PC 无需 Rust/Cargo：复制当前平台的一条命令，安装器会从 GitHub Release 下载对应归档、校验 SHA256，并把 `ridgecode` 加入用户 PATH。当前稳定版为 `v0.5.15`；每个归档内同时带有完整 `README.md` 与安装脚本，便于离线转交和审计。
 
 Windows PowerShell：
 
@@ -16,9 +16,9 @@ Windows PowerShell：
 # 最新稳定版：安装到 %LOCALAPPDATA%\Programs\ridgecode，并写入用户 PATH
 irm https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.ps1 | iex
 
-# 可复现安装：固定脚本与 Release 版本 v0.5.14
-$s = irm https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.14/scripts/install.ps1
-& ([scriptblock]::Create($s)) -Version v0.5.14
+# 可复现安装：固定脚本与 Release 版本 v0.5.15
+$s = irm https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.15/scripts/install.ps1
+& ([scriptblock]::Create($s)) -Version v0.5.15
 
 # 新开终端后验证
 ridgecode --version
@@ -31,8 +31,8 @@ Linux / macOS：
 # 最新稳定版：安装到 ~/.local/bin
 curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.sh | sh
 
-# 可复现安装：固定脚本与 Release 版本 v0.5.14
-curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.14/scripts/install.sh | sh -s -- --version v0.5.14
+# 可复现安装：固定脚本与 Release 版本 v0.5.15
+curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.15/scripts/install.sh | sh -s -- --version v0.5.15
 
 # 验证
 ridgecode --version
@@ -52,7 +52,7 @@ Linux / macOS 将 `$env:RIDGE_API_KEY` 改为 `export RIDGE_API_KEY="your-key"`�
 
 升级时重复执行对应平台的最新版安装命令即可；安装器会覆盖旧二进制，不改已有 `~/.ridge/config.json`。卸载仅需删除安装目录中的二进制（配置默认保留）：Windows 删除 `%LOCALAPPDATA%\Programs\ridgecode\ridgecode.exe`，Linux / macOS 删除 `~/.local/bin/ridgecode`。
 
-当前 Release：[v0.5.14](https://github.com/MySetsuna/ridge-code/releases/tag/v0.5.14)。手动下载时按平台选择：
+当前 Release：[v0.5.15](https://github.com/MySetsuna/ridge-code/releases/tag/v0.5.15)。手动下载时按平台选择：
 
 | 平台 | Release 资产 |
 | --- | --- |
@@ -65,7 +65,7 @@ Linux / macOS 将 `$env:RIDGE_API_KEY` 改为 `export RIDGE_API_KEY="your-key"`�
 若目标 PC 不能执行远程脚本，可用 GitHub CLI 下载完整归档，再离线传给目标 PC：
 
 ~~~bash
-gh release download v0.5.14 --repo MySetsuna/ridge-code --pattern 'ridgecode-*'
+gh release download v0.5.15 --repo MySetsuna/ridge-code --pattern 'ridgecode-*'
 ~~~
 
 归档内包含二进制、完整 `README.md` 与对应安装脚本；解压后可用 `--local` / `-Local` 安装，仍会校验归档旁的 `.sha256`。
@@ -440,6 +440,36 @@ Hook 子进程可读取 RIDGE_TOOL 与 RIDGE_TOOL_ARG。pre_tool 的 blocking ho
 
 内置 fastcontext、explorer、reviewer；用户 agent 放在 ~/.ridge/agents/<name>.md，也可用 RIDGE_AGENTS_DIR 指定目录。主 agent 可调用 dispatch_agent，子 agent 独立上下文、只读、只返回结论。/agent 查看当前可用列表。
 
+### Agent route：按任务选择 provider/model
+
+`dispatch_agent` 会按任务难度、规模、类型和角色，在当前有凭据的 `providers[]` 档中确定性选择模型；选择结果会随工具结果显示，例如 `selected=provider::model`、角色、评分与是否 fallback。开启 `RUST_LOG=agent=debug` 可查看同一决策的审计日志。
+
+可在 provider 档声明路由元数据；未声明的能力保持未知，RidgeCode 不从模型名猜能力：
+
+~~~json
+{
+  "providers": [
+    {
+      "name": "fast",
+      "kind": "openai",
+      "model": "small-model",
+      "base_url": "https://api.example.com/v1",
+      "key_env": "FAST_KEY",
+      "route": {
+        "context_window": 32768,
+        "cost_tier": 1,
+        "latency_tier": 1,
+        "supports_tools": true,
+        "supports_reasoning": false,
+        "tags": ["cheap", "fast"]
+      }
+    }
+  ]
+}
+~~~
+
+`cost_tier`/`latency_tier` 取 `1`（低）到 `3`（高）。大任务会过滤上下文不足的档；需要工具或深度推理而档案明确不支持时会过滤。`dispatch_agent` 可选传 `difficulty`、`size`、`kind`、`provider`、`model` 覆盖推断；偏好不可用时自动回退并明确标注，所有档案均不可用时沿用主 provider。
+
 ### 自定义斜杠命令
 
 在 ~/.ridge/commands/<name>.md 写入 prompt 正文，$ARGS 会替换为命令参数；也可由 Skill 暴露同名命令。目录可由 RIDGE_COMMANDS_DIR 或 commands_dir 覆盖。启动后输入 /name args 执行。
@@ -512,15 +542,15 @@ sh scripts/dist.sh
 维护者在稳定基线完成全量质量门后创建 v* 标签并推送；CI 会自动创建 GitHub Release、构建五个平台资产、生成 SHA256 并把 README/安装脚本放进归档：
 
 ~~~bash
-git tag v0.5.14
+git tag v0.5.15
 git push origin main
-git push origin v0.5.14
+git push origin v0.5.15
 ~~~
 
 也可用 GitHub CLI 下载指定版本：
 
 ~~~bash
-gh release download v0.5.14 --repo MySetsuna/ridge-code --pattern 'ridgecode-*'
+gh release download v0.5.15 --repo MySetsuna/ridge-code --pattern 'ridgecode-*'
 ~~~
 
 `.github/workflows/release.yml` 会为 Linux x86_64/aarch64、macOS x86_64/aarch64、Windows x86_64 构建并上传归档；发布前先执行以下质量门：

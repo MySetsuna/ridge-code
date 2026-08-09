@@ -1,0 +1,41 @@
+{
+  "iteration_id": "iter-20260809-halt-diagnostic",
+  "requirement": "REQ-20260801-01",
+  "intake": "INTAKE-20260809-01",
+  "objective": "Expose deterministic stop reason and bounded recovery guidance when TUI run stops, especially no_progress/stall.",
+  "notebook": {
+    "id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "response": ".iteration/notebooklm-response-20260809-pain-points.json",
+    "note_reconciliation": "Retained vision Note 7e702c62-a035-44b1-a968-3d843c67f223; renamed baseline Note aeb2c29a-3d94-4190-a458-aaa2c642abd5 to Completed · RidgeCode TUI baseline · iter-20260809."
+  },
+  "implementation": [
+    "tui::halt_reason_display maps HaltReason to bounded human-facing labels without changing execution.",
+    "tui::halt_reason_guidance adds deterministic inspection/recovery advice to the static stop line.",
+    "Ui activity and idle ERR result surface retain the reason; partial Answer remains visible and distinct."
+  ],
+  "changed_paths": [
+    "crates/agent/src/tui/app.rs",
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/mod.rs",
+    "crates/agent/src/tui/tests.rs"
+  ],
+  "verification": [
+    {"command":"cargo fmt --all -- --check","exit_code":0},
+    {"command":"cargo test -p agent --bin ridgecode tui::tests --locked --offline --quiet","exit_code":0,"summary":"260 passed"},
+    {"command":"cargo test --workspace --locked --offline --quiet","exit_code":0,"summary":"workspace suites passed: 106, 327, 1, 9, 2, 52, 18 plus doctests"},
+    {"command":"cargo clippy --workspace --all-targets --locked --offline -- -D warnings","exit_code":0},
+    {"command":"cargo build --workspace --locked --offline --quiet","exit_code":0},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -StressFixture -InspectAnswer -TimeoutMs 9000","exit_code":0,"summary":"status=passed; Answer/Reasoning history, resize 96x24→40x12, ConPTY snapshot and answer inspection observed"},
+    {"command":"notebook_gate.py validate-output --response .iteration/notebooklm-response-20260809-pain-points.json","exit_code":0}
+  ],
+  "local_config_smoke": {
+    "workspace_config": ".ridge/config.json",
+    "user_config": "C:/Users/12867/.ridge/config.json",
+    "observed_without_secrets": [
+      "workspace provider=openai model=glm-4.6 base_url=https://open.bigmodel.cn/api/paas/v4",
+      "user provider=volc-coding model=glm-5-2-260617 effort=max base_url=https://ark.cn-beijing.volces.com/api/coding/v3 proxy=socks5h://127.0.0.1:51080",
+      "binary --version/--help smoke passed"
+    ]
+  },
+  "next": "Keep prompt/MAX_STALL/provider/MCP changes outside this TUI slice; next cold trigger only after a new locally reproduced gap or explicit user request."
+}

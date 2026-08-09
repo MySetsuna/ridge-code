@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260810-route-runtime-fallback",
+  "at": "2026-08-10",
+  "type": "iteration",
+  "requirement": "REQ-20260809-ROUTE-01",
+  "facts": [
+    "NotebookLM vision Note continues to emphasize transparency, bounded investigation, physical evidence, and user takeover; the completed baseline Note remains retained.",
+    "Real configuration smoke reproduced selected Zai::glm-4.6 returning HTTP 429 for a read-only subagent dispatch.",
+    "dispatch_agent now performs one deterministic main-provider fallback after a selected provider completion failure; the fallback reason is visible and provider error payloads are not echoed.",
+    "run_planned_routed now applies the same bounded fallback at planner completion and teammate graph-invocation boundaries.",
+    "The same real smoke completed the subagent README inspection after fallback, with zero write/shell calls and deterministic verify PASS."
+  ],
+  "evidence": [
+    ".iteration/route-fallback-smoke-evidence-20260810.json",
+    "cargo test --workspace --locked --offline --quiet: passed (agent 120, TUI 328, remaining crates/doctests passed)",
+    "cargo clippy --workspace --all-targets --locked --offline -- -D warnings: passed",
+    "cargo build --workspace --locked --offline --quiet: passed",
+    "cargo fmt --all -- --check: passed",
+    "focused dispatch/planner-teammate fallback tests: passed",
+    "requirements_gate.py assert-task-executable: passed",
+    "preflight.py --project-root . --strict: no blockers"
+  ],
+  "notebook": {
+    "id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "title": "RidgeCode现状、愿景、路线图",
+    "note_inventory": "2 retained Notes",
+    "note_reconciliation": "Read-only note list verified; retained the vision Note and the completed iter-20260809 baseline Note; no Note/source/chat mutation."
+  },
+  "paths": [
+    "crates/agent/src/knowledge.rs",
+    "crates/agent/src/orchestrate.rs",
+    ".iteration/route-fallback-smoke-evidence-20260810.json"
+  ],
+  "symbols": [
+    "provider_failure_label",
+    "run_subagent_attempt",
+    "dispatch_obs",
+    "plan_attempt",
+    "run_planned_routed"
+  ],
+  "next": [
+    "Populate route metadata only when accurate capability and tier information is available; keep runtime fallback single-shot and auditable."
+  ]
+}

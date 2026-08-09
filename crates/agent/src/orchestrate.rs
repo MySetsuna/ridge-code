@@ -1,6 +1,8 @@
 use crate::brain::{circuit_broken, explore_exhausted, over_budget, stalled};
 use crate::context::context_rotted;
 use crate::graph::build_llm_agent;
+use crate::knowledge::{provider_failure_label, Agents};
+use crate::route::{RouteAudit, RouteRequest, RouteRole};
 use crate::state::{AgentState, MAX_STEPS};
 use langgraph::GraphError;
 use provider::{CompletionRequest, LlmProvider, Message, Role};
@@ -10,7 +12,7 @@ use std::sync::Arc;
 /// 解析失败/模型出错 → **降级**为把整个目标当单个子任务(绝不返回空,循环有活干)。
 ///
 /// 子任务本身可交给 [`build_llm_agent`] 逐个执行;彼此独立的还能靠引擎的 fan-out 并行跑。
-pub async fn plan(provider: &dyn LlmProvider, task: &str) -> Vec<String> {
+async fn plan_attempt(provider: &dyn LlmProvider, task: &str) -> Result<Vec<String>, String> {
     let req = CompletionRequest {
         messages: vec![
             Message::new(
@@ -22,11 +24,18 @@ pub async fn plan(provider: &dyn LlmProvider, task: &str) -> Vec<String> {
         ],
         tools: vec![],
     };
-    let text = match provider.complete(&req).await {
-        Ok(c) => c.text,
-        Err(_) => return vec![task.to_string()],
-    };
-    parse_subtasks(&text).unwrap_or_else(|| vec![task.to_string()])
+    let text = provider
+        .complete(&req)
+        .await
+        .map_err(|error| provider_failure_label(error.as_ref()))?
+        .text;
+    Ok(parse_subtasks(&text).unwrap_or_else(|| vec![task.to_string()]))
+}
+
+pub async fn plan(provider: &dyn LlmProvider, task: &str) -> Vec<String> {
+    plan_attempt(provider, task)
+        .await
+        .unwrap_or_else(|_| vec![task.to_string()])
 }
 
 /// 一轮任务的**停机原因**(loop engineering:让「为什么停」成为机器可判的确定性信号,
@@ -153,6 +162,8 @@ pub struct SubtaskResult {
     pub approved: bool,
     pub steps: usize,
     pub tokens: usize,
+    /// Structured provider/model choice; absent for the legacy fixed-provider API.
+    pub route: Option<RouteAudit>,
 }
 
 /// 规划-执行的聚合报告。
@@ -163,6 +174,8 @@ pub struct PlanReport {
     pub approved: bool,
     pub total_tokens: usize,
     pub total_steps: usize,
+    /// Planner choice for the routed API; absent for the legacy fixed-provider API.
+    pub planner_route: Option<RouteAudit>,
 }
 
 /// **规划 + 执行**(orchestrator-workers,M5 完整版):
@@ -193,6 +206,7 @@ pub async fn run_planned(
             approved: out.approved,
             steps: out.steps,
             tokens: out.total_tokens,
+            route: None,
         });
     }
 
@@ -201,6 +215,83 @@ pub async fn run_planned(
         approved,
         total_tokens,
         total_steps,
+        planner_route: None,
+    })
+}
+
+/// Routed planner/teammate execution. Selection happens before each bounded
+/// graph invocation; execution remains the existing serial, verified loop.
+pub async fn run_planned_routed(
+    agents: &Agents,
+    main: Arc<dyn LlmProvider>,
+    task: &str,
+) -> Result<PlanReport, GraphError> {
+    let planner_request = RouteRequest::from_task(task, RouteRole::Planner);
+    let planner = agents.select_provider(&planner_request, main.clone());
+    let mut planner_route = planner.decision.audit(RouteRole::Planner);
+    let subtasks = match plan_attempt(planner.provider.as_ref(), task).await {
+        Ok(subtasks) => subtasks,
+        Err(first_failure) if planner_route.selected.is_some() => {
+            planner_route.used_fallback = true;
+            planner_route.reason = format!(
+                "{}; selected provider failed ({first_failure}), deterministic main-provider fallback",
+                planner_route.reason
+            );
+            match plan_attempt(main.as_ref(), task).await {
+                Ok(subtasks) => subtasks,
+                Err(fallback_failure) => {
+                    planner_route.reason = format!(
+                        "{}; main-provider fallback failed ({fallback_failure}), using original task",
+                        planner_route.reason
+                    );
+                    vec![task.to_string()]
+                }
+            }
+        }
+        Err(_) => vec![task.to_string()],
+    };
+    let mut results = Vec::with_capacity(subtasks.len());
+    let mut total_tokens = 0;
+    let mut total_steps = 0;
+    let mut approved = true;
+
+    for sub in subtasks {
+        let worker_request = RouteRequest::from_task(&sub, RouteRole::Teammate);
+        let worker = agents.select_provider(&worker_request, main.clone());
+        let mut worker_route = worker.decision.audit(RouteRole::Teammate);
+        let app = build_llm_agent(worker.provider.clone())?;
+        let out = match app.invoke(AgentState::new(sub.clone())).await {
+            Ok(out) => out,
+            Err(first_failure) if worker_route.selected.is_some() => {
+                worker_route.used_fallback = true;
+                worker_route.reason = format!(
+                    "{}; selected provider failed ({}), deterministic main-provider fallback",
+                    worker_route.reason,
+                    provider_failure_label(&first_failure)
+                );
+                let fallback_app = build_llm_agent(main.clone())?;
+                fallback_app.invoke(AgentState::new(sub.clone())).await?
+            }
+            Err(error) => return Err(error),
+        };
+        approved &= out.approved;
+        total_tokens += out.total_tokens;
+        total_steps += out.steps;
+        results.push(SubtaskResult {
+            task: sub,
+            approved: out.approved,
+            steps: out.steps,
+            tokens: out.total_tokens,
+            route: Some(worker_route),
+        });
+    }
+
+    Ok(PlanReport {
+        subtasks: results,
+        approved,
+        total_tokens,
+        total_steps,
+        planner_route: Some(planner_route),
     })
 }
 
@@ -210,6 +301,18 @@ mod tests {
     use crate::context::CONTEXT_ROT_TOKENS;
     use crate::*;
     use provider::ToolCall;
+
+    struct AlwaysFailProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for AlwaysFailProvider {
+        async fn complete(
+            &self,
+            _req: &CompletionRequest,
+        ) -> Result<provider::Completion, provider::ProviderError> {
+            Err("http 503: unavailable-body".into())
+        }
+    }
 
     // 一个「永不收工、每轮都调同一个失败命令」的 provider 步骤,带可配的 token 用量。
     fn stuck_step(tokens: u32) -> provider::Completion {
@@ -508,5 +611,147 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["impl add", "test add"]
         );
+    }
+
+    #[tokio::test]
+    async fn routed_orchestrator_audits_planner_and_teammate_choices() {
+        use provider::{Completion, ScriptedProvider};
+
+        let planner: Arc<dyn LlmProvider> = Arc::new(ScriptedProvider::new(vec![Completion {
+            text: r#"["inspect"]"#.into(),
+            ..Default::default()
+        }]));
+        let worker: Arc<dyn LlmProvider> = Arc::new(ScriptedProvider::new(vec![
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "pass".into(),
+                    name: "run_shell".into(),
+                    arguments: serde_json::json!({"cmd": "exit 0"}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                text: "done".into(),
+                ..Default::default()
+            },
+        ]));
+        let planner_profile = ModelProfile {
+            provider: "deep".into(),
+            model: "planner".into(),
+            kind: "openai".into(),
+            context_window: Some(64_000),
+            cost_tier: Some(3),
+            latency_tier: Some(3),
+            supports_tools: Some(false),
+            supports_reasoning: Some(true),
+            tags: vec!["planning".into()],
+        };
+        let worker_profile = ModelProfile {
+            provider: "fast".into(),
+            model: "worker".into(),
+            kind: "openai".into(),
+            context_window: Some(64_000),
+            cost_tier: Some(1),
+            latency_tier: Some(1),
+            supports_tools: Some(true),
+            supports_reasoning: Some(false),
+            tags: vec!["execution".into()],
+        };
+        let agents = Agents {
+            defs: Vec::new(),
+            providers: std::collections::HashMap::new(),
+            route_candidates: vec![
+                AgentProvider {
+                    profile: planner_profile,
+                    provider: planner.clone(),
+                },
+                AgentProvider {
+                    profile: worker_profile,
+                    provider: worker.clone(),
+                },
+            ],
+        };
+
+        let report = run_planned_routed(&agents, planner, "design a complex architecture")
+            .await
+            .unwrap();
+        assert_eq!(
+            report
+                .planner_route
+                .as_ref()
+                .and_then(|route| route.selected.as_deref()),
+            Some("deep::planner")
+        );
+        assert_eq!(report.subtasks.len(), 1);
+        assert_eq!(
+            report.subtasks[0]
+                .route
+                .as_ref()
+                .and_then(|route| route.selected.as_deref()),
+            Some("fast::worker")
+        );
+        assert!(report.approved);
+        assert!(report.subtasks[0]
+            .route
+            .as_ref()
+            .is_some_and(|route| route.reason.contains("role=teammate")));
+    }
+
+    #[tokio::test]
+    async fn routed_orchestrator_falls_back_after_planner_and_teammate_failures() {
+        use provider::{Completion, ScriptedProvider};
+
+        let main: Arc<dyn LlmProvider> = Arc::new(ScriptedProvider::new(vec![
+            Completion {
+                text: r#"["inspect"]"#.into(),
+                ..Default::default()
+            },
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "pass".into(),
+                    name: "run_shell".into(),
+                    arguments: serde_json::json!({"cmd": "exit 0"}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                text: "done".into(),
+                ..Default::default()
+            },
+        ]));
+        let failing: Arc<dyn LlmProvider> = Arc::new(AlwaysFailProvider);
+        let profile = ModelProfile {
+            provider: "limited".into(),
+            model: "unavailable".into(),
+            kind: "openai".into(),
+            context_window: Some(64_000),
+            cost_tier: Some(1),
+            latency_tier: Some(1),
+            supports_tools: Some(true),
+            supports_reasoning: Some(true),
+            tags: vec![],
+        };
+        let agents = Agents {
+            defs: Vec::new(),
+            providers: std::collections::HashMap::new(),
+            route_candidates: vec![AgentProvider {
+                profile,
+                provider: failing,
+            }],
+        };
+
+        let report = run_planned_routed(&agents, main.clone(), "design a complex architecture")
+            .await
+            .unwrap();
+        assert!(report.approved);
+        assert!(report
+            .planner_route
+            .as_ref()
+            .is_some_and(|route| route.used_fallback
+                && route.reason.contains("http 503")
+                && route.reason.contains("main-provider fallback")));
+        assert!(report.subtasks[0].route.as_ref().is_some_and(
+            |route| route.used_fallback && route.reason.contains("main-provider fallback")
+        ));
     }
 }

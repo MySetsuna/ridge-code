@@ -1,0 +1,37 @@
+{
+  "iteration_id": "iter-20260810-open-readonly-trace",
+  "config_scope": "user .ridge/config.json",
+  "task_shape": "same open-ended read-only inspection of README.md, docs/DIRECTION.md, and docs/REQUIREMENTS-SPEC.md",
+  "secrets_printed": false,
+  "raw_trace_retained": false,
+  "baseline": {
+    "prompt_variant": "boundary clause + Chinese durable nudge",
+    "timeout_ms": 45000,
+    "timed_out": true,
+    "first_reason_ms": 23874,
+    "first_act_ms": 23991,
+    "reason_count": 5,
+    "act_count": 5,
+    "tool_names": ["read_file", "search"],
+    "blocked_count": 0,
+    "error_count": 0,
+    "completion_marker": false,
+    "last_event_ms": 39977
+  },
+  "variant": {
+    "prompt_variant": "boundary clause + hard read-only budget + English durable nudge",
+    "timeout_ms": 45000,
+    "timed_out": true,
+    "first_reason_ms": 26262,
+    "first_act_ms": 26379,
+    "reason_count": 3,
+    "act_count": 3,
+    "tool_names": ["search"],
+    "blocked_count": 0,
+    "error_count": 0,
+    "completion_marker": false,
+    "last_event_ms": 40063
+  },
+  "interpretation": "Both variants reach read/search actions, but provider/model turns are slow and no deterministic error or completion appears within the bound. This does not isolate model noncompliance from latency; no root cause is claimed.",
+  "cleanup": "trace script and raw output removed; user config unchanged"
+}

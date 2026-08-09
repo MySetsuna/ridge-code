@@ -1,0 +1,182 @@
+{
+  "baseline": {
+    "head": "4646fa6acbdfa3b06fd239d14dfb81671df4581d",
+    "worktree_digest": "2729bc351205a7d732624e724aed56d01591c590d1c18c43eb529d001c49ff8a"
+  },
+  "config": {
+    "backend": "serial",
+    "enabled": true,
+    "max_packet_bytes": 16384,
+    "max_total_packet_bytes": 16384,
+    "max_workers": 1
+  },
+  "dispatch_id": "98a7313f9a70c44b3a8e046b",
+  "execution_mode": "bounded_single",
+  "model_capabilities": null,
+  "orchestration_enabled": true,
+  "packets": [
+    {
+      "baseline": {
+        "codegraph_revision": "current-index",
+        "head": "4646fa6acbdfa3b06fd239d14dfb81671df4581d",
+        "worktree_digest": "2729bc351205a7d732624e724aed56d01591c590d1c18c43eb529d001c49ff8a"
+      },
+      "codegraph": {
+        "facts": [
+          {
+            "evidence": "codegraph: crates/agent/src/knowledge.rs:286-404",
+            "fact": "dispatch_obs 按静态 Agent.provider 选档案，缺失时回退主 provider；子 agent 只读工具固定为 read_file/search。"
+          },
+          {
+            "evidence": "codegraph: crates/agent/src/main.rs:831-858; crates/agent/src/config.rs:76-120",
+            "fact": "build_agents 仅将能解析凭据的 Config.providers 档案建成运行时 provider，现有 Agents 未保存路由能力元数据。"
+          },
+          {
+            "evidence": "codegraph: crates/agent/src/orchestrate.rs:174-207",
+            "fact": "run_planned 已有 planner/worker 角色，但直接接收 provider 句柄且无任务特性路由。"
+          }
+        ],
+        "queries": [
+          "Agent Agents run_subagent dispatch_obs",
+          "build_llm_agent_full build_core",
+          "ProviderProfile ModelInfo LlmProvider",
+          "run_planned plan"
+        ]
+      },
+      "constraints": [
+        "只读；不得改业务代码、需求、NotebookLM、git 历史或用户配置。",
+        "保持 provider trait、权限门、maker/checker、langgraph BSP 与 subagent 只读边界。",
+        "不得猜测 Ridge capability 中空的 model/reasoning 字段。"
+      ],
+      "depends_on": [],
+      "dispatch_id": "98a7313f9a70c44b3a8e046b",
+      "exclusive_resources": [
+        "agent route contract"
+      ],
+      "execution_kind": "read",
+      "isolation": "shared",
+      "model_route": {
+        "difficulty": "complex",
+        "reasoning_effort": "high",
+        "resolution": "backend_adapter",
+        "tier": "frontier"
+      },
+      "objective": "只读审查已批准 route 需求与当前 Agent/provider/dispatch 边界，提出最小可实现的确定性路由接口、回退与 teammate 接缝；不得修改业务代码。",
+      "packet_bytes": 5098,
+      "packet_hash": "27dcd29714eb80db3bd46d89a719c6eeee6a531fb1ef6d5b56735ee4e37bc558",
+      "requirements": {
+        "ids": [
+          "REQ-20260809-ROUTE-01"
+        ],
+        "records": [
+          {
+            "id": "REQ-20260809-ROUTE-01",
+            "markdown": "### REQ-20260809-ROUTE-01 · Agent route 按任务特性选择 provider/model\n\n- Approval evidence:`用户明确回复：批准`\n- Status:`ACTIVE`\n- Version:`v0.4.0`\n- Behavior:`RidgeCode 从已加载且当前可用的 provider/model 配置构建可解释、可测试的 route 决策：根据任务难度、规模、类型与角色/派发方式选择或排序候选 provider/model；支持 subagent 与 agent teammate 派发路径；缺省、不可用或失败时确定性回退并可观测记录原因；不以模型自述替代路由结果。`\n- Boundary:`范围含项目初始化所需 .iteration 状态、需求与状态快照、CodeGraph 查询、经批准的 NotebookLM/深度调研证据；crates/agent 的 route/dispatch 配置与决策模型、provider/model 能力元数据、subagent/teammate 派发接缝、确定性测试及必要 CLI/TUI 可观测性；仅改动证据证明必要的直接依赖。不得上传密钥、cookie、原始会话或未批准需求；不改变 langgraph 核心 BSP 语义、权限门、危险命令拦截、maker/checker 与 verify；不引入无界后台任务、具体第三方 SDK 耦合、无证据的 provider 重试/计费策略或无关 UI 重构；保留 provider trait/配置边界、MCP 协议语义、子 agent 只读约束及当前工作区脏改动。`\n- Acceptance:`完成 request-intake、requirements gate、PROJECT-STATE 快照、context/iteration gate 与有界调研记录；形成经当前代码、CodeGraph、测试与真实配置核验的 route 设计与实现；测试覆盖任务特性分类/显式覆盖、候选过滤与排序、provider/model 不可用回退、subagent 与 teammate 派发、可观测选择原因及权限/只读边界；通过 cargo fmt --all --check、cargo test --workspace、cargo clippy --workspace --all-targets -- -D warnings、cargo build --workspace，并完成真实可用配置 route smoke，证明实际选择仅来自当前可用 providers/models。`\n- Traceability:`REQ → provider/model 配置解析、route 决策、dispatch_agent/teammate 派发接缝 → crates/agent/provider/tests 与 workspace quality gates → 脱敏 smoke/调研证据；NotebookLM 报告仅作假设，闭环时清理或归档。",
+            "section": "active",
+            "title": "Agent route 按任务特性选择 provider/model"
+          }
+        ]
+      },
+      "result_path": ".iteration/agents/result-route-review.json",
+      "schema_version": 1,
+      "scope": {
+        "allowed_files": [
+          "crates/agent/src/knowledge.rs",
+          "crates/agent/src/orchestrate.rs",
+          "crates/agent/src/config.rs",
+          "crates/agent/src/main.rs",
+          "crates/agent/src/graph.rs",
+          "crates/provider/src/lib.rs"
+        ],
+        "allowed_write_paths": [],
+        "control_write_paths": [
+          ".iteration/agents/result-route-review.json"
+        ],
+        "deny_unlisted": true
+      },
+      "symbols": [
+        "Agents",
+        "dispatch_obs",
+        "run_subagent",
+        "run_planned",
+        "ProviderProfile"
+      ],
+      "task_id": "route-review",
+      "transport": {
+        "completion_rule": "transport receipt is not completion; finalized result file is required",
+        "requested_backend": "serial"
+      },
+      "verification": [
+        {
+          "command": "cargo test -p agent --lib --locked --offline",
+          "expected_exit": 0
+        }
+      ],
+      "worker_policy": {
+        "may_approve_requirements": false,
+        "may_call_notebooklm": false,
+        "may_commit_or_push": false,
+        "may_expand_scope": false,
+        "must_write_result_file": true
+      }
+    }
+  ],
+  "parallel_rejections": [],
+  "plan_hash": "67ce1d18dc3505aec973dbf10bbac254a6053c0e11f3a598d33c764842dd38fc",
+  "schema_version": 1,
+  "total_packet_bytes": 5098,
+  "transport": {
+    "auto_order": [
+      "ridge",
+      "tmux",
+      "native",
+      "serial"
+    ],
+    "fallback_rule": "advance only when backend is unavailable, unsupported, or spawn fails before task acceptance; never duplicate an accepted task",
+    "native": {
+      "actions": [
+        "spawn_agent",
+        "send_message",
+        "wait_agent"
+      ]
+    },
+    "payload": "shared packet file; Ridge may use ridge_stash_data and send only ridge://cache URI",
+    "requested_backend": "serial",
+    "ridge": {
+      "acknowledge": "ridge_acknowledge_receipt",
+      "completion_rule": "receipt is transport evidence only; validated result file proves completion",
+      "delegate": "ridge_delegate_task",
+      "discover": "ridge_get_team_profile",
+      "list_launch_profiles": "ridge_list_launch_profiles",
+      "observe": [
+        "ridge_delivery_status",
+        "ridge_capture_pane",
+        "ridge_inbox_read"
+      ],
+      "pre_spawn_rule": "re-read capabilities; revision must match packet",
+      "required_capability_revision": null,
+      "spawn": "ridge_split_pane",
+      "typed_spawn_fields": [
+        "launch_profile",
+        "reasoning_effort"
+      ]
+    },
+    "serial": {
+      "actions": [
+        "run one bounded worker packet at a time"
+      ]
+    },
+    "tmux": {
+      "actions": [
+        "create pane/session",
+        "send packet path",
+        "collect result file"
+      ]
+    }
+  },
+  "waves": [
+    [
+      "route-review"
+    ]
+  ]
+}

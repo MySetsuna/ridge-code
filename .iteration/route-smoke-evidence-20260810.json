@@ -1,0 +1,28 @@
+{
+  "iteration_id": "iter-20260810-route-real-config",
+  "mode": "headless_read_only_dispatch_agent",
+  "config_scope": "user .ridge/config.json",
+  "provider_initialized": true,
+  "mcp_servers_connected": 2,
+  "subagent": "explorer",
+  "task_profile": {
+    "difficulty": "simple",
+    "size": "small",
+    "kind": "read_only",
+    "role": "subagent"
+  },
+  "route": {
+    "selected": "Zai::glm-4.6",
+    "candidate_count": 1,
+    "used_fallback": false,
+    "reason_observed": "role=subagent difficulty=simple size=small kind=read_only selected=Zai::glm-4.6 score=0 candidates=1"
+  },
+  "execution": {
+    "readonly": true,
+    "write_or_shell_calls": 0,
+    "subagent_result": "HTTP 429 insufficient balance or available resource package",
+    "main_verify": "PASS"
+  },
+  "interpretation": "Only one credential-resolvable provider profile entered the route registry for this run; selection stayed within that registry. Route metadata was omitted in the user config, so no model capability was inferred.",
+  "secrets": "not recorded"
+}

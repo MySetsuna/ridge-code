@@ -839,12 +839,15 @@ fn build_agents(cfg: &Config, auth: &std::collections::BTreeMap<String, String>)
         }
     }
     let mut providers = std::collections::HashMap::new();
+    let mut route_candidates = Vec::new();
     for p in &cfg.providers {
         if let Some(key) = p.resolve_key_with(auth) {
-            providers.insert(
-                p.name.clone(),
-                make_provider(&p.kind, &p.model, &p.base_url, key),
-            );
+            let provider = make_provider(&p.kind, &p.model, &p.base_url, key);
+            providers.insert(p.name.clone(), provider.clone());
+            route_candidates.push(agent::AgentProvider {
+                profile: p.route_model_profile(),
+                provider,
+            });
         }
     }
     if !defs.is_empty() {
@@ -855,7 +858,11 @@ fn build_agents(cfg: &Config, auth: &std::collections::BTreeMap<String, String>)
             names.join(", ")
         );
     }
-    agent::Agents { defs, providers }
+    agent::Agents {
+        defs,
+        providers,
+        route_candidates,
+    }
 }
 
 /// 装配真实 provider。密钥来源(任一命中即用,否则 None → demo)。密钥绝不打印:

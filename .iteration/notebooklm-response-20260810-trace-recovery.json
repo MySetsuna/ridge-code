@@ -1,0 +1,76 @@
+{
+  "status": "NEEDS_MORE_EVIDENCE",
+  "confirmed_facts": [
+    {
+      "fact": "The target notebook has 27 sources and two retained Notes covering transparency, restrained automation, native scrollback, takeover, and bounded stall protection.",
+      "evidence": "Notebook source/note inventory retrieved from the target notebook; no Note mutation performed."
+    },
+    {
+      "fact": "The local TUI already exposes activity age, phase duration telemetry, waiting target, activity history, and the existing deterministic exploration counters.",
+      "evidence": "crates/agent/src/tui/app.rs, crates/agent/src/tui/draw.rs, crates/agent/src/tui/mod.rs, crates/agent/src/tui/status.rs"
+    },
+    {
+      "fact": "The boundary-prompt variant reached a first observed reasoning stream at 15109ms, first formatted reason/act at 24544/24547ms, and timed out at 45s without completion; first observed stream chunk measured 5 UTF-8 bytes.",
+      "evidence": ".iteration/trace-stream-metadata-20260810.json"
+    }
+  ],
+  "contradictions": [
+    "NotebookLM described missing step-age/TTFT display, but local code already has activity_started, phase_duration_ms, activity-age rendering, and waiting target."
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "The user-visible pain is primarily an opaque wait between provider request and actionable tool event.",
+      "support": ["The trace has a long gap before formatted reason/act and no deterministic error."],
+      "against": ["The first observed stream marker arrived earlier.", "The process-boundary trace cannot identify provider internals."],
+      "experiment": "Repeat the same task/config with bounded runs and record first-stream, first-act, completion, and waiting-age metadata only."
+    },
+    {
+      "hypothesis": "A quantitative token-inertia warning would clarify exploration debt.",
+      "support": ["Read/search streaks continue without completion in the open-ended task."],
+      "against": ["No durable token-since-edit field exists.", "Read-only review can legitimately be long; warning risks false alarm."],
+      "experiment": "Use existing explore_streak plus deterministic completion/act outcomes first; do not add token state yet."
+    }
+  ],
+  "candidates": [
+    {
+      "core": "TUI-only waiting freshness label using existing activity_started/last_activity and waiting target; explicitly label observed waiting age, not provider TTFT.",
+      "constraints": ["No provider/MCP/langgraph change", "No second state machine or hidden reasoning classifier", "Preserve Esc/Ctrl-C takeover and MAX_STALL/MAX_EXPLORE"],
+      "risks": ["Duplicate existing +Xs/phase-duration UI", "Could imply a network diagnosis the local boundary cannot prove"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui only", "presentation projection"],
+      "validation": ["First compare current TUI fixture output at narrow/wide widths.", "Implement only if the current waiting age is not visible in the actionable chrome."]
+    },
+    {
+      "core": "Existing-counter inertia signal using explore_streak and recent action outcome, without adding token-since-edit state.",
+      "constraints": ["Read-only tasks must not be treated as failed by color alone", "No new stop rule", "No model self-report"],
+      "risks": ["False-positive anxiety during legitimate code review", "Current HUD already exposes explore streak"],
+      "reversibility": "high",
+      "scope": ["defer unless a usability test shows the current diagnostic is missed"],
+      "validation": ["Ask whether users can locate the current EXPL/WAIT signal and takeover affordance before adding another indicator."]
+    },
+    {
+      "core": "Repeatable A/B evidence for the current boundary contract and hard read-only budget before another prompt edit.",
+      "constraints": ["Same user config and task", "At least three bounded trials per variant if provider variance permits", "Completion/first-act are deterministic outcome signals; model self-report is not evidence"],
+      "risks": ["Provider variance can swamp a small sample", "A stricter call budget can truncate legitimate inspection"],
+      "reversibility": "high",
+      "scope": ["experiment only", "no runtime semantic change"],
+      "validation": ["Compare first-stream, first-act, tool count, timeout, and deterministic completion.", "Stop if evidence remains non-discriminating."]
+    }
+  ],
+  "recommendation": "Do not add TTFT plumbing or token-inertia state now. The local TUI already covers much of Candidate 1, and the new metadata run does not support a long-reasoning-wall explanation. First run a bounded repeated measurement; implement a TUI-only recovery/age wording slice only if current chrome fails that check.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Run repeated sanitized A/B traces with the same real user configuration and task, then adjudicate first-stream/first-act/completion and current waiting-age visibility."
+  },
+  "stop_conditions": [
+    "Do not remove or relax any stall, exploration, budget, permission, or maker-checker guard.",
+    "Do not claim a final root cause from these traces.",
+    "Stop prompt/runtime changes if repeated trials cannot distinguish latency from exploration behavior."
+  ],
+  "notebooklm": {
+    "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+    "sources_used": [],
+    "citations": {},
+    "references": []
+  }
+}

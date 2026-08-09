@@ -1,3 +1,5 @@
+use crate::route::{ModelProfile, ProviderRouteConfig};
+
 /// `~/.ridge/config.json`:一处配 provider/model/预算/多 MCP/skills(env 仍可覆盖)。
 /// 密钥优先走 env(`RIDGE_API_KEY` 或档案 `key_env` 指名的变量);也可在档案里内联 `api_key`
 /// (明文存盘,自担风险)。启动取密钥顺序见 `main.rs::real_provider`。
@@ -90,6 +92,10 @@ pub struct ProviderProfile {
     /// 不走 key。serde-default → 旧 config 零破坏。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub use_oauth: Option<bool>,
+    /// Optional, user-declared routing metadata. Omitted values remain unknown;
+    /// the router never guesses model capabilities from a model name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<ProviderRouteConfig>,
 }
 
 fn default_key_env() -> String {
@@ -97,6 +103,22 @@ fn default_key_env() -> String {
 }
 
 impl ProviderProfile {
+    /// Convert config metadata into the route registry identity.
+    pub fn route_model_profile(&self) -> ModelProfile {
+        let route = self.route.clone().unwrap_or_default();
+        ModelProfile {
+            provider: self.name.clone(),
+            model: self.model.clone(),
+            kind: self.kind.clone(),
+            context_window: route.context_window,
+            cost_tier: route.cost_tier,
+            latency_tier: route.latency_tier,
+            supports_tools: route.supports_tools,
+            supports_reasoning: route.supports_reasoning,
+            tags: route.tags,
+        }
+    }
+
     /// 解析本档案的密钥:内联 `api_key`(非空)优先,否则从 `key_env` 命名的环境变量读。
     /// 都取不到 → `None`(该档案不可用于真实启动)。
     pub fn resolve_key(&self) -> Option<String> {
@@ -309,6 +331,7 @@ pub fn parse_provider_add(args: &str) -> Result<ProviderProfile, String> {
             .unwrap_or_else(default_key_env),
         api_key: None,
         use_oauth: None,
+        route: None,
     })
 }
 
@@ -414,6 +437,7 @@ mod tests {
             key_env: "ZHIPU_KEY".into(),
             api_key: None,
             use_oauth: None,
+            route: None,
         };
         let start = r#"{ "model": "old", "mcp": [ { "name": "nlm", "cmd": "x.exe" } ] }"#;
         // 追加第一个 → mcp 保留、providers 出现。
@@ -531,10 +555,39 @@ mod tests {
             key_env: String::new(),
             api_key: None,
             use_oauth: Some(true),
+            route: None,
         };
         let out = config_add_provider("{}", &prof).unwrap();
         let cfg = Config::parse(&out);
         assert_eq!(cfg.providers[0].use_oauth, Some(true));
         assert_eq!(cfg.providers[0].name, "chatgpt-plus");
+    }
+
+    #[test]
+    fn provider_route_metadata_is_optional_and_roundtrips() {
+        let cfg = Config::parse(
+            r#"{"providers":[
+                {"name":"fast","kind":"openai","model":"small","base_url":"u",
+                 "route":{"context_window":8192,"cost_tier":1,"latency_tier":1,
+                           "supports_tools":true,"supports_reasoning":false,"tags":["cheap"]}}
+            ]}"#,
+        );
+        let profile = cfg.providers[0].route_model_profile();
+        assert_eq!(profile.key(), "fast::small");
+        assert_eq!(profile.context_window, Some(8192));
+        assert_eq!(profile.cost_tier, Some(1));
+        assert_eq!(profile.supports_tools, Some(true));
+        assert_eq!(profile.tags, vec!["cheap"]);
+
+        let dumped = serde_json::to_string(&cfg.providers[0]).unwrap();
+        assert!(dumped.contains("\"route\""));
+        assert!(dumped.contains("\"context_window\":8192"));
+
+        let legacy = Config::parse(
+            r#"{"providers":[{"name":"legacy","kind":"openai","model":"m","base_url":"u"}]}"#,
+        );
+        let legacy_profile = legacy.providers[0].route_model_profile();
+        assert_eq!(legacy_profile.context_window, None);
+        assert_eq!(legacy_profile.supports_tools, None);
     }
 }

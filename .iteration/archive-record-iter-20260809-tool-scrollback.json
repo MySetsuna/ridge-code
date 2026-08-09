@@ -1,0 +1,30 @@
+{
+  "iteration_id": "iter-20260809-tool-scrollback",
+  "requirement": "REQ-20260801-01",
+  "intake": "INTAKE-20260809-02",
+  "objective": "Commit completed live Tool blocks at each Superstep boundary so an ongoing investigation remains auditable in native scrollback before task completion.",
+  "notebook": {
+    "id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "response": ".iteration/notebooklm-response-20260809-next.json",
+    "note_reconciliation": "Rechecked the two current notes: retained the current vision note and the completed TUI baseline note; no stale note required removal."
+  },
+  "implementation": [
+    "Call Ui::commit_live_tools after each StreamEvent::Superstep state/message boundary.",
+    "Preserve existing bounded folded tool history and execution semantics; done and interrupt paths remain unchanged."
+  ],
+  "changed_paths": [
+    "crates/agent/src/tui/mod.rs"
+  ],
+  "verification": [
+    {"command":"cargo fmt --all -- --check","exit_code":0},
+    {"command":"cargo test -p agent --bin ridgecode tui::tests --locked --offline --quiet","exit_code":0,"summary":"260 passed"},
+    {"command":"cargo test --workspace --locked --offline --quiet","exit_code":0,"summary":"workspace suites passed: 106, 327, 1, 9, 2, 52, 18 plus doctests"},
+    {"command":"cargo clippy --workspace --all-targets --locked --offline -- -D warnings","exit_code":0},
+    {"command":"cargo build --workspace --locked --offline --quiet","exit_code":0},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -BusyFixture -TimeoutMs 9000","exit_code":0,"summary":"status=passed; busy queue/takeover and ConPTY snapshot observed"},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -StressFixture -InspectAnswer -TimeoutMs 9000","exit_code":0,"summary":"status=passed; Answer/Reasoning history, resize 96x24 to 40x12, ConPTY snapshot and answer inspection observed"},
+    {"command":"notebook_gate.py validate-output --response .iteration/notebooklm-response-20260809-next.json","exit_code":0},
+    {"command":"iteration_gate.py --root . --context .iteration/context.json --budget .iteration/budget.json --usage .iteration/usage.json","exit_code":0,"summary":"outside_write_scope empty; budget within bounds"}
+  ],
+  "next": "Keep prompt/MAX_STALL/provider/MCP changes outside this TUI slice; revisit only after a new locally reproduced gap or explicit user request."
+}

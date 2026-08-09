@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "dispatch": {
+    "enabled": true,
+    "backend": "serial",
+    "max_workers": 1,
+    "max_packet_bytes": 16384,
+    "max_total_packet_bytes": 16384
+  },
+  "tasks": [
+    {
+      "id": "worker-1",
+      "result_path": ".iteration/agents/iter-20260809-03/result-worker-1.json",
+      "objective": "主 Agent 串行执行：将 AgentState 的 stall、err_streak、explore_streak 原始计数以有界状态标签展示在忙碌 TUI 顶栏，帮助用户识别查代码/列清单循环。",
+      "difficulty": "light",
+      "reasoning_effort": "low",
+      "execution_kind": "write",
+      "isolation": "shared",
+      "requirements": ["REQ-20260801-01"],
+      "symbols": ["AgentState", "StreamEvent::Superstep", "fmt_progress_diagnostic", "top_chrome"],
+      "codegraph": {
+        "queries": [
+          "AgentState stall/explore_streak/err_streak to StreamEvent::Superstep and TUI status",
+          "top_chrome and width-aware status rail projection"
+        ],
+        "facts": [
+          {
+            "fact": "AgentState already computes exact bounded loop counters; TUI currently consumes only step, tokens, pending_call, activity, and todos, so the counters are not visible during a busy run.",
+            "evidence": "codegraph/local source: crates/agent/src/state.rs; crates/agent/src/tui/mod.rs:1239-1260; crates/agent/src/tui/draw.rs:3270-3335"
+          }
+        ]
+      },
+      "files": [
+        "crates/agent/src/state.rs",
+        "crates/agent/src/tui/app.rs",
+        "crates/agent/src/tui/mod.rs",
+        "crates/agent/src/tui/status.rs",
+        "crates/agent/src/tui/draw.rs",
+        "crates/agent/src/tui/tests.rs"
+      ],
+      "tests": ["crates/agent/src/tui/tests.rs"],
+      "write_paths": [
+        "crates/agent/src/tui/app.rs",
+        "crates/agent/src/tui/mod.rs",
+        "crates/agent/src/tui/status.rs",
+        "crates/agent/src/tui/draw.rs",
+        "crates/agent/src/tui/tests.rs"
+      ],
+      "exclusive_resources": ["TUI busy status projection"],
+      "constraints": [
+        "presentation-only; consume exact counters; no heuristic classifier",
+        "no graph/provider/MCP/queue/key/MAX_STALL/halt-routing changes",
+        "preserve ANSI16, bounded width, native scrollback, folded details and ConPTY"
+      ],
+      "verification": [
+        {"command":"cargo test -p agent --bin ridgecode tui::tests --locked --offline --quiet","expected_exit":0},
+        {"command":"cargo fmt --all -- --check","expected_exit":0},
+        {"command":"cargo clippy --workspace --all-targets --locked --offline -- -D warnings","expected_exit":0}
+      ],
+      "depends_on": []
+    }
+  ]
+}

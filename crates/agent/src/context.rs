@@ -104,7 +104,7 @@ pub(crate) fn durable_state_block(s: &AgentState) -> Option<String> {
     }
     if explore_nudge {
         b.push_str(&format!(
-            "侦察未落盘: 已连续 {} 步只读/搜索、尚无 write/edit。若任务需改文件,下一步必须 edit_file/write_file/apply_edits 或 finish 汇报已定位结论;禁止重复通读同一区域。\n",
+            "exploration_streak: {} (read/search calls since last write/edit; no durable change). Stop repeated exploration now. If an approved target is known, take the smallest action and verify it; in read-only mode, answer with supported facts; if blocked, state the concrete blocker. Do not make another read/search call merely to reset this counter.\n",
             s.explore_streak
         ));
     }
@@ -324,7 +324,23 @@ mod tests {
             .content
             .contains("durable_state"));
 
-        // 连续纯侦察达 nudge 阈值 → 注入「定位后立即动手」提醒(无改文件也有块)。
+        // 达到 nudge 阈值 → 给真实模型「定位后立即动手」提醒；
+        // MAX_EXPLORE 仍负责硬停，nudge 只改 prompt 事实块，不改路由。
+        let before_nudge = AgentState {
+            explore_streak: EXPLORE_NUDGE_AFTER - 1,
+            history: vec![Message::user("t")],
+            ..Default::default()
+        };
+        assert!(
+            !to_messages("SYS", &before_nudge)
+                .last()
+                .unwrap()
+                .content
+                .contains("侦察未落盘"),
+            "nudge should not appear before the threshold"
+        );
+
+        // 达到 nudge 阈值 → 注入「定位后立即动手」提醒(无改文件也有块)。
         let thrash = AgentState {
             explore_streak: EXPLORE_NUDGE_AFTER,
             history: vec![Message::user("t")],
@@ -333,8 +349,11 @@ mod tests {
         let msgs = to_messages("SYS", &thrash);
         let last = msgs.last().unwrap();
         assert!(
-            last.content.contains("侦察未落盘") && last.content.contains("edit_file"),
-            "应 nudge 切入写改: {}",
+            last.content.contains("exploration_streak")
+                && last.content.contains("Stop repeated exploration now")
+                && last.content.contains("read-only mode")
+                && last.content.contains("approved target"),
+            "应 nudge 切入收束: {}",
             last.content
         );
     }

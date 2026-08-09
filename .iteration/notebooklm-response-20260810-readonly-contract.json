@@ -1,0 +1,115 @@
+{
+  "status": "PROCEED",
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+  "source_count": 27,
+  "note_ids": [
+    "7e702c62-a035-44b1-a968-3d843c67f223",
+    "aeb2c29a-3d94-4190-a458-aaa2c642abd5"
+  ],
+  "question": "Given a representative read-only audit still reached no_progress after repeated search/read calls, which bounded slice can close the exploration loop without changing execution semantics?",
+  "confirmed_facts": [
+    {
+      "fact": "NotebookLM's current vision prioritizes transparent progress, bounded exploration, honest stopping, and visible handoff over hidden model self-report.",
+      "evidence": "NotebookLM Note 7e702c62-a035-44b1-a968-3d843c67f223 and source set"
+    },
+    {
+      "fact": "The read-only graph removed write tools, but the generic BASE_SYSTEM and durable exploration nudge still instructed the model to seek edit/write actions.",
+      "evidence": "CodeGraph: build_core, build_system_prompt_with_mode, durable_state_block"
+    },
+    {
+      "fact": "Before the nudge correction, the real-config read-only audit produced a final three-finding handoff only after 13 steps and manifest halt_reason no_progress; after the correction it approved in 7 steps with three path-qualified findings.",
+      "evidence": ".iteration/smoke-evidence-20260810.json"
+    }
+  ],
+  "contradictions": [
+    "NotebookLM's heuristic OVER-BRANCHING HUD alert would infer model behavior from counters and risks false positives; exact deterministic counters already surface the observable condition.",
+    "A physical-signal inertia HUD would duplicate existing bounded progress diagnostics and can falsely label legitimate read-only work as stalled.",
+    "Extracting milestones from model Markdown plans would trust self-report, contrary to the project's deterministic verification boundary."
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "A bounded read-only runtime prompt and mode-safe durable nudge will make inspection tasks stop after enough evidence instead of pursuing unavailable writes.",
+      "support": ["NotebookLM transparency/stop-loop vision", "local trace showed unavailable write instruction in read-only context"],
+      "against": ["provider behavior is variable", "prompt compliance alone is not a hard execution guarantee"],
+      "experiment": "Run the real user config with --read-only and a representative TUI audit; require approved manifest and concise path-qualified findings."
+    }
+  ],
+  "candidates": [
+    {
+      "core": "heuristic OVER-BRANCHING alert",
+      "constraints": ["presentation-only", "no new execution state"],
+      "risks": ["false positives", "duplicates exact loop counters", "model-behavior inference"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/status.rs", "crates/agent/src/tui/draw.rs"],
+      "validation": ["deterministic counter rendering", "real-config smoke"],
+      "disposition": "reject_false_positive_risk"
+    },
+    {
+      "core": "model Markdown milestone extraction",
+      "constraints": ["must not replace deterministic verification"],
+      "risks": ["self-report is unreliable", "parsing drift", "false completion"],
+      "reversibility": "medium",
+      "scope": ["crates/agent/src/context.rs", "crates/agent/src/graph.rs"],
+      "validation": ["adversarial model output tests", "deterministic approval tests"],
+      "disposition": "reject_self_report"
+    },
+    {
+      "core": "read-only runtime prompt plus mode-safe exploration nudge",
+      "constraints": ["read-only mode only", "normal write-enabled execution unchanged", "no provider/MCP/langgraph/key semantics change"],
+      "risks": ["prompt compliance remains probabilistic", "fixed call hint is advisory"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/brain.rs", "crates/agent/src/context.rs", "crates/agent/src/graph.rs"],
+      "validation": ["brain/context focused tests", "workspace tests/clippy/build", "real-config read-only smoke", "ConPTY busy/stress regression"],
+      "disposition": "accepted_and_verified"
+    }
+  ],
+  "local_adjudication": [
+    {
+      "candidate": "heuristic OVER-BRANCHING alert",
+      "result": "reject_false_positive_risk",
+      "reason": "The existing exact stall/error/explore counters expose the deterministic condition without guessing model intent."
+    },
+    {
+      "candidate": "physical action-inertia HUD",
+      "result": "defer_redundant",
+      "reason": "Useful only if a concrete telemetry gap is reproduced; current read-only smoke needs a stopping contract, not another warning."
+    },
+    {
+      "candidate": "model Markdown milestone extraction",
+      "result": "reject_self_report",
+      "reason": "It would weaken the maker/checker boundary by treating model narration as completion evidence."
+    },
+    {
+      "candidate": "read-only runtime prompt plus mode-safe exploration nudge",
+      "result": "accepted_and_verified",
+      "reason": "Local trace identified the unavailable-write contradiction; after removing it, real-config smoke approved in 7 steps with three concise findings."
+    }
+  ],
+  "implementation": {
+    "core": "Build a read-only-specific system prompt, route it only through read-only graph assembly, and make the durable exploration nudge request finish/reporting rather than unavailable writes.",
+    "constraints": [
+      "keep BASE_SYSTEM and write-enabled behavior unchanged",
+      "keep MAX_EXPLORE and deterministic verification unchanged",
+      "do not add hidden-reasoning heuristics, new state machine, provider, MCP, or langgraph semantics"
+    ],
+    "validation": [
+      "cargo fmt --all -- --check",
+      "cargo test --workspace --locked --offline",
+      "cargo clippy --workspace --all-targets --locked --offline -- -D warnings",
+      "cargo build --workspace --locked --offline",
+      "real-config --read-only smoke: approved=true, 7 steps, three path-qualified findings",
+      "BusyFixture + ResizeProbe and StressFixture + InspectAnswer ConPTY regressions passed"
+    ]
+  },
+  "recommendation": "Accept the read-only contract slice; reject the three speculative NLM candidates and retain the current notes as the vision and completed-history record.",
+  "next_step": {
+    "type": "experiment",
+    "value": "Archive this verified iteration and reconcile the current completed Note; next usability slice requires a fresh reproduced pain."
+  },
+  "stop_conditions": [
+    "Do not add heuristic model-intent alerts without a concrete false-negative/false-positive trace.",
+    "Do not parse model self-report as deterministic completion evidence.",
+    "Do not claim broad project completion from this single read-only smoke; keep the iteration goal active for future NLM-guided slices."
+  ]
+}

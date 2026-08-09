@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260810-route-smoke",
+  "at": "2026-08-10",
+  "type": "iteration",
+  "requirement": "REQ-20260809-ROUTE-01",
+  "facts": [
+    "CodeGraph confirms dispatch_agent reaches dispatch_obs and run_subagent through the graph tool-call path.",
+    "run_planned_routed is a public planner/teammate seam with deterministic RouteAudit coverage; no CLI/TUI caller was found, so teammate validation remains API/test based rather than a new user-facing command.",
+    "The current real configuration run entered dispatch_agent with a simple, small, read_only subagent task and selected only Zai::glm-4.6 from one credential-resolvable route candidate.",
+    "The selected subagent provider returned HTTP 429; no write or shell call occurred and the main deterministic verify gate passed.",
+    "Provider route metadata is omitted in the user config; the router did not infer capabilities from model names."
+  ],
+  "evidence": [
+    ".iteration/route-smoke-evidence-20260810.json",
+    "cargo test -p agent --lib route::tests --locked --offline --quiet: 5 passed",
+    "cargo test -p agent --lib knowledge::tests --locked --offline --quiet: 11 passed",
+    "cargo test -p agent --lib orchestrate::tests --locked --offline --quiet: 10 passed",
+    "cargo fmt --all -- --check: passed",
+    "cargo test --workspace --locked --offline --quiet: passed",
+    "cargo clippy --workspace --all-targets --locked --offline -- -D warnings: passed",
+    "cargo build --workspace --locked --offline --quiet: passed",
+    "requirements_gate.py assert-task-executable: passed",
+    "state_snapshot.py check: passed",
+    "iteration_gate.py: passed",
+    "notebook_gate.py validate-output: passed"
+  ],
+  "notebook": {
+    "id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+    "title": "RidgeCode现状、愿景、路线图",
+    "evidence": "read-only notebook_get/source_list_drive/chat_list/chat_get/note_list",
+    "note_reconciliation": "Retained the two existing Notes; no source, chat, or planning Note mutation."
+  },
+  "paths": [
+    ".iteration/route-smoke-evidence-20260810.json",
+    "crates/agent/src/route.rs",
+    "crates/agent/src/knowledge.rs",
+    "crates/agent/src/orchestrate.rs",
+    "crates/agent/src/main.rs"
+  ],
+  "symbols": [
+    "Agents::select_provider",
+    "dispatch_obs",
+    "run_planned_routed",
+    "choose_route"
+  ],
+  "next": [
+    "Populate route metadata only when accurate capability and tier information is available; do not infer it from model names."
+  ]
+}

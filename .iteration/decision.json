@@ -1,269 +1,38 @@
 {
-  "question": "What is the next measurable RidgeCode TUI improvement after KKP HOLD/FOLLOW, static Markdown roles/alert edges, and the current semantic channels, history, folded tools, lifecycle anchors, cache boundaries, and ConPTY coverage?",
-  "target": "Make model reasoning, answers, waiting, conclusions, tools, queue, and takeover visible, searchable, expandable, bounded, adaptive, and responsive without changing execution semantics.",
+  "question": "RidgeCode 应如何依据任务难度、规模、类型与派发角色，在当前可用 provider/model profiles 中为 subagent 或 teammate 做确定性、可解释的路由选择？",
+  "target": "形成经源码、CodeGraph、NotebookLM 与确定性实验核验的 route 方案，并实现最小可用的 provider/model 能力元数据、任务特性决策、候选过滤排序、回退与 subagent/teammate 派发接缝。",
   "approved_constraints": [
-    "REQ-20260801-01 and INTAKE-20260805-03 are approved and executable.",
-    "Use only manually imported NotebookLM theory source 8862d715-ffad-4288-b7eb-173260e2dcff; do not inspect user-owned research status.",
-    "Do not create another Ridge member; use the existing notebooklm-mcp-maintainer only.",
-    "Do not change langgraph/provider/MCP execution semantics or add a second execution state machine.",
-    "Keep Answer separate from reasoning_content; preserve ANSI16, cell-width wrapping, bounded details, queue/takeover/HOLD/FOLLOW, and native scrollback.",
-    "Tools remain folded by default and expandable with bounded detail; user intervention remains non-blocking.",
-    "TestBackend is supplementary; Windows ConPTY is required for terminal claims.",
-    "Error idle result cards with retained partial Answer must preserve visible PARTIAL body/metadata/recovery affordances without changing execution, queue, provider, MCP, or key-routing semantics.",
-    "Static Reasoning commit projection may reuse existing md_line_spans_with_alert for Markdown/code semantic roles; keep native scrollback, rails/meta/history hint, bounded fold/wrap, and all key semantics unchanged.",
-    "Static Reasoning scrollback and audit detail may reuse existing alert_edges/apply_alert_edge; preserve body, rails, cell width, and no new parser/cache/dependency/renderer/execution/key change."
+    "绑定 REQ-20260809-ROUTE-01；仅使用当前已加载且可用的 provider/model 配置。",
+    "保持 provider trait、MCP 协议、langgraph BSP、权限门、危险命令拦截、maker/checker、确定性 verify 与 subagent 只读边界。",
+    "不上传密钥、cookie、原始会话、原始日志或未批准需求；NotebookLM 只产出假设与候选方案。",
+    "不引入无界后台任务、无证据的重试/计费策略、具体第三方 SDK 耦合或无关 UI 重构。"
   ],
   "verified_facts": [
-    {
-      "fact": "Live and history panels now preserve explicit narrow Enter expansion and Esc closure affordances without changing panel routing.",
-      "evidence": "panel_hint, clip_hint_with_close, narrow_history_hint_names_expand_action, narrow_live_history_hint_names_expand_action"
-    },
-    {
-      "fact": "The wide input legend preserves Ctrl+R history and Ctrl+T activity by compacting lower-priority labels within its cell budget.",
-      "evidence": "input_chrome and input_chrome_exposes_submit_or_queue_mode"
-    },
-    {
-      "fact": "The compact busy rail previously showed queue depth but not the ordinary Enter-to-queue action; it now shows `↵ queue` at wider compact widths and `↵` at narrow widths before optional audit tokens.",
-      "evidence": "compact_busy_actions; input_chrome_exposes_submit_or_queue_mode at widths 12, 18, and 24"
-    },
-    {
-      "fact": "Release ConPTY coverage passed busy queue/Inspector/Reasoning/HOLD/FOLLOW/resize/takeover and narrow StressFixture Answer inspection with dual Ctrl-C.",
-      "evidence": "windows-pty-e2e.ps1 Release BusyFixture and Release StressFixture status=passed"
-    },
-    {
-      "fact": "The current Windows package contains README.md, install.ps1, ridgecode.exe, and a SHA-256 sidecar.",
-      "evidence": "dist/ridgecode-x86_64-pc-windows-msvc.zip; SHA-256 AA91E76B517A7BB772F1AB3DE6AA1CD18E9FD3950FD718FA541E60B061E2B062"
-    },
-    {
-      "fact": "The exact empty final markers `(final)` and `reason#N: (final)` were not classified as Answer events, while malformed `(final)not-a-marker` must remain ordinary text; the presentation parser now distinguishes these cases and renders `[empty answer]`.",
-      "evidence": "final_answer_gets_assistant_marker; crates/agent/src/tui/eventfmt.rs; focused test passed"
-    },
-    {
-      "fact": "Busy-with-tools 56–71-column input chrome omitted ordinary Enter queue even though the wider 72+ branch exposed it; the rail now keeps `↵ queue`, front queue, takeover, tool detail, and reasoning-history affordances through width-aware compression.",
-      "evidence": "input_chrome_exposes_submit_or_queue_mode at widths 56 and 64; Release BusyFixture 96/64/56 and StressFixture 18x14 status=passed"
-    },
-    {
-      "fact": "Verification activity was classified as CHK and visible in the Activity panel/live lifecycle path, but it was not retained as a native scrollback activity anchor; it now produces the same bounded static activity anchor and Ctrl+T recovery affordance as other actionable lifecycle signals.",
-      "evidence": "ActivityKind::is_retained_signal includes Verification; verification_activity_leaves_a_static_anchor_with_a_detail_affordance passed; workspace TUI 297 and Release PTY matrix passed"
-    },
-    {
-      "fact": "Busy LIVE empty-state content exposed HOLD/Inspect but omitted Esc/Ctrl-C takeover; its width-aware action candidates now retain Esc takeover from 80 columns down to a truthful one-token `Esc` micro hint.",
-      "evidence": "live_empty_state_keeps_takeover_affordance_across_widths at 6/11/18/32/48/80 columns; Release BusyFixture preview shows `Esc takeover` at 96/64/56; Release StressFixture and dual Ctrl-C passed"
-    },
-    {
-      "fact": "The focused notebook has exactly one useful Active Note; the attempted new NLM query remains quota-exhausted before an answer and no research-status operation was performed.",
-      "evidence": "NotebookLM note/chat listing and .iteration/notebooklm-response-20260806-queue.json"
-    },
-    {
-      "fact": "The existing Ridge member notebooklm-mcp-maintainer is the only relevant member; no new member was created.",
-      "evidence": "Current Ridge workspace profile and captured pane"
-    },
-    {
-      "fact": "The TUI dispatcher accepted /goal, /inspect, and /reasoning, but the slash completion popup omitted them; the static completion list now exposes all three without changing routing.",
-      "evidence": "slash_popup_surfaces_goal_and_attention_commands; cargo test --workspace --locked --offline --quiet passed"
-    },
-    {
-      "fact": "The release harness default timeout was shorter than the 5000 ms InspectAnswer probe; the default is now 6500 ms, and Release StressFixture + InspectAnswer passes with Answer focus observed.",
-      "evidence": "scripts/windows-pty-e2e.ps1 default run; status=passed; snapshot_answer_inspect_live_view=hold; snapshot_answer_inspect_live_focus=answer:1"
-    },
-    {
-      "fact": "The current Windows package contains README.md, install.ps1, ridgecode.exe, and a SHA-256 sidecar after the slash-completion/doc fix.",
-      "evidence": "dist/ridgecode-x86_64-pc-windows-msvc.zip; SHA-256 AA91E76B517A7BB772F1AB3DE6AA1CD18E9FD3950FD718FA541E60B061E2B062"
-    },
-    {
-      "fact": "The lifecycle classifier now maps the exact `node · running tools` and `node · wrapping up` phases to Tool/TLS and Conclusion/SUM instead of the generic System kind.",
-      "evidence": "activity_classifier_exposes_investigation_verification_and_conclusion; focused cargo test passed; CodeGraph node_label call path"
-    },
-    {
-      "fact": "Idle input chrome now exposes `Enter send` at medium widths and reserves a compact `↵` token in narrow archive rails, while preserving existing cell bounds and audit shortcuts.",
-      "evidence": "input_chrome_exposes_submit_or_queue_mode; focused cargo test passed; crates/agent/src/tui/status.rs"
-    },
-    {
-      "fact": "Narrow busy chrome now distinguishes waiting for the model from waiting for a pending tool call, instead of collapsing both states to `waiting`.",
-      "evidence": "compact_busy_phase derives the target from the existing pending_call fact; narrow_busy_chrome_keeps_waiting_target_without_live_channel passed at 18/24/32/40 columns."
-    },
-    {
-      "fact": "The HOLD live-phase anchor now preserves the same model/tool waiting target as the top busy rail, using one shared presentation helper.",
-      "evidence": "waiting_target/waiting_phase; held_live_anchor_keeps_waiting_target_visible passed for model/tool targets at 40 columns."
-    },
-    {
-      "fact": "When a held stream also carried a T›L›A channel trace and CHK lifecycle badge, narrow clipping could erase the model/tool portion of the waiting target; the anchor now prioritizes HOLD, waiting, and its target before optional breadcrumbs.",
-      "evidence": "held_wait_anchor_prioritizes_waiting_target_over_optional_breadcrumbs initially failed at width 32, then passed at 18/24/32/40 after compact_waiting_anchor was added."
-    },
-    {
-      "fact": "Static reasoning commits use a `┊ THK[...]` first-line prefix, but the semantic commit wrapper did not recognize that prefix; long reasoning lines therefore lost the `│` continuation rail during narrow reflow.",
-      "evidence": "committed_reasoning_text_keeps_its_continuation_rail_after_narrow_reflow initially failed at 18 columns, then passed after adding the existing `┊` prefix to commit_semantic_prefix; reasoning_commit_renders_in_inline_scrollback and CJK reflow regressions pass."
-    },
-    {
-      "fact": "After the rail was restored, Release BusyFixture at the 40-column resize probe showed the rail could still be inserted inside ordinary words; the semantic commit wrapper now defers whitespace and keeps a whole word together when the next row can hold it, while long unbroken tokens still hard-wrap by grapheme/cell.",
-      "evidence": "semantic_reasoning_rail_prefers_word_boundaries_on_narrow_reflow passed; Release BusyFixture preview no longer showed `reason│ing`, `an│d`, or `h│istory`; all continuation rows remained within 40 cells."
-    },
-    {
-      "fact": "The rebuilt local Windows package contains the complete README, install.ps1, and release ridgecode.exe with a matching SHA-256 sidecar.",
-      "evidence": "dist/ridgecode-x86_64-pc-windows-msvc.zip; entries exactly install.ps1, README.md, ridgecode.exe; SHA-256 265AD4E409A5C0A0396FAD100605EE26A607CDB7E9065ABCFFA847DF9B39C705"
-    },
-    {
-      "fact": "Live reasoning/Answer physical wrapping previously split ordinary words at the 40-column viewport; the existing forward wrapper and bounded reverse-tail wrapper now prefer whitespace boundaries, while unbroken output and synthetic ellipsis tails retain bounded hard-wrap behavior.",
-      "evidence": "live_output_prefers_word_boundaries_before_hard_wrapping passed for wrap_live_spans and wrap_live_spans_tail; live_markdown_highlighting_tails_long_prose_before_span_scan and live_tail_wrap_bounds_unbroken_output passed; Release BusyFixture resize 40x12 preview no longer showed the split words."
-    },
-    {
-      "fact": "The latest local Windows package contains the complete README, install.ps1, and release ridgecode.exe with a matching SHA-256 sidecar after the live-wrap fix.",
-      "evidence": "dist/ridgecode-x86_64-pc-windows-msvc.zip; entries exactly install.ps1, README.md, ridgecode.exe; SHA-256 176DC646BB021685D9A46B9AA846FB9400B71FD791BC53439A1F2D375AD10CDA"
-    },
-    {
-      "fact": "NLM's proposed virtualized layout-height cache is not an unimplemented gap: current code already bounds visible logical/physical tails and caches live/detail layout by revision and width.",
-      "evidence": "CodeGraph: LiveTranscript::visible_lines, LineIndex::tail_ranges, LiveOutputCache::prepare, DetailLayoutCache::prepare; long_live_frames_are_bounded_and_profiled passed."
-    },
-    {
-      "fact": "NLM's follow-up claim that native scrollback makes Answer/Reasoning/Tool blocks unrecoverable is not true for this TUI contract: static scrollback is intentionally non-interactive, while bounded Answer/Reasoning/Tool/Live history panels recover and expand those records.",
-      "evidence": "CodeGraph: flush_commits/insert_bounded_commit_lines plus answer_history_panel, reasoning_history_panel, tool_history_panel, live_history_panel_with_queue, and Ctrl+R/Ctrl+O routing."
-    }
+    {"fact":"Agent 定义仅有可选 provider 字符串、tools 白名单与正文；provider 字符串用于引用命名档案。","evidence":"crates/agent/src/knowledge.rs:156-166,169-201"},
+    {"fact":"dispatch_obs 仅按 Agent.provider 查找 Agents.providers，找不到时回退到主 provider，然后运行只读 sub-agent。","evidence":"crates/agent/src/knowledge.rs:286-318,378-404"},
+    {"fact":"Config.providers 保存 name/kind/model/base_url/key_env/use_oauth；build_agents 只把能解析凭据的档案建成运行时 provider。","evidence":"crates/agent/src/config.rs:31-34,76-120; crates/agent/src/main.rs:831-858"},
+    {"fact":"run_planned 已有 planner/worker 双角色，但 planner 与 worker 由调用方直接传入，计划结果无任务特性或候选模型路由。","evidence":"crates/agent/src/orchestrate.rs:174-207"},
+    {"fact":"LlmProvider 是统一 complete/complete_streaming 接缝，具体 provider 已被 trait 隔离。","evidence":"crates/provider/src/lib.rs:294-316"}
   ],
   "failure_signals": [
-    "NotebookLM query remains quota-exhausted (RESOURCE_EXHAUSTED); no new design recommendation is accepted.",
-    "Immediate CompletionFixture Answer inspection can miss its send window because the ScriptedProvider completes before the snapshot probe; delayed StressFixture is the authoritative Answer-inspection path.",
-    "No local live-stream reflow, stale-width, cache, or execution defect is reproduced beyond the fixed history/LiveHistory and action-rail affordance gaps; the empty-final boundary is parser-level and presentation-only.",
-    "The initial default StressFixture + InspectAnswer harness invocation exposed a timeout mismatch, not a product failure; the harness now gives the 5000 ms probe enough time and the default combination passes.",
-    "Before the local classifier fix, node_label's `running tools` and `wrapping up` phrases fell through to SYS; the focused regression now proves TLS/SUM mapping without changing execution.",
-    "Idle submit discoverability was missing in the 56–87 column branch and could be crowded out by narrow archive shortcuts; the local rail now reserves Enter/↵ before optional history tokens.",
-    "Narrow waiting status previously discarded pending_call and showed only `waiting`; the local projection now preserves the model/tool target without adding execution state.",
-    "HOLD live_phase_anchor still used a literal `waiting` after the narrow top rail was fixed; the shared waiting_phase projection now keeps the target visible while inspecting older live rows.",
-    "HOLD waiting target could still be clipped by optional trace/lifecycle/step text at narrow widths; the priority fallback now drops optional breadcrumbs before the target.",
-    "Static reasoning long lines could wrap through the body without a visible continuation rail because `┊` was absent from the shared semantic prefix table; the bounded projection now preserves the existing `│` rail.",
-    "The first rail fix used grapheme-greedy physical wrapping, so a 40-column Release PTY preview inserted `│` in the middle of ordinary words; the word-aware presentation boundary now moves a whole word when whitespace permits and only hard-wraps unbroken tokens.",
-    "The committed-word fix did not cover the live reverse-tail path: CodeGraph/local regression reproduced `netwo`/`rk` and `availabl`/`e` at width 40; the live path now has one whitespace-aware forward/tail projection with an explicit bounded fallback for synthetic ellipsis tails and unbroken tokens.",
-    "A new NLM deep-research start was attempted only after the cold gate passed, but Google API error code 8 prevented task creation; no task ID exists and no old task was polled.",
-    "NLM follow-up proposed an invented Widget::is_sealed/StatefulWidget::freeze interaction boundary without a current-code symbol or reproducible defect; CodeGraph shows the existing history-panel recovery contract, so the proposal is rejected."
+    "当前 subagent 只能静态绑定 provider 或回退主 provider，无法按任务规模/类型选择模型。",
+    "当前 planner/worker API 无法表达 teammate 角色、任务能力要求、候选过滤或选择原因。"
   ],
-  "attempts": [
-    {
-      "experiment": "Evaluate same-session NLM planning and local medium-width queue affordance evidence.",
-      "result": {
-        "status": "failed",
-        "summary": "NLM returned RESOURCE_EXHAUSTED; local CodeGraph identified and fixed the missing ordinary Enter queue affordance in the 56–71-column busy-with-tools rail."
-      },
-      "evidence": {
-        "command": "notebook_gate validation, CodeGraph, workspace tests, Release ConPTY, and scripts/dist.ps1",
-        "exit_code": 0,
-        "pointer": ".iteration/notebooklm-response-20260806-medium-queue.json; crates/agent/src/tui/status.rs; crates/agent/src/tui/tests.rs"
-      }
-    },
-    {
-      "experiment": "Evaluate same-session NLM planning and local narrow waiting-target visibility evidence.",
-      "result": {
-        "status": "failed",
-        "summary": "NLM remained RESOURCE_EXHAUSTED; local CodeGraph identified and fixed the loss of model/tool waiting target in narrow busy chrome."
-      },
-      "evidence": {
-        "command": "CodeGraph, focused/workspace tests, fmt, Clippy, Release ConPTY, and scripts/dist.ps1",
-        "exit_code": 0,
-        "pointer": ".iteration/notebooklm-response-20260806-next-6.json; crates/agent/src/tui/draw.rs; crates/agent/src/tui/tests.rs"
-      }
-    },
-    {
-      "experiment": "Evaluate same-session NLM planning and local HOLD waiting-target visibility evidence.",
-      "result": {
-        "status": "failed",
-        "summary": "NLM remained RESOURCE_EXHAUSTED; local CodeGraph identified and fixed the stale literal waiting label in the HOLD anchor by sharing the existing pending-call projection."
-      },
-      "evidence": {
-        "command": "CodeGraph, focused/workspace tests, fmt, Clippy, Release ConPTY, and scripts/dist.ps1",
-        "exit_code": 0,
-        "pointer": ".iteration/notebooklm-response-20260806-next-7.json; crates/agent/src/tui/draw.rs; crates/agent/src/tui/tests.rs"
-      }
-    },
-    {
-      "experiment": "Evaluate same-session NLM planning and reproduce HOLD waiting-target clipping with channel/lifecycle breadcrumbs.",
-      "result": {
-        "status": "failed",
-        "summary": "NLM remained RESOURCE_EXHAUSTED; local CodeGraph reproduced the target loss at width 32 and the bounded priority projection fixed it without changing execution semantics."
-      },
-      "evidence": {
-        "command": "NotebookLM query, CodeGraph, focused regression, and local source audit",
-        "exit_code": 0,
-        "pointer": ".iteration/notebooklm-response-20260806-next-8.json; .iteration/archive-record-iter-20260806-hold-wait-priority.json; crates/agent/src/tui/draw.rs; crates/agent/src/tui/tests.rs"
-      }
-    },
-    {
-      "experiment": "Evaluate same-session NLM planning and reproduce static reasoning continuation-rail loss at narrow width.",
-      "result": {
-        "status": "failed",
-        "summary": "NLM returned RESOURCE_EXHAUSTED before an answer; CodeGraph and the focused regression reproduced missing `│` continuation rails for a real `┊ THK[...]` commit, and the shared semantic prefix fix passed the focused matrix."
-      },
-      "evidence": {
-        "command": "NotebookLM query, CodeGraph, focused reasoning reflow regressions",
-        "exit_code": 0,
-        "pointer": ".iteration/notebooklm-response-20260805-next-9.json; crates/agent/src/tui/app.rs; crates/agent/src/tui/tests.rs"
-      }
-    },
-    {
-      "experiment": "Reproduce and remove ordinary-word splits introduced by the restored reasoning continuation rail at the Release PTY 40-column probe.",
-      "result": {
-        "status": "failed",
-        "summary": "NotebookLM remained RESOURCE_EXHAUSTED; the local semantic commit wrapper now groups styled graphemes into whitespace/word units, prefers a word boundary, and preserves hard wrapping for long unbroken tokens."
-      },
-      "evidence": {
-        "command": "cargo test --workspace --locked --offline --quiet; cargo fmt --all -- --check; cargo clippy --workspace --all-targets --locked --offline -- -D warnings; Release BusyFixture; Release StressFixture; scripts/dist.ps1",
-        "exit_code": 0,
-        "pointer": ".iteration/notebooklm-response-20260805-next-10.json; crates/agent/src/tui/app.rs; crates/agent/src/tui/tests.rs; dist/ridgecode-x86_64-pc-windows-msvc.zip"
-      }
-    },
-    {
-      "experiment": "Reproduce and remove ordinary-word splits in live reasoning/Answer physical reflow while preserving bounded tail performance and synthetic ellipsis visibility.",
-      "result": {
-        "status": "failed",
-        "summary": "NotebookLM remained RESOURCE_EXHAUSTED; local CodeGraph/test evidence identified the live forward and reverse-tail wrappers as the remaining presentation boundary, and the word-aware implementation passed all regression and Release PTY checks."
-      },
-      "evidence": {
-        "command": "CodeGraph, focused TUI regression, cargo test --workspace --locked --offline --quiet, cargo fmt --all -- --check, cargo clippy --workspace --all-targets --locked --offline -- -D warnings, Release BusyFixture, Release StressFixture, scripts/dist.ps1",
-        "exit_code": 0,
-        "pointer": ".iteration/notebooklm-response-20260805-next-11.json; crates/agent/src/tui/draw.rs; crates/agent/src/tui/app.rs; crates/agent/src/tui/tests.rs; dist/ridgecode-x86_64-pc-windows-msvc.zip"
-      }
-    }
-  ],
+  "attempts": [],
   "candidate_solutions": [
-    {
-      "core": "Measure high-frequency live Answer/Reasoning projection work under stable-prefix stream updates before changing cache architecture.",
-      "disposition": "next_local_experiment",
-      "constraints": ["presentation-only", "reuse LiveTranscript/LiveOutputCache", "no second renderer or state machine"],
-      "scope": ["crates/agent/src/tui/transcript.rs", "crates/agent/src/tui/draw.rs", "crates/agent/src/tui/tests.rs"],
-      "validation": ["deterministic profile", "cargo test --workspace", "cargo clippy", "ConPTY StressFixture"]
-    },
-    {
-      "core": "Keep completed Answer/Reasoning recovery and folded Tool detail reachable at narrow widths without adding a persistent sidebar.",
-      "disposition": "verify_local_only",
-      "constraints": ["reuse existing panels and cell-width wrappers", "tools folded by default", "no execution-semantics change"],
-      "scope": ["crates/agent/src/tui/draw.rs", "crates/agent/src/tui/panel.rs", "crates/agent/src/tui/tests.rs"],
-      "validation": ["narrow-width matrix", "ConPTY StressFixture/BusyFixture", "workspace tests"]
-    },
-    {
-      "core": "Treat new NLM design suggestions as hypotheses and require a locally reproduced visual or performance defect before implementation.",
-      "disposition": "guardrail",
-      "constraints": ["only source 8862d715-ffad-4288-b7eb-173260e2dcff", "do not poll old research tasks", "no second agent/member"],
-      "scope": [],
-      "validation": ["CodeGraph", "deterministic tests", "ConPTY"]
-    }
+    {"core":"在 agent 层新增纯函数 RouteRequest/RouteDecision/ModelProfile，按显式任务特性与 profile 能力排序，再把选中 provider 注入 dispatch 与 planned execution。","constraints":["provider trait 不变","无候选时确定性回退","选择原因可序列化"],"risks":["能力元数据初始需从现有配置安全推导","teammate 并发语义需避免越过权限门"],"reversibility":"新增独立模块，可先只接 subagent","scope":["crates/agent/src/route.rs","knowledge.rs","orchestrate.rs","main.rs"],"validation":["纯函数矩阵测试","配置可用性过滤测试","subagent/planned smoke"]},
+    {"core":"扩展 provider profile 声明 capabilities/tiers，再由 dispatch 层按任务标签匹配并回退。","constraints":["保留旧 config 兼容","不把模型名硬编码进核心","密钥解析不变"],"risks":["配置字段扩大且用户需维护能力标签","声明可能与实际模型能力漂移"],"reversibility":"serde 默认字段可回滚","scope":["config.rs","knowledge.rs","main.rs"],"validation":["旧配置解析回归","profile 过滤排序测试","真实可用档案 smoke"]},
+    {"core":"把路由交给一个 LLM planner 选择 provider/model。","constraints":["必须有确定性白名单与回退","不能信模型自述"],"risks":["不可确定、额外延迟、可能选不可用模型","与安全验收冲突"],"reversibility":"高但不宜作为首实现","scope":["orchestrate.rs"],"validation":["仅可作为对照实验，不作为默认实现"]}
   ],
- "hypotheses": [
-    {
-      "hypothesis": "High-frequency stream revisions may still redo bounded visible Markdown/rail projection despite cache hits.",
-      "support": ["cache invalidates on transcript render_revision"],
-      "against": ["current long-live profile passes"],
-      "experiment": "Measure deterministic rebuild/body work under stable-prefix stream revisions before changing cache architecture."
-    },
-    {
-      "hypothesis": "A whole-document virtualizer or new sidebar is needed.",
-      "support": [],
-      "against": ["bounded live projection, height caches, and no user-visible stale-width defect"],
-      "experiment": "Require a reproduced anchor, stale-width, or measurable hot-path defect first."
-    }
+  "hypotheses": [
+    {"hypothesis":"最小稳妥路由应在 agent 派发前做纯函数决策，输入显式任务特性与已验证 profile 元数据；不应让模型决定可用性。","support":["当前 provider 句柄已在 build_agents 中确定","确定性验收要求可解释回退"],"against":["尚未知道用户配置是否提供足够的模型能力差异"],"experiment":"比较静态 profile 元数据与真实配置 smoke，验证是否能覆盖难度/规模/类型的最小矩阵。"},
+    {"hypothesis":"teammate 可先复用 planned planner/worker 的角色抽象，新增路由与结果边界，不必引入第二执行状态机。","support":["run_planned 已有 planner/worker 分工且串行有界"],"against":["尚未确认 teammate 的产品语义与并发需求"],"experiment":"CodeGraph 梳理所有 planned/agent 调用方并用 ScriptedProvider 验证角色选择、回退与安全边界。"}
   ],
   "prohibitions": [
-    "Do not query old user-owned deep research status.",
-    "Do not create another Ridge member for the same MCP task.",
-    "Do not claim report/import/installation/ready without task id or direct repository/test evidence.",
-    "Do not add a whole-document virtualizer, fixed CPU/frame threshold, momentary KKP protocol, persistent sidebar, or second renderer from uncited NLM prose.",
-    "Do not modify the main repository while the independent MCP member works."
+    "不把 NotebookLM 建议直接当成代码事实或根因。",
+    "不因路由需求放宽只读 sub-agent 工具、不绕过主 agent 权限门。",
+    "不把当前配置中不可解析凭据的 profile 当作可用候选。",
+    "不新增无界后台 teammate、隐式网络探测或模型自述驱动的 stop rule。"
   ],
   "questions": []
 }

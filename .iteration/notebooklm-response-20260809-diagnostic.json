@@ -1,0 +1,109 @@
+{
+  "status": "PROCEED",
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+  "source_count": 27,
+  "note_ids": [
+    "7e702c62-a035-44b1-a968-3d843c67f223",
+    "aeb2c29a-3d94-4190-a458-aaa2c642abd5"
+  ],
+  "question": "排除已落地 TUI 切片后，基于全部 27 个来源提出最多 3 个新的、局部且可验证候选，直击查代码空转、max stall 黑盒、历史回看不直觉。",
+  "confirmed_facts": [
+    {
+      "fact": "NotebookLM 新候选为结构化推理异常 HUD、物理底边封口、内容感知动态宽度挤压。",
+      "evidence": "notebook_query 返回的候选及来源标题。"
+    },
+    {
+      "fact": "NotebookLM 将 HUD 误报、底边封口高度偏移、CJK/ConPTY 宽度误差列为主要风险。",
+      "evidence": "notebook_query 每项风险说明。"
+    }
+  ],
+  "contradictions": [
+    "NotebookLM 仍把底边封口视作缺口，但 CodeGraph 未证明现有生命周期 rail/scrollback 投影存在对应本地故障。",
+    "NotebookLM 候选 1 使用启发式 OVER-BRANCHING 标签；本轮仅接受已有 AgentState 计数的事实投影，避免误报。"
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "用户在模型连续纯侦察或重复输出阶段看不到停机前的确定性进展计数。",
+      "support": ["用户对查代码/列清单空转与 max stall 的描述", "NLM structural diagnostics candidate"],
+      "against": ["TUI 已显示 step/activity/waiting，但尚未显示 AgentState stall/explore_streak/err_streak"],
+      "experiment": "把 Superstep state 的三个原始计数投影到 busy rail，做纯函数与窄宽度/ConPTY 验证。"
+    },
+    {
+      "hypothesis": "活动 THK/ANS/TLS 缺少底边封口或宽度挤压会造成当前可复现的视觉缺陷。",
+      "support": ["NLM 研究建议"],
+      "against": ["现有 lifecycle rail、bounded physical projection 与 CJK/ConPTY 矩阵；未发现本地失败样本"],
+      "experiment": "仅在出现真实布局/锚点失败样本后再测底边或动态宽度，不先引入额外边框/布局状态。"
+    }
+  ],
+  "local_adjudication": [
+    {
+      "candidate": "结构化推理异常 HUD",
+      "result": "accept_deterministic_subset",
+      "reason": "AgentState 已有 stall、err_streak、explore_streak；StreamEvent::Superstep 已携带完整 state。可显示原始计数，不需启发式 OVER-BRANCHING 判定。"
+    },
+    {
+      "candidate": "物理底边封口",
+      "result": "defer",
+      "reason": "当前代码已有生命周期 rail、Activity/History/scrollback 投影；CodeGraph 未证明缺少底边造成的本地布局缺陷，额外边框有高度跳变风险。"
+    },
+    {
+      "candidate": "内容感知动态宽度挤压",
+      "result": "reject_without_repro",
+      "reason": "当前已有宽度/物理行缓存、CJK/Markdown/ConPTY 矩阵；未复现空洞 surface 或 line_width 对齐缺陷。"
+    }
+  ],
+  "candidates": [
+    {
+      "core": "deterministic loop-counter HUD projection",
+      "constraints": ["presentation-only", "consume exact AgentState counters", "no heuristic hidden-reasoning inference"],
+      "risks": ["busy rail width pressure", "users may misread counters without bounded labels"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/app.rs", "crates/agent/src/tui/mod.rs", "crates/agent/src/tui/status.rs", "crates/agent/src/tui/draw.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["deterministic unit test", "narrow width cell bound", "BusyFixture/StressFixture ConPTY"],
+      "disposition": "selected"
+    },
+    {
+      "core": "physical bottom closure",
+      "constraints": ["presentation-only", "reuse existing lifecycle projection", "no extra execution state"],
+      "risks": ["one-row height jump", "anchor/cache invalidation"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/transcript.rs", "crates/agent/src/tui/draw.rs"],
+      "validation": ["first reproduce a local boundary defect", "ConPTY resize"],
+      "disposition": "deferred_without_repro"
+    },
+    {
+      "core": "content-aware width squeezing",
+      "constraints": ["preserve cell-width/CJK correctness", "reuse existing layout cache", "no new renderer"],
+      "risks": ["ConPTY/CJK alignment drift", "unexpected visual hierarchy"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/draw.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["reproduce empty-surface or line-width defect", "CJK/Markdown/ConPTY matrix"],
+      "disposition": "rejected_without_repro"
+    }
+  ],
+  "implementation": {
+    "core": "Expose exact AgentState stall, err_streak, and explore_streak as bounded busy-rail diagnostics.",
+    "constraints": [
+      "presentation-only",
+      "do not change MAX_STALL/MAX_EXPLORE/MAX_ERR_STREAK thresholds",
+      "do not infer hidden reasoning",
+      "do not change graph/provider/MCP/queue/key/halt routing",
+      "preserve ANSI16, width bounds, native scrollback, folded details, and ConPTY"
+    ],
+    "validation": [
+      "focused TUI regression",
+      "workspace tests, fmt, clippy, build",
+      "BusyFixture and StressFixture ConPTY"
+    ]
+  },
+  "recommendation": "采用确定性计数投影，拒绝启发式标签；其余候选待本地复现后再议。",
+  "next_step": {
+    "type": "implementation",
+    "value": "完成 busy rail 确定性计数投影的全量质量与 ConPTY 验证，并仅在出现新本地缺陷时重开底边/动态挤压候选。"
+  },
+  "stop_conditions": [
+    "不得把 stall/explore/err 计数解释为隐藏 reasoning 或新增停机规则。",
+    "没有本地复现时，不添加启发式 OVER-BRANCHING 标签、底边框或动态宽度布局。"
+  ]
+}

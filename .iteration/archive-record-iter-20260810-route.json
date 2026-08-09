@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260810-route",
+  "at": "2026-08-10",
+  "type": "iteration",
+  "facts": [
+    "Approved REQ-20260809-ROUTE-01 is implemented as deterministic provider/model routing for subagent and planner/teammate roles.",
+    "Only credential-resolvable providers enter route_candidates; explicit route metadata is optional and unknown capabilities are never inferred from model names.",
+    "dispatch_agent exposes selected provider/model, role/task reason, and fallback state; route decisions are emitted through tracing without secrets.",
+    "Legacy run_planned remains compatible; run_planned_routed returns structured planner and teammate RouteAudit values.",
+    "NotebookLM deep-research bridge and native deep mode both failed before producing a report; local code, CodeGraph, and deterministic tests were used for adjudication."
+  ],
+  "evidence": [
+    "cargo test --workspace --locked --offline: passed",
+    "cargo clippy --workspace --all-targets --locked --offline -- -D warnings: passed",
+    "cargo build --workspace --locked --offline: passed",
+    "cargo fmt --all -- --check: passed",
+    "git diff --check: passed with existing CRLF normalization warnings",
+    ".iteration/route-smoke-evidence-20260810.json",
+    ".iteration/research-route-failure-20260810.json"
+  ],
+  "paths": [
+    "crates/agent/src/route.rs",
+    "crates/agent/src/config.rs",
+    "crates/agent/src/knowledge.rs",
+    "crates/agent/src/orchestrate.rs",
+    "README.md",
+    "docs/ARCHITECTURE.md"
+  ],
+  "symbols": [
+    "RouteRequest",
+    "choose_route",
+    "Agents::select_provider",
+    "dispatch_obs",
+    "run_planned_routed"
+  ],
+  "next": [
+    "Populate route metadata in user provider profiles when accurate capability and tier information is available."
+  ]
+}

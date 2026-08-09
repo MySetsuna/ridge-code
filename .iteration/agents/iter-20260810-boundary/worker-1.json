@@ -1,0 +1,114 @@
+{
+  "baseline": {
+    "codegraph_revision": "current-index",
+    "head": "4646fa6acbdfa3b06fd239d14dfb81671df4581d",
+    "worktree_digest": "a0faa679b9e1fdb9c6785796023210e619d434c68553f3e602b3c38ef023ee91"
+  },
+  "codegraph": {
+    "facts": [
+      {
+        "evidence": "CodeGraph: crates/agent/src/brain.rs:8-25, crates/agent/src/context.rs:92-112",
+        "fact": "Durable State 已在 explore_streak 达到 EXPLORE_NUDGE_AFTER 时注入计数与停侦察提醒；BASE_SYSTEM 尚缺通用的停止重复调查/选择最小下一动作条款。"
+      }
+    ],
+    "queries": [
+      "build_system_prompt_with_mode BASE_SYSTEM durable_state_block to_messages call path"
+    ]
+  },
+  "constraints": [
+    "保留 MAX_STALL/MAX_EXPLORE、maker-checker、确定性 verify、权限门与 takeover",
+    "不改 provider/MCP/langgraph/工具执行语义，不新增状态机、renderer 或隐藏 classifier",
+    "read-only 模式仍须在证据充分后报告；正常模式不得因 nudge 强制提前 finish"
+  ],
+  "depends_on": [],
+  "dispatch_id": "f5f8bbe7384df1d5c635305f",
+  "exclusive_resources": [
+    "agent prompt contract"
+  ],
+  "execution_kind": "write",
+  "isolation": "shared",
+  "model_route": {
+    "difficulty": "medium",
+    "reasoning_effort": "medium",
+    "resolution": "backend_adapter",
+    "tier": "intermediate"
+  },
+  "objective": "复核并实现一个不改变执行语义的模糊任务行动边界契约：已有证据时停止重复侦察，选择最小行动、验证或事实报告。",
+  "packet_bytes": 7306,
+  "packet_hash": "63a3db3a48bfd6696e27cabdf0cfb7df038ddc9f02f4d7845455c8e98868f50f",
+  "requirements": {
+    "ids": [
+      "REQ-20260801-01",
+      "REQ-20260803-01"
+    ],
+    "records": [
+      {
+        "id": "REQ-20260801-01",
+        "markdown": "### REQ-20260801-01 · TUI 视觉、交互与展示层迭代\n\n- 批准依据:`批准`\n- 状态:`ACTIVE`\n- 版本:`v0.2.0`\n- 行为:`RidgeCode TUI 以清晰、科技感强且终端主题友好的界面呈现实际收到且允许展示的模型输出与最终回答；Answer 与实际 reasoning_content 分层呈现，不伪造隐藏推理；模型回复、调查结论、等待/执行状态与当前 Agent 活动须持续可见，长内容先展示摘要并可展开查看有界详情；文件读取与工具输出默认合并为可折叠摘要，展开时显示有界、按终端宽度换行的有效细节；支持有界、无外部解析依赖的行级 Markdown 展示（bold、code、header）与 ANSI 16 色语义角色；关键交互可发现、可操作，长任务期间保持响应并允许用户取消当前执行后接管输入；底部状态区明确区分输入 token 与输出 token；忙碌时待提交消息粘性显示于输入框上方，Enter 追加至队尾，Ctrl+Enter 立即推至队首且不打断当前模型回合。`\n- 边界:`范围限于 crates/agent/src/tui 及其直接交互/渲染依赖、展示状态模型、布局、事件处理、渲染与测试，以及按迭代门进行的 NotebookLM 架构/业界方案调研与本轮 Note 清理。不改变 langgraph 核心语义，不把具体 LLM/MCP SDK 耦合进 TUI，不牺牲安全门、确定性验证、跨平台终端兼容或数据完整性，不升级无关依赖；保留 maker/checker、权限门、危险命令拦截、输入排队/取消、事件驱动主环、Viewport::Inline、insert_before 原生 scrollback 与 ANSI 16 色主题适配方向；不覆盖 samples/config.json 与 test_codegraph.ps1。工具摘要须保留，工具详情默认折叠且有界；Markdown 仅作展示层解析。`\n- 验收:`通过 cargo fmt --all --check、cargo test --workspace、cargo clippy --workspace --all-targets -- -D warnings；TUI 纯逻辑测试覆盖 Markdown span、语义色角色、折叠/展开、状态迁移、窄终端布局、CJK/emoji 宽度、长行物理换行、Ctrl+R/Ctrl+O、输入/输出 token 分栏、Agent 活动状态、取消后接管与待提交队列预览/队首推送；证明静态提交文本无 ANSI 逃逸残留、文件读取/工具详情默认折叠且展开不越界、LiveTranscript 64 块上限有效；完成真实终端或可复现渲染验收，证明长输出按宽度换行不刷屏、模型回复/调查结论/等待/当前活动可见、摘要可展开、工具默认收起且可展开、待提交消息不遮挡当前输入，Enter/Ctrl+Enter 不打断当前回合，Ctrl-C 可交还输入控制，且单帧刷新无明显卡顿；NotebookLM 建议经 CodeGraph、当前代码与测试核验后方可落地。`\n- 追踪:`REQ → crates/agent/src/tui/*.rs 的状态/事件/渲染符号 → crates/agent/src/tui/tests.rs 与 workspace 质量闸；NLM 建议证据存于 .iteration/notebooklm-response.json；Note 清理以本轮迭代 ID、闭环证据与本地 archive 记录为准。",
+        "section": "active",
+        "title": "TUI 视觉、交互与展示层迭代"
+      },
+      {
+        "id": "REQ-20260803-01",
+        "markdown": "### REQ-20260803-01 · goal 长时间任务生命周期\n\n- 批准依据:`批准`\n- 状态:`ACTIVE`\n- 版本:`v0.3.0`\n- 行为:`提供可持久化的 goal 生命周期：创建、查看状态、继续/恢复、推进与完成/阻塞收敛；长时间运行保存目标、阶段、证据、失败原因与下一步，重启后可恢复，不以模型自述替代确定性验收。NotebookLM 仅提供经验证的架构建议。`\n- 边界:`范围限于 ridgecode CLI/TUI 的 goal 命令入口、goal 状态模型与本地持久化、长任务恢复/收敛规则及测试；NLM 非运行时必需依赖，不上传原始日志、密钥或未批准需求；不改变 langgraph 核心并发语义、权限门、危险命令拦截或 provider/MCP SDK 边界；不引入无界后台任务。`\n- 验收:`补充 goal 状态机、持久化原子写、重启恢复、完成/阻塞判定、取消与重复执行保护测试；通过 cargo fmt --all --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked；完成一次本机 CLI/TUI smoke。`\n- 追踪:`REQ → goal 状态/命令/持久化符号 → agent 测试与 workspace 质量门 → 经核验的 .iteration/notebooklm-response.json；不得将需求草案直接写入 NotebookLM 需求源。`",
+        "section": "active",
+        "title": "goal 长时间任务生命周期"
+      }
+    ]
+  },
+  "result_path": ".iteration/agents/iter-20260810-boundary/result-worker-1.json",
+  "schema_version": 1,
+  "scope": {
+    "allowed_files": [
+      "crates/agent/src/brain.rs",
+      "crates/agent/src/context.rs"
+    ],
+    "allowed_write_paths": [
+      "crates/agent/src/brain.rs",
+      "crates/agent/src/context.rs"
+    ],
+    "control_write_paths": [
+      ".iteration/agents/iter-20260810-boundary/result-worker-1.json"
+    ],
+    "deny_unlisted": true
+  },
+  "symbols": [
+    "build_system_prompt_with_mode",
+    "durable_state_block",
+    "to_messages"
+  ],
+  "task_id": "worker-1",
+  "transport": {
+    "completion_rule": "transport receipt is not completion; finalized result file is required",
+    "requested_backend": "serial"
+  },
+  "verification": [
+    {
+      "command": "cargo test -p agent --lib brain::tests --locked --offline --quiet",
+      "expected_exit": 0
+    },
+    {
+      "command": "cargo test -p agent --lib context::tests --locked --offline --quiet",
+      "expected_exit": 0
+    },
+    {
+      "command": "cargo test --workspace --locked --offline --quiet",
+      "expected_exit": 0
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets --locked --offline -- -D warnings",
+      "expected_exit": 0
+    },
+    {
+      "command": "cargo fmt --all -- --check",
+      "expected_exit": 0
+    }
+  ],
+  "worker_policy": {
+    "may_approve_requirements": false,
+    "may_call_notebooklm": false,
+    "may_commit_or_push": false,
+    "may_expand_scope": false,
+    "must_write_result_file": true
+  }
+}

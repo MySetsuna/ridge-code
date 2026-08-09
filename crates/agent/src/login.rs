@@ -712,6 +712,7 @@ pub(crate) fn register_oauth_profile(provider_id: &str) -> Option<String> {
         key_env: String::new(),
         api_key: None,
         use_oauth: Some(true),
+        route: None,
     };
     let cfg_path = config_path();
     let cfg_text = std::fs::read_to_string(&cfg_path).unwrap_or_default();

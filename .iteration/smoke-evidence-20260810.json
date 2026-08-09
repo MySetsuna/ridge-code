@@ -1,0 +1,48 @@
+{
+  "iteration_id": "iter-20260810-real-config-effort-control",
+  "mode": "headless_read_only_real_config",
+  "config_scope": "user .ridge/config.json",
+  "provider_initialized": true,
+  "mcp_servers_connected": 2,
+  "cases": [
+    {
+      "name": "single_read_baseline",
+      "effort": "max_from_user_config",
+      "steps": 2,
+      "tokens": 11817,
+      "approved": true
+    },
+    {
+      "name": "tui_gap_audit_default_effort",
+      "effort": "max_from_user_config",
+      "timeout_ms": 30000,
+      "timed_out": true,
+      "manifest_count": 0,
+      "observed_phase": "planning_then_search_then_search"
+    },
+    {
+      "name": "tui_gap_audit_low_effort",
+      "effort": "low_process_override",
+      "timeout_ms": 60000,
+      "timed_out": true,
+      "manifest_count": 0,
+      "observed_phase": "planning_then_search_then_search_then_read_file"
+    },
+    {
+      "name": "tui_gap_audit_read_only_contract",
+      "effort": "low_process_override",
+      "readonly_prompt": "enabled",
+      "timeout_ms": 90000,
+      "timed_out": false,
+      "manifest_count": 1,
+      "steps": 7,
+      "tokens": 63108,
+      "approved": true,
+      "halt_reason": "approved",
+      "trace_bytes": 51633,
+      "result": "three concise findings with file paths"
+    }
+  ],
+  "interpretation": "降低 reasoning effort 未消除查码/列清单停滞；可见现象不是 max effort 单因。任务仍未写文件、未跑 shell。",
+  "cleanup": "临时 session、脚本与新增 run 目录已清理；未改用户配置、未保留仓库 run artifact。"
+}

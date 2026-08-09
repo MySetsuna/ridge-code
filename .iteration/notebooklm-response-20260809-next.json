@@ -1,0 +1,72 @@
+{
+  "status": "PROCEED",
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "conversation_id": "68791fb7-659a-4ad6-a86c-beb7ac694781",
+  "question": "基于 27 个来源、愿景 Note 与 Completed baseline Note，为下一轮提出最多 3 个局部可验证 TUI 候选，直击查代码空转、max stall 黑盒、历史回看不直觉。",
+  "confirmed_facts": [
+    {
+      "fact": "NotebookLM 建议候选集中于生命周期块物理提交、结构化 stall 预警 HUD、KKP 按住审计。",
+      "evidence": "NotebookLM notebook_query 返回的 3 项候选及其来源引用。"
+    },
+    {
+      "fact": "NotebookLM 明确将 ConPTY 重影/回流、HUD 误报、KKP 握手失败列为主要风险。",
+      "evidence": "NotebookLM notebook_query 的每项 risk 字段。"
+    }
+  ],
+  "contradictions": [
+    "候选 1 声称生命周期块尚未绑定物理提交；本地需核验已有 commit_live_reasoning/commit_live_tools/flush_commits 调用链。",
+    "候选 3 声称 HOLD/FOLLOW 仍需 KKP 释放事件；本地已有 KKP/ConPTY HOLD/FOLLOW 证据，不能重复实现。"
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "现有 TUI 仍缺少停机前的软 stall 预警，而非只在最终 HaltReason 后提示。",
+      "support": ["用户描述模型查代码/列清单后长期不推进"],
+      "against": ["TUI 当前已有 waiting、activity、deterministic halt reason；尚未证明缺少可见的前置信号"],
+      "experiment": "CodeGraph 查询 AgentState stall/explore_streak 到 TUI 的现有事件链，构造 deterministic fixture 检查是否存在无进展可见信号。"
+    },
+    {
+      "hypothesis": "完成中的 THK/TLS 块仍需更早进入 native scrollback。",
+      "support": ["NotebookLM 候选 1", "用户希望直接向上滚动审计"],
+      "against": ["本地已有 bounded commit queue、insert_before 与 reasoning/tool commit 路径"],
+      "experiment": "定位 commit_live_reasoning/commit_live_tools 的真实调用点，并用 PTY 观察任务进行中与停止时的 scrollback 边界。"
+    }
+  ],
+  "candidates": [
+    {
+      "core": "milestone-to-scrollback ejection",
+      "constraints": ["presentation-only", "native scrollback", "no second renderer"],
+      "risks": ["Windows ConPTY reflow/duplication"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/app.rs", "crates/agent/src/tui/mod.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["CodeGraph call path", "in-progress PTY fixture", "workspace tests"],
+      "disposition": "verify_local_only"
+    },
+    {
+      "core": "structural anomaly HUD alert",
+      "constraints": ["presentation-only", "no MAX_STALL change", "no hidden reasoning inference"],
+      "risks": ["false positives", "new heuristic state"],
+      "reversibility": "medium",
+      "scope": ["crates/agent/src/tui/status.rs", "crates/agent/src/tui/draw.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["deterministic stall/explore fixture", "narrow-width render", "ConPTY"],
+      "disposition": "candidate_after_local_repro"
+    },
+    {
+      "core": "KKP key-release momentary audit",
+      "constraints": ["preserve HOLD/FOLLOW fallback", "Windows compatible"],
+      "risks": ["unsupported release events", "duplicate key transitions"],
+      "reversibility": "high",
+      "scope": ["crates/agent/src/tui/input.rs", "crates/agent/src/tui/tests.rs"],
+      "validation": ["KKP and legacy input matrix", "ConPTY"],
+      "disposition": "rejected_as_already_covered"
+    }
+  ],
+  "recommendation": "先核验候选 1 的真实调用链与候选 2 的 deterministic 前置 stall 信号；候选 3 暂不实现。",
+  "next_step": {
+    "type": "experiment",
+    "value": "用 CodeGraph 与 PTY fixture 判定是否存在‘任务进行中已完成块未进入 scrollback’或‘停机前无可见无进展信号’的真实缺口。"
+  },
+  "stop_conditions": [
+    "不得重复实现已有 HOLD/FOLLOW、native scrollback、partial Answer、halt reason。",
+    "没有可复现本地缺陷时，不添加启发式 HUD 或全局虚拟化。"
+  ]
+}

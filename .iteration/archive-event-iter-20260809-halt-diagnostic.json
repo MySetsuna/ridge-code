@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260809-halt-diagnostic",
+  "at": "2026-08-09",
+  "type": "iteration_completed",
+  "facts": [
+    "TUI now renders deterministic no_progress/stall as no verified progress in the activity/result surface.",
+    "Static stop output includes bounded human-readable recovery guidance; execution and max-stall thresholds unchanged.",
+    "Existing partial Answer, native scrollback, folded tools, queue, takeover and ConPTY paths remain intact."
+  ],
+  "evidence": [
+    {"command":"cargo test --workspace --locked --offline --quiet","exit_code":0},
+    {"command":"cargo clippy --workspace --all-targets --locked --offline -- -D warnings","exit_code":0},
+    {"command":"scripts/windows-pty-e2e.ps1 -Binary target/debug/ridgecode.exe -StressFixture -InspectAnswer -TimeoutMs 9000","exit_code":0,"result":"passed"},
+    {"path":".iteration/notebooklm-response-20260809-pain-points.json","validation":"notebook_gate validate-output: valid"}
+  ],
+  "paths": [
+    "crates/agent/src/tui/app.rs",
+    "crates/agent/src/tui/draw.rs",
+    "crates/agent/src/tui/mod.rs",
+    "crates/agent/src/tui/tests.rs"
+  ],
+  "symbols": [
+    "halt_reason_display",
+    "halt_reason_guidance",
+    "Ui::mark_task_outcome_with_reason",
+    "idle_error_detail"
+  ],
+  "next": [
+    "Keep prompt/MAX_STALL/provider/MCP changes outside this approved TUI slice.",
+    "Use a new cold trigger only after a locally reproduced gap or explicit user request."
+  ]
+}

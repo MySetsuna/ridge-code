@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "dispatch": {
+    "enabled": true,
+    "backend": "serial",
+    "max_workers": 1,
+    "max_packet_bytes": 16384,
+    "max_total_packet_bytes": 16384
+  },
+  "tasks": [
+    {
+      "id": "route-review",
+      "result_path": ".iteration/agents/result-route-review.json",
+      "objective": "只读审查已批准 route 需求与当前 Agent/provider/dispatch 边界，提出最小可实现的确定性路由接口、回退与 teammate 接缝；不得修改业务代码。",
+      "difficulty": "complex",
+      "reasoning_effort": "high",
+      "execution_kind": "read",
+      "isolation": "shared",
+      "requirements": ["REQ-20260809-ROUTE-01"],
+      "symbols": ["Agents", "dispatch_obs", "run_subagent", "run_planned", "ProviderProfile"],
+      "codegraph": {
+        "queries": ["Agent Agents run_subagent dispatch_obs", "build_llm_agent_full build_core", "ProviderProfile ModelInfo LlmProvider", "run_planned plan"],
+        "facts": [
+          {"fact":"dispatch_obs 按静态 Agent.provider 选档案，缺失时回退主 provider；子 agent 只读工具固定为 read_file/search。","evidence":"codegraph: crates/agent/src/knowledge.rs:286-404"},
+          {"fact":"build_agents 仅将能解析凭据的 Config.providers 档案建成运行时 provider，现有 Agents 未保存路由能力元数据。","evidence":"codegraph: crates/agent/src/main.rs:831-858; crates/agent/src/config.rs:76-120"},
+          {"fact":"run_planned 已有 planner/worker 角色，但直接接收 provider 句柄且无任务特性路由。","evidence":"codegraph: crates/agent/src/orchestrate.rs:174-207"}
+        ]
+      },
+      "files": ["crates/agent/src/knowledge.rs", "crates/agent/src/orchestrate.rs", "crates/agent/src/config.rs", "crates/agent/src/main.rs", "crates/agent/src/graph.rs", "crates/provider/src/lib.rs"],
+      "tests": ["crates/agent/src/knowledge.rs", "crates/agent/src/orchestrate.rs"],
+      "write_paths": [],
+      "exclusive_resources": ["agent route contract"],
+      "constraints": ["只读；不得改业务代码、需求、NotebookLM、git 历史或用户配置。", "保持 provider trait、权限门、maker/checker、langgraph BSP 与 subagent 只读边界。", "不得猜测 Ridge capability 中空的 model/reasoning 字段。"],
+      "verification": [{"command":"cargo test -p agent --lib --locked --offline", "expected_exit":0}],
+      "depends_on": []
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260810-ROUTE-FALLBACK-01",
+  "classification": "active",
+  "summary": "沿既有 NotebookLM 与真实配置证据，补齐 provider/model 运行失败后的确定性一次性回退与可观测原因。",
+  "requirement_ids": [
+    "REQ-20260809-ROUTE-01"
+  ],
+  "pending_ids": [],
+  "approval_reasons": [],
+  "open_questions": [],
+  "approval_evidence": "",
+  "request_sha256": "ea3496509602c7ea9991b82ff2179f82f307a7587a83adef47d70a738e6dfcd1",
+  "requirements_sha256": "d4f918d8532fbd90ea9c1a3180ec3e56dcf9680a52bf99b3e856103dc2eac9e8",
+  "pending_sha256": "a653cd735491bf6593b289e50840a5b084fe90ed2e89cd912d283366297387f3",
+  "draft_sha256": "",
+  "previous_intake_sha256": "",
+  "executable": true,
+  "reasons": []
+}
