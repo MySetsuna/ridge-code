@@ -1,3 +1,7 @@
+use crate::communication::{
+    in_process_exchange, AgentEnvelope, AgentError, AgentHello, AgentMessage, AgentProtocolError,
+    AgentResponse, AgentRole, AgentStatus, AgentTask,
+};
 use crate::exec::{builtin_tool_specs, execute_tool_call};
 use crate::route::{choose_route, ModelProfile, RouteDecision, RouteRequest, RouteRole};
 use provider::{CompletionRequest, LlmProvider, Message, Role, ToolCall, ToolSpec};
@@ -450,6 +454,79 @@ pub(crate) fn provider_failure_label(error: &(dyn std::error::Error + Send + Syn
     }
 }
 
+async fn run_subagent_via_protocol(
+    def: &Agent,
+    provider: Arc<dyn LlmProvider>,
+    task: &str,
+    correlation_id: &str,
+) -> Result<String, String> {
+    let request = AgentEnvelope::task(
+        format!("{correlation_id}:task"),
+        "main",
+        def.name.clone(),
+        correlation_id,
+        AgentTask::new(
+            task,
+            true,
+            vec!["read_file".to_string(), "search".to_string()],
+            SUBAGENT_MAX_STEPS,
+        ),
+    );
+    let response = in_process_exchange(
+        AgentHello::guarded("main", AgentRole::Maker),
+        AgentHello::read_only(def.name.clone(), AgentRole::Explorer),
+        request,
+        |incoming| async move {
+            let correlation_id = incoming.correlation_id.clone();
+            let parent_id = incoming.message_id.clone();
+            let from = incoming.to.clone();
+            let to = incoming.from.clone();
+            let AgentMessage::Task(payload) = incoming.message else {
+                return Err(AgentProtocolError::Invalid(
+                    "sub-agent expected Task".to_string(),
+                ));
+            };
+            match run_subagent_attempt(def, provider, &payload.task).await {
+                Ok(summary) => Ok(AgentEnvelope::response(
+                    format!("{correlation_id}:response"),
+                    from,
+                    to,
+                    correlation_id,
+                    AgentResponse {
+                        status: AgentStatus::Done,
+                        approved: true,
+                        steps: 0,
+                        tokens: 0,
+                        summary,
+                        modified_files: Vec::new(),
+                    },
+                )
+                .with_parent(parent_id.clone())),
+                Err(message) => Ok(AgentEnvelope::error(
+                    format!("{correlation_id}:error"),
+                    from,
+                    to,
+                    correlation_id,
+                    AgentError {
+                        code: "subagent_failed".to_string(),
+                        message,
+                        retryable: false,
+                    },
+                )
+                .with_parent(parent_id)),
+            }
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    match response.message {
+        AgentMessage::Response(result) if result.status == AgentStatus::Done => Ok(result.summary),
+        AgentMessage::Error(error) => Err(error.message),
+        AgentMessage::Response(result) => Err(format!("sub-agent status {:?}", result.status)),
+        _ => Err("sub-agent returned unexpected message".to_string()),
+    }
+}
+
 /// Run a read-only sub-agent without exposing raw provider error payloads.
 pub async fn run_subagent(def: &Agent, provider: Arc<dyn LlmProvider>, task: &str) -> String {
     match run_subagent_attempt(def, provider, task).await {
@@ -522,7 +599,7 @@ pub(crate) async fn dispatch_obs(
     );
     let routed = agents.select_provider(&request, main.clone());
     let mut decision = routed.decision;
-    let out = match run_subagent_attempt(def, routed.provider, task).await {
+    let out = match run_subagent_via_protocol(def, routed.provider, task, &call.id).await {
         Ok(out) => out,
         Err(first_failure) if decision.selected.is_some() => {
             decision.used_fallback = true;
@@ -530,7 +607,7 @@ pub(crate) async fn dispatch_obs(
                 "{}; selected provider failed ({first_failure}), deterministic main-provider fallback",
                 decision.reason
             );
-            match run_subagent_attempt(def, main.clone(), task).await {
+            match run_subagent_via_protocol(def, main.clone(), task, &format!("{}:fallback", call.id)).await {
                 Ok(out) => out,
                 Err(fallback_failure) => format!(
                     "[{} 出错: selected provider failed ({first_failure}); main-provider fallback failed ({fallback_failure})]",

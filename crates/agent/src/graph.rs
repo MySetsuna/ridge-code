@@ -75,6 +75,22 @@ pub fn build_llm_agent(
 }
 
 /// 装配 agent 图,并把 MCP 工具并入(确定性 verify,无独立模型复核,一律放行)。
+/// Build an agent graph that cannot expose side-effecting tools.
+pub fn build_llm_agent_read_only(
+    provider: Arc<dyn LlmProvider>,
+) -> Result<CompiledGraph<AgentState>, GraphError> {
+    build_core(
+        provider,
+        McpTools::empty(),
+        None,
+        Arc::new(AutoApprove),
+        Vec::new(),
+        null_token_bus(),
+        Arc::new(Agents::default()),
+        true,
+    )
+}
+
 pub fn build_llm_agent_with(
     provider: Arc<dyn LlmProvider>,
     mcp: McpTools,

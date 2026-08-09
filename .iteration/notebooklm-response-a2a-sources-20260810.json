@@ -1,0 +1,25 @@
+{
+  "status": "PROCEED",
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "notebook_title": "RidgeCode现状、愿景、路线图",
+  "query_mode": "existing_sources_only",
+  "confirmed_facts": [
+    {"fact":"笔记本反复强调调查债、黑盒执行、通信成本与审计断层；目标是透明、结论驱动、可接管的深度协作。","evidence":"NotebookLM existing-sources query: 对话与愿景 Note；来源索引 629/461/378"},
+    {"fact":"现有设计把 User、Maker/Planner、Checker/Worker 区分开；Checker 只认物理世界硬信号，不信模型自述。","evidence":"NotebookLM existing-sources query: 来源索引 367/453/459"},
+    {"fact":"现有实现语义以 Pregel superstep、StreamEvent、durable state、Esc/Ctrl-C、MAX_STALL 和只读工具白名单为边界。","evidence":"NotebookLM existing-sources query: 来源索引 36/453/457/460/461/465"},
+    {"fact":"笔记本提出能力/自主权证书、结论而非全轨迹回传、原子块 DONE/ERR 事件等通信重构候选。","evidence":"NotebookLM existing-sources query: 来源索引 393/396/461；愿景 Note"}
+  ],
+  "contradictions": [],
+  "unverified_hypotheses": [
+    {"hypothesis":"独立版本化 agent envelope + transport adapter 比直接复用 MCP tools/call 更能隔离业务生命周期与 wire protocol。","support":["REQ 要求协议差异不得泄漏进业务状态机","当前 MCP transport 只表达 JSON-RPC request/notify"],"against":["尚未完成外部 deep research","笔记本未给出可直接采用的完整 wire schema"],"experiment":"实现协议纯函数与两种 transport 后，验证业务状态机无需分支且双协议行为一致。"},
+    {"hypothesis":"in-process 与 stdio JSON-RPC 足以先证明多协议闭环，远程 broker 可延后。","support":["当前工程已有本地函数调用与 MCP stdio 边界","REQ acceptance 要求无密钥本机 smoke"],"against":["笔记本来源可能隐含跨进程/跨机器诉求"],"experiment":"先完成 in-process 与 stdio smoke；若来源与边界测试显示不足，再扩展协议适配。"},
+    {"hypothesis":"原子 DONE/ERR 事件应进入 agent 协作通信层，但必须服从现有 superstep、取消与 bounded 语义。","support":["笔记本来源强调 StreamEvent、durable state 与审计","现有 TUI/agent 已有 stop 与 verify 边界"],"against":["事件粒度过细可能增加 token/队列压力"],"experiment":"采用有界事件类型与结果摘要，测试取消、超时、事件顺序和状态收敛。"}
+  ],
+  "candidates": [
+    {"core":"独立 AgentEnvelope/AgentTransport，in-process 与 stdio 适配；MCP 仅作为一种外部适配。","constraints":["correlation_id/parent_id、能力、取消、错误、超时显式化","只读与权限证书进入握手/请求约束"],"risks":["需定义与 MCP JSON-RPC 的适配边界"],"reversibility":"高","scope":["agent communication module","dispatch_agent","planner/worker"],"validation":["协议纯函数测试","双 transport smoke","权限/取消/错误回归"]},
+    {"core":"直接把 agent 协作映射为 MCP JSON-RPC tools/call。","constraints":["必须补齐 agent 生命周期与取消关联"],"risks":["工具语义可能吞掉双向事件、握手与状态生命周期"],"reversibility":"中","scope":["MCP client/transport","dispatch/team"],"validation":["MCP stdio/in-process 测试"]}
+  ],
+  "recommendation": "采用第一候选作首实现；将 NotebookLM 内容作为架构假设，必须由当前源码、CodeGraph、确定性测试和无密钥本机 smoke 证伪/核验。",
+  "next_step": {"type":"implementation","value":"审计现有 dispatch/team/MCP 调用链后，新增最小版本化通信信封与两个 bounded transport，并接入一个 agent-to-agent 闭环。"},
+  "stop_conditions": ["无法在不放宽只读/权限/verify 边界下完成双协议闭环","出现无界队列、未关联响应或跨会话状态泄漏"]
+}

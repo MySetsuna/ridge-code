@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "intake_id": "INTAKE-20260810-A2A-01",
+  "classification": "active",
+  "summary": "按用户明确授权，基于 Ridge 笔记本通信重构证据实现 RidgeCode 的 bounded agent-to-agent、多协议通信接缝与可验证运行闭环。",
+  "requirement_ids": [
+    "REQ-20260810-A2A-01"
+  ],
+  "pending_ids": [],
+  "approval_reasons": [],
+  "open_questions": [],
+  "approval_evidence": "",
+  "request_sha256": "e42de3b54248385163bec8b9e37b9a9ed609a4b9080f4f0dd22e734c21ae758b",
+  "requirements_sha256": "aa57b6702840fd71854ff508b13b67a0a891ad9f4074e846b9314040aa952af9",
+  "pending_sha256": "a653cd735491bf6593b289e50840a5b084fe90ed2e89cd912d283366297387f3",
+  "draft_sha256": "",
+  "previous_intake_sha256": "",
+  "executable": true,
+  "reasons": []
+}

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "upsert": [
+    {
+      "id": "REQ-20260810-A2A-01",
+      "section": "active",
+      "markdown": "### REQ-20260810-A2A-01 · Agent-to-agent 多协议通信重构\n\n- Status:`ACTIVE`\n- Version:`v0.5.0`\n- Behavior:`RidgeCode 支持有界、可审计的 agent-to-agent 协作：主 agent 可通过明确的通信信封与协议适配接缝向一个或多个角色 agent 发送任务、上下文/能力约束与取消信号，并接收带有发送方、关联 ID、状态、结果或错误的结构化响应；同一协作语义可落在至少两种传输协议上，协议差异不得泄漏进 agent 业务状态机；保留只读子 agent、安全门、maker/checker、确定性验证与并发/步数上限。\n- Boundary:`范围限于 crates/agent 的 agent 协作协议/消息模型、dispatch 与 teammate 接缝、传输适配及必要的 crates/mcp/provider 直接边界与测试；优先复用现有 trait、MCP/stdio 与本地调用能力，不耦合具体第三方 agent SDK，不改变 langgraph BSP 语义、工具权限、危险命令拦截、provider trait 或 MCP JSON-RPC 语义；不得引入无界后台任务、隐式跨会话共享、未审计的远程执行或敏感信息上传。\n- Acceptance:`完成 request-intake、NotebookLM 深度研究假设核验与 CodeGraph 设计审计；定义版本化消息信封、关联/取消/错误语义与至少两种传输协议的可插拔适配；测试覆盖握手/能力协商、请求响应关联、并发隔离、超时/取消、传输失败、只读权限与 maker/checker 边界；通过 cargo fmt --all -- --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked，并完成本机无密钥 smoke，证明两种协议均可完成一次 agent-to-agent 任务闭环。\n- Traceability:`REQ → agent communication envelope/transport/dispatch symbols → protocol adapters and deterministic tests → local two-protocol smoke → workspace quality gates; NotebookLM output remains hypothesis and is archived only after current-code verification.`"
+    }
+  ],
+  "remove": []
+}

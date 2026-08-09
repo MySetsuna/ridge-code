@@ -1,6 +1,10 @@
 use crate::brain::{circuit_broken, explore_exhausted, over_budget, stalled};
+use crate::communication::{
+    in_process_exchange, AgentEnvelope, AgentError, AgentHello, AgentMessage, AgentProtocolError,
+    AgentResponse, AgentRole, AgentStatus, AgentTask,
+};
 use crate::context::context_rotted;
-use crate::graph::build_llm_agent;
+use crate::graph::{build_llm_agent, build_llm_agent_read_only};
 use crate::knowledge::{provider_failure_label, Agents};
 use crate::route::{RouteAudit, RouteRequest, RouteRole};
 use crate::state::{AgentState, MAX_STEPS};
@@ -36,6 +40,81 @@ pub async fn plan(provider: &dyn LlmProvider, task: &str) -> Vec<String> {
     plan_attempt(provider, task)
         .await
         .unwrap_or_else(|_| vec![task.to_string()])
+}
+
+struct TeammateOutcome {
+    approved: bool,
+    steps: usize,
+    tokens: usize,
+}
+
+async fn run_teammate_via_protocol(
+    provider: Arc<dyn LlmProvider>,
+    task: &str,
+    correlation_id: &str,
+) -> Result<TeammateOutcome, GraphError> {
+    let request = AgentEnvelope::task(
+        format!("{correlation_id}:task"),
+        "main",
+        "teammate",
+        correlation_id,
+        AgentTask::new(
+            task,
+            true,
+            vec!["read_file".to_string(), "search".to_string()],
+            MAX_STEPS,
+        ),
+    );
+    let response = in_process_exchange(
+        AgentHello::guarded("main", AgentRole::Planner),
+        AgentHello::read_only("teammate", AgentRole::Worker),
+        request,
+        |incoming| async move {
+            let correlation_id = incoming.correlation_id.clone();
+            let parent_id = incoming.message_id.clone();
+            let from = incoming.to.clone();
+            let to = incoming.from.clone();
+            let AgentMessage::Task(payload) = incoming.message else {
+                return Err(AgentProtocolError::Invalid(
+                    "teammate expected Task".to_string(),
+                ));
+            };
+            let app = build_llm_agent_read_only(provider)
+                .map_err(|error| AgentProtocolError::Handler(error.to_string()))?;
+            let outcome = app
+                .invoke(AgentState::new(payload.task))
+                .await
+                .map_err(|error| AgentProtocolError::Handler(error.to_string()))?;
+            Ok(AgentEnvelope::response(
+                format!("{correlation_id}:response"),
+                from,
+                to,
+                correlation_id,
+                AgentResponse {
+                    status: AgentStatus::Done,
+                    approved: outcome.approved,
+                    steps: outcome.steps,
+                    tokens: outcome.total_tokens,
+                    summary: outcome.messages.last().cloned().unwrap_or_default(),
+                    modified_files: outcome.modified_files.into_iter().collect(),
+                },
+            )
+            .with_parent(parent_id))
+        },
+    )
+    .await
+    .map_err(|error| GraphError::Join(error.to_string()))?;
+    match response.message {
+        AgentMessage::Response(result) => Ok(TeammateOutcome {
+            approved: result.approved,
+            steps: result.steps,
+            tokens: result.tokens,
+        }),
+        AgentMessage::Error(AgentError { message, .. }) => Err(GraphError::Join(message)),
+        _ => Err(GraphError::Join(
+            "teammate returned unexpected message".to_string(),
+        )),
+    }
 }
 
 /// 一轮任务的**停机原因**(loop engineering:让「为什么停」成为机器可判的确定性信号,
@@ -259,8 +338,13 @@ pub async fn run_planned_routed(
         let worker_request = RouteRequest::from_task(&sub, RouteRole::Teammate);
         let worker = agents.select_provider(&worker_request, main.clone());
         let mut worker_route = worker.decision.audit(RouteRole::Teammate);
-        let app = build_llm_agent(worker.provider.clone())?;
-        let out = match app.invoke(AgentState::new(sub.clone())).await {
+        let out = match run_teammate_via_protocol(
+            worker.provider.clone(),
+            &sub,
+            &format!("teammate:{index}", index = results.len()),
+        )
+        .await
+        {
             Ok(out) => out,
             Err(first_failure) if worker_route.selected.is_some() => {
                 worker_route.used_fallback = true;
@@ -269,19 +353,23 @@ pub async fn run_planned_routed(
                     worker_route.reason,
                     provider_failure_label(&first_failure)
                 );
-                let fallback_app = build_llm_agent(main.clone())?;
-                fallback_app.invoke(AgentState::new(sub.clone())).await?
+                run_teammate_via_protocol(
+                    main.clone(),
+                    &sub,
+                    &format!("teammate:{}:fallback", results.len()),
+                )
+                .await?
             }
             Err(error) => return Err(error),
         };
         approved &= out.approved;
-        total_tokens += out.total_tokens;
+        total_tokens += out.tokens;
         total_steps += out.steps;
         results.push(SubtaskResult {
             task: sub,
             approved: out.approved,
             steps: out.steps,
-            tokens: out.total_tokens,
+            tokens: out.tokens,
             route: Some(worker_route),
         });
     }
@@ -621,20 +709,10 @@ mod tests {
             text: r#"["inspect"]"#.into(),
             ..Default::default()
         }]));
-        let worker: Arc<dyn LlmProvider> = Arc::new(ScriptedProvider::new(vec![
-            Completion {
-                tool_calls: vec![ToolCall {
-                    id: "pass".into(),
-                    name: "run_shell".into(),
-                    arguments: serde_json::json!({"cmd": "exit 0"}),
-                }],
-                ..Default::default()
-            },
-            Completion {
-                text: "done".into(),
-                ..Default::default()
-            },
-        ]));
+        let worker: Arc<dyn LlmProvider> = Arc::new(ScriptedProvider::new(vec![Completion {
+            text: "done".into(),
+            ..Default::default()
+        }]));
         let planner_profile = ModelProfile {
             provider: "deep".into(),
             model: "planner".into(),
@@ -704,14 +782,6 @@ mod tests {
         let main: Arc<dyn LlmProvider> = Arc::new(ScriptedProvider::new(vec![
             Completion {
                 text: r#"["inspect"]"#.into(),
-                ..Default::default()
-            },
-            Completion {
-                tool_calls: vec![ToolCall {
-                    id: "pass".into(),
-                    name: "run_shell".into(),
-                    arguments: serde_json::json!({"cmd": "exit 0"}),
-                }],
                 ..Default::default()
             },
             Completion {

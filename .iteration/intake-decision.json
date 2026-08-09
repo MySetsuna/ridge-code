@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "intake_id": "INTAKE-20260810-ROUTE-FALLBACK-01",
+  "intake_id": "INTAKE-20260810-A2A-01",
   "classification": "active",
-  "summary": "沿既有 NotebookLM 与真实配置证据，补齐 provider/model 运行失败后的确定性一次性回退与可观测原因。",
-  "requirement_ids": ["REQ-20260809-ROUTE-01"],
+  "summary": "按用户明确授权，基于 Ridge 笔记本通信重构证据实现 RidgeCode 的 bounded agent-to-agent、多协议通信接缝与可验证运行闭环。",
+  "requirement_ids": ["REQ-20260810-A2A-01"],
   "pending_ids": [],
   "approval_reasons": [],
   "open_questions": [],

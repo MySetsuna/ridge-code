@@ -48,6 +48,8 @@ mod context;
 pub use context::*;
 mod route;
 pub use route::*;
+mod communication;
+pub use communication::*;
 mod signals;
 pub use signals::*;
 mod mcp_tools;

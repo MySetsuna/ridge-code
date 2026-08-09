@@ -1,38 +1,43 @@
 {
-  "question": "RidgeCode 应如何依据任务难度、规模、类型与派发角色，在当前可用 provider/model profiles 中为 subagent 或 teammate 做确定性、可解释的路由选择？",
-  "target": "形成经源码、CodeGraph、NotebookLM 与确定性实验核验的 route 方案，并实现最小可用的 provider/model 能力元数据、任务特性决策、候选过滤排序、回退与 subagent/teammate 派发接缝。",
+  "question": "基于 RidgeCode 笔记本中关于 agent 通信机制重构的来源、对话与 Note，如何在现有 RidgeCode 中实现有界、可审计的 agent-to-agent 协作与多协议传输，同时保留只读子 agent、权限门、maker/checker、确定性验证和现有 provider/MCP 边界？",
+  "target": "形成经 NotebookLM 深度研究、当前源码与 CodeGraph 核验的通信协议设计，并实现版本化消息信封、能力/握手、请求响应关联、取消/超时/错误语义及至少两种可插拔传输的最小 agent-to-agent 闭环，接入 dispatch_agent 与 teammate 路径。",
   "approved_constraints": [
-    "绑定 REQ-20260809-ROUTE-01；仅使用当前已加载且可用的 provider/model 配置。",
-    "保持 provider trait、MCP 协议、langgraph BSP、权限门、危险命令拦截、maker/checker、确定性 verify 与 subagent 只读边界。",
-    "不上传密钥、cookie、原始会话、原始日志或未批准需求；NotebookLM 只产出假设与候选方案。",
-    "不引入无界后台任务、无证据的重试/计费策略、具体第三方 SDK 耦合或无关 UI 重构。"
+    "绑定 REQ-20260810-A2A-01；用户明确授权自动通过审批并直接开发。",
+    "主 agent 保留协调权；子 agent 默认只读；不绕过权限门、危险命令拦截、maker/checker 或确定性 verify。",
+    "保留 langgraph BSP 语义、provider trait、MCP JSON-RPC 语义与现有 stdio 兼容；协议差异封装在传输适配层。",
+    "不引入具体第三方 agent SDK、无界后台任务、隐式跨会话共享、未审计远程执行或敏感信息上传。",
+    "NotebookLM 只提供架构假设与候选方案；所有代码事实、根因和质量结论以本地代码、运行、测试和 CodeGraph 为准。"
   ],
   "verified_facts": [
-    {"fact":"Agent 定义仅有可选 provider 字符串、tools 白名单与正文；provider 字符串用于引用命名档案。","evidence":"crates/agent/src/knowledge.rs:156-166,169-201"},
-    {"fact":"dispatch_obs 仅按 Agent.provider 查找 Agents.providers，找不到时回退到主 provider，然后运行只读 sub-agent。","evidence":"crates/agent/src/knowledge.rs:286-318,378-404"},
-    {"fact":"Config.providers 保存 name/kind/model/base_url/key_env/use_oauth；build_agents 只把能解析凭据的档案建成运行时 provider。","evidence":"crates/agent/src/config.rs:31-34,76-120; crates/agent/src/main.rs:831-858"},
-    {"fact":"run_planned 已有 planner/worker 双角色，但 planner 与 worker 由调用方直接传入，计划结果无任务特性或候选模型路由。","evidence":"crates/agent/src/orchestrate.rs:174-207"},
-    {"fact":"LlmProvider 是统一 complete/complete_streaming 接缝，具体 provider 已被 trait 隔离。","evidence":"crates/provider/src/lib.rs:294-316"}
+    {"fact":"dispatch_agent 当前通过 dispatch_obs 选择 provider 后执行只读 sub-agent，并已有一次有界 provider fallback。","evidence":"CodeGraph: crates/agent/src/knowledge.rs:494-547"},
+    {"fact":"routed orchestrator 已有 planner/worker 角色和 RouteAudit，但仍是本地函数调用接缝。","evidence":"CodeGraph: crates/agent/src/orchestrate.rs:158-286"},
+    {"fact":"provider 层以 LlmProvider::complete/complete_streaming 隔离具体模型实现。","evidence":"CodeGraph: crates/provider/src/lib.rs:LlmProvider references"},
+    {"fact":"MCP 层已有 McpTransport::request/notify 与 McpClient 的 JSON-RPC initialize/tools/list/tools/call 逻辑。","evidence":"CodeGraph: crates/mcp/src/lib.rs:36-125"},
+    {"fact":"现有 langgraph 图运行有 max_supersteps、同步 apply 与取消/Join 错误边界。","evidence":"CodeGraph: crates/langgraph/src/state.rs:1-50; repository AGENTS.md architecture contract"}
   ],
   "failure_signals": [
-    "当前 subagent 只能静态绑定 provider 或回退主 provider，无法按任务规模/类型选择模型。",
-    "当前 planner/worker API 无法表达 teammate 角色、任务能力要求、候选过滤或选择原因。"
+    "dispatch_agent 与 teammate 尚无统一的 agent 消息信封、关联 ID、握手/能力协商或取消语义。",
+    "McpTransport 只抽象 JSON-RPC method/params，不表达 agent 请求/响应生命周期；直接把协议细节塞进业务状态会破坏多协议隔离。",
+    "当前 route/dispatch 能选择 provider，但不能把协作参与方、传输协议、生命周期状态作为可审计结果。"
   ],
-  "attempts": [],
+  "attempts": [
+    {"experiment":"启动 ChatGPT Deep Research bridge","result":{"status":"failed","summary":"本机无可用 Chrome CDP"},"evidence":{"command":"mcp__chatgpt_nlm_research__research_start(provider=chatgpt)","exit_code":1,"pointer":"failed to reach Chrome CDP at http://127.0.0.1:9222"}},
+    {"experiment":"启动 NotebookLM 原生 deep research","result":{"status":"failed","summary":"NotebookLM Google API 返回 UserDisplayableError code 8"},"evidence":{"command":"mcp__notebooklm_mcp__research_start(mode=deep, source=web)","exit_code":1,"pointer":"Failed to start research — Google API error code 8 (UserDisplayableError)"}}
+  ],
   "candidate_solutions": [
-    {"core":"在 agent 层新增纯函数 RouteRequest/RouteDecision/ModelProfile，按显式任务特性与 profile 能力排序，再把选中 provider 注入 dispatch 与 planned execution。","constraints":["provider trait 不变","无候选时确定性回退","选择原因可序列化"],"risks":["能力元数据初始需从现有配置安全推导","teammate 并发语义需避免越过权限门"],"reversibility":"新增独立模块，可先只接 subagent","scope":["crates/agent/src/route.rs","knowledge.rs","orchestrate.rs","main.rs"],"validation":["纯函数矩阵测试","配置可用性过滤测试","subagent/planned smoke"]},
-    {"core":"扩展 provider profile 声明 capabilities/tiers，再由 dispatch 层按任务标签匹配并回退。","constraints":["保留旧 config 兼容","不把模型名硬编码进核心","密钥解析不变"],"risks":["配置字段扩大且用户需维护能力标签","声明可能与实际模型能力漂移"],"reversibility":"serde 默认字段可回滚","scope":["config.rs","knowledge.rs","main.rs"],"validation":["旧配置解析回归","profile 过滤排序测试","真实可用档案 smoke"]},
-    {"core":"把路由交给一个 LLM planner 选择 provider/model。","constraints":["必须有确定性白名单与回退","不能信模型自述"],"risks":["不可确定、额外延迟、可能选不可用模型","与安全验收冲突"],"reversibility":"高但不宜作为首实现","scope":["orchestrate.rs"],"validation":["仅可作为对照实验，不作为默认实现"]}
+    {"core":"在 agent 层新增版本化 AgentEnvelope/AgentTransport trait，提供 in-process transport 与 stdio JSON-RPC transport，dispatch/team 接口只依赖统一会话语义。","constraints":["复用 serde/async-trait","显式 correlation_id/parent_id","所有 transport 有界超时与取消"],"risks":["需设计与现有 MCP JSON-RPC 的清晰适配边界"],"reversibility":"高；独立模块、先接 dispatch_agent","scope":["crates/agent/src/communication.rs","knowledge.rs","orchestrate.rs","必要 mcp adapter"],"validation":["纯协议矩阵测试","in-process + stdio smoke","权限/取消/错误测试"]},
+    {"core":"把 agent-to-agent 消息直接映射为现有 MCP tools/call 与 JSON-RPC method，沿用 McpTransport 作为唯一多协议入口。","constraints":["不扩展业务状态机","每个 agent 暴露固定 namespace","必须补齐取消和关联语义"],"risks":["MCP 工具语义与 agent 生命周期混淆，难以表达双向事件/能力协商"],"reversibility":"中；依赖现有 MCP wire 语义","scope":["crates/mcp/src/lib.rs","crates/agent/src/mcp_tools.rs","dispatch/team"] ,"validation":["MCP stdio/in-process transport 测试","消息关联/错误回归"]},
+    {"core":"引入具体外部 A2A SDK 或远程 broker 作为运行时总线。","constraints":["需保持权限、认证、重试和 bounded lifecycle"],"risks":["违反 provider/MCP 边界、增加网络与认证复杂度、当前无证据支持"],"reversibility":"低","scope":["不作为首实现，仅作排除项"],"validation":["仅在本地协议闭环失败且有证据时重新评估"]}
   ],
   "hypotheses": [
-    {"hypothesis":"最小稳妥路由应在 agent 派发前做纯函数决策，输入显式任务特性与已验证 profile 元数据；不应让模型决定可用性。","support":["当前 provider 句柄已在 build_agents 中确定","确定性验收要求可解释回退"],"against":["尚未知道用户配置是否提供足够的模型能力差异"],"experiment":"比较静态 profile 元数据与真实配置 smoke，验证是否能覆盖难度/规模/类型的最小矩阵。"},
-    {"hypothesis":"teammate 可先复用 planned planner/worker 的角色抽象，新增路由与结果边界，不必引入第二执行状态机。","support":["run_planned 已有 planner/worker 分工且串行有界"],"against":["尚未确认 teammate 的产品语义与并发需求"],"experiment":"CodeGraph 梳理所有 planned/agent 调用方并用 ScriptedProvider 验证角色选择、回退与安全边界。"}
+    {"hypothesis":"最小正确落点是独立通信信封与 transport trait；MCP JSON-RPC 可作为一种适配，而非直接成为 agent 业务协议。","support":["现有 McpTransport 已封装 request/notify","REQ 要求协议差异不得泄漏进业务状态机"],"against":["尚未从 NotebookLM 来源确认其通信机制重构是否要求特定 wire schema"],"experiment":"深度研究提取来源中的 envelope、角色、握手、生命周期、传输与安全约束，并与当前符号逐项核验。"},
+    {"hypothesis":"in-process 与 stdio 两种 transport 足以先证明多协议闭环，无需网络 broker；远程协议作为后续适配。","support":["现有工程已有本地 agent/provider 与 MCP stdio 能力","当前 acceptance 要求无密钥本机 smoke"],"against":["笔记本可能要求跨进程/跨机器 agent 通信"],"experiment":"对来源候选做边界比较，选择能在现有安全门内完成双协议 smoke 的最小方案。"}
   ],
   "prohibitions": [
-    "不把 NotebookLM 建议直接当成代码事实或根因。",
-    "不因路由需求放宽只读 sub-agent 工具、不绕过主 agent 权限门。",
-    "不把当前配置中不可解析凭据的 profile 当作可用候选。",
-    "不新增无界后台 teammate、隐式网络探测或模型自述驱动的 stop rule。"
+    "不把 NotebookLM 建议直接当成代码事实、需求扩展或协议标准。",
+    "不上传密钥、cookie、原始会话、原始运行日志或用户配置敏感值。",
+    "不通过 agent-to-agent 通道下放写入/shell 权限，不接受模型自述作为成功信号。",
+    "不引入无界队列、隐式重试、无关联响应、静默取消或跨会话状态泄漏。"
   ],
   "questions": []
 }

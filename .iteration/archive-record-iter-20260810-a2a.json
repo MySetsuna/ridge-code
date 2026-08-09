@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "id": "iter-20260810-a2a",
+  "at": "2026-08-10",
+  "type": "iteration_close",
+  "facts": [
+    "A2A envelope and transport layer implemented",
+    "dispatch and routed teammate paths use protocol exchange",
+    "workspace quality gates passed"
+  ],
+  "evidence": [
+    ".iteration/a2a-smoke-evidence-20260810.json",
+    ".iteration/research-status-a2a-20260810.json"
+  ],
+  "paths": [
+    "crates/agent/src/communication.rs",
+    "crates/agent/src/knowledge.rs",
+    "crates/agent/src/orchestrate.rs",
+    "crates/agent/src/graph.rs"
+  ],
+  "symbols": [
+    "AgentEnvelope",
+    "AgentTransport",
+    "run_subagent_via_protocol",
+    "run_teammate_via_protocol"
+  ],
+  "next": [
+    "poll the existing NotebookLM research task after re-authentication",
+    "publish the verified release without changing the version"
+  ],
+  "iteration_id": "iter-20260810-a2a",
+  "requirement_id": "REQ-20260810-A2A-01",
+  "status": "implemented_and_verified",
+  "summary": "Added versioned agent-to-agent envelopes, capability handshake, bounded cancellation/error semantics, in-process and newline JSON-RPC transports, and protocol-backed dispatch/team paths.",
+  "safety": [
+    "dispatch sub-agents remain read-only",
+    "routed teammates use read-only graph and explicit read_file/search capabilities",
+    "read-only tasks reject side-effecting capability/tool requests",
+    "maker/checker and deterministic verify graph semantics unchanged"
+  ],
+  "verification": {
+    "fmt": "passed",
+    "workspace_tests": "passed",
+    "workspace_clippy": "passed",
+    "workspace_build": "passed",
+    "protocol_tests": "11 passed, 0 failed",
+    "no_key_smoke": "passed"
+  },
+  "research": {
+    "source_query": "validated",
+    "deep_research": "pending_auth_poll",
+    "evidence": ".iteration/research-status-a2a-20260810.json"
+  },
+  "changed_files": [
+    "crates/agent/src/communication.rs",
+    "crates/agent/src/knowledge.rs",
+    "crates/agent/src/orchestrate.rs",
+    "crates/agent/src/graph.rs",
+    "docs/REQUIREMENTS-SPEC.md"
+  ]
+}

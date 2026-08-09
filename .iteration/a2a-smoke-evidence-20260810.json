@@ -1,0 +1,21 @@
+{
+  "status": "passed",
+  "scope": "local_no_key",
+  "protocol_tests": {
+    "command": "cargo test -p agent communication::tests --locked --offline",
+    "exit_code": 0,
+    "passed": 11,
+    "failed": 0,
+    "transports": ["in_process", "newline_json_rpc"]
+  },
+  "covered": [
+    "version negotiation",
+    "capability handshake",
+    "correlation and parent identity",
+    "bounded timeout",
+    "wire cancellation",
+    "structured error",
+    "read-only side-effect rejection"
+  ],
+  "secrets_observed": false
+}

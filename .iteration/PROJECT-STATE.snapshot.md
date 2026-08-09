@@ -791,13 +791,176 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 <!-- PROJECT_STATE_RUNTIME -->
 ## 运行元数据
 
-- repository_head:`4646fa6acbdfa3b06fd239d14dfb81671df4581d`
+- repository_head:`c617db211fef94561a88668369e121c591166789`
 - requirements_version:`v0.2.0`
-- requirements_hash:`d4f918d8532fbd90ea9c1a3180ec3e56dcf9680a52bf99b3e856103dc2eac9e8`
+- requirements_hash:`aa57b6702840fd71854ff508b13b67a0a891ad9f4074e846b9314040aa952af9`
 - pending_hash:`a653cd735491bf6593b289e50840a5b084fe90ed2e89cd912d283366297387f3`
-- generated_at:`2026-08-09T16:49:01+00:00`
-- current_git_diff:`.iteration/agents/dispatch-plan.json,.iteration/agents/iter-20260809-02/dispatch-plan.json,.iteration/agents/iter-20260809-02/worker-1.json,.iteration/agents/iter-20260809-03/dispatch-plan.json,.iteration/agents/iter-20260809-03/worker-1.json,.iteration/agents/iter-20260810-boundary/dispatch-plan.json,.iteration/agents/iter-20260810-boundary/worker-1.json,.iteration/agents/route-review/dispatch-plan.json,.iteration/agents/route-review/route-review.json,.iteration/agents/worker-1.json,.iteration/archive-event-iter-20260809-halt-diagnostic.json,.iteration/archive-event-iter-20260809-loop-diagnostics.json,.iteration/archive-event-iter-20260809-real-smoke.json,.iteration/archive-event-iter-20260809-tool-scrollback.json,.iteration/archive-event-iter-20260810-boundary-contract.json,.iteration/archive-event-iter-20260810-readonly-contract.json,.iteration/archive-event-iter-20260810-trace-recovery.json,.iteration/archive-event-iter-20260810-verify-diagnostic.json,.iteration/archive-record-iter-20260809-halt-diagnostic.json,.iteration/archive-record-iter-20260809-loop-diagnostics.json,.iteration/archive-record-iter-20260809-real-smoke.json,.iteration/archive-record-iter-20260809-tool-scrollback.json,.iteration/archive-record-iter-20260810-boundary-contract.json,.iteration/archive-record-iter-20260810-readonly-contract.json,.iteration/archive-record-iter-20260810-route-runtime-fallback.json,.iteration/archive-record-iter-20260810-route-smoke.json,.iteration/archive-record-iter-20260810-route.json,.iteration/archive-record-iter-20260810-trace-recovery.json,.iteration/archive-record-iter-20260810-verify-diagnostic.json,.iteration/context.json,.iteration/decision.json,.iteration/dispatch-20260809-02.json,.iteration/dispatch-20260809-03.json,.iteration/dispatch-20260810-boundary.json,.iteration/dispatch.json,.iteration/intake-decision.json,.iteration/intakes/INTAKE-20260809-01.json,.iteration/intakes/INTAKE-20260809-02.json,.iteration/intakes/INTAKE-20260809-03.json,.iteration/intakes/INTAKE-20260809-04.json,.iteration/intakes/INTAKE-20260809-ROUTE-01.json,.iteration/intakes/INTAKE-20260809-ROUTE-02.json,.iteration/intakes/INTAKE-20260810-01.json,.iteration/intakes/INTAKE-20260810-ROUTE-FALLBACK-01.json,.iteration/notebooklm-response-20260809-diagnostic.json,.iteration/notebooklm-response-20260809-next.json,.iteration/notebooklm-response-20260809-pain-points.json,.iteration/notebooklm-response-20260809-smoke.json,.iteration/notebooklm-response-20260810-boundary-contract.json,.iteration/notebooklm-response-20260810-readonly-contract.json,.iteration/notebooklm-response-20260810-trace-recovery.json,.iteration/notebooklm-response-20260810-verify-diagnostic.json,.iteration/notebooklm-response-route-20260810.json,.iteration/pending-route-operation.json,.iteration/promote-route-operation.json,.iteration/request.txt,.iteration/research-route-failure-20260810.json,.iteration/route-dispatch.json,.iteration/route-fallback-smoke-evidence-20260810.json,.iteration/route-smoke-evidence-20260810.json,.iteration/smoke-evidence-20260809.json,.iteration/smoke-evidence-20260810-boundary.json,.iteration/smoke-evidence-20260810-verify-diagnostic.json,.iteration/smoke-evidence-20260810.json,.iteration/trace-evidence-20260810-open-readonly.json,.iteration/trace-stream-metadata-20260810.json,README.md,crates/agent/src/auth.rs,crates/agent/src/brain.rs,crates/agent/src/config.rs,crates/agent/src/context.rs,crates/agent/src/graph.rs,crates/agent/src/knowledge.rs,crates/agent/src/lib.rs,crates/agent/src/login.rs,crates/agent/src/main.rs,crates/agent/src/orchestrate.rs,crates/agent/src/route.rs,crates/agent/src/tui/app.rs,crates/agent/src/tui/draw.rs,crates/agent/src/tui/mod.rs,crates/agent/src/tui/status.rs,crates/agent/src/tui/tests.rs,docs/ARCHITECTURE.md,docs/PENDING-REQUIREMENTS.md,docs/REQUIREMENTS-SPEC.md,docs/archive/events-2026-08.jsonl`
+- decision_hash:`044f10aca508fa7e2a8332470553fb83980bfb3c800a61fe6497c344c49ae11b`
+- generated_at:`2026-08-09T18:13:42+00:00`
+- current_git_diff:`.iteration/a2a-requirement-operation.json,.iteration/a2a-smoke-evidence-20260810.json,.iteration/archive-record-iter-20260810-a2a.json,.iteration/decision.json,.iteration/intake-decision.json,.iteration/intakes/INTAKE-20260810-A2A-01.json,.iteration/notebooklm-response-a2a-sources-20260810.json,.iteration/request.txt,.iteration/research-status-a2a-20260810.json,Cargo.lock,crates/agent/Cargo.toml,crates/agent/src/communication.rs,crates/agent/src/graph.rs,crates/agent/src/knowledge.rs,crates/agent/src/lib.rs,crates/agent/src/orchestrate.rs,docs/REQUIREMENTS-SPEC.md,docs/archive/events-2026-08.jsonl`
 
 ## 非权威 Pending 索引
 
 - _无_
+
+## 当前决策包
+
+```json
+{
+  "approved_constraints": [
+    "绑定 REQ-20260810-A2A-01；用户明确授权自动通过审批并直接开发。",
+    "主 agent 保留协调权；子 agent 默认只读；不绕过权限门、危险命令拦截、maker/checker 或确定性 verify。",
+    "保留 langgraph BSP 语义、provider trait、MCP JSON-RPC 语义与现有 stdio 兼容；协议差异封装在传输适配层。",
+    "不引入具体第三方 agent SDK、无界后台任务、隐式跨会话共享、未审计远程执行或敏感信息上传。",
+    "NotebookLM 只提供架构假设与候选方案；所有代码事实、根因和质量结论以本地代码、运行、测试和 CodeGraph 为准。"
+  ],
+  "attempts": [
+    {
+      "evidence": {
+        "command": "mcp__chatgpt_nlm_research__research_start(provider=chatgpt)",
+        "exit_code": 1,
+        "pointer": "failed to reach Chrome CDP at http://127.0.0.1:9222"
+      },
+      "experiment": "启动 ChatGPT Deep Research bridge",
+      "result": {
+        "status": "failed",
+        "summary": "本机无可用 Chrome CDP"
+      }
+    },
+    {
+      "evidence": {
+        "command": "mcp__notebooklm_mcp__research_start(mode=deep, source=web)",
+        "exit_code": 1,
+        "pointer": "Failed to start research — Google API error code 8 (UserDisplayableError)"
+      },
+      "experiment": "启动 NotebookLM 原生 deep research",
+      "result": {
+        "status": "failed",
+        "summary": "NotebookLM Google API 返回 UserDisplayableError code 8"
+      }
+    }
+  ],
+  "candidate_solutions": [
+    {
+      "constraints": [
+        "复用 serde/async-trait",
+        "显式 correlation_id/parent_id",
+        "所有 transport 有界超时与取消"
+      ],
+      "core": "在 agent 层新增版本化 AgentEnvelope/AgentTransport trait，提供 in-process transport 与 stdio JSON-RPC transport，dispatch/team 接口只依赖统一会话语义。",
+      "reversibility": "高；独立模块、先接 dispatch_agent",
+      "risks": [
+        "需设计与现有 MCP JSON-RPC 的清晰适配边界"
+      ],
+      "scope": [
+        "crates/agent/src/communication.rs",
+        "knowledge.rs",
+        "orchestrate.rs",
+        "必要 mcp adapter"
+      ],
+      "validation": [
+        "纯协议矩阵测试",
+        "in-process + stdio smoke",
+        "权限/取消/错误测试"
+      ]
+    },
+    {
+      "constraints": [
+        "不扩展业务状态机",
+        "每个 agent 暴露固定 namespace",
+        "必须补齐取消和关联语义"
+      ],
+      "core": "把 agent-to-agent 消息直接映射为现有 MCP tools/call 与 JSON-RPC method，沿用 McpTransport 作为唯一多协议入口。",
+      "reversibility": "中；依赖现有 MCP wire 语义",
+      "risks": [
+        "MCP 工具语义与 agent 生命周期混淆，难以表达双向事件/能力协商"
+      ],
+      "scope": [
+        "crates/mcp/src/lib.rs",
+        "crates/agent/src/mcp_tools.rs",
+        "dispatch/team"
+      ],
+      "validation": [
+        "MCP stdio/in-process transport 测试",
+        "消息关联/错误回归"
+      ]
+    },
+    {
+      "constraints": [
+        "需保持权限、认证、重试和 bounded lifecycle"
+      ],
+      "core": "引入具体外部 A2A SDK 或远程 broker 作为运行时总线。",
+      "reversibility": "低",
+      "risks": [
+        "违反 provider/MCP 边界、增加网络与认证复杂度、当前无证据支持"
+      ],
+      "scope": [
+        "不作为首实现，仅作排除项"
+      ],
+      "validation": [
+        "仅在本地协议闭环失败且有证据时重新评估"
+      ]
+    }
+  ],
+  "failure_signals": [
+    "dispatch_agent 与 teammate 尚无统一的 agent 消息信封、关联 ID、握手/能力协商或取消语义。",
+    "McpTransport 只抽象 JSON-RPC method/params，不表达 agent 请求/响应生命周期；直接把协议细节塞进业务状态会破坏多协议隔离。",
+    "当前 route/dispatch 能选择 provider，但不能把协作参与方、传输协议、生命周期状态作为可审计结果。"
+  ],
+  "hypotheses": [
+    {
+      "against": [
+        "尚未从 NotebookLM 来源确认其通信机制重构是否要求特定 wire schema"
+      ],
+      "experiment": "深度研究提取来源中的 envelope、角色、握手、生命周期、传输与安全约束，并与当前符号逐项核验。",
+      "hypothesis": "最小正确落点是独立通信信封与 transport trait；MCP JSON-RPC 可作为一种适配，而非直接成为 agent 业务协议。",
+      "support": [
+        "现有 McpTransport 已封装 request/notify",
+        "REQ 要求协议差异不得泄漏进业务状态机"
+      ]
+    },
+    {
+      "against": [
+        "笔记本可能要求跨进程/跨机器 agent 通信"
+      ],
+      "experiment": "对来源候选做边界比较，选择能在现有安全门内完成双协议 smoke 的最小方案。",
+      "hypothesis": "in-process 与 stdio 两种 transport 足以先证明多协议闭环，无需网络 broker；远程协议作为后续适配。",
+      "support": [
+        "现有工程已有本地 agent/provider 与 MCP stdio 能力",
+        "当前 acceptance 要求无密钥本机 smoke"
+      ]
+    }
+  ],
+  "prohibitions": [
+    "不把 NotebookLM 建议直接当成代码事实、需求扩展或协议标准。",
+    "不上传密钥、cookie、原始会话、原始运行日志或用户配置敏感值。",
+    "不通过 agent-to-agent 通道下放写入/shell 权限，不接受模型自述作为成功信号。",
+    "不引入无界队列、隐式重试、无关联响应、静默取消或跨会话状态泄漏。"
+  ],
+  "question": "基于 RidgeCode 笔记本中关于 agent 通信机制重构的来源、对话与 Note，如何在现有 RidgeCode 中实现有界、可审计的 agent-to-agent 协作与多协议传输，同时保留只读子 agent、权限门、maker/checker、确定性验证和现有 provider/MCP 边界？",
+  "questions": [],
+  "target": "形成经 NotebookLM 深度研究、当前源码与 CodeGraph 核验的通信协议设计，并实现版本化消息信封、能力/握手、请求响应关联、取消/超时/错误语义及至少两种可插拔传输的最小 agent-to-agent 闭环，接入 dispatch_agent 与 teammate 路径。",
+  "verified_facts": [
+    {
+      "evidence": "CodeGraph: crates/agent/src/knowledge.rs:494-547",
+      "fact": "dispatch_agent 当前通过 dispatch_obs 选择 provider 后执行只读 sub-agent，并已有一次有界 provider fallback。"
+    },
+    {
+      "evidence": "CodeGraph: crates/agent/src/orchestrate.rs:158-286",
+      "fact": "routed orchestrator 已有 planner/worker 角色和 RouteAudit，但仍是本地函数调用接缝。"
+    },
+    {
+      "evidence": "CodeGraph: crates/provider/src/lib.rs:LlmProvider references",
+      "fact": "provider 层以 LlmProvider::complete/complete_streaming 隔离具体模型实现。"
+    },
+    {
+      "evidence": "CodeGraph: crates/mcp/src/lib.rs:36-125",
+      "fact": "MCP 层已有 McpTransport::request/notify 与 McpClient 的 JSON-RPC initialize/tools/list/tools/call 逻辑。"
+    },
+    {
+      "evidence": "CodeGraph: crates/langgraph/src/state.rs:1-50; repository AGENTS.md architecture contract",
+      "fact": "现有 langgraph 图运行有 max_supersteps、同步 apply 与取消/Join 错误边界。"
+    }
+  ]
+}
+```

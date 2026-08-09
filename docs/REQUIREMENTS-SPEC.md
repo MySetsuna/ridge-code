@@ -55,6 +55,16 @@
 - Boundary:`范围含项目初始化所需 .iteration 状态、需求与状态快照、CodeGraph 查询、经批准的 NotebookLM/深度调研证据；crates/agent 的 route/dispatch 配置与决策模型、provider/model 能力元数据、subagent/teammate 派发接缝、确定性测试及必要 CLI/TUI 可观测性；仅改动证据证明必要的直接依赖。不得上传密钥、cookie、原始会话或未批准需求；不改变 langgraph 核心 BSP 语义、权限门、危险命令拦截、maker/checker 与 verify；不引入无界后台任务、具体第三方 SDK 耦合、无证据的 provider 重试/计费策略或无关 UI 重构；保留 provider trait/配置边界、MCP 协议语义、子 agent 只读约束及当前工作区脏改动。`
 - Acceptance:`完成 request-intake、requirements gate、PROJECT-STATE 快照、context/iteration gate 与有界调研记录；形成经当前代码、CodeGraph、测试与真实配置核验的 route 设计与实现；测试覆盖任务特性分类/显式覆盖、候选过滤与排序、provider/model 不可用回退、subagent 与 teammate 派发、可观测选择原因及权限/只读边界；通过 cargo fmt --all --check、cargo test --workspace、cargo clippy --workspace --all-targets -- -D warnings、cargo build --workspace，并完成真实可用配置 route smoke，证明实际选择仅来自当前可用 providers/models。`
 - Traceability:`REQ → provider/model 配置解析、route 决策、dispatch_agent/teammate 派发接缝 → crates/agent/provider/tests 与 workspace quality gates → 脱敏 smoke/调研证据；NotebookLM 报告仅作假设，闭环时清理或归档。
+
+### REQ-20260810-A2A-01 · Agent-to-agent 多协议通信重构
+
+- Approval evidence:`用户明确指令：自动通过审批，直接按nlm迭代流程走，启动深度研究，然后直接开发，不卡再需求审批。`
+- Status:`ACTIVE`
+- Version:`v0.5.0`
+- Behavior:`RidgeCode 支持有界、可审计的 agent-to-agent 协作：主 agent 可通过明确的通信信封与协议适配接缝向一个或多个角色 agent 发送任务、上下文/能力约束与取消信号，并接收带有发送方、关联 ID、状态、结果或错误的结构化响应；同一协作语义可落在至少两种传输协议上，协议差异不得泄漏进 agent 业务状态机；保留只读子 agent、安全门、maker/checker、确定性验证与并发/步数上限。
+- Boundary:`范围限于 crates/agent 的 agent 协作协议/消息模型、dispatch 与 teammate 接缝、传输适配及必要的 crates/mcp/provider 直接边界与测试；优先复用现有 trait、MCP/stdio 与本地调用能力，不耦合具体第三方 agent SDK，不改变 langgraph BSP 语义、工具权限、危险命令拦截、provider trait 或 MCP JSON-RPC 语义；不得引入无界后台任务、隐式跨会话共享、未审计的远程执行或敏感信息上传。
+- Acceptance:`完成 request-intake、NotebookLM 深度研究假设核验与 CodeGraph 设计审计；定义版本化消息信封、关联/取消/错误语义与至少两种传输协议的可插拔适配；测试覆盖握手/能力协商、请求响应关联、并发隔离、超时/取消、传输失败、只读权限与 maker/checker 边界；通过 cargo fmt --all -- --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked，并完成本机无密钥 smoke，证明两种协议均可完成一次 agent-to-agent 任务闭环。
+- Traceability:`REQ → agent communication envelope/transport/dispatch symbols → protocol adapters and deterministic tests → local two-protocol smoke → workspace quality gates; NotebookLM output remains hypothesis and is archived only after current-code verification.`
 ## 修订账本 (Revision Ledger)
 
 关闭的 Pending、历史修订与审批证据写入 `docs/archive/events-YYYY-MM.jsonl`；本文件仅保留当前 Active 条款。
