@@ -42,7 +42,12 @@ if ($Local) {
     $zip = Join-Path $tmp "a.zip"
     Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
     $checksumUrl = $url -replace '\.zip$', '.sha256'
-    $checksumText = (Invoke-WebRequest -Uri $checksumUrl -UseBasicParsing).Content
+    $checksumContent = (Invoke-WebRequest -Uri $checksumUrl -UseBasicParsing).Content
+    $checksumText = if ($checksumContent -is [byte[]]) {
+      [Text.Encoding]::UTF8.GetString($checksumContent)
+    } else {
+      [string]$checksumContent
+    }
     $expected = (($checksumText -split '\s+')[0]).Trim().ToLowerInvariant()
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
     if ($expected -notmatch '^[0-9a-f]{64}$' -or $actual -ne $expected) {
