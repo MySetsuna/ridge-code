@@ -1,6 +1,9 @@
-use crate::guard::*;
+use crate::guard::{
+    active_sandbox_cmd, constraint_guard_shell, constraint_guard_write, jail, run_post_tool_hooks,
+    run_pre_tool_hooks, sandbox_argv,
+};
 use crate::signals::{signal_create, signal_resolve, SIGNALS_DIR};
-use crate::state::*;
+use crate::state::{Patch, Todo};
 use provider::{ToolCall, ToolSpec};
 
 /// 内置工具的规格(喂给 LLM 让它按 schema 出结构化 tool_call)。
@@ -174,177 +177,231 @@ fn unix_syntax_hint(cmd: &str, shell_used: &str) -> Option<&'static str> {
 
 /// 执行一个结构化工具调用,返回给模型看的观察结果(observation)。用真实的 `tools` crate 干活。
 /// iter-40:前后各串一层 hook(pre_tool 可拦截 / post_tool fire-and-forget)。
+fn tool_arg<'a>(call: &'a ToolCall, key: &str) -> &'a str {
+    call.arguments
+        .get(key)
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+}
+
+struct ToolResult {
+    observation: String,
+    run_post_hooks: bool,
+}
+
+fn tool_result(observation: String) -> ToolResult {
+    ToolResult {
+        observation,
+        run_post_hooks: true,
+    }
+}
+
+fn blocked_result(observation: String) -> ToolResult {
+    ToolResult {
+        observation,
+        run_post_hooks: false,
+    }
+}
+
+fn execute_shell_tool(call: &ToolCall) -> ToolResult {
+    let cmd = tool_arg(call, "cmd");
+    if let Some(why) = tools::is_dangerous_command(cmd) {
+        tracing::warn!(tool = %call.name, reason = %why, "blocked dangerous command");
+        return blocked_result(format!("BLOCKED (dangerous: {why}) — 拒绝执行 `{cmd}`"));
+    }
+    if let Some(message) = constraint_guard_shell(cmd) {
+        return blocked_result(message);
+    }
+    let result = match active_sandbox_cmd() {
+        Some(sandbox) => {
+            let cwd = std::env::current_dir()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+            tracing::debug!(sandbox = %sandbox, "run_shell via sandbox");
+            tools::run_argv(&sandbox_argv(&sandbox, cmd, &cwd))
+        }
+        None => {
+            let shell = tool_arg(call, "shell");
+            tools::run_shell_in((!shell.is_empty()).then_some(shell), cmd)
+        }
+    };
+    match result {
+        Ok(result) => {
+            let mut observation = format!(
+                "exit {}: {}{}",
+                result.code,
+                result.stdout.trim(),
+                result.stderr.trim()
+            );
+            if result.code != 0 {
+                let shell = tool_arg(call, "shell").to_lowercase();
+                let used = if shell.is_empty() {
+                    tools::default_shell()
+                } else {
+                    shell.as_str()
+                };
+                if let Some(hint) = unix_syntax_hint(cmd, used) {
+                    observation.push('\n');
+                    observation.push_str(hint);
+                }
+            }
+            tool_result(observation)
+        }
+        Err(error) => tool_result(format!("shell error: {error}")),
+    }
+}
+
+fn execute_write_file_tool(call: &ToolCall) -> ToolResult {
+    let path = tool_arg(call, "path");
+    if let Err(error) = jail(path) {
+        return blocked_result(error);
+    }
+    let contents = tool_arg(call, "contents");
+    if let Some(message) = constraint_guard_write(path, contents) {
+        return blocked_result(message);
+    }
+    match tools::write_file(path, contents) {
+        Ok(()) => tool_result(format!("wrote {} bytes to {path}", contents.len())),
+        Err(error) => tool_result(format!("write error: {error}")),
+    }
+}
+
+fn execute_edit_file_tool(call: &ToolCall) -> ToolResult {
+    let path = tool_arg(call, "path");
+    if let Err(error) = jail(path) {
+        return blocked_result(error);
+    }
+    match tools::edit_file(
+        path,
+        tool_arg(call, "old_string"),
+        tool_arg(call, "new_string"),
+    ) {
+        Ok(()) => tool_result(format!("edited {path}")),
+        Err(error) => tool_result(format!("edit error: {error}")),
+    }
+}
+
+fn execute_apply_edits_tool(call: &ToolCall) -> ToolResult {
+    let edits = parse_edits(call);
+    if edits.is_empty() {
+        return blocked_result("apply_edits error: 缺少 edits".to_string());
+    }
+    for edit in &edits {
+        if let Err(message) = jail(&edit.path) {
+            return blocked_result(message);
+        }
+    }
+    match tools::apply_edits(&edits) {
+        Ok(count) => tool_result(format!("applied {count} 个文件的批量编辑")),
+        Err(error) => tool_result(format!("apply_edits error: {error}")),
+    }
+}
+
+fn execute_read_file_tool(call: &ToolCall) -> ToolResult {
+    let number = |key: &str| call.arguments.get(key).and_then(|value| value.as_u64());
+    let (offset, limit) = (number("offset"), number("limit"));
+    let result = if offset.is_some() || limit.is_some() {
+        tools::read_file_range(
+            tool_arg(call, "path"),
+            offset.unwrap_or(1).max(1) as usize,
+            limit.unwrap_or(2000) as usize,
+        )
+    } else {
+        tools::read_file(tool_arg(call, "path"))
+    };
+    match result {
+        Ok(contents) => tool_result(contents),
+        Err(error) => tool_result(format!("read error: {error}")),
+    }
+}
+
+fn execute_search_tool(call: &ToolCall) -> ToolResult {
+    let value_or = |key: &str, default: &'static str| {
+        let value = tool_arg(call, key);
+        if value.is_empty() {
+            default.to_string()
+        } else {
+            value.to_string()
+        }
+    };
+    match tools::search(
+        value_or("path", "."),
+        tool_arg(call, "pattern"),
+        &value_or("glob", "*"),
+    ) {
+        Ok(contents) if contents.is_empty() => tool_result("(no matches)".to_string()),
+        Ok(contents) => tool_result(contents),
+        Err(error) => tool_result(format!("search error: {error}")),
+    }
+}
+
+fn execute_signal_tool(call: &ToolCall) -> ToolResult {
+    let resolve = tool_arg(call, "resolve");
+    if !resolve.is_empty() {
+        return match signal_resolve(SIGNALS_DIR, resolve) {
+            Ok(true) => blocked_result(format!("signal resolved: {resolve}")),
+            Ok(false) => blocked_result(format!("signal 未找到: {resolve}")),
+            Err(error) => blocked_result(format!("signal error: {error}")),
+        };
+    }
+    let body = tool_arg(call, "body");
+    if body.is_empty() {
+        return blocked_result("signal error: 缺少 body".to_string());
+    }
+    let kind = if tool_arg(call, "type").is_empty() {
+        "note"
+    } else {
+        tool_arg(call, "type")
+    };
+    match signal_create(SIGNALS_DIR, kind, body, "manual") {
+        Ok(id) => tool_result(format!("signal recorded: {id}")),
+        Err(error) => tool_result(format!("signal error: {error}")),
+    }
+}
+
+fn execute_tool_body(call: &ToolCall) -> ToolResult {
+    match call.name.as_str() {
+        "run_shell" => execute_shell_tool(call),
+        "write_file" => execute_write_file_tool(call),
+        "edit_file" => execute_edit_file_tool(call),
+        "apply_edits" => execute_apply_edits_tool(call),
+        "read_file" => execute_read_file_tool(call),
+        "search" => execute_search_tool(call),
+        "todo_write" => tool_result(format!("已更新任务清单 {} 项", parse_todos(call).len())),
+        "signal_write" => execute_signal_tool(call),
+        other => tool_result(format!(
+            "tool error: 未知工具 `{other}`;请只调用系统所列工具"
+        )),
+    }
+}
+
 pub fn execute_tool_call(call: &ToolCall) -> String {
-    // pre_tool hook(iter-40):blocking hook 拒绝 → 不执行工具。
     if let Some(blocked) = run_pre_tool_hooks(call) {
         return blocked;
     }
-    // 可观测(iter-44):核心动作埋点。`RUST_LOG=agent=debug` 可观 agent 每步工具调用。
     tracing::debug!(tool = %call.name, "tool call");
-    let arg = |k: &str| call.arguments.get(k).and_then(|v| v.as_str()).unwrap_or("");
-    let obs = match call.name.as_str() {
-        "run_shell" => {
-            let cmd = arg("cmd");
-            // 危险命令拦截:即使用户批准也拒绝(无沙箱阶段的安全硬门槛)。
-            if let Some(why) = tools::is_dangerous_command(cmd) {
-                tracing::warn!(tool = %call.name, reason = %why, "blocked dangerous command");
-                return format!("BLOCKED (dangerous: {why}) —— 拒绝执行 `{cmd}`");
-            }
-            // 约束守卫:删/清空受保护路径(测试)→ 拒(防奖励黑客)。
-            if let Some(m) = constraint_guard_shell(cmd) {
-                return m;
-            }
-            // 外置沙箱包裹(iter-46):配了 sandbox_cmd → 经它跑(真隔离交平台);否则宿主直跑。
-            // 危险命令拦截/约束守卫已在上方先过 —— 沙箱是叠加的纵深防御,非替换。
-            let result = match active_sandbox_cmd() {
-                Some(sb) => {
-                    let cwd = std::env::current_dir()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default();
-                    tracing::debug!(sandbox = %sb, "run_shell via sandbox");
-                    tools::run_argv(&sandbox_argv(&sb, cmd, &cwd))
-                }
-                None => {
-                    // 模型自主择 shell(iter-51):`shell` 字段选执行器,省则宿主默认(host_env 块已告知可用项)。
-                    let shell = arg("shell");
-                    tools::run_shell_in((!shell.is_empty()).then_some(shell), cmd)
-                }
-            };
-            match result {
-                Ok(r) => {
-                    let mut obs =
-                        format!("exit {}: {}{}", r.code, r.stdout.trim(), r.stderr.trim());
-                    // 失败且疑似把 Unix/bash 语法用在 PowerShell → 附纠错提示,助弱模型一次自愈,
-                    // 省掉「ls -la 条条失败」式空耗步(半途而废主因之一)。
-                    if r.code != 0 {
-                        let shell = arg("shell").to_lowercase();
-                        let used = if shell.is_empty() {
-                            tools::default_shell()
-                        } else {
-                            shell.as_str()
-                        };
-                        if let Some(hint) = unix_syntax_hint(cmd, used) {
-                            obs.push('\n');
-                            obs.push_str(hint);
-                        }
-                    }
-                    obs
-                }
-                Err(e) => format!("shell error: {e}"),
-            }
-        }
-        "write_file" => {
-            if let Err(e) = jail(arg("path")) {
-                return e;
-            }
-            let contents = arg("contents");
-            // 约束守卫:往受保护路径(测试)写空内容 = 清空测试 → 拒(防奖励黑客)。
-            if let Some(m) = constraint_guard_write(arg("path"), contents) {
-                return m;
-            }
-            match tools::write_file(arg("path"), contents) {
-                Ok(()) => format!("wrote {} bytes to {}", contents.len(), arg("path")),
-                Err(e) => format!("write error: {e}"),
-            }
-        }
-        "edit_file" => {
-            if let Err(e) = jail(arg("path")) {
-                return e;
-            }
-            match tools::edit_file(arg("path"), arg("old_string"), arg("new_string")) {
-                Ok(()) => format!("edited {}", arg("path")),
-                Err(e) => format!("edit error: {e}"),
-            }
-        }
-        "apply_edits" => {
-            let edits = parse_edits(call);
-            if edits.is_empty() {
-                return "apply_edits error: 缺少 edits".to_string();
-            }
-            // 沙箱:任一路径越狱 → 整批拒(与 apply_edits 的原子性一致,不留半成品)。
-            for e in &edits {
-                if let Err(msg) = jail(&e.path) {
-                    return msg;
-                }
-            }
-            match tools::apply_edits(&edits) {
-                Ok(n) => format!("applied {n} 个文件的批量编辑"),
-                Err(e) => format!("apply_edits error: {e}"),
-            }
-        }
-        "read_file" => {
-            let num = |k: &str| call.arguments.get(k).and_then(|v| v.as_u64());
-            let (off, lim) = (num("offset"), num("limit"));
-            let res = if off.is_some() || lim.is_some() {
-                tools::read_file_range(
-                    arg("path"),
-                    off.unwrap_or(1).max(1) as usize,
-                    lim.unwrap_or(2000) as usize,
-                )
-            } else {
-                tools::read_file(arg("path"))
-            };
-            match res {
-                Ok(c) => c,
-                Err(e) => format!("read error: {e}"),
-            }
-        }
-        "search" => {
-            let or = |k: &str, d: &'static str| {
-                let v = arg(k);
-                if v.is_empty() {
-                    d.to_string()
-                } else {
-                    v.to_string()
-                }
-            };
-            match tools::search(or("path", "."), arg("pattern"), &or("glob", "*")) {
-                Ok(s) if s.is_empty() => "(no matches)".to_string(),
-                Ok(s) => s,
-                Err(e) => format!("search error: {e}"),
-            }
-        }
-        // 状态更新在 act 节点(发 SetTodos patch);这里只回个观察摘要。
-        "todo_write" => format!("已更新任务清单:{} 项", parse_todos(call).len()),
-        "signal_write" => {
-            let resolve = arg("resolve");
-            if !resolve.is_empty() {
-                return match signal_resolve(SIGNALS_DIR, resolve) {
-                    Ok(true) => format!("signal resolved: {resolve}"),
-                    Ok(false) => format!("signal 未找到: {resolve}"),
-                    Err(e) => format!("signal error: {e}"),
-                };
-            }
-            let body = arg("body");
-            if body.is_empty() {
-                return "signal error: 缺少 body".to_string();
-            }
-            let kind = if arg("type").is_empty() {
-                "note"
-            } else {
-                arg("type")
-            };
-            match signal_create(SIGNALS_DIR, kind, body, "manual") {
-                Ok(id) => format!("signal recorded: {id}"),
-                Err(e) => format!("signal error: {e}"),
-            }
-        }
-        // 未知/幻觉工具名:归一化为 **error**(含 " error:" → 喂失败信号 + 熔断计数),
-        // 并提示只调系统所列工具。此前回 "unknown tool" 不含判据词 → 幻觉工具静默空转不计错。
-        other => format!("tool error: 未知工具 `{other}`;请只调用系统所列工具"),
-    };
-    run_post_tool_hooks(call); // post_tool hook(iter-40):工具跑完 fire-and-forget(如写后格式化)。
-    tracing::debug!(tool = %call.name, ok = !obs.contains(" error:"), "tool done");
-    obs
+    let result = execute_tool_body(call);
+    if result.run_post_hooks {
+        run_post_tool_hooks(call);
+    }
+    tracing::debug!(
+        tool = %call.name,
+        ok = !result.observation.contains(" error:"),
+        "tool done"
+    );
+    result.observation
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{builtin_tool_specs, durable_updates, execute_tool_call, unix_syntax_hint};
     use crate::brain::{tool_output_failed, tool_output_ok};
     use crate::context::durable_state_block;
-    use crate::*;
+    use crate::exec::is_error_observation;
+    use crate::observe::preview_call;
+    use crate::{build_llm_agent_gated, shell_tool, AgentState, AutoDeny, McpTools, MAX_STEPS};
     use langgraph::GraphState;
+    use provider::ToolCall;
     use std::sync::Arc;
 
     /// Unix 语法撞 PowerShell 的纠错提示:命中 bash 特征且用 PS/cmd → 提示;已用 bash 或本就是 PS 命令 → 不提示。
@@ -662,7 +719,7 @@ mod tests {
     /// P3 权限门:AutoDeny → 有副作用的工具不执行,观察为 permission denied,拿不到成功信号。
     #[tokio::test]
     async fn permission_gate_blocks_denied_tool() {
-        use provider::{Completion, ScriptedProvider};
+        use provider::{Completion, ScriptedProvider, ToolCall};
         let scripted = ScriptedProvider::new(vec![
             Completion {
                 tool_calls: vec![ToolCall {

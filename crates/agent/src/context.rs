@@ -1,4 +1,4 @@
-use crate::state::*;
+use crate::state::{AgentState, EXPLORE_NUDGE_AFTER};
 use provider::{repair_tool_history, Message, Role};
 
 /// 把当前状态铺成给 provider 的消息序列:system(含注入的技能)+ **真实多轮 history**
@@ -144,10 +144,14 @@ pub fn compact_history(history: Vec<Message>, keep: usize) -> Vec<Message> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        bound_observation, compact_history, context_rotted, est_tokens, to_messages,
+        AUTO_COMPACT_KEEP, CONTEXT_ROT_TOKENS, OBS_CHAR_CAP,
+    };
     use crate::brain::{tool_output_failed, tool_output_ok};
     use crate::exec::is_error_observation;
-    use crate::*;
+    use crate::state::{AgentState, EXPLORE_NUDGE_AFTER};
+    use provider::{Message, Role};
 
     /// 上下文腐烂判定:小历史不腐烂;单条超硬上限的巨消息(压不掉)→ 腐烂。
     #[test]

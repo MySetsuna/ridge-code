@@ -2,6 +2,12 @@ name: quality-gate
 
 on:
   workflow_call:
+    inputs:
+      run_sonar:
+        description: Run the local SonarQube scan on the selected runner
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
 
 permissions:
@@ -9,7 +15,7 @@ permissions:
 
 jobs:
   quality:
-    name: coverage + Sonar quality gate
+    name: coverage + local Sonar quality gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,15 +39,35 @@ jobs:
           cargo llvm-cov --workspace --all-features --locked --lcov --output-path target/quality/lcov.info --fail-under-lines 80
           test -s target/quality/lcov.info
           test -s target/quality/clippy.json
-      - name: Require Sonar token
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        run: test -n "$SONAR_TOKEN"
-      - name: SonarQube Cloud scan and quality gate
-        uses: SonarSource/sonarqube-scan-action@v7
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      - name: Upload Sonar reports
+        uses: actions/upload-artifact@v4
         with:
-          args: >-
-            -Dsonar.qualitygate.wait=true
-            -Dsonar.qualitygate.timeout=300
+          name: sonar-quality-reports
+          path: target/quality
+          if-no-files-found: error
+
+  sonar:
+    name: local SonarQube quality gate
+    if: ${{ inputs.run_sonar }}
+    needs: quality
+    runs-on: [self-hosted, ridgecode-sonar]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: sonar-quality-reports
+          path: target/quality
+      - name: Install SonarScanner
+        run: npm install --global @sonar/scan@5.0.0
+      - name: Require local Sonar token
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: node -e "if (!process.env.SONAR_TOKEN) process.exit(1)"
+      - name: Local SonarQube scan and quality gate
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          NO_PROXY: localhost,127.0.0.1
+          no_proxy: localhost,127.0.0.1
+        run: sonar-scanner-npm -Dsonar.host.url=http://localhost:9000 -Dsonar.qualitygate.wait=true -Dsonar.qualitygate.timeout=300

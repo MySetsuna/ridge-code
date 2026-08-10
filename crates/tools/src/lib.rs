@@ -184,31 +184,46 @@ fn search_dir(
     out: &mut Vec<String>,
 ) -> io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let ft = entry.file_type()?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let path = entry.path();
-        if ft.is_dir() {
-            if !SKIP_DIRS.contains(&name.as_ref()) {
-                search_dir(base, &path, needle, glob, out)?;
-            }
-        } else if ft.is_file() && glob_match(glob, &name) {
-            // 读不成 UTF-8(二进制)就跳过,别把搜索搞挂。
-            if let Ok(content) = read_file(&path) {
-                let rel = path.strip_prefix(base).unwrap_or(&path);
-                for (i, line) in content.lines().enumerate() {
-                    if line.contains(needle) {
-                        out.push(format!("{}:{}:{}", rel.display(), i + 1, line.trim_end()));
-                        if out.len() > SEARCH_CAP {
-                            return Ok(());
-                        }
-                    }
-                }
-            }
+        if search_entry(base, entry?, needle, glob, out)? {
+            return Ok(());
         }
     }
     Ok(())
+}
+
+fn search_entry(
+    base: &Path,
+    entry: std::fs::DirEntry,
+    needle: &str,
+    glob: &str,
+    out: &mut Vec<String>,
+) -> io::Result<bool> {
+    let file_type = entry.file_type()?;
+    let name = entry.file_name();
+    let name = name.to_string_lossy();
+    let path = entry.path();
+    if file_type.is_dir() {
+        if !SKIP_DIRS.contains(&name.as_ref()) {
+            search_dir(base, &path, needle, glob, out)?;
+        }
+    } else if file_type.is_file() && glob_match(glob, &name) {
+        append_file_matches(base, &path, needle, out);
+    }
+    Ok(out.len() > SEARCH_CAP)
+}
+
+fn append_file_matches(base: &Path, path: &Path, needle: &str, out: &mut Vec<String>) {
+    // 读不成 UTF-8(二进制)就跳过,别把搜索搞挂。
+    let Ok(content) = read_file(path) else { return };
+    let rel = path.strip_prefix(base).unwrap_or(path);
+    for (i, line) in content.lines().enumerate() {
+        if line.contains(needle) {
+            out.push(format!("{}:{}:{}", rel.display(), i + 1, line.trim_end()));
+            if out.len() > SEARCH_CAP {
+                return;
+            }
+        }
+    }
 }
 
 /// 极简 glob:`*` / `*.rs`(后缀)/ `main.*`(前缀)/ 精确名;`**/` 递归前缀等价于无前缀
@@ -363,7 +378,7 @@ pub fn available_shells() -> Vec<String> {
 pub const SHELLS: [&str; 5] = ["cmd", "powershell", "pwsh", "bash", "sh"];
 
 /// 按选定 shell 构造 `Command`(纯映射,不执行)。未知/空 → 宿主默认。
-/// PowerShell 分支强制 `OutputEncoding=UTF8`:令 `from_utf8_lossy` 见到 UTF-8、不再产 `�` 乱码
+/// PowerShell 分支强制 `OutputEncoding=UTF8`:令 `from_utf8_lossy` 见到 UTF-8、不再产 `U+FFFD` 乱码
 /// (Windows 中文机 cmd 输出为 GBK/936,是先前报错乱码之根)。
 fn shell_command(shell: Option<&str>, cmd: &str) -> Command {
     let lowered = shell.map(|s| s.trim().to_lowercase());
@@ -553,7 +568,13 @@ fn terminate_process_tree(child: &mut std::process::Child) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        apply_edits, available_shells, default_shell, edit_file, edits_diff, glob_match,
+        is_dangerous_command, jail_path, read_file, read_file_range, run_shell, run_shell_in,
+        run_shell_in_with_timeout, search, write_file, Edit,
+    };
+    use std::path::Path;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn write_then_read_roundtrips() {

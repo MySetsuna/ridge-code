@@ -1,4 +1,4 @@
-use crate::config::*;
+use crate::config::HookCfg;
 use provider::ToolCall;
 
 /// 地址越狱开关(iter-34):进程级,默认 **关**。开则 `jail` 放行 cwd 子树外的写。
@@ -112,34 +112,47 @@ pub(crate) fn active_sandbox_cmd() -> Option<String> {
 }
 
 /// 引号感知分词(纯):`"..."`/`'...'` 内空白保留,裸词按空白切。给 sandbox_cmd 模板拆 argv。
+fn consume_sandbox_char(
+    c: char,
+    current: &mut String,
+    started: &mut bool,
+    quote: &mut Option<char>,
+) -> bool {
+    if let Some(q) = *quote {
+        if c == q {
+            *quote = None;
+        } else {
+            current.push(c);
+        }
+        return false;
+    }
+    match c {
+        '"' | '\'' => {
+            *quote = Some(c);
+            *started = true;
+        }
+        c if c.is_whitespace() => {
+            if *started {
+                *started = false;
+                return true;
+            }
+        }
+        c => {
+            current.push(c);
+            *started = true;
+        }
+    }
+    false
+}
+
 pub fn sandbox_split(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut started = false;
     let mut quote: Option<char> = None;
     for c in s.chars() {
-        match quote {
-            Some(q) => {
-                if c == q {
-                    quote = None;
-                } else {
-                    cur.push(c);
-                }
-            }
-            None => {
-                if c == '"' || c == '\'' {
-                    quote = Some(c);
-                    started = true;
-                } else if c.is_whitespace() {
-                    if started {
-                        out.push(std::mem::take(&mut cur));
-                        started = false;
-                    }
-                } else {
-                    cur.push(c);
-                    started = true;
-                }
-            }
+        if consume_sandbox_char(c, &mut cur, &mut started, &mut quote) {
+            out.push(std::mem::take(&mut cur));
         }
     }
     if started {
@@ -286,8 +299,11 @@ pub fn fire_session_hooks(event: &str, detail: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::*;
+    use super::{
+        audit_line, constraint_guard_shell, constraint_guard_write, hook_is_safe, hooks_for_event,
+        is_mutating_tool, jail_guard, read_only_block, sandbox_argv, sandbox_split,
+    };
+    use crate::{builtin_tool_specs, Config};
 
     /// iter-46:sandbox_cmd 模板引号感知分词。
     #[test]

@@ -215,78 +215,31 @@ impl MediaDisplay {
 
     /// 展示媒体信息
     pub fn display(&self, media: &MediaInfo) {
-        match media.media_type {
-            MediaType::Image => {
+        let (icon, label, show_size) = Self::media_presentation(&media.media_type);
+        self.output
+            .print_with_prefix(icon, &format!("{label}: {}", media.path));
+        if show_size {
+            if let Some(size) = media.size {
                 self.output
-                    .print_with_prefix("🖼️", &format!("图片: {}", media.path));
-                if let Some(size) = media.size {
-                    self.output
-                        .print_with_prefix("📏", &format!("大小: {} bytes", size));
-                }
-                if let Some(desc) = &media.description {
-                    self.output.print_with_prefix("📝", desc);
-                }
-                self.output.print_with_prefix(
-                    "🔗",
-                    &format!("路径: `file://{}{}`", media.path, Color::reset()),
-                );
+                    .print_with_prefix("📏", &format!("大小: {size} bytes"));
             }
-            MediaType::Video => {
-                self.output
-                    .print_with_prefix("🎬", &format!("视频: {}", media.path));
-                if let Some(size) = media.size {
-                    self.output
-                        .print_with_prefix("📏", &format!("大小: {} bytes", size));
-                }
-                if let Some(desc) = &media.description {
-                    self.output.print_with_prefix("📝", desc);
-                }
-                self.output.print_with_prefix(
-                    "🔗",
-                    &format!("路径: `file://{}{}`", media.path, Color::reset()),
-                );
-            }
-            MediaType::Audio => {
-                self.output
-                    .print_with_prefix("🎵", &format!("音频: {}", media.path));
-                if let Some(size) = media.size {
-                    self.output
-                        .print_with_prefix("📏", &format!("大小: {} bytes", size));
-                }
-                if let Some(desc) = &media.description {
-                    self.output.print_with_prefix("📝", desc);
-                }
-                self.output.print_with_prefix(
-                    "🔗",
-                    &format!("路径: `file://{}{}`", media.path, Color::reset()),
-                );
-            }
-            MediaType::File => {
-                self.output
-                    .print_with_prefix("📄", &format!("文件: {}", media.path));
-                if let Some(size) = media.size {
-                    self.output
-                        .print_with_prefix("📏", &format!("大小: {} bytes", size));
-                }
-                if let Some(desc) = &media.description {
-                    self.output.print_with_prefix("📝", desc);
-                }
-                self.output.print_with_prefix(
-                    "🔗",
-                    &format!("路径: `file://{}{}`", media.path, Color::reset()),
-                );
-            }
-            MediaType::Directory => {
-                self.output
-                    .print_with_prefix("📁", &format!("目录: {}", media.path));
-                if let Some(desc) = &media.description {
-                    self.output.print_with_prefix("📝", desc);
-                }
-                self.output.print_with_prefix(
-                    "🔗",
-                    &format!("路径: `file://{}{}`", media.path, Color::reset()),
-                );
-            }
+        }
+        if let Some(description) = &media.description {
+            self.output.print_with_prefix("📝", description);
+        }
+        self.output.print_with_prefix(
+            "🔗",
+            &format!("路径: \x60file://{}{}\x60", media.path, Color::reset()),
+        );
+    }
+
+    fn media_presentation(media_type: &MediaType) -> (&'static str, &'static str, bool) {
+        match media_type {
+            MediaType::Image => ("🖼️", "图片", true),
+            MediaType::Video => ("🎬", "视频", true),
+            MediaType::Audio => ("🎵", "音频", true),
+            MediaType::File => ("📄", "文件", true),
+            MediaType::Directory => ("📁", "目录", false),
         }
     }
 }
@@ -419,7 +372,7 @@ impl Formatter {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Color, Formatter, MediaDisplay, MediaInfo, MediaType, RichOutput, TableDisplay};
     use std::fs;
 
     #[test]

@@ -1,4 +1,36 @@
-use super::*;
+use std::collections::VecDeque;
+use std::io;
+use std::sync::mpsc;
+
+use agent::{est_tokens, Approver, Todo};
+use ratatui::{
+    backend::Backend,
+    style::{Color, Modifier},
+    text::{Line, Text},
+    widgets::Paragraph,
+    Terminal,
+};
+
+use super::{
+    activity_commit_lines, activity_panel, answer_history_panel, colored_commit_lines,
+    commit_lines, commit_lines_with_answer_metrics,
+    input::{ApprovalRequest, InputState, Popup},
+    live_history_panel_with_queue,
+    panel::{Panel, PanelKind, PanelRowAction},
+    presentation::{
+        PresentationChannel, PresentationId, PresentationLedger, PresentationMetrics,
+        PresentationStatus,
+    },
+    queue_panel, reasoning_commit_lines, reasoning_history_panel,
+    render::{sanitize_display_text, SPLASH_TICKS},
+    role_color, static_tool_lines, tool_history_panel,
+    transcript::{LiveBlockFocus, LiveChannel, LiveTranscript, ToolBlock},
+    ModelCatalog, Role, MAX_TOOL_HISTORY,
+};
+#[cfg(test)]
+use super::{activity_commit_text, activity_role, reasoning_commit_text};
+use crate::{DeviceOAuthFlow, LocalOAuthCallback};
+use ratatui::widgets::{Widget, Wrap};
 pub(crate) struct TuiApprover {
     pub(crate) tx: tokio::sync::mpsc::UnboundedSender<ApprovalRequest>,
 }
@@ -113,6 +145,8 @@ pub(crate) enum ActivityKind {
     Error,
 }
 
+type ActivityClassifier = (fn(&str, &str, &str) -> bool, ActivityKind);
+
 impl ActivityKind {
     /// Compact ASCII tags stay legible in narrow terminals and remain useful
     /// when Nerd Fonts or emoji glyphs are unavailable.
@@ -158,77 +192,103 @@ impl ActivityKind {
     fn from_text(text: &str) -> Self {
         let trimmed = text.trim();
         let lower = text.to_ascii_lowercase();
-        if matches!(
-            lower.as_str(),
-            "starting task" | "task started" | "beginning task"
-        ) || matches!(trimmed, "开始任务" | "任务开始")
-        {
-            Self::Run
-        } else if lower.contains("approval") || text.contains("审批") || text.contains("授权") {
-            Self::Approval
-        } else if lower.contains("waiting") || text.contains("等待") {
-            Self::Waiting
-        } else if lower.contains("takeover") || text.contains("接管") {
-            Self::Takeover
-        } else if lower.starts_with("queued")
-            || lower.starts_with("front-queued")
-            || text.starts_with("排队")
-            || text.starts_with("队列")
-        {
-            Self::Queue
-        } else if lower.contains("error")
-            || lower.contains("failed")
-            || lower.contains("failure")
-            || lower.contains("not approved")
-            || text.contains("错误")
-            || text.contains("失败")
-        {
-            Self::Error
-        } else if lower.contains("completed")
-            || lower.contains("approved")
-            || lower.contains("done")
-            || text.contains("完成")
-        {
-            Self::Completed
-        } else if lower.contains("settling")
-            || lower.contains("conclusion")
-            || lower.contains("synthes")
-            || lower.contains("wrapping up")
-            || text.contains("结论")
-            || text.contains("总结")
-            || text.contains("收敛")
-        {
-            Self::Conclusion
-        } else if lower.contains("verify")
-            || lower.contains("checker")
-            || text.contains("验证")
-            || text.contains("检查")
-        {
-            Self::Verification
-        } else if lower.contains("thinking")
-            || lower.contains("reasoning")
-            || lower.contains("investigat")
-            || lower.contains("survey")
-            || lower.contains("analysis")
-            || lower.contains("reason")
-            || text.contains("调查")
-            || text.contains("分析")
-            || text.contains("推理")
-            || text.contains("思考")
-        {
-            Self::Reasoning
-        } else if lower.contains("answering") || text.contains("回答") || text.contains("答复")
-        {
-            Self::Answer
-        } else if lower.contains("running tool")
-            || lower.starts_with("tool")
-            || text.starts_with("工具")
-        {
-            Self::Tool
-        } else {
-            Self::System
-        }
+        let classifiers: [ActivityClassifier; 12] = [
+            (is_run_activity, Self::Run),
+            (is_approval_activity, Self::Approval),
+            (is_waiting_activity, Self::Waiting),
+            (is_takeover_activity, Self::Takeover),
+            (is_queue_activity, Self::Queue),
+            (is_error_activity, Self::Error),
+            (is_completed_activity, Self::Completed),
+            (is_conclusion_activity, Self::Conclusion),
+            (is_verification_activity, Self::Verification),
+            (is_reasoning_activity, Self::Reasoning),
+            (is_answer_activity, Self::Answer),
+            (is_tool_activity, Self::Tool),
+        ];
+        classifiers
+            .into_iter()
+            .find_map(|(matches, kind)| matches(text, trimmed, &lower).then_some(kind))
+            .unwrap_or(Self::System)
     }
+}
+
+fn is_run_activity(_text: &str, trimmed: &str, lower: &str) -> bool {
+    matches!(lower, "starting task" | "task started" | "beginning task")
+        || matches!(trimmed, "开始任务" | "任务开始")
+}
+
+fn is_approval_activity(text: &str, _trimmed: &str, lower: &str) -> bool {
+    lower.contains("approval") || text.contains("审批") || text.contains("授权")
+}
+
+fn is_waiting_activity(text: &str, _trimmed: &str, lower: &str) -> bool {
+    lower.contains("waiting") || text.contains("等待")
+}
+
+fn is_takeover_activity(text: &str, _trimmed: &str, lower: &str) -> bool {
+    lower.contains("takeover") || text.contains("接管")
+}
+
+fn is_queue_activity(text: &str, _trimmed: &str, lower: &str) -> bool {
+    lower.starts_with("queued")
+        || lower.starts_with("front-queued")
+        || text.starts_with("排队")
+        || text.starts_with("队列")
+}
+
+fn is_error_activity(text: &str, _trimmed: &str, lower: &str) -> bool {
+    lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("failure")
+        || lower.contains("not approved")
+        || text.contains("错误")
+        || text.contains("失败")
+}
+
+fn is_completed_activity(text: &str, _trimmed: &str, lower: &str) -> bool {
+    lower.contains("completed")
+        || lower.contains("approved")
+        || lower.contains("done")
+        || text.contains("完成")
+}
+
+fn is_conclusion_activity(text: &str, _trimmed: &str, lower: &str) -> bool {
+    lower.contains("settling")
+        || lower.contains("conclusion")
+        || lower.contains("synthes")
+        || lower.contains("wrapping up")
+        || text.contains("结论")
+        || text.contains("总结")
+        || text.contains("收敛")
+}
+
+fn is_verification_activity(text: &str, _trimmed: &str, lower: &str) -> bool {
+    lower.contains("verify")
+        || lower.contains("checker")
+        || text.contains("验证")
+        || text.contains("检查")
+}
+
+fn is_reasoning_activity(text: &str, _trimmed: &str, lower: &str) -> bool {
+    lower.contains("thinking")
+        || lower.contains("reasoning")
+        || lower.contains("investigat")
+        || lower.contains("survey")
+        || lower.contains("analysis")
+        || lower.contains("reason")
+        || text.contains("调查")
+        || text.contains("分析")
+        || text.contains("推理")
+        || text.contains("思考")
+}
+
+fn is_answer_activity(text: &str, _trimmed: &str, lower: &str) -> bool {
+    lower.contains("answering") || text.contains("回答") || text.contains("答复")
+}
+
+fn is_tool_activity(text: &str, _trimmed: &str, lower: &str) -> bool {
+    lower.contains("running tool") || lower.starts_with("tool") || text.starts_with("工具")
 }
 
 #[derive(Clone, Debug)]

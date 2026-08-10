@@ -23,16 +23,21 @@ cargo llvm-cov --workspace --all-features --locked --lcov \
 test -s "${LCOV_PATH}"
 test -s "${QUALITY_DIR}/clippy.json"
 
-command -v sonar-scanner >/dev/null 2>&1 || {
-  echo "sonar-scanner is required; the quality gate cannot skip Sonar" >&2
+SONAR_SCANNER_BIN="$(command -v sonar-scanner || command -v sonar-scanner-npm || true)"
+test -n "${SONAR_SCANNER_BIN}" || {
+  echo "sonar-scanner or sonar-scanner-npm is required; the quality gate cannot skip Sonar" >&2
   exit 1
 }
 test -n "${SONAR_TOKEN:-}" || {
   echo "SONAR_TOKEN is required; the quality gate cannot run unauthenticated" >&2
   exit 1
 }
-sonar-scanner \
-  "-Dsonar.host.url=${SONAR_HOST_URL:-https://sonarcloud.io}" \
+if [[ "${SONAR_HOST_URL:-http://localhost:9000}" =~ ^https?://(localhost|127\.0\.0\.1)(:|/|$) ]]; then
+  export NO_PROXY="${NO_PROXY:+${NO_PROXY},}localhost,127.0.0.1"
+  export no_proxy="${NO_PROXY}"
+fi
+"${SONAR_SCANNER_BIN}" \
+  "-Dsonar.host.url=${SONAR_HOST_URL:-http://localhost:9000}" \
   -Dsonar.qualitygate.wait=true \
   -Dsonar.qualitygate.timeout=300
 echo "Quality gate passed: line coverage >= ${MIN_LINE_COVERAGE}% and Sonar quality gate passed."

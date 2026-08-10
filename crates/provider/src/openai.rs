@@ -128,21 +128,8 @@ pub fn salvage_text_tool_calls(text: &str) -> (Vec<ToolCall>, String) {
 fn parse_one_text_tool_call(inner: &str, idx: usize) -> Option<ToolCall> {
     let id = format!("salvaged-{idx}");
     // ① 整块 JSON:{"name": "...", "arguments": {…}|"…"}
-    if let Ok(v) = serde_json::from_str::<Value>(inner) {
-        if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
-            let arguments = match v.get("arguments") {
-                Some(Value::String(s)) => {
-                    serde_json::from_str(s).unwrap_or_else(|_| Value::Object(Default::default()))
-                }
-                Some(other) => other.clone(),
-                None => Value::Object(Default::default()),
-            };
-            return Some(ToolCall {
-                id,
-                name: name.to_string(),
-                arguments,
-            });
-        }
+    if let Some(call) = parse_json_tool_call(inner, &id) {
+        return Some(call);
     }
     // ② GLM 文本格式:工具名在首个 `<` 之前;其后成对 <arg_key>k</arg_key> <arg_value>v</arg_value>。
     let name_end = inner.find('<').unwrap_or(inner.len());
@@ -160,6 +147,23 @@ fn parse_one_text_tool_call(inner: &str, idx: usize) -> Option<ToolCall> {
         id,
         name: name.to_string(),
         arguments: Value::Object(args),
+    })
+}
+
+fn parse_json_tool_call(inner: &str, id: &str) -> Option<ToolCall> {
+    let value = serde_json::from_str::<Value>(inner).ok()?;
+    let name = value.get("name")?.as_str()?;
+    let arguments = match value.get("arguments") {
+        Some(Value::String(s)) => {
+            serde_json::from_str(s).unwrap_or_else(|_| Value::Object(Default::default()))
+        }
+        Some(other) => other.clone(),
+        None => Value::Object(Default::default()),
+    };
+    Some(ToolCall {
+        id: id.to_string(),
+        name: name.to_string(),
+        arguments,
     })
 }
 
@@ -205,47 +209,69 @@ pub fn accumulate_stream<F: Fn(StreamChunk) + ?Sized>(
     on_token: &F,
 ) {
     let delta = &v["choices"][0]["delta"];
-    if let Some(reasoning) = delta["reasoning_content"].as_str() {
-        if !reasoning.is_empty() {
-            on_token(StreamChunk::Reasoning(reasoning.to_string()));
-            acc.reasoning.push_str(reasoning);
-        }
-    }
-    if let Some(content) = delta["content"].as_str() {
-        if !content.is_empty() {
-            on_token(StreamChunk::Answer(content.to_string()));
-            acc.text.push_str(content);
-        }
-    }
-    if let Some(tcs) = delta["tool_calls"].as_array() {
-        for tc in tcs {
-            let idx = tc["index"].as_u64().unwrap_or(0) as usize;
-            while acc.tool_calls.len() <= idx {
-                acc.tool_calls.push(ToolCallAcc::default());
-            }
-            let slot = &mut acc.tool_calls[idx];
-            if let Some(id) = tc["id"].as_str() {
-                if !id.is_empty() {
-                    slot.id = id.to_string();
-                }
-            }
-            if let Some(name) = tc["function"]["name"].as_str() {
-                if !name.is_empty() {
-                    slot.name = name.to_string();
-                }
-            }
-            if let Some(args) = tc["function"]["arguments"].as_str() {
-                slot.args.push_str(args);
-            }
-        }
-    }
+    append_text_delta(
+        acc,
+        delta,
+        "reasoning_content",
+        StreamChunk::Reasoning,
+        on_token,
+    );
+    append_text_delta(acc, delta, "content", StreamChunk::Answer, on_token);
+    append_tool_deltas(acc, delta);
     // usage 通常在最后一帧(choices 为空)带回(需请求里开 stream_options.include_usage)。
-    if let Some(u) = v.get("usage") {
-        if !u.is_null() {
-            acc.usage.prompt_tokens = u["prompt_tokens"].as_u64().unwrap_or(0) as u32;
-            acc.usage.completion_tokens = u["completion_tokens"].as_u64().unwrap_or(0) as u32;
-        }
+    update_usage(acc, v.get("usage"));
+}
+
+fn append_text_delta<F, C>(acc: &mut StreamAcc, delta: &Value, field: &str, chunk: C, on_token: &F)
+where
+    F: Fn(StreamChunk) + ?Sized,
+    C: Fn(String) -> StreamChunk,
+{
+    let Some(text) = delta[field].as_str().filter(|text| !text.is_empty()) else {
+        return;
+    };
+    on_token(chunk(text.to_string()));
+    if field == "content" {
+        acc.text.push_str(text);
+    } else {
+        acc.reasoning.push_str(text);
     }
+}
+
+fn append_tool_deltas(acc: &mut StreamAcc, delta: &Value) {
+    let Some(tool_calls) = delta["tool_calls"].as_array() else {
+        return;
+    };
+    for tool_call in tool_calls {
+        append_tool_delta(acc, tool_call);
+    }
+}
+
+fn append_tool_delta(acc: &mut StreamAcc, tool_call: &Value) {
+    let index = tool_call["index"].as_u64().unwrap_or(0) as usize;
+    while acc.tool_calls.len() <= index {
+        acc.tool_calls.push(ToolCallAcc::default());
+    }
+    let slot = &mut acc.tool_calls[index];
+    copy_non_empty(&mut slot.id, tool_call["id"].as_str());
+    copy_non_empty(&mut slot.name, tool_call["function"]["name"].as_str());
+    if let Some(arguments) = tool_call["function"]["arguments"].as_str() {
+        slot.args.push_str(arguments);
+    }
+}
+
+fn copy_non_empty(target: &mut String, value: Option<&str>) {
+    if let Some(value) = value.filter(|value| !value.is_empty()) {
+        *target = value.to_string();
+    }
+}
+
+fn update_usage(acc: &mut StreamAcc, usage: Option<&Value>) {
+    let Some(usage) = usage.filter(|usage| !usage.is_null()) else {
+        return;
+    };
+    acc.usage.prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+    acc.usage.completion_tokens = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
 }
 
 impl StreamAcc {
@@ -283,7 +309,8 @@ impl StreamAcc {
 
 #[cfg(test)]
 mod salvage_tests {
-    use super::*;
+    use super::{parse_response, salvage_text_tool_calls};
+    use serde_json::json;
 
     /// 实测病灶格式:GLM 把调用当纯文本吐(`<arg_key>`/`<arg_value>`),散文在前。
     #[test]

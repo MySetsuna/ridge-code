@@ -1,5 +1,5 @@
-use crate::knowledge::*;
-use crate::state::*;
+use crate::knowledge::Skill;
+use crate::state::{AgentState, Patch, MAX_ERR_STREAK, MAX_EXPLORE, MAX_STALL, MAX_STEPS};
 use langgraph::{CompiledGraph, GraphError, StateGraph, END};
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -327,9 +327,12 @@ pub(crate) async fn verify_node(s: AgentState) -> Result<Patch, Infallible> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    #[allow(unused_imports)]
-    use crate::*;
+    use super::{
+        build_system_prompt, build_system_prompt_with_mode, explore_exhausted, is_explore_tool,
+        is_land_edit_tool, must_stop, tool_output_failed, verify_failure_reason, verify_node,
+        AgentState, BASE_SYSTEM,
+    };
+    use crate::state::MAX_EXPLORE;
 
     /// 输出端省钱:BASE_SYSTEM 含 Lean-output 约束(简洁作答 + 只出最小编辑)。
     #[test]

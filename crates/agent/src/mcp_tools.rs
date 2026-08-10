@@ -1,5 +1,5 @@
-use crate::rich_output::*;
-use crate::state::*;
+use crate::rich_output::{Color, RichOutput};
+use crate::state::Todo;
 use mcp::McpClient;
 use provider::ToolSpec;
 use std::collections::HashMap;
@@ -106,8 +106,9 @@ pub fn render_todos(todos: &[Todo]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::*;
+    use super::{expand_mentions, render_todos};
+    use crate::exec::{execute_tool_call, parse_todos};
+    use crate::needs_approval;
     use provider::ToolCall;
 
     /// todo_write:解析 todos + 渲染 checklist + 只读不走权限门。

@@ -1,6 +1,16 @@
 use std::borrow::Cow;
 
-use super::*;
+use agent::Todo;
+use ratatui::{
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+};
+
+use super::presentation::PresentationMetrics;
+use super::{
+    bound_answer_history_text, bound_reasoning_history_text, fmt_reasoning_meta,
+    wrap_live_spans_greedy, ActivityKind, ToolBlock,
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// 要不要画这一帧:有状态变更(dirty)或显式动画需求才画;业务 busy 不直接拥有渲染决策。
@@ -338,55 +348,52 @@ pub(crate) fn inline_md_spans(text: &str) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut rest = text;
     loop {
-        let tick = rest.find('`');
-        let bold = rest.find("**");
-        let (pos, is_tick) = match (tick, bold) {
-            (None, None) => {
-                if !rest.is_empty() {
-                    spans.push(Span::raw(rest.to_owned()));
-                }
-                break;
+        let Some((pos, is_tick)) = next_inline_marker(rest) else {
+            if !rest.is_empty() {
+                spans.push(Span::raw(rest.to_owned()));
             }
-            (Some(t), Some(b)) if t <= b => (t, true),
-            (Some(t), None) => (t, true),
-            (_, Some(b)) => (b, false),
+            break;
         };
         if pos > 0 {
             spans.push(Span::raw(rest[..pos].to_owned()));
         }
-        if is_tick {
-            match rest[pos + 1..].find('`') {
-                Some(end) => {
-                    let inner = &rest[pos + 1..pos + 1 + end];
-                    spans.push(Span::styled(
-                        inner.to_owned(),
-                        Style::default().fg(role_color(Role::Warn)),
-                    ));
-                    rest = &rest[pos + 1 + end + 1..];
-                }
-                None => {
-                    spans.push(Span::raw(rest[pos..].to_owned()));
-                    break;
-                }
-            }
-        } else {
-            match rest[pos + 2..].find("**") {
-                Some(end) => {
-                    let inner = &rest[pos + 2..pos + 2 + end];
-                    spans.push(Span::styled(
-                        inner.to_owned(),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ));
-                    rest = &rest[pos + 2 + end + 2..];
-                }
-                None => {
-                    spans.push(Span::raw(rest[pos..].to_owned()));
-                    break;
-                }
-            }
-        }
+        let Some((span, next)) = consume_inline_marker(rest, pos, is_tick) else {
+            spans.push(Span::raw(rest[pos..].to_owned()));
+            break;
+        };
+        spans.push(span);
+        rest = &rest[next..];
     }
     spans
+}
+
+fn next_inline_marker(text: &str) -> Option<(usize, bool)> {
+    match (text.find(char::from(96)), text.find("**")) {
+        (None, None) => None,
+        (Some(tick), Some(bold)) if tick <= bold => Some((tick, true)),
+        (Some(tick), None) => Some((tick, true)),
+        (_, Some(bold)) => Some((bold, false)),
+    }
+}
+
+fn consume_inline_marker(
+    text: &str,
+    position: usize,
+    is_tick: bool,
+) -> Option<(Span<'static>, usize)> {
+    let delimiter_len = usize::from(!is_tick) + 1;
+    let suffix = &text[position + delimiter_len..];
+    let end = if is_tick {
+        suffix.find(char::from(96))?
+    } else {
+        suffix.find("**")?
+    };
+    let inner = suffix[..end].to_owned();
+    let span = match is_tick {
+        true => Span::styled(inner, Style::default().fg(role_color(Role::Warn))),
+        false => Span::styled(inner, Style::default().add_modifier(Modifier::BOLD)),
+    };
+    Some((span, position + delimiter_len + end + delimiter_len))
 }
 
 fn markdown_quote_prefix(line: &str) -> Option<(String, &str)> {
@@ -511,29 +518,42 @@ where
     let mut edges = vec![None; lines.len()];
     let mut index = 0;
     while index < lines.len() {
-        if markdown_alert_role(alert_body(lines[index])).is_none() {
+        if !is_alert_start(lines[index]) {
             index += 1;
             continue;
         }
-        let mut end = index;
-        while end + 1 < lines.len() && is_alert_continuation(lines[end + 1]) {
-            end += 1;
-        }
-        if end == index {
-            edges[index] = Some(AlertEdge::Single);
-        } else {
-            edges[index] = Some(AlertEdge::Top);
-            for (offset, edge) in edges[index + 1..=end].iter_mut().enumerate() {
-                *edge = Some(if index + 1 + offset == end {
-                    AlertEdge::Bottom
-                } else {
-                    AlertEdge::Middle
-                });
-            }
-        }
+        let end = alert_run_end(&lines, index);
+        mark_alert_edges(&mut edges, index, end);
         index = end + 1;
     }
     edges
+}
+
+fn is_alert_start(line: &str) -> bool {
+    markdown_alert_role(alert_body(line)).is_some()
+}
+
+fn alert_run_end(lines: &[&str], start: usize) -> usize {
+    let mut end = start;
+    while end + 1 < lines.len() && is_alert_continuation(lines[end + 1]) {
+        end += 1;
+    }
+    end
+}
+
+fn mark_alert_edges(edges: &mut [Option<AlertEdge>], start: usize, end: usize) {
+    if end == start {
+        edges[start] = Some(AlertEdge::Single);
+        return;
+    }
+    edges[start] = Some(AlertEdge::Top);
+    for (offset, edge) in edges[start + 1..=end].iter_mut().enumerate() {
+        *edge = Some(if start + 1 + offset == end {
+            AlertEdge::Bottom
+        } else {
+            AlertEdge::Middle
+        });
+    }
 }
 
 fn alert_edge_glyph(edge: AlertEdge) -> &'static str {
@@ -770,12 +790,8 @@ fn code_line_spans(text: &str) -> Vec<Span<'static>> {
             .chars()
             .next()
             .expect("code index is on a char boundary");
-        let previous_is_space = text[..index]
-            .chars()
-            .next_back()
-            .is_none_or(char::is_whitespace);
 
-        if rest.starts_with("//") || (c == '#' && !rest.starts_with("#[") && previous_is_space) {
+        if is_code_comment_start(text, index, rest, c) {
             flush_code_plain(&mut spans, &mut plain);
             push_code_span(&mut spans, rest, Role::Muted);
             break;
@@ -796,33 +812,16 @@ fn code_line_spans(text: &str) -> Vec<Span<'static>> {
                 .is_none_or(|previous| !code_identifier_continue(previous))
         {
             flush_code_plain(&mut spans, &mut plain);
-            let end = text[index..]
-                .char_indices()
-                .take_while(|(_, value)| {
-                    value.is_ascii_alphanumeric() || matches!(*value, '_' | '.')
-                })
-                .last()
-                .map(|(offset, value)| index + offset + value.len_utf8())
-                .unwrap_or(index + c.len_utf8());
+            let end = code_number_end(text, index, c);
             push_code_span(&mut spans, &text[index..end], Role::Warn);
             index = end;
             continue;
         }
 
         if code_identifier_start(c) {
-            let end = text[index..]
-                .char_indices()
-                .take_while(|(_, value)| code_identifier_continue(*value))
-                .last()
-                .map(|(offset, value)| index + offset + value.len_utf8())
-                .unwrap_or(index + c.len_utf8());
+            let end = code_identifier_end(text, index, c);
             let token = &text[index..end];
-            if let Some(role) = code_token_role(token) {
-                flush_code_plain(&mut spans, &mut plain);
-                push_code_span(&mut spans, token, role);
-            } else {
-                plain.push_str(token);
-            }
+            append_code_identifier(&mut spans, &mut plain, token);
             index = end;
             continue;
         }
@@ -832,6 +831,43 @@ fn code_line_spans(text: &str) -> Vec<Span<'static>> {
     }
     flush_code_plain(&mut spans, &mut plain);
     spans
+}
+
+fn is_code_comment_start(text: &str, index: usize, rest: &str, c: char) -> bool {
+    rest.starts_with("//")
+        || (c == '#'
+            && !rest.starts_with("#[")
+            && text[..index]
+                .chars()
+                .next_back()
+                .is_none_or(char::is_whitespace))
+}
+
+fn code_number_end(text: &str, index: usize, first: char) -> usize {
+    text[index..]
+        .char_indices()
+        .take_while(|(_, value)| value.is_ascii_alphanumeric() || matches!(*value, '_' | '.'))
+        .last()
+        .map(|(offset, value)| index + offset + value.len_utf8())
+        .unwrap_or(index + first.len_utf8())
+}
+
+fn code_identifier_end(text: &str, index: usize, first: char) -> usize {
+    text[index..]
+        .char_indices()
+        .take_while(|(_, value)| code_identifier_continue(*value))
+        .last()
+        .map(|(offset, value)| index + offset + value.len_utf8())
+        .unwrap_or(index + first.len_utf8())
+}
+
+fn append_code_identifier(spans: &mut Vec<Span<'static>>, plain: &mut String, token: &str) {
+    if let Some(role) = code_token_role(token) {
+        flush_code_plain(spans, plain);
+        push_code_span(spans, token, role);
+    } else {
+        plain.push_str(token);
+    }
 }
 
 /// 行级 md 轻渲染(iter-28):静态提交与 Live Answer 共用；样式仅存在呈现层。
@@ -1519,12 +1555,7 @@ fn commit_body_units(body: Vec<Span<'static>>) -> Vec<CommitBodyUnit> {
         for grapheme in span.content.as_ref().graphemes(true) {
             if grapheme == "\n" {
                 if let Some(kind) = kind.take() {
-                    let chunk = std::mem::take(&mut fragments);
-                    units.push(if kind {
-                        CommitBodyUnit::Whitespace(chunk)
-                    } else {
-                        CommitBodyUnit::Word(chunk)
-                    });
+                    push_commit_unit(&mut units, &mut fragments, kind);
                 }
                 units.push(CommitBodyUnit::Newline);
                 continue;
@@ -1533,12 +1564,7 @@ fn commit_body_units(body: Vec<Span<'static>>) -> Vec<CommitBodyUnit> {
             let whitespace = grapheme.chars().all(char::is_whitespace);
             if kind.is_some_and(|current| current != whitespace) {
                 let previous = kind.take().expect("commit unit kind exists");
-                let chunk = std::mem::take(&mut fragments);
-                units.push(if previous {
-                    CommitBodyUnit::Whitespace(chunk)
-                } else {
-                    CommitBodyUnit::Word(chunk)
-                });
+                push_commit_unit(&mut units, &mut fragments, previous);
             }
             kind = Some(whitespace);
             fragments.push(CommitFragment {
@@ -1550,13 +1576,22 @@ fn commit_body_units(body: Vec<Span<'static>>) -> Vec<CommitBodyUnit> {
     }
 
     if let Some(kind) = kind {
-        units.push(if kind {
-            CommitBodyUnit::Whitespace(fragments)
-        } else {
-            CommitBodyUnit::Word(fragments)
-        });
+        push_commit_unit(&mut units, &mut fragments, kind);
     }
     units
+}
+
+fn push_commit_unit(
+    units: &mut Vec<CommitBodyUnit>,
+    fragments: &mut Vec<CommitFragment>,
+    whitespace: bool,
+) {
+    let chunk = std::mem::take(fragments);
+    units.push(if whitespace {
+        CommitBodyUnit::Whitespace(chunk)
+    } else {
+        CommitBodyUnit::Word(chunk)
+    });
 }
 
 fn commit_fragments_cells(fragments: &[CommitFragment]) -> usize {

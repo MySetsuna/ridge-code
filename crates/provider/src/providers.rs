@@ -1,6 +1,10 @@
 //! 具体 LlmProvider 实现:OpenAI 兼容 / 原生 Anthropic Messages(传输 × 归一化的薄接线层)。
 use crate::http::{HttpClient, ReqwestClient};
-use crate::*;
+use crate::{
+    anthropic, oauth, openai, Completion, CompletionRequest, LlmProvider, Message, ProviderError,
+    StreamChunk,
+};
+use serde_json::Value;
 use std::sync::Arc;
 
 /// OpenAI 兼容 provider:`build_request` → HTTP → `parse_response`,全走归一化层。

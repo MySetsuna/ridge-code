@@ -1,11 +1,16 @@
-use crate::brain::*;
-use crate::context::*;
-use crate::exec::*;
-use crate::guard::*;
-use crate::knowledge::*;
-use crate::mcp_tools::*;
-use crate::observe::*;
-use crate::state::*;
+use crate::brain::{
+    build_system_prompt_with_mode, is_explore_tool, is_land_edit_tool, reason_route,
+    verify_failure_reason, verify_node, verify_ok, verify_route_llm,
+};
+use crate::context::{bound_observation, to_messages};
+use crate::exec::{
+    builtin_tool_specs, durable_updates, execute_tool_call, is_error_observation, parse_todos,
+};
+use crate::guard::{is_mutating_tool, read_only_block};
+use crate::knowledge::{dispatch_obs, dispatch_spec, Agents, Skill};
+use crate::mcp_tools::McpTools;
+use crate::observe::{fetch_url_obs, preview_call, web_search_obs};
+use crate::state::{needs_approval, AgentState, Approver, AutoApprove, Patch};
 use langgraph::{CompiledGraph, GraphError, StateGraph};
 use provider::{CompletionRequest, LlmProvider, Message, Role, StreamChunk};
 use std::convert::Infallible;
@@ -177,278 +182,306 @@ fn build_core(
     read_only: bool,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
     graph_trace("build.begin");
-    let mut g = StateGraph::<AgentState>::new();
-    // 只读模式:不 offer 副作用工具、也不 offer MCP(副作用未知)—— 从源头断写。
+    let specs = build_tool_specs(&mcp, &agents, read_only);
+    let system = Arc::new(build_system_prompt_with_mode(&skills, read_only));
+    let mcp = Arc::new(mcp);
+    let mut graph = StateGraph::<AgentState>::new();
+
+    add_reason_node(
+        &mut graph,
+        provider.clone(),
+        system.clone(),
+        specs,
+        token_bus,
+    );
+    let fetch: Arc<dyn provider::search::WebFetch> =
+        Arc::new(provider::search::ReqwestFetch::new());
+    let net = Arc::new(std::sync::OnceLock::new());
+    add_act_node(
+        &mut graph,
+        ActContext {
+            mcp,
+            approver,
+            fetch,
+            net,
+            agents,
+            main_provider: provider.clone(),
+            read_only,
+        },
+    );
+    add_verify_node(&mut graph, reviewer);
+    add_wrapup_node(&mut graph, provider, system);
+
+    graph.set_entry("reason");
+    graph.add_conditional_edge("reason", reason_route);
+    graph.add_edge("act", "reason");
+    graph.add_conditional_edge("verify", verify_route_llm);
+    graph_trace("compile.begin");
+    let compiled = graph.compile();
+    graph_trace("compile.end");
+    compiled
+}
+
+fn build_tool_specs(mcp: &McpTools, agents: &Agents, read_only: bool) -> Vec<provider::ToolSpec> {
     let mut specs = builtin_tool_specs();
     if read_only {
-        specs.retain(|s| !is_mutating_tool(&s.name));
+        specs.retain(|spec| !is_mutating_tool(&spec.name));
     }
-    if let Some(d) = dispatch_spec(&agents) {
-        specs.push(d); // dispatch_agent 安全(子 agent 恒只读),只读模式也可派
+    if let Some(dispatch) = dispatch_spec(agents) {
+        specs.push(dispatch);
     }
     if !read_only {
-        specs.extend(mcp.specs);
+        specs.extend(mcp.specs.clone());
     }
-    let router = Arc::new(mcp.router);
     graph_trace("specs.ready");
-    let system = Arc::new(build_system_prompt_with_mode(&skills, read_only));
-    graph_trace("system.ready");
+    specs
+}
 
-    let provider_c = provider.clone();
-    let system_c = system.clone();
-    g.add_node("reason", move |s: AgentState| {
-        let provider = provider_c.clone();
+fn add_reason_node(
+    graph: &mut StateGraph<AgentState>,
+    provider: Arc<dyn LlmProvider>,
+    system: Arc<String>,
+    specs: Vec<provider::ToolSpec>,
+    token_bus: TokenBus,
+) {
+    graph.add_node("reason", move |state: AgentState| {
+        let provider = provider.clone();
+        let system = system.clone();
         let tools = specs.clone();
-        let system = system_c.clone();
         let bus = token_bus.clone();
         async move {
-            let req = CompletionRequest {
-                messages: to_messages(&system, &s),
+            let request = CompletionRequest {
+                messages: to_messages(&system, &state),
                 tools,
             };
-            // 流式:provider 每吐一段(回答/思考)就发进总线,REPL 侧分道逐字显示。无 sender 则等同整段。
             let on_token = move |chunk: StreamChunk| {
-                if let Some(tx) = bus.lock().unwrap().as_ref() {
-                    let _ = tx.send(chunk);
+                if let Some(sender) = bus.lock().unwrap().as_ref() {
+                    let _ = sender.send(chunk);
                 }
             };
-            tracing::debug!(step = s.steps + 1, msgs = req.messages.len(), "llm request");
-            let completion = provider.complete_streaming(&req, &on_token).await?;
-            let usage = completion.usage.clone();
-            let tokens = usage.total() as usize; // 成本记账
             tracing::debug!(
-                step = s.steps + 1,
+                step = state.steps + 1,
+                msgs = request.messages.len(),
+                "llm request"
+            );
+            let completion = provider.complete_streaming(&request, &on_token).await?;
+            let usage = completion.usage.clone();
+            let tokens = usage.total() as usize;
+            tracing::debug!(
+                step = state.steps + 1,
                 tokens,
                 tool_calls = completion.tool_calls.len(),
                 "llm response"
             );
-            let asst_text = completion.text.clone();
-            let patch = if let Some(call) = completion.tool_calls.into_iter().next() {
-                // maker 想用工具 → 记 assistant(带 tool_calls)进 history,交给 act 执行。
-                let hist = Message::assistant(asst_text).with_tool_calls(vec![call.clone()]);
-                Patch::Batch(vec![
-                    Patch::BumpStep,
-                    Patch::AddUsage(usage.clone()),
-                    Patch::Message(format!(
-                        "reason#{}: tool_call {} {}",
-                        s.steps + 1,
-                        call.name,
-                        call.arguments
-                    )),
-                    Patch::PushHistory(hist),
-                    Patch::PendingCall(Some(call)),
-                    Patch::Action(Some("tool".to_string())),
-                ])
-            } else {
-                // 模型给了最终文本,没有工具调用 → 收尾。
-                Patch::Batch(vec![
-                    Patch::BumpStep,
-                    Patch::AddUsage(usage),
-                    Patch::Message(format!("reason#{}: (final) {}", s.steps + 1, asst_text)),
-                    Patch::PushHistory(Message::assistant(asst_text)),
-                    Patch::PendingCall(None),
-                    Patch::Action(Some("finish".to_string())),
-                ])
-            };
-            Ok::<_, provider::ProviderError>(patch)
+            Ok::<_, provider::ProviderError>(reason_patch(
+                &state,
+                completion.text,
+                completion.tool_calls.into_iter().next(),
+                usage,
+            ))
         }
     });
+    graph_trace("system.ready");
+}
 
-    // web_search 依赖:真实抓取器 + 网络环境缓存(整会话懒探测一次)。
-    let fetch: Arc<dyn provider::search::WebFetch> =
-        Arc::new(provider::search::ReqwestFetch::new());
-    let net: Arc<std::sync::OnceLock<provider::search::NetEnv>> =
-        Arc::new(std::sync::OnceLock::new());
+fn reason_patch(
+    state: &AgentState,
+    text: String,
+    call: Option<provider::ToolCall>,
+    usage: provider::Usage,
+) -> Patch {
+    match call {
+        Some(call) => Patch::Batch(vec![
+            Patch::BumpStep,
+            Patch::AddUsage(usage),
+            Patch::Message(format!(
+                "reason#{}: tool_call {} {}",
+                state.steps + 1,
+                call.name,
+                call.arguments
+            )),
+            Patch::PushHistory(Message::assistant(text).with_tool_calls(vec![call.clone()])),
+            Patch::PendingCall(Some(call)),
+            Patch::Action(Some("tool".to_string())),
+        ]),
+        None => Patch::Batch(vec![
+            Patch::BumpStep,
+            Patch::AddUsage(usage),
+            Patch::Message(format!("reason#{}: (final) {text}", state.steps + 1)),
+            Patch::PushHistory(Message::assistant(text)),
+            Patch::PendingCall(None),
+            Patch::Action(Some("finish".to_string())),
+        ]),
+    }
+}
 
-    let router_c = router.clone();
-    let approver_c = approver.clone();
-    let fetch_c = fetch.clone();
-    let net_c = net.clone();
-    let agents_c = agents.clone();
-    let provider_act = provider.clone(); // 主 provider:sub-agent 未指定档案时的回落
-    g.add_node("act", move |s: AgentState| {
-        let router = router_c.clone();
-        let approver = approver_c.clone();
-        let fetch = fetch_c.clone();
-        let net = net_c.clone();
-        let agents = agents_c.clone();
-        let main_provider = provider_act.clone();
+#[derive(Clone)]
+struct ActContext {
+    mcp: Arc<McpTools>,
+    approver: Arc<dyn Approver>,
+    fetch: Arc<dyn provider::search::WebFetch>,
+    net: Arc<std::sync::OnceLock<provider::search::NetEnv>>,
+    agents: Arc<Agents>,
+    main_provider: Arc<dyn LlmProvider>,
+    read_only: bool,
+}
+
+fn add_act_node(graph: &mut StateGraph<AgentState>, context: ActContext) {
+    graph.add_node("act", move |state: AgentState| {
+        let context = context.clone();
         async move {
-            let patch = match &s.pending_call {
+            let patch = match state.pending_call.as_ref() {
                 Some(call) => {
-                    // 只读模式深度防御:副作用工具即使被幻觉调到也硬拒(与 offering 过滤双保险)。
-                    let obs = if let Some(m) = read_only_block(read_only, &call.name) {
-                        m
-                    } else if needs_approval(&call.name)
-                        && !approver.approve(&call.name, &preview_call(call))
-                    {
-                        format!("permission denied by user: {}", call.name)
-                    } else if call.name == "dispatch_agent" {
-                        dispatch_obs(&agents, &main_provider, call).await
-                    } else if call.name == "web_search" {
-                        web_search_obs(fetch.as_ref(), &net, call).await
-                    } else if call.name == "fetch_url" {
-                        fetch_url_obs(fetch.as_ref(), call).await
-                    } else if let Some((client, raw)) = router.get(&call.name) {
-                        // 命名空间命中 → 路由到 MCP 服务器。
-                        call_mcp_with_timeout(
-                            client,
-                            raw,
-                            call.arguments.clone(),
-                            mcp_tool_timeout(),
-                        )
-                        .await
-                    } else {
-                        execute_tool_call(call)
-                    };
-                    // 上下文卫生(根因):巨型工具输出入 history 前确定性截断(head+tail 预览),
-                    // 止住单条巨输出撑爆上下文;零丢数据,文件可 read_file 区间重取。所有工具路径汇流此接缝。
-                    let obs = bound_observation(obs);
-                    // 无进展检测:工具输出与上一轮相同则 stall+1,否则清零。
-                    let stall = if s.tool_output.as_deref() == Some(obs.as_str()) {
-                        s.stall + 1
-                    } else {
-                        0
-                    };
-                    // 熔断计数:本轮观察为错误则 err_streak+1,成功则清零(与 stall 正交,兜「错误每轮不同」)。
-                    let err_streak = if is_error_observation(&obs) {
-                        s.err_streak + 1
-                    } else {
-                        0
-                    };
-                    // 纯侦察计数:read/search 等每轮+1;成功落盘改写清零;其余(run_shell/todo/…)保持。
-                    // 修「输出每轮不同 → stall 永不触发 → 只查不改烧到 step_cap」的根因。
-                    let explore_streak =
-                        if is_land_edit_tool(&call.name) && !is_error_observation(&obs) {
-                            0
-                        } else if is_explore_tool(&call.name) {
-                            s.explore_streak + 1
-                        } else {
-                            s.explore_streak
-                        };
-                    // Durable State 回填(事实驱动):在 obs 被移动前算好。
-                    let durable = durable_updates(call, &obs);
-                    let mut patches = vec![
-                        Patch::Message(format!("act: {} -> {}", call.name, obs)),
-                        // 工具结果按 role=tool 正确回灌(匹配 tool_call_id)。
-                        Patch::PushHistory(Message::tool_result(call.id.clone(), obs.clone())),
-                        Patch::SetStall(stall),
-                        Patch::SetErrStreak(err_streak),
-                        Patch::SetExploreStreak(explore_streak),
-                        Patch::ToolOutput(Some(obs)),
-                        Patch::PendingCall(None),
-                    ];
-                    // todo_write:把清单写进状态(REPL 会渲染 [x]/[~]/[ ])。
-                    if call.name == "todo_write" {
-                        patches.push(Patch::SetTodos(parse_todos(call)));
-                    }
-                    patches.extend(durable); // 记已改文件 / 上次报错
-                    Patch::Batch(patches)
+                    let observation = execute_pending_call(call, &context).await;
+                    act_patch(&state, call, observation)
                 }
                 None => Patch::Message("act: no pending tool_call".to_string()),
             };
             Ok::<_, Infallible>(patch)
         }
     });
+}
 
+async fn execute_pending_call(call: &provider::ToolCall, context: &ActContext) -> String {
+    if let Some(message) = read_only_block(context.read_only, &call.name) {
+        return message;
+    }
+    if needs_approval(&call.name) && !context.approver.approve(&call.name, &preview_call(call)) {
+        return format!("permission denied by user: {}", call.name);
+    }
+    if call.name == "dispatch_agent" {
+        return dispatch_obs(&context.agents, &context.main_provider, call).await;
+    }
+    if call.name == "web_search" {
+        return web_search_obs(context.fetch.as_ref(), &context.net, call).await;
+    }
+    if call.name == "fetch_url" {
+        return fetch_url_obs(context.fetch.as_ref(), call).await;
+    }
+    if let Some((client, raw)) = context.mcp.router.get(&call.name) {
+        return call_mcp_with_timeout(client, raw, call.arguments.clone(), mcp_tool_timeout())
+            .await;
+    }
+    execute_tool_call(call)
+}
+
+fn act_patch(state: &AgentState, call: &provider::ToolCall, observation: String) -> Patch {
+    let observation = bound_observation(observation);
+    let stall = if state.tool_output.as_deref() == Some(observation.as_str()) {
+        state.stall + 1
+    } else {
+        0
+    };
+    let err_streak = if is_error_observation(&observation) {
+        state.err_streak + 1
+    } else {
+        0
+    };
+    let explore_streak = next_explore_streak(state, call, &observation);
+    let mut patches = vec![
+        Patch::Message(format!("act: {} -> {}", call.name, observation)),
+        Patch::PushHistory(Message::tool_result(call.id.clone(), observation.clone())),
+        Patch::SetStall(stall),
+        Patch::SetErrStreak(err_streak),
+        Patch::SetExploreStreak(explore_streak),
+        Patch::ToolOutput(Some(observation.clone())),
+        Patch::PendingCall(None),
+    ];
+    if call.name == "todo_write" {
+        patches.push(Patch::SetTodos(parse_todos(call)));
+    }
+    patches.extend(durable_updates(call, &observation));
+    Patch::Batch(patches)
+}
+
+fn next_explore_streak(state: &AgentState, call: &provider::ToolCall, observation: &str) -> usize {
+    if is_land_edit_tool(&call.name) && !is_error_observation(observation) {
+        0
+    } else if is_explore_tool(&call.name) {
+        state.explore_streak + 1
+    } else {
+        state.explore_streak
+    }
+}
+
+fn add_verify_node(graph: &mut StateGraph<AgentState>, reviewer: Option<Arc<dyn LlmProvider>>) {
     match reviewer {
-        // 有独立 reviewer:确定性通过后再让它复核作弊。
-        Some(rv) => {
-            let rv_c = rv.clone();
-            g.add_node("verify", move |s: AgentState| {
-                let reviewer = rv_c.clone();
-                async move {
-                    let det_ok = verify_ok(&s);
-                    if !det_ok {
-                        let reason = verify_failure_reason(&s);
-                        return Ok::<_, provider::ProviderError>(Patch::Batch(vec![
-                            Patch::Approved(false),
-                            Patch::Issues(vec![reason.to_string()]),
-                            Patch::Message(format!(
-                                "verify: FAIL (deterministic: {reason}) -> back to reason"
-                            )),
-                        ]));
-                    }
-                    // 独立模型复核:给它轨迹,问是否合法达成(没作弊)。
-                    let verdict = reviewer.complete(&review_request(&s)).await?;
-                    let approved =
-                        verdict.text.contains("APPROVE") && !verdict.text.contains("REJECT");
-                    let patch = if approved {
-                        Patch::Batch(vec![
-                            Patch::Approved(true),
-                            Patch::Message(
-                                "verify: PASS (deterministic + 独立 reviewer)".to_string(),
-                            ),
-                        ])
-                    } else {
-                        Patch::Batch(vec![
-                            Patch::Approved(false),
-                            Patch::Issues(vec![format!("reviewer 打回: {}", verdict.text)]),
-                            Patch::Message(format!("verify: reviewer REJECT -> {}", verdict.text)),
-                        ])
-                    };
-                    Ok(patch)
-                }
+        Some(reviewer) => {
+            graph.add_node("verify", move |state: AgentState| {
+                let reviewer = reviewer.clone();
+                async move { reviewed_patch(&reviewer, &state).await }
             });
         }
-        // 无 reviewer:纯确定性 verify。
         None => {
-            g.add_node("verify", verify_node);
+            graph.add_node("verify", verify_node);
         }
     }
+}
 
-    // 收束回合(#2 / 软中止):运行到达安全上限(回合上限)或卡死(无进展/连错)时,不再哑然腰斩,
-    // 而是**软暂停**——让模型产一段面向用户的交接:已完成 / 还剩什么 / 建议的后续步骤,供用户参考续跑。
-    // 一次非流式补全、不 offer 工具(逼其只出文本)、无出边 → 隐式 END,天然不成环、不会二次熔断。
-    let provider_wrap = provider.clone();
-    let system_wrap = system.clone();
-    g.add_node("wrapup", move |s: AgentState| {
-        let provider = provider_wrap.clone();
-        let system = system_wrap.clone();
+async fn reviewed_patch(
+    reviewer: &Arc<dyn LlmProvider>,
+    state: &AgentState,
+) -> Result<Patch, provider::ProviderError> {
+    if !verify_ok(state) {
+        let reason = verify_failure_reason(state);
+        return Ok(Patch::Batch(vec![
+            Patch::Approved(false),
+            Patch::Issues(vec![reason.to_string()]),
+            Patch::Message(format!(
+                "verify: FAIL (deterministic: {reason}) -> back to reason"
+            )),
+        ]));
+    }
+    let verdict = reviewer.complete(&review_request(state)).await?;
+    if verdict.text.contains("APPROVE") && !verdict.text.contains("REJECT") {
+        return Ok(Patch::Batch(vec![
+            Patch::Approved(true),
+            Patch::Message("verify: PASS (deterministic + 独立 reviewer)".to_string()),
+        ]));
+    }
+    Ok(Patch::Batch(vec![
+        Patch::Approved(false),
+        Patch::Issues(vec![format!("reviewer 打回: {}", verdict.text)]),
+        Patch::Message(format!("verify: reviewer REJECT -> {}", verdict.text)),
+    ]))
+}
+
+fn add_wrapup_node(
+    graph: &mut StateGraph<AgentState>,
+    provider: Arc<dyn LlmProvider>,
+    system: Arc<String>,
+) {
+    graph.add_node("wrapup", move |state: AgentState| {
+        let provider = provider.clone();
+        let system = system.clone();
         async move {
-            let reason = halt_reason(&s);
-            let mut messages = to_messages(&system, &s);
+            let reason = halt_reason(&state);
+            let mut messages = to_messages(&system, &state);
             messages.push(Message::new(
                 Role::System,
                 format!(
-                    "本轮到此**软暂停**(原因:{}。不是失败,且已不能再调用工具)。请用**用户的语言**\
-                     写一段供用户参考的交接说明:①目前已完成/已改动了什么;②还剩什么没做;\
-                     ③若要继续,给出具体、可直接照做的后续步骤或计划。直接说给用户听,\
-                     别提「护栏/节点/超步」等内部机制。",
+                    "本轮到此**软暂停**(原因:{}).不是失败,且已不能再调用工具。请用**用户的语言**                     写一段供用户参考的交接说明:①目前已完成/已改动了什么?②还剩什么没做?                     ③若要继续,给出具体、可直接照做的后续步骤或计划。直接说给用户听,                     别提“护栏/节点/超步”等内部机制。",
                     reason.as_str()
                 ),
             ));
-            let req = CompletionRequest {
+            let request = CompletionRequest {
                 messages,
                 tools: vec![],
             };
-            // 交接说明生成失败也不阻断收尾(给个占位文本),halt_reason 仍据终态判定不变。
-            let (text, usage) = match provider.complete(&req).await {
-                Ok(c) => (c.text, c.usage),
-                Err(e) => (
-                    format!("(交接说明生成失败:{e})"),
+            let (text, usage) = match provider.complete(&request).await {
+                Ok(completion) => (completion.text, completion.usage),
+                Err(error) => (
+                    format!("(交接说明生成失败:{error})"),
                     provider::Usage::default(),
                 ),
             };
             Ok::<_, Infallible>(Patch::Batch(vec![
                 Patch::AddUsage(usage),
-                // 以 `(final)` 约定渲染成模型终答(🤖 白);⏸ 标记「软暂停」+ 原因,供用户一眼分辨非正常完成。
-                Patch::Message(format!("(final) ⏸ [{}] {}", reason.as_str(), text)),
+                Patch::Message(format!("(final) ⏸[{}] {}", reason.as_str(), text)),
                 Patch::PushHistory(Message::assistant(text)),
             ]))
         }
     });
-
-    g.set_entry("reason");
-    g.add_conditional_edge("reason", reason_route);
-    g.add_edge("act", "reason");
-    // LLM 路径专用 verify 路由:熔断 → wrapup(收束回合)→ 隐式 END。
-    g.add_conditional_edge("verify", verify_route_llm);
-
-    graph_trace("compile.begin");
-    let compiled = g.compile();
-    graph_trace("compile.end");
-    compiled
 }
 
 /// 给独立 reviewer 的复核请求:system 定角色 + user 附上 agent 的轨迹。
@@ -472,11 +505,16 @@ fn review_request(s: &AgentState) -> CompletionRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::*;
+    use super::{call_mcp_with_timeout, halt_reason, is_error_observation, verify_route_llm};
+    use crate::{
+        build_agent, build_llm_agent, build_llm_agent_reviewed, build_llm_agent_with, default_tool,
+        resolve_mcp, scripted, AgentState, Brain, HaltReason, McpTools, Tool, MAX_STEPS,
+    };
     use langgraph::RunConfig;
     use mcp::McpClient;
     use provider::ToolCall;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn happy_path_converges_and_gets_approved() {

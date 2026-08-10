@@ -1,7 +1,16 @@
 use std::borrow::Cow;
 use std::sync::OnceLock;
 
-use super::*;
+use agent::Todo;
+use ratatui::{
+    style::{Modifier, Style},
+    text::{Line, Span, Text},
+};
+
+use super::{
+    clip_display_cells, role_color, sanitize_display_text, str_cells, todo_progress, LiveChannel,
+    Role,
+};
 
 /// 上下文窗口人读化:200000 → "200K",1048576 → "1.0M"(纯函数)。
 pub(crate) fn fmt_ctx(n: u64) -> String {
@@ -265,32 +274,72 @@ fn compact_busy_actions(
     live_inspecting: bool,
 ) -> String {
     if width <= 8 {
-        // At the smallest usable width the top chrome may be collapsed to
-        // preserve an editable draft. Keep queue depth, takeover, and the
-        // freshest observed channel in the input title instead of losing the
-        // Answer/Reasoning/Tool signal with right-side clipping.
-        let channel = if has_live_answer {
-            Some(" A ")
-        } else if has_reasoning {
-            Some(" R ")
-        } else if has_tools {
-            Some(" T ")
-        } else {
-            None
-        };
-        let budget = width.saturating_sub(2) as usize;
-        let mut text = "Q".to_owned();
-        for token in [Some(" C"), channel].into_iter().flatten() {
-            if str_cells(&text) + str_cells(token) > budget {
-                break;
-            }
-            text.push_str(token);
-        }
-        return text;
+        return narrow_busy_actions(width, has_tools, has_reasoning, has_live_answer);
     }
     let budget = width.saturating_sub(2);
     let mut text = format!(" Q:[{}]", compact_count(&queued.to_string()));
-    let enqueue = if width >= 24 { "↵ queue" } else { "↵" };
+    append_busy_action_tokens(
+        &mut text,
+        BusyActionTokens {
+            budget: budget as usize,
+            long_enqueue: width >= 24,
+            has_tools,
+            has_reasoning,
+            has_live_answer,
+            has_live_history,
+            live_inspecting,
+        },
+    );
+    format!("{text} ")
+}
+
+fn narrow_busy_actions(
+    width: u16,
+    has_tools: bool,
+    has_reasoning: bool,
+    has_live_answer: bool,
+) -> String {
+    let channel = if has_live_answer {
+        Some(" A ")
+    } else if has_reasoning {
+        Some(" R ")
+    } else if has_tools {
+        Some(" T ")
+    } else {
+        None
+    };
+    let budget = width.saturating_sub(2) as usize;
+    let mut text = "Q".to_owned();
+    for token in [Some(" C"), channel].into_iter().flatten() {
+        if str_cells(&text) + str_cells(token) > budget {
+            break;
+        }
+        text.push_str(token);
+    }
+    text
+}
+
+struct BusyActionTokens {
+    budget: usize,
+    long_enqueue: bool,
+    has_tools: bool,
+    has_reasoning: bool,
+    has_live_answer: bool,
+    has_live_history: bool,
+    live_inspecting: bool,
+}
+
+fn append_busy_action_tokens(text: &mut String, options: BusyActionTokens) {
+    let BusyActionTokens {
+        budget,
+        long_enqueue,
+        has_tools,
+        has_reasoning,
+        has_live_answer,
+        has_live_history,
+        live_inspecting,
+    } = options;
+    let enqueue = if long_enqueue { "↵ queue" } else { "↵" };
     for token in [
         Some(enqueue),
         Some("^C"),
@@ -303,12 +352,11 @@ fn compact_busy_actions(
     .into_iter()
     .flatten()
     {
-        if str_cells(&text) + str_cells(token) > budget as usize {
+        if str_cells(text) + str_cells(token) > budget {
             break;
         }
         text.push_str(token);
     }
-    format!("{text} ")
 }
 
 /// When the user is auditing live output, put the return-to-follow action at
@@ -331,21 +379,56 @@ fn busy_live_inspection_actions(
         " HOLD · Alt+End follow · {takeover} · Q:[{}]",
         compact_count(&queued.to_string())
     );
+    append_inspection_actions(
+        &mut text,
+        width,
+        has_tools,
+        has_reasoning,
+        has_live_answer,
+        has_live_history,
+    );
+    text
+}
+
+fn append_inspection_actions(
+    text: &mut String,
+    width: u16,
+    has_tools: bool,
+    has_reasoning: bool,
+    has_live_answer: bool,
+    has_live_history: bool,
+) {
+    let has_focus = has_tools || has_reasoning || has_live_answer;
     if width >= 72 && (has_tools || has_reasoning) {
         text.push_str(" · Space toggle");
     }
-    if width >= 80 && (has_tools || has_reasoning || has_live_answer) {
-        let focus = if width >= 88 {
+    if width >= 80 && has_focus {
+        text.push_str(if width >= 88 {
             " · Alt+←/→ focus"
         } else {
             " · Alt<> focus"
-        };
-        text.push_str(focus);
-    } else if width >= 72 && (has_tools || has_reasoning || has_live_answer) {
-        // Keep the action discoverable at the exact boundary where the full
-        // label would clip the HOLD/follow/takeover priority rail.
+        });
+    } else if width >= 72 && has_focus {
         text.push_str(" · ←→");
     }
+    append_inspection_shortcuts(
+        text,
+        width,
+        has_tools,
+        has_reasoning,
+        has_live_answer,
+        has_live_history,
+    );
+}
+
+fn append_inspection_shortcuts(
+    text: &mut String,
+    width: u16,
+    has_tools: bool,
+    has_reasoning: bool,
+    has_live_answer: bool,
+    has_live_history: bool,
+) {
     if width >= 64 {
         text.push_str(" · ^Enter front");
     }
@@ -364,7 +447,6 @@ fn busy_live_inspection_actions(
     if width >= 104 {
         text.push_str(" · Ctrl+T activity");
     }
-    text
 }
 
 /// Idle narrow chrome keeps submit plus archive entry points discoverable even
@@ -420,232 +502,401 @@ fn compact_idle_input_actions(width: u16) -> String {
     clip_display_cells(text, width.saturating_sub(2))
 }
 
-pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
-    let InputChromeArgs {
-        busy,
-        queued,
-        width,
-        reasoning_expanded,
-        has_reasoning,
-        has_reasoning_history,
-        has_live_answer,
-        has_answer_history,
-        has_live_history,
-        has_tools,
-        has_history,
-        has_scrollable_tool_details,
-        has_live_output,
-        live_inspecting,
-    } = args;
-    if busy && live_inspecting && has_live_output && width >= 48 {
-        let text = busy_live_inspection_actions(
-            queued,
-            width,
-            has_tools,
-            has_reasoning,
-            has_live_answer,
-            has_live_history,
+struct InputChromeHints {
+    multiline: &'static str,
+    reasoning: Option<&'static str>,
+    reasoning_suffix: String,
+    answer_suffix: &'static str,
+    answer_prefix: &'static str,
+    focus: &'static str,
+    toggle: &'static str,
+    toggle_separator: &'static str,
+    scroll: &'static str,
+    live: &'static str,
+    inspect: &'static str,
+    inspect_compact: &'static str,
+    wide_live_prefix: String,
+}
+
+impl InputChromeHints {
+    fn from_args(args: &InputChromeArgs) -> Self {
+        let reasoning = reasoning_hint(
+            args.has_reasoning,
+            args.reasoning_expanded,
+            args.has_reasoning_history,
         );
-        return (
-            clip_display_cells(&text, width.saturating_sub(2)),
-            Role::Primary,
-        );
-    }
-    let multiline_hint = multiline_shortcut_hint();
-    let reasoning_hint = if has_reasoning {
-        if reasoning_expanded {
-            Some("Ctrl+R collapse")
+        let reasoning_suffix = reasoning
+            .map(|hint| format!(" · {hint}"))
+            .unwrap_or_default();
+        let answer_suffix = answer_suffix(args.has_live_answer, args.has_answer_history);
+        let answer_prefix = answer_prefix(args.has_live_answer, args.has_answer_history);
+        let focus = if args.has_tools {
+            " · Alt+↑/↓ focus"
         } else {
-            Some("Ctrl+R reasoning")
+            ""
+        };
+        let toggle = toggle_hint(args.has_tools, args.has_history);
+        let toggle_separator = if toggle.is_empty() { "" } else { " · " };
+        let scroll = if args.has_scrollable_tool_details {
+            " · Alt+PgUp/PgDn scroll"
+        } else {
+            ""
+        };
+        let live = live_hint(
+            args.has_live_output,
+            args.live_inspecting,
+            args.has_tools,
+            args.has_reasoning,
+        );
+        let inspect = if args.has_live_history {
+            " · Ctrl+I inspect"
+        } else {
+            ""
+        };
+        let inspect_compact = if args.has_live_history { " ^I" } else { "" };
+        let wide_live_prefix = wide_live_prefix(live, args.has_live_history);
+        Self {
+            multiline: multiline_shortcut_hint(),
+            reasoning,
+            reasoning_suffix,
+            answer_suffix,
+            answer_prefix,
+            focus,
+            toggle,
+            toggle_separator,
+            scroll,
+            live,
+            inspect,
+            inspect_compact,
+            wide_live_prefix,
         }
-    } else if has_reasoning_history {
+    }
+}
+
+fn reasoning_hint(has_reasoning: bool, expanded: bool, has_history: bool) -> Option<&'static str> {
+    if has_reasoning {
+        Some(if expanded {
+            "Ctrl+R collapse"
+        } else {
+            "Ctrl+R reasoning"
+        })
+    } else if has_history {
         Some("Ctrl+R history")
     } else {
         None
-    };
-    let reasoning_suffix = reasoning_hint
-        .map(|hint| format!(" · {hint}"))
-        .unwrap_or_default();
-    let answer_suffix = if has_live_answer {
+    }
+}
+
+fn answer_suffix(has_live: bool, has_history: bool) -> &'static str {
+    if has_live {
         " · Ctrl+A focus"
-    } else if has_answer_history {
+    } else if has_history {
         " · Ctrl+A answers"
     } else {
         ""
-    };
-    let answer_prefix = if has_live_answer {
+    }
+}
+
+fn answer_prefix(has_live: bool, has_history: bool) -> &'static str {
+    if has_live {
         "Ctrl+A focus · "
-    } else if has_answer_history {
+    } else if has_history {
         "Ctrl+A answers · "
     } else {
         ""
-    };
-    let focus_hint = if has_tools {
-        " · Alt+↑/↓ focus"
-    } else {
-        ""
-    };
-    let toggle_hint = if has_tools {
+    }
+}
+
+fn toggle_hint(has_tools: bool, has_history: bool) -> &'static str {
+    if has_tools {
         "Ctrl+O details"
     } else if has_history {
         "Ctrl+O history"
     } else {
         ""
-    };
-    let toggle_separator = if toggle_hint.is_empty() { "" } else { " · " };
-    let scroll_hint = if has_scrollable_tool_details {
-        " · Alt+PgUp/PgDn scroll"
-    } else {
+    }
+}
+
+fn live_hint(
+    has_output: bool,
+    inspecting: bool,
+    has_tools: bool,
+    has_reasoning: bool,
+) -> &'static str {
+    if !has_output {
         ""
-    };
-    let live_hint = if !has_live_output {
-        ""
-    } else if live_inspecting {
-        if has_tools || has_reasoning {
-            " · HOLD Ctrl+Space/Alt+End follow · Alt+←/→ focus · Space toggle"
-        } else {
-            " · HOLD Ctrl+Space/Alt+End follow"
-        }
+    } else if inspecting && (has_tools || has_reasoning) {
+        " · HOLD Ctrl+Space/Alt+End follow · Alt+←/→ focus · Space toggle"
+    } else if inspecting {
+        " · HOLD Ctrl+Space/Alt+End follow"
     } else {
         " · Ctrl+Space hold · PgUp/PgDn page"
-    };
-    let inspect_hint = if has_live_history {
-        " · Ctrl+I inspect"
-    } else {
-        ""
-    };
-    let inspect_compact = if has_live_history { " ^I" } else { "" };
-    // Put the live viewport control first on the wide input chrome. The
-    // tail is clipped on ordinary terminals; intervention must remain visible.
-    let wide_live_prefix = live_hint
+    }
+}
+
+fn wide_live_prefix(live: &str, has_history: bool) -> String {
+    let prefix = live
         .strip_prefix(" · ")
         .map(|hint| format!("{hint} · "))
         .unwrap_or_default();
-    let wide_live_prefix = if has_live_history {
-        format!("Ctrl+I inspect · {wide_live_prefix}")
+    if has_history {
+        format!("Ctrl+I inspect · {prefix}")
     } else {
-        wide_live_prefix
-    };
-    let text = match (busy, width) {
-        (true, width) if width >= 96 && has_tools => format!(
-                " Queue [{queued}]{reasoning_suffix}{answer_suffix}{toggle_separator}{toggle_hint}{focus_hint}{inspect_hint} · Ctrl+T activity · Enter queue · Ctrl+Enter front · Ctrl+C takeover{scroll_hint}{live_hint}"
-        ),
-        (true, width) if width >= 72 && has_tools => {
-            // 工具运行时优先保留不打断的前插、接管、详情、思考与焦点动作。
-            // 96 列以下采用与窄栏一致的键位缩写，避免把 Alt+↑/↓ 裁成半个动作。
-            let reasoning = if has_reasoning {
-                if reasoning_expanded {
-                    " · ^R collapse"
-                } else {
-                    " · ^R"
-                }
-            } else {
-                ""
-            };
-            let enqueue = if width >= 88 {
-                " · Enter queue"
-            } else {
-                " · ↵ queue"
-            };
-            let front = if width >= 88 { "^Enter front" } else { "^Enter" };
-            let details = if width >= 80 { "^O details" } else { "^O" };
-            format!(
-                " Queue [{queued}]{enqueue} · {front} · ^C takeover{reasoning} · {details} · Alt+↑/↓{inspect_hint}"
-            )
+        prefix
+    }
+}
+
+pub(crate) fn input_chrome(args: InputChromeArgs) -> (String, Role) {
+    if args.busy && args.live_inspecting && args.has_live_output && args.width >= 48 {
+        let text = busy_live_inspection_actions(
+            args.queued,
+            args.width,
+            args.has_tools,
+            args.has_reasoning,
+            args.has_live_answer,
+            args.has_live_history,
+        );
+        return (
+            clip_display_cells(&text, args.width.saturating_sub(2)),
+            Role::Primary,
+        );
+    }
+    let hints = InputChromeHints::from_args(&args);
+    let text = input_chrome_text(&args, &hints);
+    (
+        clip_display_cells(&text, args.width.saturating_sub(2)),
+        // Busy is an active mode, not a warning; keep the single cyan focus
+        // accent available for motion and current interaction.
+        Role::Primary,
+    )
+}
+
+fn input_chrome_text(args: &InputChromeArgs, hints: &InputChromeHints) -> String {
+    if args.busy {
+        busy_input_chrome_text(args, hints)
+    } else {
+        idle_input_chrome_text(args, hints)
+    }
+}
+
+fn busy_input_chrome_text(args: &InputChromeArgs, hints: &InputChromeHints) -> String {
+    let InputChromeArgs {
+        queued,
+        width,
+        reasoning_expanded,
+        has_reasoning,
+        has_tools,
+        has_live_answer,
+        live_inspecting,
+        ..
+    } = *args;
+    match (width, has_tools) {
+        (width, true) if width >= 96 => busy_wide_tools_chrome(queued, hints),
+        (width, true) if width >= 72 => {
+            busy_tools_chrome(queued, width, has_reasoning, reasoning_expanded, hints)
         }
-        (true, width) if width >= 72 => format!(
-            " Queue [{queued}] · Ctrl+Enter front · Ctrl+C takeover · Enter{reasoning_suffix}{answer_suffix}{toggle_separator}{toggle_hint}{inspect_hint}{live_hint} · Ctrl+T activity"
-        ),
-        (true, width) if width >= 56 && has_tools => {
-            let reasoning = if has_reasoning { " · ^R" } else { "" };
-            let answer = if has_live_answer { " · ^A" } else { "" };
-            let (queue_separator, front, takeover) = if width >= 64 {
-                ("", "^Enter front", "^C takeover")
-            } else {
-                (" · ", "^Enter", "^C")
-            };
-            format!(
-                " Q:[{queued}]{queue_separator}↵ queue · {front} · {takeover} · ^O details{reasoning}{answer}{inspect_compact} "
-            )
+        (width, _) if width >= 72 => busy_wide_busy_chrome(queued, hints),
+        (width, true) if width >= 56 => {
+            busy_compact_tools_chrome(queued, width, has_reasoning, has_live_answer, hints)
         }
-        (true, width) if width >= 56 => {
-                format!(" Queue [{queued}] · Enter queue · Ctrl+Enter front · Ctrl+C takeover{reasoning_suffix}{answer_suffix}{inspect_hint}{live_hint} ")
-        }
-        (true, width) => compact_busy_actions(
+        (width, _) if width >= 56 => busy_compact_chrome(queued, hints),
+        (width, _) => compact_busy_actions(
             queued,
             width,
-            has_tools || has_history,
+            has_tools || args.has_history,
             has_reasoning,
             has_live_answer,
-            has_live_history,
+            args.has_live_history,
             live_inspecting,
         ),
-        (false, width) if width >= 88 => {
-            let full = format!(
-                " Input ({answer_prefix}{wide_live_prefix}Enter send · {multiline_hint} · Tab complete{focus_hint}{toggle_separator}{toggle_hint}{scroll_hint}{reasoning_suffix} · Ctrl+T activity) "
-            );
-            if str_cells(&full) <= width.saturating_sub(2) as usize {
-                full
-            } else {
-                // Keep the reasoning/archive and activity actions whole when
-                // the full Windows keyboard legend would clip the last label.
-                format!(
-                    " Input ({answer_prefix}{wide_live_prefix}Enter · Ctrl+J newline · Tab{focus_hint}{toggle_separator}{toggle_hint}{scroll_hint}{reasoning_suffix} · Ctrl+T activity) "
-                )
-            }
-        }
-        (false, width) if width >= 56 => format!(
-            " Input · Enter send · Tab complete{reasoning_suffix}{answer_suffix}{focus_hint}{toggle_separator}{toggle_hint}{inspect_hint}{scroll_hint}{live_hint} "
+    }
+}
+
+fn busy_wide_tools_chrome(queued: usize, hints: &InputChromeHints) -> String {
+    format!(
+        " Queue [{queued}]{reasoning_suffix}{answer_suffix}{toggle_separator}{toggle_hint}{focus_hint}{inspect_hint} · Ctrl+T activity · Enter queue · Ctrl+Enter front · Ctrl+C takeover{scroll_hint}{live_hint}",
+        reasoning_suffix = hints.reasoning_suffix,
+        answer_suffix = hints.answer_suffix,
+        toggle_separator = hints.toggle_separator,
+        toggle_hint = hints.toggle,
+        focus_hint = hints.focus,
+        inspect_hint = hints.inspect,
+        scroll_hint = hints.scroll,
+        live_hint = hints.live,
+    )
+}
+
+fn busy_tools_chrome(
+    queued: usize,
+    width: u16,
+    has_reasoning: bool,
+    reasoning_expanded: bool,
+    hints: &InputChromeHints,
+) -> String {
+    let reasoning = busy_reasoning_hint(has_reasoning, reasoning_expanded);
+    let enqueue = if width >= 88 {
+        " · Enter queue"
+    } else {
+        " · ↵ queue"
+    };
+    let front = if width >= 88 {
+        "^Enter front"
+    } else {
+        "^Enter"
+    };
+    let details = if width >= 80 { "^O details" } else { "^O" };
+    format!(
+        " Queue [{queued}]{enqueue} · {front} · ^C takeover{reasoning} · {details} · Alt+↑/↓{}",
+        hints.inspect
+    )
+}
+
+fn busy_wide_busy_chrome(queued: usize, hints: &InputChromeHints) -> String {
+    format!(
+        " Queue [{queued}] · Ctrl+Enter front · Ctrl+C takeover · Enter{reasoning_suffix}{answer_suffix}{toggle_separator}{toggle}{inspect}{live} · Ctrl+T activity",
+        reasoning_suffix = hints.reasoning_suffix,
+        answer_suffix = hints.answer_suffix,
+        toggle_separator = hints.toggle_separator,
+        toggle = hints.toggle,
+        inspect = hints.inspect,
+        live = hints.live,
+    )
+}
+
+fn busy_compact_tools_chrome(
+    queued: usize,
+    width: u16,
+    has_reasoning: bool,
+    has_live_answer: bool,
+    hints: &InputChromeHints,
+) -> String {
+    let reasoning = if has_reasoning { " · ^R" } else { "" };
+    let answer = if has_live_answer { " · ^A" } else { "" };
+    let (queue_separator, front, takeover) = if width >= 64 {
+        ("", "^Enter front", "^C takeover")
+    } else {
+        (" · ", "^Enter", "^C")
+    };
+    format!(
+        " Q:[{queued}]{queue_separator}↵ queue · {front} · {takeover} · ^O details{reasoning}{answer}{} ",
+        hints.inspect_compact
+    )
+}
+
+fn busy_compact_chrome(queued: usize, hints: &InputChromeHints) -> String {
+    format!(
+        " Queue [{queued}] · Enter queue · Ctrl+Enter front · Ctrl+C takeover{reasoning_suffix}{answer_suffix}{inspect}{live} ",
+        reasoning_suffix = hints.reasoning_suffix,
+        answer_suffix = hints.answer_suffix,
+        inspect = hints.inspect,
+        live = hints.live,
+    )
+}
+
+fn busy_reasoning_hint(has_reasoning: bool, expanded: bool) -> &'static str {
+    if !has_reasoning {
+        ""
+    } else if expanded {
+        " · ^R collapse"
+    } else {
+        " · ^R"
+    }
+}
+
+fn idle_input_chrome_text(args: &InputChromeArgs, hints: &InputChromeHints) -> String {
+    let InputChromeArgs {
+        width,
+        reasoning_expanded: _,
+        has_reasoning,
+        has_reasoning_history,
+        has_tools,
+        has_history,
+        has_answer_history,
+        has_live_history,
+        ..
+    } = *args;
+    match width {
+        width if width >= 88 => wide_idle_input_chrome(args, hints),
+        width if width >= 56 => format!(
+            " Input · Enter send · Tab complete{reasoning_suffix}{answer_suffix}{focus}{toggle_separator}{toggle}{inspect}{scroll}{live} ",
+            reasoning_suffix = hints.reasoning_suffix,
+            answer_suffix = hints.answer_suffix,
+            focus = hints.focus,
+            toggle_separator = hints.toggle_separator,
+            toggle = hints.toggle,
+            inspect = hints.inspect,
+            scroll = hints.scroll,
+            live = hints.live,
         ),
-        (false, width)
-            if width >= 18
-                && (has_tools
-                    || has_history
-                    || has_reasoning_history
-                    || has_answer_history
-                    || has_live_history) => compact_idle_history_actions(
+        width if width >= 18
+            && (has_tools
+                || has_history
+                || has_reasoning_history
+                || has_answer_history
+                || has_live_history) => compact_idle_history_actions(
             width,
             has_answer_history,
             has_reasoning || has_reasoning_history,
             has_tools || has_history,
             has_live_history,
         ),
-        (false, width) if width >= 18 && has_reasoning => {
+        width if width >= 18 && has_reasoning => {
             let text = if width < 32 {
                 " In ↵ Ctrl+R ".to_owned()
             } else {
                 format!(
                     " Input · ↵ · {} ",
-                    reasoning_hint.unwrap_or("Ctrl+R reasoning")
+                    hints.reasoning.unwrap_or("Ctrl+R reasoning")
                 )
             };
             clip_display_cells(&text, width.saturating_sub(2))
         }
-        (false, width)
-            if width >= 10
-                && (has_tools
-                    || has_history
-                    || has_reasoning_history
-                    || has_answer_history
-                    || has_live_history) => compact_idle_history_actions(
+        width if width >= 10
+            && (has_tools
+                || has_history
+                || has_reasoning_history
+                || has_answer_history
+                || has_live_history) => compact_idle_history_actions(
             width,
             has_answer_history,
             has_reasoning || has_reasoning_history,
             has_tools || has_history,
             has_live_history,
         ),
-        (false, width) if width >= 14 && has_reasoning => {
+        width if width >= 14 && has_reasoning => {
             compact_idle_history_actions(width, false, true, false, has_live_history)
         }
-        (false, width) if width >= 10 => compact_idle_input_actions(width),
-        (false, _) => " Input ".to_owned(),
-    };
-    (
-        clip_display_cells(&text, width.saturating_sub(2)),
-        // Busy is an active mode, not a warning; keep the single cyan focus
-        // accent available for motion and current interaction.
-        Role::Primary,
-    )
+        width if width >= 10 => compact_idle_input_actions(width),
+        _ => " Input ".to_owned(),
+    }
+}
+
+fn wide_idle_input_chrome(args: &InputChromeArgs, hints: &InputChromeHints) -> String {
+    let full = format!(
+        " Input ({answer_prefix}{wide_live_prefix}Enter send · {multiline} · Tab complete{focus}{toggle_separator}{toggle}{scroll}{reasoning_suffix} · Ctrl+T activity) ",
+        answer_prefix = hints.answer_prefix,
+        wide_live_prefix = hints.wide_live_prefix,
+        multiline = hints.multiline,
+        focus = hints.focus,
+        toggle_separator = hints.toggle_separator,
+        toggle = hints.toggle,
+        scroll = hints.scroll,
+        reasoning_suffix = hints.reasoning_suffix,
+    );
+    if str_cells(&full) <= args.width.saturating_sub(2) as usize {
+        full
+    } else {
+        format!(
+            " Input ({answer_prefix}{wide_live_prefix}Enter · Ctrl+J newline · Tab{focus}{toggle_separator}{toggle}{scroll}{reasoning_suffix} · Ctrl+T activity) ",
+            answer_prefix = hints.answer_prefix,
+            wide_live_prefix = hints.wide_live_prefix,
+            focus = hints.focus,
+            toggle_separator = hints.toggle_separator,
+            toggle = hints.toggle,
+            scroll = hints.scroll,
+            reasoning_suffix = hints.reasoning_suffix,
+        )
+    }
 }
 
 /// 自定义底栏占位替换用变量(需求 3)。

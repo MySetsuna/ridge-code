@@ -1,5 +1,16 @@
 //! 任务执行:run_once / headless / 流式渲染 / 产物落盘 / 报告 / demo。
-use crate::*;
+use crate::{save_session, session_path};
+use agent::scripted;
+use agent::{
+    agent_run_config, auto_signal_from_run, build_agent, build_llm_agent_full, default_tool,
+    expand_mentions, extract_signals_from_run, halt_reason, load_signal_block, null_token_bus,
+    render_todos, signal_extract_enabled, write_run, AgentState, AutoApprove, Color, McpTools,
+    RichOutput, Skill, Todo, TokenBus,
+};
+use langgraph::{CompiledGraph, StreamEvent};
+use provider::{LlmProvider, Message};
+use std::io::{IsTerminal, Write};
+use std::sync::Arc;
 
 /// 一次性任务:一律放行,跑完写 run 留痕 + 打印结果。
 /// `every=Some(dur)`:**时间触发器**(rung-3 延迟阶梯)—— app 只建一次,按间隔重跑同一任务,
@@ -348,7 +359,8 @@ pub(crate) fn print_report(out: &AgentState) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{format_event, node_label, print_report, run_artifacts_dir, run_demo, truncate};
+    use agent::AgentState;
 
     #[test]
     fn format_event_colorizes_by_kind() {

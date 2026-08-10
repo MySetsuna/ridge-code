@@ -16,14 +16,26 @@ function Invoke-Checked {
         [Parameter(Mandatory = $true)][string[]]$Arguments
     )
 
+    $previousErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     & $File @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$File $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+    $exitCode = $LASTEXITCODE
+    $ErrorActionPreference = $previousErrorAction
+    if ($exitCode -ne 0) {
+        throw "$File $($Arguments -join ' ') failed with exit code $exitCode"
     }
 }
 
 Invoke-Checked "cargo" @("fmt", "--all", "--", "--check")
-Invoke-Checked "git" @("diff", "--check")
+$gitCheckErrorAction = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$gitCheckOutput = & git diff --check 2>&1
+$gitCheckExitCode = $LASTEXITCODE
+$ErrorActionPreference = $gitCheckErrorAction
+$gitCheckOutput | Write-Output
+if ($gitCheckExitCode -ne 0) {
+    throw "git diff --check failed with exit code $gitCheckExitCode"
+}
 Invoke-Checked "cargo" @("test", "--workspace", "--locked")
 Invoke-Checked "cargo" @("clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings")
 $clippyErrorAction = $ErrorActionPreference
@@ -53,8 +65,12 @@ if (-not (Test-Path -LiteralPath $clippyPath) -or (Get-Item -LiteralPath $clippy
     throw "Clippy report missing or empty: $clippyPath"
 }
 
-if (-not (Get-Command "sonar-scanner" -ErrorAction SilentlyContinue)) {
-    throw "sonar-scanner is required; the quality gate cannot skip Sonar"
+$sonarCommand = Get-Command "sonar-scanner" -ErrorAction SilentlyContinue
+if ($null -eq $sonarCommand) {
+    $sonarCommand = Get-Command "sonar-scanner-npm" -ErrorAction SilentlyContinue
+}
+if ($null -eq $sonarCommand) {
+    throw "sonar-scanner or sonar-scanner-npm is required; the quality gate cannot skip Sonar"
 }
 
 $sonarToken = [Environment]::GetEnvironmentVariable("SONAR_TOKEN")
@@ -64,10 +80,21 @@ if ([string]::IsNullOrWhiteSpace($sonarToken)) {
 
 $sonarHost = [Environment]::GetEnvironmentVariable("SONAR_HOST_URL")
 if ([string]::IsNullOrWhiteSpace($sonarHost)) {
-    $sonarHost = "https://sonarcloud.io"
+    $sonarHost = "http://localhost:9000"
+}
+if ($sonarHost -match "^https?://(localhost|127\.0\.0\.1)(:|/|$)") {
+    $existingNoProxy = [Environment]::GetEnvironmentVariable("NO_PROXY")
+    $entries = @($existingNoProxy -split "," | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    foreach ($localHost in @("localhost", "127.0.0.1")) {
+        if ($entries -notcontains $localHost) {
+            $entries += $localHost
+        }
+    }
+    $env:NO_PROXY = $entries -join ","
+    $env:no_proxy = $env:NO_PROXY
 }
 
-Invoke-Checked "sonar-scanner" @(
+Invoke-Checked $sonarCommand.Source @(
     "-Dsonar.host.url=$sonarHost",
     "-Dsonar.qualitygate.wait=true",
     "-Dsonar.qualitygate.timeout=300"

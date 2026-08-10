@@ -13,6 +13,7 @@ pub const END: &str = "__end__";
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 type NodeResult<S> = Result<<S as GraphState>::Update, BoxError>;
+type NodeTask<S> = tokio::task::JoinHandle<(String, NodeResult<S>)>;
 type NodeFn<S> = Arc<dyn Fn(S) -> BoxFuture<NodeResult<S>> + Send + Sync>;
 /// 条件边:看当前状态,返回下一步要激活的节点集合(可 fan-out 到多个)。
 type Router<S> = Arc<dyn Fn(&S) -> Vec<String> + Send + Sync>;
@@ -255,65 +256,15 @@ impl<S: GraphState> CompiledGraph<S> {
             }
 
             // BSP:所有节点拿到同一份快照,并发执行(tokio::spawn 跑满线程池)。
-            let snapshot = state.clone();
-            let mut handles = Vec::with_capacity(frontier.len());
-            for node in &frontier {
-                let f = self
-                    .nodes
-                    .get(node)
-                    .ok_or_else(|| GraphError::UnknownNode(node.clone()))?
-                    .clone();
-                let s = snapshot.clone();
-                let name = node.clone();
-                handles.push(tokio::spawn(async move {
-                    let r = f(s).await;
-                    (name, r)
-                }));
-            }
+            let handles = self.spawn_nodes(&frontier, state.clone())?;
 
             // 同步点:先收集结果,再按 frontier 顺序确定性地 reduce。
-            let mut ran: Vec<String> = Vec::with_capacity(handles.len());
-            for h in handles {
-                let (node, res) = h.await.map_err(|e| GraphError::Join(e.to_string()))?;
-                let update = res.map_err(|source| GraphError::Node {
-                    node: node.clone(),
-                    source,
-                })?;
-                state.apply(update);
-                tracing::debug!(target: "langgraph", superstep = step, node = %node, "node finished");
-                if let Some(tx) = tx {
-                    let _ = tx.send(StreamEvent::NodeFinished {
-                        superstep: step,
-                        node: node.clone(),
-                    });
-                }
-                ran.push(node);
-            }
+            let ran = self.apply_results(handles, &mut state, step, tx).await?;
 
             // 据合并后的状态路由,算出下一超步的 frontier(去重 + 去 END)。
-            let mut next: Vec<String> = Vec::new();
-            for node in &ran {
-                for succ in self.successors(node, &state) {
-                    if succ != END && !next.contains(&succ) {
-                        next.push(succ);
-                    }
-                }
-            }
-
-            if let Some(cp) = cp {
-                cp.save(Checkpoint {
-                    step,
-                    frontier: next.clone(),
-                    state: state.clone(),
-                });
-            }
-            if let Some(tx) = tx {
-                let _ = tx.send(StreamEvent::Superstep {
-                    step,
-                    active: next.clone(),
-                    state: state.clone(),
-                });
-            }
+            let next = self.next_frontier(&ran, &state);
+            self.save_checkpoint(cp, step, &next, &state);
+            self.emit_superstep(tx, step, &next, &state);
 
             tracing::debug!(target: "langgraph", superstep = step, next = ?next, "superstep complete");
             frontier = next;
@@ -321,6 +272,99 @@ impl<S: GraphState> CompiledGraph<S> {
 
         tracing::info!(target: "langgraph", supersteps = step, "run finished");
         Ok(state)
+    }
+
+    fn next_frontier(&self, ran: &[String], state: &S) -> Vec<String> {
+        let mut next = Vec::new();
+        for node in ran {
+            for successor in self.successors(node, state) {
+                if successor != END && !next.contains(&successor) {
+                    next.push(successor);
+                }
+            }
+        }
+        next
+    }
+
+    fn save_checkpoint(
+        &self,
+        cp: Option<&dyn Checkpointer<S>>,
+        step: usize,
+        frontier: &[String],
+        state: &S,
+    ) {
+        if let Some(cp) = cp {
+            cp.save(Checkpoint {
+                step,
+                frontier: frontier.to_vec(),
+                state: state.clone(),
+            });
+        }
+    }
+
+    fn emit_superstep(
+        &self,
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<StreamEvent<S>>>,
+        step: usize,
+        active: &[String],
+        state: &S,
+    ) {
+        if let Some(tx) = tx {
+            let _ = tx.send(StreamEvent::Superstep {
+                step,
+                active: active.to_vec(),
+                state: state.clone(),
+            });
+        }
+    }
+
+    fn spawn_nodes(
+        &self,
+        frontier: &[String],
+        snapshot: S,
+    ) -> Result<Vec<NodeTask<S>>, GraphError> {
+        frontier
+            .iter()
+            .map(|node| {
+                let f = self
+                    .nodes
+                    .get(node)
+                    .ok_or_else(|| GraphError::UnknownNode(node.clone()))?
+                    .clone();
+                let name = node.clone();
+                let state = snapshot.clone();
+                Ok(tokio::spawn(async move { (name, f(state).await) }))
+            })
+            .collect()
+    }
+
+    async fn apply_results(
+        &self,
+        handles: Vec<NodeTask<S>>,
+        state: &mut S,
+        step: usize,
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<StreamEvent<S>>>,
+    ) -> Result<Vec<String>, GraphError> {
+        let mut ran = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let (node, result) = handle
+                .await
+                .map_err(|error| GraphError::Join(error.to_string()))?;
+            let update = result.map_err(|source| GraphError::Node {
+                node: node.clone(),
+                source,
+            })?;
+            state.apply(update);
+            tracing::debug!(target: "langgraph", superstep = step, node = %node, "node finished");
+            if let Some(tx) = tx {
+                let _ = tx.send(StreamEvent::NodeFinished {
+                    superstep: step,
+                    node: node.clone(),
+                });
+            }
+            ran.push(node);
+        }
+        Ok(ran)
     }
 
     /// 一个节点跑完后的后继:条件边优先,否则静态边,都没有则隐式 END。

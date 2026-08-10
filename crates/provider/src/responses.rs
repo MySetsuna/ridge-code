@@ -114,122 +114,150 @@ pub fn accumulate_stream<F: Fn(StreamChunk) + ?Sized>(
         .and_then(Value::as_str)
         .unwrap_or_default();
     match kind {
-        "response.output_text.delta" => {
-            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
-                on_token(StreamChunk::Answer(delta.to_string()));
-                acc.text.push_str(delta);
-            }
-        }
+        "response.output_text.delta" => append_response_text(acc, value, on_token, false),
         "response.reasoning_summary_text.delta"
         | "response.reasoning_text.delta"
-        | "response.reasoning_content.delta" => {
-            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
-                on_token(StreamChunk::Reasoning(delta.to_string()));
-                acc.reasoning.push_str(delta);
-            }
-        }
-        "response.function_call_arguments.delta" => {
-            let key = value
-                .get("call_id")
-                .or_else(|| value.get("item_id"))
-                .and_then(Value::as_str);
-            let Some(key) = key else { return };
-            let call = acc
-                .pending_tool_calls
-                .entry(key.to_string())
-                .or_insert_with(|| ToolCallAcc {
-                    id: value
-                        .get("item_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or(key)
-                        .to_string(),
-                    call_id: value
-                        .get("call_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or(key)
-                        .to_string(),
-                    ..Default::default()
-                });
-            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
-                call.arguments.push_str(delta);
-            }
-        }
-        "response.output_item.done" => {
-            let Some(item) = value.get("item") else {
-                return;
-            };
-            match item.get("type").and_then(Value::as_str) {
-                Some("function_call") => {
-                    let call_id = item
-                        .get("call_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    let item_id = item
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    let key = if !call_id.is_empty() {
-                        &call_id
-                    } else {
-                        &item_id
-                    };
-                    let mut call = acc.pending_tool_calls.remove(key).unwrap_or_default();
-                    call.id = item_id;
-                    call.call_id = call_id;
-                    call.name = item
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
-                        call.arguments = arguments.to_string();
-                    }
-                    if !call.name.is_empty() {
-                        upsert_tool_call(&mut acc.tool_calls, call);
-                    }
-                }
-                Some("message") => {
-                    if let Some(content) = item.get("content").and_then(Value::as_array) {
-                        for part in content {
-                            if let Some(text) = part
-                                .get("text")
-                                .and_then(Value::as_str)
-                                .filter(|text| !text.is_empty())
-                            {
-                                acc.fallback_text.push_str(text);
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        "response.completed" => {
-            acc.completed = true;
-            if let Some(response) = value.get("response") {
-                if let Some(usage) = response.get("usage") {
-                    acc.usage.prompt_tokens = usage["input_tokens"].as_u64().unwrap_or(0) as u32;
-                    acc.usage.completion_tokens =
-                        usage["output_tokens"].as_u64().unwrap_or(0) as u32;
-                }
-            }
-        }
-        "response.failed" | "response.incomplete" => {
-            let message = value
-                .pointer("/response/error/message")
-                .and_then(Value::as_str)
-                .or_else(|| {
-                    value
-                        .pointer("/response/incomplete_details/reason")
-                        .and_then(Value::as_str)
-                })
-                .unwrap_or("Responses API request failed");
-            acc.error = Some(message.to_string());
-        }
+        | "response.reasoning_content.delta" => append_response_text(acc, value, on_token, true),
+        "response.function_call_arguments.delta" => append_function_delta(acc, value),
+        "response.output_item.done" => append_output_item(acc, value),
+        "response.completed" => mark_completed(acc, value),
+        "response.failed" | "response.incomplete" => record_stream_error(acc, value),
         _ => {}
     }
+}
+
+fn append_response_text<F: Fn(StreamChunk) + ?Sized>(
+    acc: &mut StreamAcc,
+    value: &Value,
+    on_token: &F,
+    reasoning: bool,
+) {
+    let Some(delta) = value.get("delta").and_then(Value::as_str) else {
+        return;
+    };
+    let chunk = if reasoning {
+        StreamChunk::Reasoning(delta.to_string())
+    } else {
+        StreamChunk::Answer(delta.to_string())
+    };
+    on_token(chunk);
+    if reasoning {
+        acc.reasoning.push_str(delta);
+    } else {
+        acc.text.push_str(delta);
+    }
+}
+
+fn append_function_delta(acc: &mut StreamAcc, value: &Value) {
+    let Some(key) = value
+        .get("call_id")
+        .or_else(|| value.get("item_id"))
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    let call = acc
+        .pending_tool_calls
+        .entry(key.to_string())
+        .or_insert_with(|| ToolCallAcc {
+            id: value
+                .get("item_id")
+                .and_then(Value::as_str)
+                .unwrap_or(key)
+                .to_string(),
+            call_id: value
+                .get("call_id")
+                .and_then(Value::as_str)
+                .unwrap_or(key)
+                .to_string(),
+            ..Default::default()
+        });
+    if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+        call.arguments.push_str(delta);
+    }
+}
+
+fn append_output_item(acc: &mut StreamAcc, value: &Value) {
+    let Some(item) = value.get("item") else {
+        return;
+    };
+    match item.get("type").and_then(Value::as_str) {
+        Some("function_call") => append_function_item(acc, item),
+        Some("message") => append_message_item(acc, item),
+        _ => {}
+    }
+}
+
+fn append_function_item(acc: &mut StreamAcc, item: &Value) {
+    let call_id = item
+        .get("call_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let item_id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let key = if !call_id.is_empty() {
+        &call_id
+    } else {
+        &item_id
+    };
+    let mut call = acc.pending_tool_calls.remove(key).unwrap_or_default();
+    call.id = item_id;
+    call.call_id = call_id;
+    call.name = item
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
+        call.arguments = arguments.to_string();
+    }
+    if !call.name.is_empty() {
+        upsert_tool_call(&mut acc.tool_calls, call);
+    }
+}
+
+fn append_message_item(acc: &mut StreamAcc, item: &Value) {
+    let Some(content) = item.get("content").and_then(Value::as_array) else {
+        return;
+    };
+    for part in content {
+        if let Some(text) = part
+            .get("text")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+        {
+            acc.fallback_text.push_str(text);
+        }
+    }
+}
+
+fn mark_completed(acc: &mut StreamAcc, value: &Value) {
+    acc.completed = true;
+    let Some(usage) = value
+        .get("response")
+        .and_then(|response| response.get("usage"))
+    else {
+        return;
+    };
+    acc.usage.prompt_tokens = usage["input_tokens"].as_u64().unwrap_or(0) as u32;
+    acc.usage.completion_tokens = usage["output_tokens"].as_u64().unwrap_or(0) as u32;
+}
+
+fn record_stream_error(acc: &mut StreamAcc, value: &Value) {
+    let message = value
+        .pointer("/response/error/message")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .pointer("/response/incomplete_details/reason")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("Responses API request failed");
+    acc.error = Some(message.to_string());
 }
 
 fn upsert_tool_call(calls: &mut Vec<ToolCallAcc>, call: ToolCallAcc) {

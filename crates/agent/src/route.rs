@@ -370,32 +370,7 @@ pub fn choose_route(request: &RouteRequest, candidates: &[ModelProfile]) -> Rout
         .iter()
         .find(|item| item.eligible)
         .map(|item| item.profile.clone());
-    let reason = match selected.as_ref() {
-        Some(profile) => {
-            let score = ranking
-                .iter()
-                .find(|item| item.profile == *profile)
-                .map(|item| item.score)
-                .unwrap_or_default();
-            format!(
-                "role={} difficulty={} size={} kind={} selected={} score={} candidates={}",
-                request.role.as_str(),
-                request.profile.difficulty.as_str(),
-                request.profile.size.as_str(),
-                request.profile.kind.as_str(),
-                profile.key(),
-                score,
-                ranking.len()
-            )
-        }
-        None => format!(
-            "role={} difficulty={} size={} kind={} selected=none reason=no eligible provider/model candidate",
-            request.role.as_str(),
-            request.profile.difficulty.as_str(),
-            request.profile.size.as_str(),
-            request.profile.kind.as_str()
-        ),
-    };
+    let reason = route_reason(request, &ranking, selected.as_ref());
     RouteDecision {
         selected,
         ranking,
@@ -404,10 +379,56 @@ pub fn choose_route(request: &RouteRequest, candidates: &[ModelProfile]) -> Rout
     }
 }
 
+fn route_reason(
+    request: &RouteRequest,
+    ranking: &[RouteRank],
+    selected: Option<&ModelProfile>,
+) -> String {
+    let prefix = format!(
+        "role={} difficulty={} size={} kind={}",
+        request.role.as_str(),
+        request.profile.difficulty.as_str(),
+        request.profile.size.as_str(),
+        request.profile.kind.as_str()
+    );
+    match selected {
+        Some(profile) => {
+            let score = ranking
+                .iter()
+                .find(|item| item.profile == *profile)
+                .map(|item| item.score)
+                .unwrap_or_default();
+            format!(
+                "{prefix} selected={} score={} candidates={}",
+                profile.key(),
+                score,
+                ranking.len()
+            )
+        }
+        None => format!("{prefix} selected=none reason=no eligible provider/model candidate"),
+    }
+}
+
 fn rank_candidate(request: &RouteRequest, profile: ModelProfile) -> RouteRank {
-    let mut score = 0;
-    let mut eligible = true;
     let mut reasons = Vec::new();
+    let needs_tools = !matches!(request.role, RouteRole::Planner);
+    let eligible = eligibility_reasons(request, &profile, needs_tools, &mut reasons);
+    let score = score_candidate(request, &profile, needs_tools);
+    RouteRank {
+        profile,
+        score,
+        eligible,
+        reasons,
+    }
+}
+
+fn eligibility_reasons(
+    request: &RouteRequest,
+    profile: &ModelProfile,
+    needs_tools: bool,
+    reasons: &mut Vec<String>,
+) -> bool {
+    let mut eligible = true;
     if request
         .preferred_provider
         .as_deref()
@@ -431,11 +452,21 @@ fn rank_candidate(request: &RouteRequest, profile: ModelProfile) -> RouteRank {
         eligible = false;
         reasons.push("context window too small".to_string());
     }
-    let needs_tools = !matches!(request.role, RouteRole::Planner);
     if needs_tools && profile.supports_tools == Some(false) {
         eligible = false;
         reasons.push("tools unsupported".to_string());
     }
+    if reasoning_rejected(request, profile, reasons) {
+        eligible = false;
+    }
+    eligible
+}
+
+fn reasoning_rejected(
+    request: &RouteRequest,
+    profile: &ModelProfile,
+    reasons: &mut Vec<String>,
+) -> bool {
     let prefers_reasoning = matches!(
         request.role,
         RouteRole::Maker | RouteRole::Planner | RouteRole::Teammate
@@ -444,36 +475,35 @@ fn rank_candidate(request: &RouteRequest, profile: ModelProfile) -> RouteRank {
             request.profile.kind,
             TaskKind::Planning | TaskKind::Research
         );
-    if prefers_reasoning {
-        match profile.supports_reasoning {
-            Some(true) => score += 8,
-            Some(false) => {
-                if matches!(request.profile.difficulty, TaskDifficulty::Complex)
-                    || matches!(request.role, RouteRole::Maker | RouteRole::Planner)
-                {
-                    eligible = false;
-                    reasons.push("reasoning unsupported for role/task".to_string());
-                } else {
-                    score -= 5;
-                }
-            }
-            None => reasons.push("reasoning capability unknown".to_string()),
+    if !prefers_reasoning {
+        return false;
+    }
+    match profile.supports_reasoning {
+        Some(true) => false,
+        Some(false)
+            if matches!(request.profile.difficulty, TaskDifficulty::Complex)
+                || matches!(request.role, RouteRole::Maker | RouteRole::Planner) =>
+        {
+            reasons.push("reasoning unsupported for role/task".to_string());
+            true
+        }
+        Some(false) => false,
+        None => {
+            reasons.push("reasoning capability unknown".to_string());
+            false
         }
     }
+}
+
+fn score_candidate(request: &RouteRequest, profile: &ModelProfile, needs_tools: bool) -> i32 {
     let prefers_fast = matches!(
         request.role,
         RouteRole::Subagent | RouteRole::Checker | RouteRole::Worker
     ) || matches!(request.profile.difficulty, TaskDifficulty::Simple)
         || matches!(request.profile.kind, TaskKind::ReadOnly | TaskKind::Review);
-    let prefers_cheap = prefers_fast;
-    if prefers_fast {
-        score += tier_score(profile.latency_tier, true);
-    }
-    if prefers_cheap {
-        score += tier_score(profile.cost_tier, true);
-    } else {
-        score += tier_score(profile.cost_tier, false);
-    }
+    let mut score = tier_score(profile.latency_tier, true) * i32::from(prefers_fast);
+    score += tier_score(profile.cost_tier, prefers_fast);
+    score += reasoning_score(request, profile);
     if needs_tools && profile.supports_tools == Some(true) {
         score += 3;
     }
@@ -483,11 +513,25 @@ fn rank_candidate(request: &RouteRequest, profile: ModelProfile) -> RouteRank {
     {
         score += 2;
     }
-    RouteRank {
-        profile,
-        score,
-        eligible,
-        reasons,
+    score
+}
+
+fn reasoning_score(request: &RouteRequest, profile: &ModelProfile) -> i32 {
+    let prefers_reasoning = matches!(
+        request.role,
+        RouteRole::Maker | RouteRole::Planner | RouteRole::Teammate
+    ) || matches!(request.profile.difficulty, TaskDifficulty::Complex)
+        || matches!(
+            request.profile.kind,
+            TaskKind::Planning | TaskKind::Research
+        );
+    if !prefers_reasoning {
+        return 0;
+    }
+    match profile.supports_reasoning {
+        Some(true) => 8,
+        Some(false) => -5,
+        None => 0,
     }
 }
 
@@ -513,7 +557,10 @@ fn non_empty(value: Option<&str>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        choose_route, ModelProfile, RouteRequest, RouteRole, TaskDifficulty, TaskKind, TaskProfile,
+        TaskSize,
+    };
 
     fn model(provider: &str, model: &str, reasoning: bool, cost: u8, latency: u8) -> ModelProfile {
         ModelProfile {

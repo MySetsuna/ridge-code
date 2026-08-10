@@ -610,6 +610,16 @@ enum LiveBlock {
     Tool(ToolBlock),
 }
 
+struct VisibleLanes<'a> {
+    answers: VecDeque<LiveLine<'a>>,
+    reasoning: VecDeque<LiveLine<'a>>,
+    other: VecDeque<LiveLine<'a>>,
+    focused_id: Option<u64>,
+    last_answer_text: Option<&'a str>,
+    focused_tool_expanded: bool,
+    reasoning_truncated: bool,
+}
+
 /// Semantic target behind a live Inspector row.  Keeping identity separate
 /// from display text lets navigation focus an older block without parsing
 /// summaries or coupling the execution graph to the panel.
@@ -1573,32 +1583,148 @@ impl LiveTranscript {
         // Inspector selection can pin one historical Answer/Reasoning block
         // without stopping the producer.  Render that bounded block directly;
         // normal Follow projection below remains unchanged after Alt+End.
-        if let Some(focus) = self.audit_focus {
-            if let Some((lines, mut truncated)) = self.audit_lines(focus, max_rows) {
-                let mut visible = into_tail(lines, max_rows);
-                let effective_offset =
-                    inspect_offset.min(visible.len().saturating_sub(requested_rows));
-                if effective_offset > 0 {
-                    let end = visible.len().saturating_sub(effective_offset);
-                    let start = end.saturating_sub(requested_rows);
-                    visible = visible
-                        .into_iter()
-                        .skip(start)
-                        .take(end.saturating_sub(start))
-                        .collect();
-                    truncated = true;
-                }
-                mark_reasoning_continuation(&mut visible, truncated);
-                ensure_marker(&mut visible, LiveLineKind::Reasoning, "💭 ");
-                ensure_marker(&mut visible, LiveLineKind::Answer, "🤖 ");
-                return visible;
-            }
+        if let Some(visible) = self.audit_visible_lines(max_rows, requested_rows, inspect_offset) {
+            return visible;
         }
 
         // Keep only rows that can reach this frame.  A long-running task may
         // retain 64 blocks, but the viewport is bounded; materializing every
         // collapsed/expanded tool row on every spinner frame needlessly turns
         // redraw cost into O(blocks × detail).
+        let lanes = self.collect_visible_lanes(max_rows);
+
+        // Default view keeps Answer readable while reserving an adaptive reasoning
+        // preview. Ctrl+R opts into an inspection view: reasoning gets the
+        // remaining rows, while Answer keeps one row and a focused tool keeps its
+        // summary.
+        self.compose_visible_lanes(lanes, max_rows, requested_rows, inspect_offset)
+    }
+
+    fn compose_visible_lanes<'a>(
+        &'a self,
+        lanes: VisibleLanes<'a>,
+        max_rows: usize,
+        requested_rows: usize,
+        inspect_offset: usize,
+    ) -> Vec<LiveLine<'a>> {
+        let VisibleLanes {
+            answers,
+            reasoning,
+            other,
+            focused_id,
+            last_answer_text,
+            focused_tool_expanded,
+            mut reasoning_truncated,
+            ..
+        } = lanes;
+        let reasoning_preview_rows = default_reasoning_preview_rows(max_rows);
+        let reserve_reasoning = should_reserve_reasoning(
+            self.reasoning_expanded,
+            &answers,
+            focused_tool_expanded,
+            !reasoning.is_empty(),
+            focused_id.is_some(),
+            max_rows,
+            reasoning_preview_rows,
+        );
+        let answer_budget = visible_answer_budget(
+            self.reasoning_expanded,
+            !answers.is_empty(),
+            focused_id.is_some(),
+            max_rows,
+            reserve_reasoning,
+            reasoning_preview_rows,
+        );
+        let answers = pin_answer_header(
+            into_tail(answers, answer_budget),
+            last_answer_text,
+            answer_budget,
+        );
+        let focused = self.focused_tool_lines(
+            focused_id,
+            max_rows,
+            answers.len(),
+            !reasoning.is_empty(),
+            reserve_reasoning,
+            reasoning_preview_rows,
+        );
+        let reasoning_rows = reasoning.len();
+        let mut visible = merge_visible_lanes(VisibleLaneMerge {
+            reasoning_expanded: self.reasoning_expanded,
+            reserve_reasoning,
+            reasoning,
+            other,
+            focused,
+            answers,
+            max_rows,
+            reasoning_preview_rows,
+        });
+        if apply_inspect_offset(&mut visible, requested_rows, inspect_offset) {
+            reasoning_truncated = true;
+        }
+        reasoning_truncated |= visible
+            .iter()
+            .filter(|line| line.kind == LiveLineKind::Reasoning)
+            .count()
+            < reasoning_rows;
+        mark_reasoning_continuation(&mut visible, reasoning_truncated);
+        ensure_marker(&mut visible, LiveLineKind::Reasoning, "💭 ");
+        ensure_marker(&mut visible, LiveLineKind::Answer, "🤖 ");
+        visible
+    }
+
+    fn focused_tool_lines<'a>(
+        &'a self,
+        focused_id: Option<u64>,
+        max_rows: usize,
+        answer_rows: usize,
+        has_reasoning: bool,
+        reserve_reasoning: bool,
+        reasoning_preview_rows: usize,
+    ) -> VecDeque<LiveLine<'a>> {
+        let mut focused = VecDeque::with_capacity(max_rows);
+        let Some(focused_id) = focused_id else {
+            return focused;
+        };
+        let Some(LiveBlock::Tool(tool)) = self
+            .blocks
+            .iter()
+            .find(|block| matches!(block, LiveBlock::Tool(tool) if tool.id == focused_id))
+        else {
+            return focused;
+        };
+        let budget = focused_tool_budget(
+            self.reasoning_expanded,
+            tool.expanded,
+            max_rows,
+            answer_rows,
+            has_reasoning,
+            reserve_reasoning,
+            reasoning_preview_rows,
+        );
+        tool.append_live_tail(&mut focused, budget, true);
+        focused
+    }
+
+    fn audit_visible_lines<'a>(
+        &'a self,
+        max_rows: usize,
+        requested_rows: usize,
+        inspect_offset: usize,
+    ) -> Option<Vec<LiveLine<'a>>> {
+        let focus = self.audit_focus?;
+        let (lines, mut truncated) = self.audit_lines(focus, max_rows)?;
+        let mut visible = into_tail(lines, max_rows);
+        if apply_inspect_offset(&mut visible, requested_rows, inspect_offset) {
+            truncated = true;
+        }
+        mark_reasoning_continuation(&mut visible, truncated);
+        ensure_marker(&mut visible, LiveLineKind::Reasoning, "💭 ");
+        ensure_marker(&mut visible, LiveLineKind::Answer, "🤖 ");
+        Some(visible)
+    }
+
+    fn collect_visible_lanes<'a>(&'a self, max_rows: usize) -> VisibleLanes<'a> {
         let mut answers = VecDeque::with_capacity(max_rows);
         let mut reasoning = VecDeque::with_capacity(max_rows);
         let mut other = VecDeque::with_capacity(max_rows);
@@ -1632,9 +1758,6 @@ impl LiveTranscript {
                     );
                 }
                 LiveBlock::Reasoning(reasoning_block) => {
-                    // Before the first Answer, keep the actual Reasoning/Tool
-                    // block order; once Answer exists, the dedicated lanes
-                    // intentionally enforce Answer-first budgeting.
                     let target = if has_answer {
                         &mut reasoning
                     } else {
@@ -1650,114 +1773,21 @@ impl LiveTranscript {
                         max_rows,
                     );
                 }
-                LiveBlock::Tool(tool) => {
-                    if focused_id != Some(tool.id) {
-                        tool.append_live_tail(&mut other, max_rows, false);
-                    }
+                LiveBlock::Tool(tool) if focused_id != Some(tool.id) => {
+                    tool.append_live_tail(&mut other, max_rows, false);
                 }
+                LiveBlock::Tool(_) => {}
             }
         }
-
-        // Default view keeps Answer readable while reserving an adaptive reasoning
-        // preview. Ctrl+R opts into an inspection view: reasoning gets the
-        // remaining rows, while Answer keeps one row and a focused tool keeps its
-        // summary.
-        let reasoning_preview_rows = default_reasoning_preview_rows(max_rows);
-        let reserve_reasoning = !self.reasoning_expanded
-            && !answers.is_empty()
-            && !focused_tool_expanded
-            && !reasoning.is_empty()
-            && max_rows > reasoning_preview_rows + usize::from(focused_id.is_some());
-        let answer_budget = if self.reasoning_expanded {
-            let focus_reservation = usize::from(focused_id.is_some() && max_rows > 1);
-            usize::from(!answers.is_empty()).min(max_rows.saturating_sub(focus_reservation))
-        } else {
-            let reserved = usize::from(focused_id.is_some())
-                + if reserve_reasoning {
-                    reasoning_preview_rows
-                } else {
-                    0
-                };
-            max_rows.saturating_sub(reserved)
-        };
-        let answers = pin_answer_header(
-            into_tail(answers, answer_budget),
+        VisibleLanes {
+            answers,
+            reasoning,
+            other,
+            focused_id,
             last_answer_text,
-            answer_budget,
-        );
-        let mut focused = VecDeque::with_capacity(max_rows);
-        if let Some(focused_id) = focused_id {
-            if let Some(LiveBlock::Tool(tool)) = self
-                .blocks
-                .iter()
-                .find(|block| matches!(block, LiveBlock::Tool(tool) if tool.id == focused_id))
-            {
-                let focus_budget = if self.reasoning_expanded && tool.expanded {
-                    // Ctrl+O must remain observable during Ctrl+R inspection:
-                    // keep the focused summary, borrow remaining rows for its
-                    // bounded details, and leave one row for actual reasoning
-                    // whenever the viewport has room.
-                    let available = max_rows.saturating_sub(answers.len());
-                    let reasoning_floor = usize::from(!reasoning.is_empty());
-                    if available <= 1 {
-                        available
-                    } else {
-                        available.saturating_sub(reasoning_floor).max(1)
-                    }
-                } else if self.reasoning_expanded {
-                    1
-                } else {
-                    max_rows
-                        .saturating_sub(answers.len())
-                        .saturating_sub(if reserve_reasoning {
-                            reasoning_preview_rows
-                        } else {
-                            0
-                        })
-                        .max(1)
-                };
-                tool.append_live_tail(&mut focused, focus_budget, true);
-            }
+            focused_tool_expanded,
+            reasoning_truncated,
         }
-        let focus_rows = focused.len();
-        let remaining = max_rows.saturating_sub(answers.len() + focus_rows);
-        let reasoning_rows = reasoning.len();
-        let mut visible = if self.reasoning_expanded && !reasoning.is_empty() {
-            into_tail(reasoning, remaining)
-        } else if reserve_reasoning {
-            let reasoning = into_tail(reasoning, remaining.min(reasoning_preview_rows));
-            let mut visible = into_tail(other, remaining.saturating_sub(reasoning.len()));
-            visible.extend(reasoning);
-            visible
-        } else {
-            // No Answer: retain the full reasoning tail, then let normal tail
-            // clipping arbitrate against non-focused tool rows.
-            let mut combined = reasoning;
-            combined.extend(other);
-            into_tail(combined, remaining)
-        };
-        visible.extend(focused);
-        visible.extend(answers);
-        let effective_offset = inspect_offset.min(visible.len().saturating_sub(requested_rows));
-        if effective_offset > 0 {
-            let end = visible.len().saturating_sub(effective_offset);
-            let start = end.saturating_sub(requested_rows);
-            visible = visible
-                .into_iter()
-                .skip(start)
-                .take(end.saturating_sub(start))
-                .collect();
-            reasoning_truncated = true;
-        }
-        reasoning_truncated |= visible
-            .iter()
-            .filter(|line| line.kind == LiveLineKind::Reasoning)
-            .count()
-            < reasoning_rows;
-        mark_reasoning_continuation(&mut visible, reasoning_truncated);
-        ensure_marker(&mut visible, LiveLineKind::Reasoning, "💭 ");
-        ensure_marker(&mut visible, LiveLineKind::Answer, "🤖 ");
-        visible
     }
 
     fn trim_blocks(&mut self) -> Vec<ToolBlock> {
@@ -2104,6 +2134,136 @@ fn into_tail<'a>(mut lines: VecDeque<LiveLine<'a>>, max_rows: usize) -> Vec<Live
         lines.pop_front();
     }
     lines.into_iter().collect()
+}
+
+fn apply_inspect_offset(
+    lines: &mut Vec<LiveLine<'_>>,
+    requested_rows: usize,
+    offset: usize,
+) -> bool {
+    let effective_offset = offset.min(lines.len().saturating_sub(requested_rows));
+    if effective_offset == 0 {
+        return false;
+    }
+    let end = lines.len().saturating_sub(effective_offset);
+    let start = end.saturating_sub(requested_rows);
+    *lines = lines
+        .drain(..)
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect();
+    true
+}
+
+fn should_reserve_reasoning(
+    reasoning_expanded: bool,
+    answers: &VecDeque<LiveLine<'_>>,
+    focused_tool_expanded: bool,
+    has_reasoning: bool,
+    has_focus: bool,
+    max_rows: usize,
+    preview_rows: usize,
+) -> bool {
+    !reasoning_expanded
+        && !answers.is_empty()
+        && !focused_tool_expanded
+        && has_reasoning
+        && max_rows > preview_rows + usize::from(has_focus)
+}
+
+fn visible_answer_budget(
+    reasoning_expanded: bool,
+    has_answers: bool,
+    has_focus: bool,
+    max_rows: usize,
+    reserve_reasoning: bool,
+    reasoning_preview_rows: usize,
+) -> usize {
+    if reasoning_expanded {
+        let focus_reservation = usize::from(has_focus && max_rows > 1);
+        usize::from(has_answers).min(max_rows.saturating_sub(focus_reservation))
+    } else {
+        let reserved = usize::from(has_focus)
+            + if reserve_reasoning {
+                reasoning_preview_rows
+            } else {
+                0
+            };
+        max_rows.saturating_sub(reserved)
+    }
+}
+
+fn focused_tool_budget(
+    reasoning_expanded: bool,
+    tool_expanded: bool,
+    max_rows: usize,
+    answer_rows: usize,
+    has_reasoning: bool,
+    reserve_reasoning: bool,
+    reasoning_preview_rows: usize,
+) -> usize {
+    if reasoning_expanded && tool_expanded {
+        let available = max_rows.saturating_sub(answer_rows);
+        let reasoning_floor = usize::from(has_reasoning);
+        if available <= 1 {
+            available
+        } else {
+            available.saturating_sub(reasoning_floor).max(1)
+        }
+    } else if reasoning_expanded {
+        1
+    } else {
+        max_rows
+            .saturating_sub(answer_rows)
+            .saturating_sub(if reserve_reasoning {
+                reasoning_preview_rows
+            } else {
+                0
+            })
+            .max(1)
+    }
+}
+
+struct VisibleLaneMerge<'a> {
+    reasoning_expanded: bool,
+    reserve_reasoning: bool,
+    reasoning: VecDeque<LiveLine<'a>>,
+    other: VecDeque<LiveLine<'a>>,
+    focused: VecDeque<LiveLine<'a>>,
+    answers: Vec<LiveLine<'a>>,
+    max_rows: usize,
+    reasoning_preview_rows: usize,
+}
+
+fn merge_visible_lanes(input: VisibleLaneMerge<'_>) -> Vec<LiveLine<'_>> {
+    let VisibleLaneMerge {
+        reasoning_expanded,
+        reserve_reasoning,
+        reasoning,
+        other,
+        focused,
+        answers,
+        max_rows,
+        reasoning_preview_rows,
+    } = input;
+    let focus_rows = focused.len();
+    let remaining = max_rows.saturating_sub(answers.len() + focus_rows);
+    let reasoning = if reasoning_expanded && !reasoning.is_empty() {
+        into_tail(reasoning, remaining)
+    } else if reserve_reasoning {
+        let reasoning = into_tail(reasoning, remaining.min(reasoning_preview_rows));
+        let mut visible = into_tail(other, remaining.saturating_sub(reasoning.len()));
+        visible.extend(reasoning);
+        visible
+    } else {
+        let mut combined = reasoning;
+        combined.extend(other);
+        into_tail(combined, remaining)
+    };
+    let mut visible = reasoning;
+    visible.extend(focused);
+    visible.extend(answers);
+    visible
 }
 
 fn tail_lines<'a>(lines: Vec<LiveLine<'a>>, max_rows: usize) -> Vec<LiveLine<'a>> {

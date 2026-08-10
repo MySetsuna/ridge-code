@@ -1,4 +1,13 @@
-use super::*;
+use agent::Config;
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+use super::transcript::LiveBlockFocus;
+use super::{
+    fmt_ctx, ActivityEntry, AnswerEntry, LiveTranscript, ReasoningEntry, ToolBlock,
+    EFFORT_MODEL_GROUP,
+};
+use crate::config_path;
+use agent::PROVIDER_PRESETS;
 
 const DETAIL_SCROLL_STEP: i16 = 4;
 

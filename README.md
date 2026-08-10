@@ -562,10 +562,18 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --workspace --locked
 ~~~
 
-Full quality gate also runs line coverage (minimum 80%) and the SonarQube
-quality gate. Run pwsh -File scripts/quality-gate.ps1 or
-sh scripts/quality-gate.sh locally. Missing sonar-scanner or SONAR_TOKEN is a
-hard failure; the scan cannot be skipped.
+Full quality gate also runs line coverage (minimum 80%) and the local SonarQube
+quality gate. The repository targets `http://localhost:9000`; start the local
+SonarQube service, create a project token at
+`http://localhost:9000/account/security`, then run
+`pwsh -File scripts/configure-sonar-secret.ps1` and paste the token into the
+hidden prompt. The token is stored only in the current user's environment.
+Install the scanner with `npm install --global @sonar/scan@5.0.0`, then run
+`pwsh -File scripts/quality-gate.ps1` or `sh scripts/quality-gate.sh` locally.
+Missing sonar-scanner or SONAR_TOKEN is a hard failure; the scan cannot be
+skipped. The release workflow's local Sonar job requires a self-hosted runner
+on the same machine as the local service; GitHub-hosted runners cannot reach
+localhost.
 
 ## 引擎 API（最小示例）
 

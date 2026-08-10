@@ -1,9 +1,971 @@
-use super::*;
+use super::{
+    edit_input, handle_device_oauth_event, handle_done_result, handle_input_action,
+    handle_key_event, handle_stream_event, handle_tick, handle_token_chunk, keylog_path,
+    log_key_event, note_initial_ui, poll_device_oauth, poll_model_catalog, poll_oauth_callback,
+    prepare_loop, process_pending_submit, reset_task_ui, run_event_loop, run_event_step,
+    session_input_history, superstep_activity, tui_approver, DoneEventContext, EventStepContext,
+    KeyEventContext, KeyEventResult, LoopPrepareContext, PendingSubmitContext, StartTask,
+    StreamEventContext, TuiLoopContext,
+};
+use crate::{DeviceOAuthEvent, ReplMeta};
+use ratatui::backend::CrosstermBackend;
+use std::time::{Duration, Instant};
+
+fn test_meta() -> ReplMeta {
+    ReplMeta {
+        tools: Vec::new(),
+        provider: "test".into(),
+        provider_label: "test".into(),
+        model: "model".into(),
+        base_url: String::new(),
+        status_bar: "{provider} · {model}".into(),
+        ctx_window: 200_000,
+    }
+}
+
+fn test_swap() -> Arc<provider::SwapProvider> {
+    Arc::new(provider::SwapProvider::new(Arc::new(
+        provider::ScriptedProvider::new(Vec::new()),
+    )))
+}
+
+fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
+    Event::Key(KeyEvent::new(code, modifiers))
+}
+
+fn release_key(code: KeyCode, modifiers: KeyModifiers) -> Event {
+    Event::Key(KeyEvent::new_with_kind(
+        code,
+        modifiers,
+        KeyEventKind::Release,
+    ))
+}
+
+fn assert_continue(result: anyhow::Result<KeyEventResult>) {
+    assert!(matches!(
+        result.expect("key event should be handled"),
+        KeyEventResult::Continue
+    ));
+}
+
+#[tokio::test]
+async fn extracted_key_handler_covers_priority_and_edit_paths() {
+    let mut ui = Ui::default();
+    ui.push_chunk(provider::StreamChunk::Reasoning("reasoning".into()));
+    ui.push_chunk(provider::StreamChunk::Answer("answer".into()));
+    let mut meta = test_meta();
+    let swap = test_swap();
+    let bus = agent::null_token_bus();
+    let mut pending = None;
+    let mut task = None;
+    let mut task_started = None;
+    let mut retry_count = 0;
+    let mut pending_submit = None;
+    let mut momentary_hold = false;
+    let mut last_ctrl_c = None;
+    let mut pressed = std::collections::HashSet::new();
+    let keylog_path = None;
+    macro_rules! dispatch {
+        ($event:expr) => {{
+            let mut context = KeyEventContext {
+                ui: &mut ui,
+                meta: &mut meta,
+                swap: &swap,
+                bus: &bus,
+                pending: &mut pending,
+                task: &mut task,
+                task_started: &mut task_started,
+                retry_count: &mut retry_count,
+                pending_submit: &mut pending_submit,
+                momentary_hold: &mut momentary_hold,
+                last_ctrl_c: &mut last_ctrl_c,
+                pressed: &mut pressed,
+                keylog_path: &keylog_path,
+            };
+            handle_key_event($event, &mut context).await
+        }};
+    }
+    macro_rules! action {
+        ($action:expr) => {{
+            let mut context = KeyEventContext {
+                ui: &mut ui,
+                meta: &mut meta,
+                swap: &swap,
+                bus: &bus,
+                pending: &mut pending,
+                task: &mut task,
+                task_started: &mut task_started,
+                retry_count: &mut retry_count,
+                pending_submit: &mut pending_submit,
+                momentary_hold: &mut momentary_hold,
+                last_ctrl_c: &mut last_ctrl_c,
+                pressed: &mut pressed,
+                keylog_path: &keylog_path,
+            };
+            handle_input_action($action, &mut context);
+        }};
+    }
+
+    assert_continue(dispatch!(Event::Paste("draft".into())));
+    assert_continue(dispatch!(Event::Resize(80, 24)));
+    assert_continue(dispatch!(key(KeyCode::Char('x'), KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::Backspace, KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::Left, KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::Right, KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::Home, KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::End, KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::Enter, KeyModifiers::NONE)));
+    assert_eq!(pending_submit.as_deref(), Some("draft"));
+
+    assert_continue(dispatch!(key(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+    assert!(ui.panel.is_some());
+    assert_continue(dispatch!(key(KeyCode::Down, KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::Up, KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::PageDown, KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::PageUp, KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::Esc, KeyModifiers::NONE)));
+    assert!(ui.panel.is_none());
+    ui.device_auth_status = Some("pending device auth".into());
+    ui.panel = Some(Panel::new(PanelKind::Queue, "Queue".into(), Vec::new()));
+    assert_continue(dispatch!(key(KeyCode::Esc, KeyModifiers::NONE)));
+    assert!(ui.device_auth_status.is_none());
+
+    ui.panel = Some(Panel::new(
+        PanelKind::Activity,
+        "Activity".into(),
+        Vec::new(),
+    ));
+    assert_continue(dispatch!(key(KeyCode::Char('o'), KeyModifiers::CONTROL)));
+    assert_continue(dispatch!(key(KeyCode::Char('r'), KeyModifiers::CONTROL)));
+    assert_continue(dispatch!(key(KeyCode::Char('a'), KeyModifiers::CONTROL)));
+    assert_continue(dispatch!(key(KeyCode::Esc, KeyModifiers::NONE)));
+    ui.panel = Some(Panel::new(
+        PanelKind::Activity,
+        "Activity".into(),
+        Vec::new(),
+    ));
+    ui.panel.as_mut().expect("oauth panel").editing = Some("code".into());
+    ui.panel.as_mut().expect("oauth panel").oauth_verifier = Some("state".into());
+    assert_continue(dispatch!(key(KeyCode::Esc, KeyModifiers::NONE)));
+    assert!(ui
+        .panel
+        .as_ref()
+        .is_some_and(|panel| panel.editing.is_none()));
+    assert_continue(dispatch!(key(KeyCode::Esc, KeyModifiers::NONE)));
+
+    assert_continue(dispatch!(key(KeyCode::Char('i'), KeyModifiers::CONTROL)));
+    assert!(ui.panel.is_some());
+    assert_continue(dispatch!(key(KeyCode::Char('t'), KeyModifiers::CONTROL)));
+    assert_continue(dispatch!(key(KeyCode::Esc, KeyModifiers::NONE)));
+    assert!(ui.panel.is_none());
+
+    ui.panel = Some(login_panel());
+    ui.panel.as_mut().expect("login panel").sel = 2;
+    ui.panel.as_mut().expect("login panel").editing = Some(String::new());
+    assert_continue(dispatch!(key(KeyCode::Char('x'), KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::Backspace, KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::Enter, KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::Esc, KeyModifiers::NONE)));
+    ui.panel = Some(Panel::new(
+        PanelKind::Queue,
+        "Queue".into(),
+        vec![PanelRow {
+            key: "queued".into(),
+            value: "task".into(),
+            ctx: None,
+        }],
+    ));
+    ui.panel.as_mut().expect("queue panel").editing = Some("draft".into());
+    assert_continue(dispatch!(key(KeyCode::Char('z'), KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::Backspace, KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::Esc, KeyModifiers::NONE)));
+
+    action!(InputAction::Insert('/'));
+    action!(InputAction::PopupOpen);
+    ui.popup = Some(Popup {
+        items: vec!["/help".into(), "/model".into()],
+        selected: 0,
+        anchor: 0,
+    });
+    if ui.popup.is_some() {
+        action!(InputAction::PopupNext);
+        action!(InputAction::PopupPrev);
+        action!(InputAction::PopupAccept);
+    }
+    action!(InputAction::Insert('a'));
+    action!(InputAction::NewLine);
+    action!(InputAction::CursorUpOrHistory);
+    action!(InputAction::CursorDownOrHistory);
+    action!(InputAction::ToggleDetails);
+    action!(InputAction::ToggleReasoning);
+    action!(InputAction::ToggleAnswer);
+    action!(InputAction::ToggleActivity);
+    action!(InputAction::OpenLiveSearch);
+    action!(InputAction::Queue);
+    action!(InputAction::Insert('f'));
+    action!(InputAction::PushNow);
+    action!(InputAction::Insert('/'));
+    ui.popup = Some(Popup {
+        items: vec!["/help".into()],
+        selected: 0,
+        anchor: 0,
+    });
+    action!(InputAction::PopupSubmit);
+    action!(InputAction::PopupClose);
+
+    ui.push_chunk(provider::StreamChunk::Answer("more answer".into()));
+    assert_continue(dispatch!(key(KeyCode::Char(' '), KeyModifiers::CONTROL)));
+    assert_continue(dispatch!(release_key(
+        KeyCode::Char(' '),
+        KeyModifiers::CONTROL
+    )));
+    assert_continue(dispatch!(key(KeyCode::PageUp, KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::PageDown, KeyModifiers::NONE)));
+    ui.push_tool(
+        ToolBlock::from_lines(vec![
+            ("tool summary".into(), Color::Yellow),
+            ("detail line one".into(), Color::White),
+            ("detail line two".into(), Color::White),
+        ])
+        .expect("tool block"),
+    );
+    assert_continue(dispatch!(key(KeyCode::Up, KeyModifiers::ALT)));
+    assert_continue(dispatch!(key(KeyCode::Down, KeyModifiers::ALT)));
+    assert_continue(dispatch!(key(KeyCode::Char(' '), KeyModifiers::CONTROL)));
+    assert_continue(dispatch!(key(KeyCode::Left, KeyModifiers::ALT)));
+    assert_continue(dispatch!(key(KeyCode::Right, KeyModifiers::ALT)));
+    assert_continue(dispatch!(key(KeyCode::Char(' '), KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::PageUp, KeyModifiers::ALT)));
+    assert_continue(dispatch!(key(KeyCode::PageDown, KeyModifiers::ALT)));
+    assert_continue(dispatch!(release_key(
+        KeyCode::Char(' '),
+        KeyModifiers::CONTROL
+    )));
+
+    let (reply, answer) = std::sync::mpsc::sync_channel(1);
+    pending = Some(ApprovalRequest {
+        action: "write_file".into(),
+        detail: "README.md".into(),
+        reply,
+    });
+    assert_continue(dispatch!(key(KeyCode::Up, KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::Char('y'), KeyModifiers::NONE)));
+    assert!(answer.recv().expect("approval reply"));
+    let (reject_reply, rejected) = std::sync::mpsc::sync_channel(1);
+    pending = Some(ApprovalRequest {
+        action: "write_file".into(),
+        detail: "README.md".into(),
+        reply: reject_reply,
+    });
+    assert_continue(dispatch!(key(KeyCode::Char('n'), KeyModifiers::NONE)));
+    assert!(!rejected.recv().expect("rejection reply"));
+
+    ui.busy = true;
+    ui.queued.push_back("kept task".into());
+    task_started = Some(Instant::now());
+    task = Some(tokio::spawn(async {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }));
+    action!(InputAction::Interrupt);
+    assert!(task.is_none());
+    assert!(!ui.busy);
+
+    assert_continue(dispatch!(key(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+    assert!(matches!(
+        dispatch!(key(KeyCode::Char('c'), KeyModifiers::CONTROL)).expect("second Ctrl-C"),
+        KeyEventResult::Exit
+    ));
+}
+
+#[test]
+fn extracted_token_handler_drains_bounded_wake_batch() {
+    let mut ui = Ui::default();
+    let mut last_activity = None;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tx.send(provider::StreamChunk::Reasoning("one".into()))
+        .expect("reasoning chunk");
+    tx.send(provider::StreamChunk::Answer("two".into()))
+        .expect("answer chunk");
+    handle_token_chunk(
+        provider::StreamChunk::Answer("first".into()),
+        &mut ui,
+        &mut last_activity,
+        &mut rx,
+    );
+    assert!(ui.busy);
+    assert!(!ui.waiting);
+    assert_eq!(ui.stream_tokens, 1);
+    assert!(ui.transcript.has_reasoning());
+    assert!(ui.transcript.has_answer());
+    assert!(last_activity.is_some());
+}
+
+#[tokio::test]
+async fn extracted_event_step_covers_stream_approval_done_and_tick_branches() {
+    let mut ui = Ui::default();
+    let mut meta = test_meta();
+    let swap = test_swap();
+    let bus = agent::null_token_bus();
+    let mut pending = None;
+    let mut task = None;
+    let mut task_started = None;
+    let mut retry_count = 0;
+    let mut pending_submit = None;
+    let mut momentary_hold = false;
+    let mut last_ctrl_c = None;
+    let mut pressed = std::collections::HashSet::new();
+    let keylog_path = None;
+    let mut last_activity = None;
+    let mut history = Vec::new();
+    let mut printed = 0;
+    let last_task = None;
+    let mut session_tokens = 0;
+    let mut session_turns = 0;
+    let start_task: StartTask = Box::new(|_, _| tokio::spawn(async {}));
+    let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tick = tokio::time::interval(Duration::from_secs(3600));
+    let terminal = Terminal::new(CrosstermBackend::new(std::io::stdout())).expect("terminal");
+    let mut animation_due = false;
+
+    macro_rules! step {
+        () => {
+            run_event_step(EventStepContext {
+                ui: &mut ui,
+                meta: &mut meta,
+                swap: &swap,
+                bus: &bus,
+                pending: &mut pending,
+                task: &mut task,
+                task_started: &mut task_started,
+                retry_count: &mut retry_count,
+                pending_submit: &mut pending_submit,
+                momentary_hold: &mut momentary_hold,
+                last_ctrl_c: &mut last_ctrl_c,
+                pressed: &mut pressed,
+                keylog_path: &keylog_path,
+                last_activity: &mut last_activity,
+                history: &mut history,
+                printed: &mut printed,
+                last_task: &last_task,
+                session_tokens: &mut session_tokens,
+                session_turns: &mut session_turns,
+                start_task: &start_task,
+                key_rx: &mut key_rx,
+                token_rx: &mut token_rx,
+                event_rx: &mut event_rx,
+                approval_rx: &mut approval_rx,
+                done_rx: &mut done_rx,
+                tick: &mut tick,
+                terminal: &terminal,
+                animation_due: &mut animation_due,
+            })
+            .await
+            .expect("event step")
+        };
+    }
+
+    key_tx.send(Event::Resize(80, 24)).expect("key event");
+    assert!(step!().dirty);
+    token_tx
+        .send(provider::StreamChunk::Answer("answer".into()))
+        .expect("token event");
+    assert!(step!().dirty);
+    event_tx
+        .send(langgraph::StreamEvent::NodeFinished {
+            superstep: 1,
+            node: "reason".into(),
+        })
+        .expect("stream event");
+    assert!(step!().dirty);
+    let (reply, answer) = std::sync::mpsc::sync_channel(1);
+    approval_tx
+        .send(ApprovalRequest {
+            action: "write_file".into(),
+            detail: "README.md".into(),
+            reply,
+        })
+        .expect("approval event");
+    assert!(step!().dirty);
+    assert!(pending.is_some());
+    done_tx
+        .send(Err("invalid request".into()))
+        .expect("done event");
+    assert!(step!().dirty);
+    assert!(!ui.busy);
+    drop(answer);
+
+    let _ = step!();
+    assert!(!ui.waiting);
+}
+
+#[tokio::test]
+async fn extracted_prepare_loop_covers_idle_poll_and_draw_decision() {
+    let mut ui = Ui::default();
+    let mut meta = test_meta();
+    let swap = test_swap();
+    let mut model_catalog_rx = None;
+    let mut pending_submit = None;
+    let mut task = None;
+    let mut history = Vec::new();
+    let agents = Arc::new(agent::Agents::default());
+    let commands = Vec::new();
+    let skills = Vec::new();
+    let mut retry_count = 0;
+    let mut last_task = None;
+    let mut task_started = None;
+    let mut last_activity = None;
+    let mut printed = 0;
+    let start_task: StartTask = Box::new(|_, _| tokio::spawn(async {}));
+    let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout())).expect("terminal");
+    let mut live_cache = LiveOutputCache::default();
+    let pending = None;
+    let mut dirty = false;
+    let mut animation_due = false;
+
+    assert!(!prepare_loop(&mut LoopPrepareContext {
+        ui: &mut ui,
+        meta: &mut meta,
+        swap: &swap,
+        model_catalog_rx: &mut model_catalog_rx,
+        pending_submit: &mut pending_submit,
+        task: &mut task,
+        history: &mut history,
+        agents: &agents,
+        commands: &commands,
+        skills: &skills,
+        session_tokens: 0,
+        session_turns: 0,
+        retry_count: &mut retry_count,
+        last_task: &mut last_task,
+        task_started: &mut task_started,
+        last_activity: &mut last_activity,
+        printed: &mut printed,
+        start_task: &start_task,
+        terminal: &mut terminal,
+        live_cache: &mut live_cache,
+        pending: &pending,
+        dirty: &mut dirty,
+        animation_due: &mut animation_due,
+    })
+    .await
+    .expect("idle prepare"));
+    dirty = true;
+    assert!(!prepare_loop(&mut LoopPrepareContext {
+        ui: &mut ui,
+        meta: &mut meta,
+        swap: &swap,
+        model_catalog_rx: &mut model_catalog_rx,
+        pending_submit: &mut pending_submit,
+        task: &mut task,
+        history: &mut history,
+        agents: &agents,
+        commands: &commands,
+        skills: &skills,
+        session_tokens: 0,
+        session_turns: 0,
+        retry_count: &mut retry_count,
+        last_task: &mut last_task,
+        task_started: &mut task_started,
+        last_activity: &mut last_activity,
+        printed: &mut printed,
+        start_task: &start_task,
+        terminal: &mut terminal,
+        live_cache: &mut live_cache,
+        pending: &pending,
+        dirty: &mut dirty,
+        animation_due: &mut animation_due,
+    })
+    .await
+    .expect("draw prepare"));
+    assert!(!dirty);
+}
+
+#[test]
+fn extracted_tick_handler_transitions_waiting_and_splash() {
+    let mut ui = Ui::default();
+    let terminal = Terminal::new(CrosstermBackend::new(std::io::stdout())).expect("terminal");
+    let idle = None;
+    let pending = None;
+    for _ in 0..SPLASH_TICKS {
+        let _ = handle_tick(&mut ui, &idle, &pending, &terminal);
+    }
+    assert_eq!(ui.splash, SPLASH_TICKS);
+    ui.busy = true;
+    let stale = Some(Instant::now() - Duration::from_secs(9));
+    assert!(!handle_tick(&mut ui, &stale, &pending, &terminal));
+    assert!(ui.waiting);
+}
+
+#[test]
+fn extracted_session_and_catalog_helpers_cover_idle_configuration_paths() {
+    let history = vec![provider::Message::user("remember this")];
+    let _ = session_input_history(&history);
+    let mut ui = Ui::default();
+    note_initial_ui(&mut ui, true, &history);
+    assert!(!ui.commits.is_empty());
+
+    let (approval_tx, _approval_rx) = tokio::sync::mpsc::unbounded_channel();
+    let _ = tui_approver(true, approval_tx.clone());
+    let _ = tui_approver(false, approval_tx);
+
+    let mut meta = test_meta();
+    let swap = test_swap();
+    let (catalog_tx, catalog_rx) = tokio::sync::oneshot::channel();
+    drop(catalog_tx);
+    let mut receiver = Some(catalog_rx);
+    assert!(poll_model_catalog(&mut ui, &mut meta, &swap, &mut receiver,));
+    assert!(ui.model_catalog.as_ref().is_some_and(Vec::is_empty));
+}
+
+#[test]
+fn extracted_keylog_helper_writes_explicit_diagnostic_path() {
+    let previous_flag = std::env::var_os("RIDGE_KEYLOG");
+    std::env::set_var("RIDGE_KEYLOG", "1");
+    assert!(keylog_path().is_some());
+    if let Some(value) = previous_flag {
+        std::env::set_var("RIDGE_KEYLOG", value);
+    } else {
+        std::env::remove_var("RIDGE_KEYLOG");
+    }
+    let path = std::env::temp_dir().join(format!("ridge-code-keylog-{}.txt", std::process::id()));
+    let keylog_path = Some(path.clone());
+    log_key_event(&Event::Resize(80, 24), &keylog_path);
+    let log = std::fs::read_to_string(&path).expect("key log");
+    assert!(log.contains("Resize"));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn extracted_edit_input_helper_covers_cursor_and_history_actions() {
+    let mut ui = Ui::default();
+    edit_input(InputAction::Insert('a'), &mut ui);
+    edit_input(InputAction::Backspace, &mut ui);
+    edit_input(InputAction::Left, &mut ui);
+    edit_input(InputAction::Right, &mut ui);
+    edit_input(InputAction::Home, &mut ui);
+    edit_input(InputAction::End, &mut ui);
+    edit_input(InputAction::NewLine, &mut ui);
+    ui.input.buffer = "wrapped input".into();
+    ui.input.cursor = ui.input.buffer.chars().count();
+    edit_input(InputAction::CursorUpOrHistory, &mut ui);
+    edit_input(InputAction::CursorDownOrHistory, &mut ui);
+    ui.input.history = vec!["previous".into()];
+    ui.input.cursor = 0;
+    edit_input(InputAction::CursorUpOrHistory, &mut ui);
+    edit_input(InputAction::CursorDownOrHistory, &mut ui);
+}
+
+#[tokio::test]
+async fn extracted_pending_submit_covers_command_and_task_paths() {
+    let mut ui = Ui::default();
+    let mut history = Vec::new();
+    let mut meta = test_meta();
+    let swap = test_swap();
+    let agents = agent::Agents::default();
+    let commands = Vec::new();
+    let skills = Vec::new();
+    let mut pending_submit = Some("/help".to_string());
+    let mut retry_count = 0;
+    let mut last_task = None;
+    let mut task_started = None;
+    let mut last_activity = None;
+    let mut printed = 0;
+    let mut task = None;
+    let start_task: StartTask = Box::new(|_, _| tokio::spawn(async {}));
+
+    assert!(!process_pending_submit(&mut PendingSubmitContext {
+        ui: &mut ui,
+        history: &mut history,
+        meta: &mut meta,
+        swap: &swap,
+        agents: &agents,
+        commands: &commands,
+        skills: &skills,
+        session_tokens: 0,
+        session_turns: 0,
+        pending_submit: &mut pending_submit,
+        retry_count: &mut retry_count,
+        last_task: &mut last_task,
+        task_started: &mut task_started,
+        last_activity: &mut last_activity,
+        printed: &mut printed,
+        task: &mut task,
+        start_task: &start_task,
+    })
+    .await
+    .expect("slash command"));
+    assert!(pending_submit.is_none());
+
+    pending_submit = Some("run this task".into());
+    assert!(!process_pending_submit(&mut PendingSubmitContext {
+        ui: &mut ui,
+        history: &mut history,
+        meta: &mut meta,
+        swap: &swap,
+        agents: &agents,
+        commands: &commands,
+        skills: &skills,
+        session_tokens: 0,
+        session_turns: 0,
+        pending_submit: &mut pending_submit,
+        retry_count: &mut retry_count,
+        last_task: &mut last_task,
+        task_started: &mut task_started,
+        last_activity: &mut last_activity,
+        printed: &mut printed,
+        task: &mut task,
+        start_task: &start_task,
+    })
+    .await
+    .expect("task submit"));
+    assert_eq!(last_task.as_deref(), Some("run this task"));
+    assert!(task.take().is_some());
+}
+
+#[tokio::test]
+async fn extracted_event_loop_exits_after_takeover_signal() {
+    let (key_tx, key_rx) = tokio::sync::mpsc::unbounded_channel();
+    key_tx
+        .send(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        .expect("first Ctrl-C");
+    key_tx
+        .send(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        .expect("second Ctrl-C");
+    let (_approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_token_tx, token_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_done_tx, done_rx) = tokio::sync::mpsc::unbounded_channel();
+    let terminal = Terminal::new(CrosstermBackend::new(std::io::stdout())).expect("terminal");
+    let context = TuiLoopContext {
+        swap: test_swap(),
+        skills: Vec::new(),
+        agents: Arc::new(agent::Agents::default()),
+        commands: Vec::new(),
+        history: Vec::new(),
+        meta: test_meta(),
+        terminal,
+        ui: Ui::default(),
+        live_cache: LiveOutputCache::default(),
+        model_catalog_rx: None,
+        approval_rx,
+        event_rx,
+        token_rx,
+        done_rx,
+        key_rx,
+        tick: tokio::time::interval(Duration::from_secs(3600)),
+        bus: agent::null_token_bus(),
+        start_task: Box::new(|_, _| tokio::spawn(async {})),
+        keylog_path: None,
+        pending: None,
+        task: None,
+        session_tokens: 0,
+        session_turns: 0,
+        printed: 0,
+        task_started: None,
+        last_activity: None,
+        pending_submit: None,
+        retry_count: 0,
+        last_task: None,
+        pressed: std::collections::HashSet::new(),
+        momentary_hold: false,
+        last_ctrl_c: None,
+        dirty: true,
+        animation_due: false,
+    };
+    run_event_loop(context).await.expect("event loop");
+}
+
 #[test]
 fn event_colours_are_semantic() {
     assert_eq!(event_color("verify: PASS"), Color::Green);
     assert_eq!(event_color("act: run_shell"), Color::Yellow);
     assert_eq!(event_color("(final) done"), role_color(Role::Answer));
+}
+
+#[test]
+fn extracted_stream_loop_handlers_cover_node_and_tool_boundaries() {
+    let mut ui = Ui::default();
+    let task_started = None;
+    let mut last_activity = None;
+    let mut printed = 0;
+    handle_stream_event(
+        langgraph::StreamEvent::NodeFinished {
+            superstep: 1,
+            node: "reason".into(),
+        },
+        &mut StreamEventContext {
+            ui: &mut ui,
+            task_started: &task_started,
+            last_activity: &mut last_activity,
+            printed: &mut printed,
+        },
+    );
+    assert!(ui.busy);
+    let mut state = agent::AgentState::new("inspect");
+    state.messages = vec![
+        "act: read_file -> line one".into(),
+        "(final) verified".into(),
+    ];
+    state.todos = vec![agent::Todo {
+        content: "verify output".into(),
+        status: "in_progress".into(),
+    }];
+    state.pending_call = Some(provider::ToolCall {
+        id: "call-1".into(),
+        name: "read_file".into(),
+        arguments: serde_json::json!({"path":"README.md"}),
+    });
+    handle_stream_event(
+        langgraph::StreamEvent::Superstep {
+            step: 2,
+            active: Vec::new(),
+            state,
+        },
+        &mut StreamEventContext {
+            ui: &mut ui,
+            task_started: &task_started,
+            last_activity: &mut last_activity,
+            printed: &mut printed,
+        },
+    );
+    assert_eq!(ui.superstep, 2);
+    assert!(ui.pending_call.is_some());
+    assert_eq!(printed, 2);
+}
+
+#[tokio::test]
+async fn extracted_done_handler_records_non_retryable_failure() {
+    let mut ui = Ui::default();
+    let mut history = Vec::new();
+    let mut task = None;
+    let mut pending_submit = None;
+    let mut momentary_hold = false;
+    let mut task_started = None;
+    let mut last_activity = None;
+    let mut printed = 0;
+    let mut retry_count = 0;
+    let last_task = None;
+    let mut session_tokens = 0;
+    let mut session_turns = 0;
+    let start_task: StartTask = Box::new(|_, _| panic!("non-retryable error must not retry"));
+    handle_done_result(
+        Err("invalid request".into()),
+        &mut DoneEventContext {
+            ui: &mut ui,
+            history: &mut history,
+            task: &mut task,
+            pending_submit: &mut pending_submit,
+            momentary_hold: &mut momentary_hold,
+            task_started: &mut task_started,
+            last_activity: &mut last_activity,
+            printed: &mut printed,
+            retry_count: &mut retry_count,
+            last_task: &last_task,
+            session_tokens: &mut session_tokens,
+            session_turns: &mut session_turns,
+            start_task: &start_task,
+        },
+    );
+    assert!(!ui.busy);
+    assert_eq!(retry_count, 0);
+    assert_eq!(ui.activity, "stopped · error");
+
+    let mut successful = agent::AgentState::new("verified");
+    successful.approved = true;
+    successful.steps = 2;
+    successful.total_tokens = 9;
+    successful.input_tokens = 3;
+    successful.output_tokens = 6;
+    successful.messages = vec!["(final) verified".into()];
+    let mut success_history = Vec::new();
+    let mut success_task = None;
+    let mut success_pending = None;
+    let mut success_hold = false;
+    let mut success_started = Some(Instant::now());
+    let mut success_activity = Some(Instant::now());
+    let mut success_printed = 1;
+    let mut success_retries = 1;
+    let mut session_tokens = 0;
+    let mut session_turns = 0;
+    ui.queued.push_back("next task".into());
+    handle_done_result(
+        Ok(successful),
+        &mut DoneEventContext {
+            ui: &mut ui,
+            history: &mut success_history,
+            task: &mut success_task,
+            pending_submit: &mut success_pending,
+            momentary_hold: &mut success_hold,
+            task_started: &mut success_started,
+            last_activity: &mut success_activity,
+            printed: &mut success_printed,
+            retry_count: &mut success_retries,
+            last_task: &None,
+            session_tokens: &mut session_tokens,
+            session_turns: &mut session_turns,
+            start_task: &start_task,
+        },
+    );
+    assert_eq!(ui.phase, "completed");
+    assert_eq!(session_tokens, 9);
+    assert_eq!(session_turns, 1);
+    assert_eq!(success_retries, 0);
+    assert_eq!(success_pending.as_deref(), Some("next task"));
+
+    let mut stopped = agent::AgentState::new("not approved");
+    stopped.approved = false;
+    stopped.steps = 3;
+    stopped.messages = vec!["(final) needs review".into()];
+    handle_done_result(
+        Ok(stopped),
+        &mut DoneEventContext {
+            ui: &mut ui,
+            history: &mut success_history,
+            task: &mut success_task,
+            pending_submit: &mut success_pending,
+            momentary_hold: &mut success_hold,
+            task_started: &mut success_started,
+            last_activity: &mut success_activity,
+            printed: &mut success_printed,
+            retry_count: &mut success_retries,
+            last_task: &None,
+            session_tokens: &mut session_tokens,
+            session_turns: &mut session_turns,
+            start_task: &start_task,
+        },
+    );
+    assert_eq!(ui.phase, "stopped");
+
+    let retry_start: StartTask = Box::new(|_, _| tokio::spawn(async {}));
+    let retry_last_task = Some("retry this".to_string());
+    let mut retry_task = None;
+    let mut retry_pending = None;
+    let mut retry_hold = false;
+    let mut retry_started = None;
+    let mut retry_activity = None;
+    let mut retry_printed = 0;
+    let mut retry_count = 0;
+    handle_done_result(
+        Err("provider timeout".into()),
+        &mut DoneEventContext {
+            ui: &mut ui,
+            history: &mut success_history,
+            task: &mut retry_task,
+            pending_submit: &mut retry_pending,
+            momentary_hold: &mut retry_hold,
+            task_started: &mut retry_started,
+            last_activity: &mut retry_activity,
+            printed: &mut retry_printed,
+            retry_count: &mut retry_count,
+            last_task: &retry_last_task,
+            session_tokens: &mut session_tokens,
+            session_turns: &mut session_turns,
+            start_task: &retry_start,
+        },
+    );
+    assert_eq!(retry_count, 1);
+    assert!(retry_task.take().is_some());
+
+    let mut exhausted_task = None;
+    let mut exhausted_pending = None;
+    let mut exhausted_hold = false;
+    let mut exhausted_started = None;
+    let mut exhausted_activity = None;
+    let mut exhausted_printed = 0;
+    let mut exhausted_retries = 10;
+    handle_done_result(
+        Err("provider timeout".into()),
+        &mut DoneEventContext {
+            ui: &mut ui,
+            history: &mut success_history,
+            task: &mut exhausted_task,
+            pending_submit: &mut exhausted_pending,
+            momentary_hold: &mut exhausted_hold,
+            task_started: &mut exhausted_started,
+            last_activity: &mut exhausted_activity,
+            printed: &mut exhausted_printed,
+            retry_count: &mut exhausted_retries,
+            last_task: &retry_last_task,
+            session_tokens: &mut session_tokens,
+            session_turns: &mut session_turns,
+            start_task: &retry_start,
+        },
+    );
+    assert_eq!(exhausted_retries, 0);
+    assert!(exhausted_task.is_none());
+}
+
+#[test]
+fn extracted_helpers_cover_task_reset_oauth_and_idle_polling() {
+    let mut ui = Ui {
+        busy: true,
+        waiting: true,
+        stream_tokens: 12,
+        pending_call: Some(provider::ToolCall {
+            id: "call".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({}),
+        }),
+        ..Ui::default()
+    };
+    reset_task_ui(&mut ui);
+    assert!(ui.busy);
+    assert!(!ui.waiting);
+    assert_eq!(ui.stream_tokens, 0);
+    assert!(ui.pending_call.is_none());
+
+    let mut meta = ReplMeta {
+        tools: Vec::new(),
+        provider: "test".into(),
+        provider_label: "test".into(),
+        model: "model".into(),
+        base_url: String::new(),
+        status_bar: "{provider} 路 {model}".into(),
+        ctx_window: 200_000,
+    };
+    let swap = Arc::new(provider::SwapProvider::new(Arc::new(
+        provider::ScriptedProvider::new(Vec::new()),
+    )));
+    handle_device_oauth_event(
+        DeviceOAuthEvent::Ready {
+            user_code: "CODE".into(),
+            opened: true,
+        },
+        &mut ui,
+        &mut meta,
+        &swap,
+    );
+    assert!(ui
+        .device_auth_status
+        .as_deref()
+        .is_some_and(|text| text.contains("CODE")));
+    handle_device_oauth_event(
+        DeviceOAuthEvent::Ready {
+            user_code: "OPEN".into(),
+            opened: false,
+        },
+        &mut ui,
+        &mut meta,
+        &swap,
+    );
+    handle_device_oauth_event(
+        DeviceOAuthEvent::Complete(Err("device stopped".into())),
+        &mut ui,
+        &mut meta,
+        &swap,
+    );
+    assert!(ui
+        .device_auth_status
+        .as_deref()
+        .is_some_and(|text| text.contains("device stopped")));
+    assert!(poll_device_oauth(&mut ui).is_none());
+    assert!(poll_oauth_callback(&mut ui).is_none());
+    assert_eq!(superstep_activity("", None), "settling result");
+    assert_eq!(superstep_activity("next", None), "next 路 next");
 }
 
 #[test]
@@ -3735,7 +4697,7 @@ fn input_chrome_exposes_submit_or_queue_mode() {
     assert!(idle_history.contains("Ctrl+O history"));
     assert!(!idle_history.contains("Ctrl+O details"));
 
-    for width in [14, 18, 24] {
+    for width in [14_u16, 18, 24] {
         let (compact, _) = input_chrome(InputChromeArgs {
             busy: false,
             queued: 0,
@@ -3766,7 +4728,7 @@ fn input_chrome_exposes_submit_or_queue_mode() {
         );
     }
 
-    for width in [10, 18, 24, 40] {
+    for width in [10_u16, 18, 24, 40] {
         let (compact, _) = input_chrome(InputChromeArgs {
             busy: false,
             queued: 0,
@@ -4034,7 +4996,7 @@ fn narrow_idle_history_keeps_answer_and_reasoning_entrypoints_visible() {
 
 #[test]
 fn busy_tool_action_rail_preserves_reasoning_and_focus_at_medium_widths() {
-    for width in [72, 80, 88, 95] {
+    for width in [72_u16, 80, 88, 95] {
         let (text, role) = input_chrome(InputChromeArgs {
             busy: true,
             queued: 2,
@@ -4081,7 +5043,7 @@ fn busy_tool_action_rail_preserves_reasoning_and_focus_at_medium_widths() {
 
 #[test]
 fn busy_live_inspection_prioritizes_follow_and_takeover() {
-    for width in [48, 56, 64, 72, 80, 88, 96] {
+    for width in [48_u16, 56, 64, 72, 80, 88, 96] {
         let (text, role) = input_chrome(InputChromeArgs {
             busy: true,
             queued: 2,
@@ -4718,6 +5680,11 @@ async fn history_command_opens_bounded_tool_history() {
         provider::ScriptedProvider::new(Vec::new()),
     )));
     let agents = agent::Agents::default();
+    let catalog = CommandCatalog {
+        agents: &agents,
+        commands: &[],
+        skills: &[],
+    };
 
     let should_exit = run_command(
         "/history",
@@ -4725,11 +5692,11 @@ async fn history_command_opens_bounded_tool_history() {
         &mut history,
         &mut meta,
         &swap,
-        &agents,
-        &[],
-        &[],
-        0,
-        0,
+        &catalog,
+        CommandStats {
+            tokens: 0,
+            turns: 0,
+        },
     )
     .await
     .expect("history command");
@@ -4748,11 +5715,11 @@ async fn history_command_opens_bounded_tool_history() {
         &mut history,
         &mut meta,
         &swap,
-        &agents,
-        &[],
-        &[],
-        0,
-        0,
+        &catalog,
+        CommandStats {
+            tokens: 0,
+            turns: 0,
+        },
     )
     .await
     .expect("inspect command");
@@ -4766,11 +5733,11 @@ async fn history_command_opens_bounded_tool_history() {
         &mut history,
         &mut meta,
         &swap,
-        &agents,
-        &[],
-        &[],
-        0,
-        0,
+        &catalog,
+        CommandStats {
+            tokens: 0,
+            turns: 0,
+        },
     )
     .await
     .expect("queue command");
@@ -9041,3 +10008,55 @@ fn activity_anchor_keeps_rail_across_explicit_detail_lines() {
         "explicit activity detail lost closing rail: {rows:?}"
     );
 }
+use std::collections::VecDeque;
+use std::sync::Arc;
+
+use agent::{est_tokens, AgentState, Config, HaltReason, Todo, PROVIDER_PRESETS};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::{
+    layout::Rect,
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::{Block, Paragraph, Widget, Wrap},
+    Terminal, TerminalOptions, Viewport,
+};
+
+use super::{
+    active_reasoning_tail_role, activity_commit_lines, activity_panel, agent_panel,
+    answer_commit_lines, answer_commit_lines_with_status,
+    answer_commit_lines_with_status_and_metrics, answer_commit_measure, answer_history_panel,
+    apply_attention_action, apply_completion, apply_paste, apply_scroll, approval_action,
+    build_popup, can_start_task, char_cells, clip_display_cells, commit_height,
+    compact_activity_item, compact_status_line, config_panel, context_pressure_role, ctx_percent,
+    current_word, decide_key, detail_match_scroll, detail_scroll_position, draw, draw_panel,
+    draw_with_cache, event_color, fence_language, fence_without_language, filter_prefix,
+    flush_commits, fmt_busy_bar, fmt_busy_phase, fmt_busy_signal, fmt_ctx, fmt_progress_diagnostic,
+    fmt_reasoning_meta, fold_lines, format_event_plain, halt_reason_display, halt_reason_guidance,
+    inline_height_cap, input_action, input_chrome, input_height, is_final_event, is_second_ctrl_c,
+    live_code_rail, live_empty_state_for_test, live_history_panel_with_queue,
+    live_history_toggle_action, live_hold_release_action, live_hold_toggle_action,
+    live_markdown_line, live_markdown_spans_with_alert, live_page_rows, live_phase_anchor,
+    live_phase_marker, live_rail, live_scroll_action, live_semantic_toggle_action,
+    live_surface_title, live_tool_rail_role, login_panel, mark_takeover_requested, markdown_lines,
+    md_line_spans, models_panel_with_effort, multiline_shortcut_label, named_profile_name,
+    panel_action, panel_attention_action, panel_enter, panel_filter, panel_hint,
+    panel_rect_for_kind, panel_title_role, panel_viewport_range, pending_queue_lines, preset_by_id,
+    preview_lines, provider_panel, queue_panel_toggle_action, reasoning_commit_lines,
+    reasoning_history_panel, render_status_template, render_todo_block, responsive_live_layout,
+    role_color, run_command, sanitize_display_text, sanitize_paste, selection_style,
+    semantic_focus_action, should_draw, splash_block, splash_frame, status_line_projection,
+    str_cells, stream_channel_badge, stream_tail, summarize_event, superstep_is_busy,
+    tail_display_cells, telemetry_surface, terminal_event_action, todo_progress, token_rate,
+    tool_detail_scroll_action, tool_focus_action, tool_history_panel, tool_preview, tools_panel,
+    top_chrome, unfinished_answer_reason, up_fallback_is_home, wrap_commit_lines, wrap_input,
+    wrap_live_spans, wrap_live_spans_tail, wrapped_rows, ActivityKind, ApprovalAction,
+    ApprovalRequest, CommandCatalog, CommandStats, CommitBlock, DetailLayoutCache, InputAction,
+    InputChromeArgs, InputState, LiveBlockFocus, LiveChannel, LiveFramePlan, LiveLineKind,
+    LiveOutputCache, LiveScrollAction, LiveTranscript, Panel, PanelAction, PanelItemsCache,
+    PanelKind, PanelRow, PanelRowAction, Popup, PresentationChannel, PresentationMetrics,
+    PresentationStatus, Role, StatusVars, TerminalEventAction, ToolBlock, ToolPhase, Ui, Vitals,
+    CHATGPT_MODEL_GROUP, CLAUDE_OAUTH_ROW, CODEX_OAUTH_ROW, MAX_ACTIVITY_HISTORY,
+    MAX_ANSWER_HISTORY, MAX_ANSWER_HISTORY_CHARS, MAX_PENDING_PREVIEW_CHARS,
+    MAX_PENDING_PREVIEW_ROWS, MAX_PRESENTATION_RECORDS, MAX_REASONING_HISTORY,
+    MAX_REASONING_HISTORY_CHARS, MAX_TOOL_HISTORY, SLASH_COMMANDS, SPLASH, SPLASH_TICKS,
+};

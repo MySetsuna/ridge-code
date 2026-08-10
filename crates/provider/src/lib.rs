@@ -85,93 +85,108 @@ impl Message {
 /// the whole request. Completed pairs are preserved; orphan tool results are
 /// discarded; incomplete assistant calls are downgraded to plain text.
 pub fn repair_tool_history(messages: &[Message]) -> Vec<Message> {
-    struct Pending {
-        assistant: Message,
-        results: Vec<Message>,
-    }
-
-    fn flush(out: &mut Vec<Message>, pending: &mut Option<Pending>) {
-        let Some(mut pending) = pending.take() else {
-            return;
-        };
-        let matched = pending
-            .assistant
-            .tool_calls
-            .iter()
-            .filter(|call| {
-                pending
-                    .results
-                    .iter()
-                    .any(|result| result.tool_call_id.as_deref() == Some(call.id.as_str()))
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-
-        if matched.is_empty() {
-            if !pending.assistant.content.is_empty() {
-                out.push(Message::assistant(pending.assistant.content));
-            }
-            return;
-        }
-
-        pending.assistant.tool_calls = matched;
-        let ids = pending
-            .assistant
-            .tool_calls
-            .iter()
-            .map(|call| call.id.clone())
-            .collect::<std::collections::HashSet<_>>();
-        out.push(pending.assistant);
-        out.extend(pending.results.into_iter().filter(|result| {
-            result
-                .tool_call_id
-                .as_deref()
-                .is_some_and(|id| ids.contains(id))
-        }));
-    }
-
     let mut out = Vec::with_capacity(messages.len());
     let mut pending = None;
     for message in messages {
         match &message.role {
             Role::Assistant if !message.tool_calls.is_empty() => {
-                flush(&mut out, &mut pending);
-                pending = Some(Pending {
-                    assistant: message.clone(),
-                    results: Vec::new(),
-                });
+                start_tool_turn(&mut out, &mut pending, message);
             }
-            Role::Tool => {
-                let Some(call_id) = message.tool_call_id.as_deref() else {
-                    continue;
-                };
-                let Some(current) = pending.as_mut() else {
-                    continue;
-                };
-                let expected = current
-                    .assistant
-                    .tool_calls
-                    .iter()
-                    .any(|call| call.id == call_id);
-                let duplicate = current
-                    .results
-                    .iter()
-                    .any(|result| result.tool_call_id.as_deref() == Some(call_id));
-                if expected && !duplicate {
-                    current.results.push(message.clone());
-                    if current.results.len() == current.assistant.tool_calls.len() {
-                        flush(&mut out, &mut pending);
-                    }
-                }
-            }
+            Role::Tool => append_tool_result(&mut out, &mut pending, message),
             _ => {
-                flush(&mut out, &mut pending);
+                flush_repaired_turn(&mut out, &mut pending);
                 out.push(message.clone());
             }
         }
     }
-    flush(&mut out, &mut pending);
+    flush_repaired_turn(&mut out, &mut pending);
     out
+}
+
+struct PendingToolTurn {
+    assistant: Message,
+    results: Vec<Message>,
+}
+
+fn start_tool_turn(
+    out: &mut Vec<Message>,
+    pending: &mut Option<PendingToolTurn>,
+    message: &Message,
+) {
+    flush_repaired_turn(out, pending);
+    *pending = Some(PendingToolTurn {
+        assistant: message.clone(),
+        results: Vec::new(),
+    });
+}
+
+fn append_tool_result(
+    out: &mut Vec<Message>,
+    pending: &mut Option<PendingToolTurn>,
+    message: &Message,
+) {
+    let Some(call_id) = message.tool_call_id.as_deref() else {
+        return;
+    };
+    let Some(current) = pending.as_mut() else {
+        return;
+    };
+    let expected = current
+        .assistant
+        .tool_calls
+        .iter()
+        .any(|call| call.id == call_id);
+    let duplicate = current
+        .results
+        .iter()
+        .any(|result| result.tool_call_id.as_deref() == Some(call_id));
+    if !expected || duplicate {
+        return;
+    }
+    current.results.push(message.clone());
+    if current.results.len() == current.assistant.tool_calls.len() {
+        flush_repaired_turn(out, pending);
+    }
+}
+
+fn flush_repaired_turn(out: &mut Vec<Message>, pending: &mut Option<PendingToolTurn>) {
+    let Some(mut pending) = pending.take() else {
+        return;
+    };
+    let matched = matching_tool_calls(&pending.assistant, &pending.results);
+    if matched.is_empty() {
+        if !pending.assistant.content.is_empty() {
+            out.push(Message::assistant(pending.assistant.content));
+        }
+        return;
+    }
+    pending.assistant.tool_calls = matched;
+    let ids = pending
+        .assistant
+        .tool_calls
+        .iter()
+        .map(|call| call.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    out.push(pending.assistant);
+    out.extend(pending.results.into_iter().filter(|result| {
+        result
+            .tool_call_id
+            .as_deref()
+            .is_some_and(|id| ids.contains(id))
+    }));
+}
+
+fn matching_tool_calls(assistant: &Message, results: &[Message]) -> Vec<ToolCall> {
+    assistant
+        .tool_calls
+        .iter()
+        .filter(|call| {
+            results
+                .iter()
+                .any(|result| result.tool_call_id.as_deref() == Some(call.id.as_str()))
+        })
+        .cloned()
+        .collect()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -248,34 +263,76 @@ pub(crate) fn extract_inline_think(text: &str) -> (String, String) {
     let (mut answer, mut think) = (String::new(), String::new());
     let mut rest = text;
     while !rest.is_empty() {
-        let a = rest.find("<think>");
-        let b = rest.find("</think>");
-        match (a, b) {
-            // 成对 `<think>…</think>`:块前是回答,块内是思考。
-            (Some(a), Some(b)) if a < b => {
-                answer.push_str(&rest[..a]);
-                think.push_str(&rest[a + "<think>".len()..b]);
-                rest = &rest[b + "</think>".len()..];
+        match next_inline_think(rest) {
+            InlineThinkPart::Pair {
+                answer_part,
+                think_part,
+                remaining,
+            } => {
+                answer.push_str(answer_part);
+                think.push_str(think_part);
+                rest = remaining;
             }
-            // 孤立未闭合 `<think>`(流式截断):其后全为思考。
-            (Some(a), None) => {
-                answer.push_str(&rest[..a]);
-                think.push_str(&rest[a + "<think>".len()..]);
+            InlineThinkPart::Unclosed {
+                answer_part,
+                think_part,
+            } => {
+                answer.push_str(answer_part);
+                think.push_str(think_part);
                 rest = "";
             }
-            // 裸/前置 `</think>`(含 a≥b 的错序):其前皆思考(GLM 无起始标签的常态)。
-            (_, Some(b)) => {
-                think.push_str(&rest[..b]);
-                rest = &rest[b + "</think>".len()..];
+            InlineThinkPart::Closing {
+                think_part,
+                remaining,
+            } => {
+                think.push_str(think_part);
+                rest = remaining;
             }
-            // 无任何标签:剩余全是回答。
-            (None, None) => {
-                answer.push_str(rest);
+            InlineThinkPart::Answer(answer_part) => {
+                answer.push_str(answer_part);
                 rest = "";
             }
         }
     }
     (answer.trim().to_string(), think.trim().to_string())
+}
+
+enum InlineThinkPart<'a> {
+    Pair {
+        answer_part: &'a str,
+        think_part: &'a str,
+        remaining: &'a str,
+    },
+    Unclosed {
+        answer_part: &'a str,
+        think_part: &'a str,
+    },
+    Closing {
+        think_part: &'a str,
+        remaining: &'a str,
+    },
+    Answer(&'a str),
+}
+
+fn next_inline_think(rest: &str) -> InlineThinkPart<'_> {
+    let open = rest.find("<think>");
+    let close = rest.find("</think>");
+    match (open, close) {
+        (Some(open), Some(close)) if open < close => InlineThinkPart::Pair {
+            answer_part: &rest[..open],
+            think_part: &rest[open + "<think>".len()..close],
+            remaining: &rest[close + "</think>".len()..],
+        },
+        (Some(open), None) => InlineThinkPart::Unclosed {
+            answer_part: &rest[..open],
+            think_part: &rest[open + "<think>".len()..],
+        },
+        (_, Some(close)) => InlineThinkPart::Closing {
+            think_part: &rest[..close],
+            remaining: &rest[close + "</think>".len()..],
+        },
+        (None, None) => InlineThinkPart::Answer(rest),
+    }
 }
 
 /// 分出 `(回答, 思考)`:把 content 里的 inline 思考剥出,与独立 `reasoning_content` 字段合并。

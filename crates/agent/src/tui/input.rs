@@ -1,4 +1,8 @@
-use super::*;
+use std::sync::mpsc;
+
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+use super::sanitize_paste;
 
 pub(crate) struct ApprovalRequest {
     pub(crate) action: String,
@@ -184,51 +188,51 @@ pub(crate) fn input_action(key: &KeyEvent, busy: bool, popup_open: bool) -> Inpu
         return InputAction::Interrupt;
     }
     if popup_open {
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('o' | 'O'))
-        {
-            return InputAction::Ignore;
-        }
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('a' | 'A'))
-        {
-            return InputAction::Ignore;
-        }
-        // 浮窗态:↑↓选、Tab 接受但不提交、Enter 接受并提交、Esc 关;
-        // 字符/退格穿透继续编辑(主环先关浮窗)。
-        return match code {
-            KeyCode::Tab => InputAction::PopupAccept,
-            KeyCode::Down => InputAction::PopupNext,
-            KeyCode::Up => InputAction::PopupPrev,
-            KeyCode::Enter => InputAction::PopupSubmit,
-            KeyCode::Char(c) => InputAction::Insert(c),
-            KeyCode::Backspace => InputAction::Backspace,
-            _ => InputAction::PopupClose,
-        };
+        return popup_action(key, code);
     }
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('o' | 'O'))
-    {
-        return InputAction::ToggleDetails;
-    }
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('r' | 'R'))
-    {
-        return InputAction::ToggleReasoning;
-    }
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('a' | 'A'))
-    {
-        return InputAction::ToggleAnswer;
-    }
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('t' | 'T'))
-    {
-        return InputAction::ToggleActivity;
-    }
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('f' | 'F'))
-    {
-        return InputAction::OpenLiveSearch;
+    if let Some(action) = global_attention_action(key) {
+        return action;
     }
     if busy && key.modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Enter {
         return InputAction::PushNow;
     }
+    normal_input_action(key, code, busy)
+}
+
+fn popup_action(key: &KeyEvent, code: KeyCode) -> InputAction {
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('o' | 'O' | 'a' | 'A'))
+    {
+        return InputAction::Ignore;
+    }
+    // 浮窗态:↑↓选、Tab 接受但不提交、Enter 接受并提交、Esc 关;
+    // 字符/退格穿透继续编辑(主环先关浮窗)。
+    match code {
+        KeyCode::Tab => InputAction::PopupAccept,
+        KeyCode::Down => InputAction::PopupNext,
+        KeyCode::Up => InputAction::PopupPrev,
+        KeyCode::Enter => InputAction::PopupSubmit,
+        KeyCode::Char(c) => InputAction::Insert(c),
+        KeyCode::Backspace => InputAction::Backspace,
+        _ => InputAction::PopupClose,
+    }
+}
+
+fn global_attention_action(key: &KeyEvent) -> Option<InputAction> {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('o' | 'O') => Some(InputAction::ToggleDetails),
+        KeyCode::Char('r' | 'R') => Some(InputAction::ToggleReasoning),
+        KeyCode::Char('a' | 'A') => Some(InputAction::ToggleAnswer),
+        KeyCode::Char('t' | 'T') => Some(InputAction::ToggleActivity),
+        KeyCode::Char('f' | 'F') => Some(InputAction::OpenLiveSearch),
+        _ => None,
+    }
+}
+
+fn normal_input_action(key: &KeyEvent, code: KeyCode, busy: bool) -> InputAction {
     match code {
         KeyCode::Enter
             if key.modifiers.contains(KeyModifiers::SHIFT)

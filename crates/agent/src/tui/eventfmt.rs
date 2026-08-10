@@ -1,4 +1,7 @@
-use super::*;
+use ratatui::style::Color;
+
+use super::{role_color, Role, ToolBlock, ToolPhase};
+use agent::tool_output_failed;
 
 fn final_payload(rest: &str) -> Option<&str> {
     if rest.is_empty() {
@@ -73,82 +76,88 @@ pub(crate) fn is_retryable_error(msg: &str) -> bool {
 
 pub(crate) fn summarize_event(m: &str) -> Vec<(String, Color)> {
     let info = role_color(Role::Info);
-    // tool_call:`reason#N: tool_call {name} {json}`
-    if let Some(rest) = m.strip_prefix("reason#") {
-        if let Some(idx) = rest.find(": tool_call ") {
-            let body = &rest[idx + ": tool_call ".len()..];
-            if let Some((name, args_str)) = body.split_once(' ') {
-                let args: serde_json::Value = serde_json::from_str(args_str).unwrap_or_default();
-                let arg = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
-                return match name {
-                    "read_file" => vec![(format!("  ⋯ Read {}", arg("path")), info)],
-                    "write_file" => {
-                        let mut out = vec![(format!("  ⋯ Write {}", arg("path")), info)];
-                        out.extend(preview_lines(arg("contents"), 8));
-                        out
-                    }
-                    "edit_file" => {
-                        let mut out = vec![(format!("  ⋯ Edit {}", arg("path")), info)];
-                        out.extend(diff_lines(arg("old_string"), arg("new_string")));
-                        out
-                    }
-                    "apply_edits" => apply_edits_summary(&args, info),
-                    "run_shell" => vec![(
-                        format!(
-                            "  ⋯ $ {}",
-                            clip(arg("cmd").lines().next().unwrap_or(""), 160)
-                        ),
-                        info,
-                    )],
-                    "search" => vec![(format!("  ⋯ Search {}", arg("pattern")), info)],
-                    other => vec![(format!("  ⋯ {other}"), info)],
-                };
-            }
-        }
+    if let Some(lines) = summarize_tool_call(m, info) {
+        return lines;
     }
-    // 观察:`act: {name} -> {obs}`。读文件的内容已在 tool_call 行体现 → act 只回执一行(丢内容噪声)。
-    if let Some(rest) = m.strip_prefix("act: ") {
-        if let Some((name, obs)) = rest.split_once(" -> ") {
-            // 失败观察(非零退出 / error / BLOCKED / permission)→ 红 ✗ + 多行错误正文,别伪装成绿 ✓、
-            // 别只留首行把真报错藏掉(用户诉求:报错要看得见)。判据复用 verify 的 tool_output_failed
-            // —— 单一真相:显红 ⇔ 确定性验证判失败。错误全文另存 trace,模型经 history 亦收到。
-            if tool_output_failed(obs) {
-                let err = role_color(Role::Error);
-                let lines: Vec<&str> = obs.lines().collect();
-                let first = lines.first().copied().unwrap_or("");
-                let mut out = vec![(format!("  ✗ {name}: {}", clip(first, 200)), err)];
-                for l in lines.iter().skip(1).take(8) {
-                    out.push((format!("  │ {}", clip(l, 200)), err));
-                }
-                if lines.len() > 9 {
-                    out.push((
-                        format!("  │ … (+{} lines, full text in trace)", lines.len() - 9),
-                        err,
-                    ));
-                }
-                return out;
-            }
-            let ok = role_color(Role::Success);
-            if obs.trim().is_empty() {
-                return vec![(format!("  ✓ {name}: no output"), ok)];
-            }
-            if name == "read_file" {
-                let mut out = vec![(
-                    format!("  ✓ Read complete ({} chars)", obs.chars().count()),
-                    ok,
-                )];
-                out.extend(preview_lines(obs, 12));
-                return out;
-            }
-            let head = clip(obs.lines().next().unwrap_or(""), 200);
-            let mut out = vec![(format!("  ✓ {name}: {head}"), ok)];
-            if obs.lines().count() > 1 {
-                out.extend(preview_lines(obs, 10));
-            }
-            return out;
-        }
+    if let Some(lines) = summarize_observation(m) {
+        return lines;
     }
     vec![(format_event_plain(m), event_color(m))]
+}
+
+fn summarize_tool_call(m: &str, info: Color) -> Option<Vec<(String, Color)>> {
+    let rest = m.strip_prefix("reason#")?;
+    let idx = rest.find(": tool_call ")?;
+    let body = &rest[idx + ": tool_call ".len()..];
+    let (name, args_str) = body.split_once(' ')?;
+    let args: serde_json::Value = serde_json::from_str(args_str).unwrap_or_default();
+    let arg = |key: &str| args.get(key).and_then(|v| v.as_str()).unwrap_or("");
+    Some(match name {
+        "read_file" => vec![(format!("  ⋯ Read {}", arg("path")), info)],
+        "write_file" => {
+            let mut out = vec![(format!("  ⋯ Write {}", arg("path")), info)];
+            out.extend(preview_lines(arg("contents"), 8));
+            out
+        }
+        "edit_file" => {
+            let mut out = vec![(format!("  ⋯ Edit {}", arg("path")), info)];
+            out.extend(diff_lines(arg("old_string"), arg("new_string")));
+            out
+        }
+        "apply_edits" => apply_edits_summary(&args, info),
+        "run_shell" => vec![(
+            format!(
+                "  ⋯ $ {}",
+                clip(arg("cmd").lines().next().unwrap_or(""), 160)
+            ),
+            info,
+        )],
+        "search" => vec![(format!("  ⋯ Search {}", arg("pattern")), info)],
+        other => vec![(format!("  ⋯ {other}"), info)],
+    })
+}
+
+fn summarize_observation(m: &str) -> Option<Vec<(String, Color)>> {
+    let rest = m.strip_prefix("act: ")?;
+    let (name, obs) = rest.split_once(" -> ")?;
+    if tool_output_failed(obs) {
+        return Some(format_failed_observation(name, obs));
+    }
+    let ok = role_color(Role::Success);
+    if obs.trim().is_empty() {
+        return Some(vec![(format!("  ✓ {name}: no output"), ok)]);
+    }
+    if name == "read_file" {
+        let mut out = vec![(
+            format!("  ✓ Read complete ({} chars)", obs.chars().count()),
+            ok,
+        )];
+        out.extend(preview_lines(obs, 12));
+        return Some(out);
+    }
+    let head = clip(obs.lines().next().unwrap_or(""), 200);
+    let mut out = vec![(format!("  ✓ {name}: {head}"), ok)];
+    if obs.lines().count() > 1 {
+        out.extend(preview_lines(obs, 10));
+    }
+    Some(out)
+}
+
+fn format_failed_observation(name: &str, obs: &str) -> Vec<(String, Color)> {
+    let err = role_color(Role::Error);
+    let lines: Vec<&str> = obs.lines().collect();
+    let first = lines.first().copied().unwrap_or("");
+    let mut out = vec![(format!("  ✗ {name}: {}", clip(first, 200)), err)];
+    for line in lines.iter().skip(1).take(8) {
+        out.push((format!("  │ {}", clip(line, 200)), err));
+    }
+    if lines.len() > 9 {
+        out.push((
+            format!("  │ … (+{} lines, full text in trace)", lines.len() - 9),
+            err,
+        ));
+    }
+    out
 }
 
 /// 将结构化工具事件转换为可折叠块；详情仅在 live 视口中按需显示。

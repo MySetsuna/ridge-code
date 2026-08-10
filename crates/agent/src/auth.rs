@@ -1,4 +1,4 @@
-use crate::config::*;
+use crate::config::{config_add_provider, config_set, ProviderProfile};
 
 // ───────────────────────── 内置供应商 preset + auth 密钥库(iter-37)─────────────────────────
 
@@ -247,8 +247,11 @@ pub fn apply_login(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::*;
+    use super::{
+        apply_login, auth_get, auth_upsert, oauth_get, oauth_parse, oauth_upsert, preset_by_id,
+        preset_to_profile, ProviderProfile, PROVIDER_PRESETS,
+    };
+    use crate::{resolve_top_level_key, Config};
 
     /// preset 表结构完好:字段非空、kind 合法、id 唯一、base_url https、含全部要求的 id、条数 ≥ 14。
     #[test]

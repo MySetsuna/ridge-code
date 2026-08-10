@@ -13,8 +13,10 @@ permissions:
 
 jobs:
   quality:
-    name: release quality gate
+    name: release quality gate (local SonarQube)
     uses: ./.github/workflows/quality-gate.yml
+    with:
+      run_sonar: true
     secrets: inherit
 
   # 先建好 Release(幂等),再让矩阵各目标往里传产物 —— 根除「五 job 并发抢着创建 Release

@@ -3,9 +3,8 @@
 //! (原生滚动/选取/搜索全保留),ratatui 只渲染底部一小块 Live 视口(状态行 + 流式尾巴 + 输入框)。
 //! 执行图跑在后台 Tokio task,token 流、工具事件和权限门都不会卡住界面(iter-23 事件驱动主环)。
 
-use std::collections::VecDeque;
 use std::io;
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -16,20 +15,21 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{
-    backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Direction, Layout, Position, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{
-        Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Widget, Wrap,
-    },
-    Terminal, TerminalOptions, Viewport,
+use ratatui::{backend::CrosstermBackend, style::Color, Terminal, TerminalOptions, Viewport};
+
+use agent::{
+    agent_run_config, build_llm_agent_full, est_tokens, expand_mentions, halt_reason,
+    null_token_bus, preset_by_id, AgentState, Approver, AutoApprove, HaltReason, McpTools, Skill,
+    TokenBus,
 };
+use langgraph::StreamEvent;
+use provider::Message;
 
-use agent::HaltReason;
-
-use super::*;
+use crate::{
+    load_global_input_history, load_session_input_history, node_label, save_global_input_history,
+    save_session, save_session_input_history, session_path, DeviceOAuthEvent, ReplMeta,
+};
+use provider::SwapProvider;
 
 type Term = Terminal<CrosstermBackend<io::Stdout>>;
 
@@ -239,6 +239,1724 @@ fn apply_attention_action(ui: &mut Ui, action: InputAction) {
     }
 }
 
+enum KeyEventResult {
+    Continue,
+    Exit,
+}
+
+struct KeyEventContext<'a> {
+    ui: &'a mut Ui,
+    meta: &'a mut ReplMeta,
+    swap: &'a Arc<SwapProvider>,
+    bus: &'a TokenBus,
+    pending: &'a mut Option<ApprovalRequest>,
+    task: &'a mut Option<tokio::task::JoinHandle<()>>,
+    task_started: &'a mut Option<Instant>,
+    retry_count: &'a mut usize,
+    pending_submit: &'a mut Option<String>,
+    momentary_hold: &'a mut bool,
+    last_ctrl_c: &'a mut Option<Instant>,
+    pressed: &'a mut std::collections::HashSet<KeyCode>,
+    keylog_path: &'a Option<std::path::PathBuf>,
+}
+
+async fn handle_key_event(
+    event: Event,
+    context: &mut KeyEventContext<'_>,
+) -> anyhow::Result<KeyEventResult> {
+    log_key_event(&event, context.keylog_path);
+    let key = match terminal_event_action(event) {
+        TerminalEventAction::Paste(text) => {
+            apply_paste(context.ui, &text);
+            return Ok(KeyEventResult::Continue);
+        }
+        TerminalEventAction::Redraw => return Ok(KeyEventResult::Continue),
+        TerminalEventAction::Key(key) => key,
+    };
+    let Some(key) = decide_key(context.pressed, &key) else {
+        return Ok(KeyEventResult::Continue);
+    };
+    if live_hold_release_action(&key, context.ui.popup.is_some()) {
+        if *context.momentary_hold {
+            *context.momentary_hold = false;
+            let _ = context.ui.follow_live();
+        }
+        return Ok(KeyEventResult::Continue);
+    }
+    if is_ctrl_c(&key) {
+        return handle_ctrl_c(context);
+    }
+    if handle_approval_key(&key, context) {
+        return Ok(KeyEventResult::Continue);
+    }
+    if handle_global_key(&key, context) {
+        return Ok(KeyEventResult::Continue);
+    }
+    if context.ui.panel.is_some() {
+        handle_panel_key(&key, context).await?;
+        return Ok(KeyEventResult::Continue);
+    }
+    if handle_live_key(&key, context) {
+        return Ok(KeyEventResult::Continue);
+    }
+    handle_input_key(&key, context);
+    Ok(KeyEventResult::Continue)
+}
+
+fn log_key_event(event: &Event, keylog_path: &Option<std::path::PathBuf>) {
+    let Some(path) = keylog_path else {
+        return;
+    };
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{event:?}");
+    }
+}
+
+fn is_ctrl_c(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c' | 'C'))
+}
+
+fn handle_ctrl_c(context: &mut KeyEventContext<'_>) -> anyhow::Result<KeyEventResult> {
+    let now = Instant::now();
+    if is_second_ctrl_c(*context.last_ctrl_c, now) {
+        return Ok(KeyEventResult::Exit);
+    }
+    *context.last_ctrl_c = Some(now);
+    if let Some(handle) = context.task.take() {
+        *context.momentary_hold = false;
+        interrupt_task(context, handle, true);
+    } else {
+        context
+            .ui
+            .note("press Ctrl-C again within 2 seconds to exit", Color::Yellow);
+    }
+    Ok(KeyEventResult::Continue)
+}
+
+fn interrupt_task(
+    context: &mut KeyEventContext<'_>,
+    handle: tokio::task::JoinHandle<()>,
+    clear_activity: bool,
+) {
+    mark_takeover_requested(context.ui);
+    handle.abort();
+    *context.bus.lock().unwrap() = None;
+    context.ui.busy = false;
+    context.ui.waiting = false;
+    let elapsed = context
+        .task_started
+        .as_ref()
+        .map(|started| started.elapsed().as_secs())
+        .unwrap_or(0);
+    context
+        .ui
+        .commit_live_reasoning(context.ui.superstep, elapsed);
+    context.ui.commit_live_answers(
+        "interrupted before final response",
+        context.ui.superstep,
+        elapsed,
+    );
+    context.ui.clear_streams();
+    context.ui.commit_live_tools();
+    context.ui.superstep = 0;
+    context.ui.pending_call = None;
+    if clear_activity {
+        *context.task_started = None;
+    }
+    *context.retry_count = 0;
+    *context.pending_submit = None;
+    context.ui.mark_takeover_ready();
+    let kept = context.ui.queued.len();
+    let tail = if kept > 0 {
+        format!("interrupted current task 路 takeover ready 路 {kept} queued kept")
+    } else {
+        "interrupted current task 路 takeover ready".into()
+    };
+    context.ui.note(tail, Color::Yellow);
+}
+
+fn handle_approval_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> bool {
+    let Some(pending) = context.pending.as_mut() else {
+        return false;
+    };
+    match approval_action(key.code) {
+        ApprovalAction::Approve => {
+            if let Some(request) = context.pending.take() {
+                if request.reply.send(true).is_ok() {
+                    context.ui.resume_after_approval();
+                }
+            }
+            context.ui.note("鉁?approved", Color::Green);
+        }
+        ApprovalAction::Reject => {
+            if let Some(request) = context.pending.take() {
+                if request.reply.send(false).is_ok() {
+                    context.ui.resume_after_approval();
+                }
+            }
+            context.ui.note("鉁?rejected", Color::Red);
+        }
+        ApprovalAction::Scroll(delta) => context.ui.scroll = apply_scroll(context.ui.scroll, delta),
+        ApprovalAction::Ignore => {
+            let _ = pending;
+        }
+    }
+    true
+}
+
+fn handle_global_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> bool {
+    if queue_panel_toggle_action(key)
+        && (context.ui.panel.is_none()
+            || context
+                .ui
+                .panel
+                .as_ref()
+                .is_some_and(|panel| panel.allows_attention_switch()))
+        && context.ui.popup.is_none()
+    {
+        context.ui.toggle_queue_panel();
+        return true;
+    }
+    if live_history_toggle_action(
+        key,
+        context.ui.popup.is_some(),
+        context.ui.transcript.has_history(),
+    ) && (context.ui.panel.is_none()
+        || context
+            .ui
+            .panel
+            .as_ref()
+            .is_some_and(|panel| panel.allows_attention_switch()))
+    {
+        context.ui.toggle_live_history();
+        return true;
+    }
+    if let Some(action) = panel_attention_action(
+        key,
+        context
+            .ui
+            .panel
+            .as_ref()
+            .is_some_and(|panel| panel.allows_attention_switch()),
+        context.ui.popup.is_some(),
+    ) {
+        apply_attention_action(context.ui, action);
+        return true;
+    }
+    false
+}
+
+async fn handle_panel_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> anyhow::Result<()> {
+    if is_activity_toggle(key, context.ui) {
+        context.ui.toggle_activity_panel();
+        return Ok(());
+    }
+    match panel_action(key) {
+        PanelAction::Esc => close_panel(context.ui),
+        PanelAction::Remove => remove_panel_selection(context.ui, key.code == KeyCode::Backspace),
+        PanelAction::Up
+        | PanelAction::Down
+        | PanelAction::DetailPageUp
+        | PanelAction::DetailPageDown
+        | PanelAction::PageUp
+        | PanelAction::PageDown
+        | PanelAction::First
+        | PanelAction::Last => navigate_panel(context.ui, panel_action(key)),
+        PanelAction::Backspace | PanelAction::Char(_) => edit_panel(context.ui, panel_action(key)),
+        PanelAction::Enter => panel_enter_key(key, context).await?,
+        PanelAction::Ignore => {}
+    }
+    Ok(())
+}
+
+fn is_activity_toggle(key: &KeyEvent, ui: &Ui) -> bool {
+    key.kind == KeyEventKind::Press
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('t' | 'T'))
+        && ui
+            .panel
+            .as_ref()
+            .is_some_and(|panel| panel.kind == PanelKind::Activity)
+}
+
+fn close_panel(ui: &mut Ui) {
+    let cancel_oauth = ui
+        .panel
+        .as_ref()
+        .is_some_and(|panel| panel.editing.is_some() && panel.oauth_verifier.is_some());
+    let cancel_device = ui.oauth_device.is_some() || ui.device_auth_status.is_some();
+    let panel = ui.panel.as_mut().unwrap();
+    if panel.editing.is_some() {
+        panel.editing = None;
+    } else {
+        ui.panel = None;
+    }
+    if cancel_oauth {
+        ui.oauth_callback.take();
+    }
+    if cancel_device {
+        ui.oauth_device.take();
+        ui.device_auth_status = None;
+    }
+}
+
+fn remove_panel_selection(ui: &mut Ui, allow_edit: bool) {
+    let selection = ui.panel.as_ref().and_then(|panel| {
+        if panel.editing.is_some() {
+            return None;
+        }
+        match panel.selected_action() {
+            PanelRowAction::RemoveQueued(index) => Some((index, true)),
+            PanelRowAction::None if panel.kind == PanelKind::Queue => {
+                panel.selected_index().map(|index| (index, false))
+            }
+            PanelRowAction::None | PanelRowAction::FocusLiveBlock(_) => None,
+        }
+    });
+    if let Some((index, from_live_panel)) = selection {
+        if let Some(message) = ui.remove_queued(index) {
+            ui.record_activity(
+                ActivityKind::Queue,
+                format!("removed 路 {}", clip_display_cells(&message, 44)),
+            );
+            ui.note(
+                format!(
+                    "removed pending item ({} left): {}",
+                    ui.queued.len(),
+                    message
+                ),
+                role_color(Role::Warn),
+            );
+            if from_live_panel {
+                ui.refresh_live_history_panel();
+            } else {
+                ui.refresh_queue_panel();
+            }
+        }
+    } else if allow_edit {
+        edit_panel(ui, PanelAction::Backspace);
+    }
+}
+
+fn navigate_panel(ui: &mut Ui, action: PanelAction) {
+    let panel = ui.panel.as_mut().unwrap();
+    if panel.editing.is_some() {
+        return;
+    }
+    match action {
+        PanelAction::Up => panel.move_up(),
+        PanelAction::Down => panel.move_down(),
+        PanelAction::DetailPageUp => {
+            let _ = panel.scroll_detail(-1);
+        }
+        PanelAction::DetailPageDown => {
+            let _ = panel.scroll_detail(1);
+        }
+        PanelAction::PageUp => panel.page_up(),
+        PanelAction::PageDown => panel.page_down(),
+        PanelAction::First => panel.first(),
+        PanelAction::Last => panel.last(),
+        _ => return,
+    }
+    ui.sync_live_panel_focus();
+}
+
+fn edit_panel(ui: &mut Ui, action: PanelAction) {
+    let panel = ui.panel.as_mut().unwrap();
+    match action {
+        PanelAction::Backspace => match &mut panel.editing {
+            Some(buffer) => {
+                buffer.pop();
+            }
+            None => {
+                panel.query.pop();
+                panel.retype();
+            }
+        },
+        PanelAction::Char(c) => {
+            let toggle_live =
+                panel.kind == PanelKind::LiveHistory && panel.editing.is_none() && c == ' ';
+            if toggle_live {
+                ui.toggle_live_panel_detail();
+            } else {
+                match &mut panel.editing {
+                    Some(buffer) => buffer.push(c),
+                    None => {
+                        panel.query.push(c);
+                        panel.retype();
+                    }
+                }
+                ui.sync_live_panel_focus();
+            }
+        }
+        _ => {}
+    }
+}
+
+async fn panel_enter_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> anyhow::Result<()> {
+    let login_submit = matches!(
+        context.ui.panel.as_ref(),
+        Some(panel) if panel.kind == PanelKind::Login && panel.editing.is_some()
+    );
+    if !login_submit {
+        panel_enter(context.ui, context.meta, context.swap);
+        return Ok(());
+    }
+    let (id, key_text) = {
+        let panel = context.ui.panel.as_ref().unwrap();
+        (
+            panel.selected().map(|row| row.key.clone()),
+            panel.editing.clone().unwrap_or_default(),
+        )
+    };
+    let oauth = match id.as_deref() {
+        Some(id) if id == CLAUDE_OAUTH_ROW => Some(&provider::oauth::ANTHROPIC),
+        Some(id) if id == CODEX_OAUTH_ROW => Some(&provider::oauth::OPENAI),
+        _ => None,
+    };
+    if let Some(config) = oauth {
+        apply_oauth_code(
+            config,
+            key_text.trim(),
+            context.meta,
+            context.swap,
+            context.ui,
+        )
+        .await;
+        return Ok(());
+    }
+    match id.as_deref().and_then(preset_by_id) {
+        Some(preset) if !key_text.trim().is_empty() => {
+            context
+                .ui
+                .note(format!("verifying {}…", preset.id), Color::Gray);
+            login_apply_verified(
+                preset,
+                key_text.trim(),
+                context.meta,
+                context.swap,
+                context.ui,
+            )
+            .await;
+        }
+        Some(_) => context.ui.note("enter a non-empty API key", Color::Yellow),
+        None => context.ui.note("no provider selected", Color::Red),
+    }
+    let _ = key;
+    Ok(())
+}
+
+fn handle_live_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> bool {
+    if handle_live_focus_key(key, context) || handle_live_view_key(key, context) {
+        return true;
+    }
+    false
+}
+
+fn handle_live_focus_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> bool {
+    if let Some(delta) =
+        tool_focus_action(key, context.ui.popup.is_some(), context.ui.has_live_tools())
+    {
+        let _ = context.ui.move_tool_focus(delta);
+        return true;
+    }
+    if let Some(delta) = semantic_focus_action(
+        key,
+        context.ui.popup.is_some(),
+        context.ui.transcript.is_inspecting(),
+        context.ui.has_inspectable_live_output(),
+    ) {
+        let _ = context.ui.move_semantic_focus(delta);
+        context
+            .ui
+            .note("Alt+鈫?鈫?路 semantic focus", role_color(Role::Info));
+        return true;
+    }
+    if let Some(delta) = tool_detail_scroll_action(
+        key,
+        context.ui.popup.is_some(),
+        context.ui.has_scrollable_live_tool(),
+    ) {
+        let _ = context.ui.scroll_tool_details(delta);
+        return true;
+    }
+    false
+}
+
+fn handle_live_view_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> bool {
+    if live_hold_toggle_action(
+        key,
+        context.ui.popup.is_some(),
+        context.ui.has_inspectable_live_output(),
+    ) {
+        if context.ui.transcript.is_inspecting() {
+            *context.momentary_hold = false;
+            let _ = context.ui.follow_live();
+        } else {
+            let _ = context.ui.hold_live();
+            *context.momentary_hold = true;
+        }
+        return true;
+    }
+    if live_semantic_toggle_action(
+        key,
+        context.ui.popup.is_some(),
+        context.ui.transcript.is_inspecting(),
+        context.ui.has_live_tools() || context.ui.transcript.has_reasoning(),
+    ) {
+        let _ = context.ui.toggle_focused_semantic();
+        context
+            .ui
+            .note("Space 路 semantic block toggled", role_color(Role::Info));
+        return true;
+    }
+    let Some(action) = live_scroll_action(
+        key,
+        context.ui.popup.is_some(),
+        context.ui.has_scrollable_live_tool(),
+        context.ui.has_inspectable_live_output(),
+    ) else {
+        return false;
+    };
+    match action {
+        LiveScrollAction::Older => {
+            let _ = context.ui.scroll_live(1);
+        }
+        LiveScrollAction::Newer => {
+            let _ = context.ui.scroll_live(-1);
+        }
+        LiveScrollAction::OlderPage => {
+            let page_rows = crossterm::terminal::size()
+                .map(|(_, height)| live_page_rows(height))
+                .unwrap_or(12);
+            let _ = context.ui.scroll_live_page(1, page_rows);
+        }
+        LiveScrollAction::NewerPage => {
+            let page_rows = crossterm::terminal::size()
+                .map(|(_, height)| live_page_rows(height))
+                .unwrap_or(12);
+            let _ = context.ui.scroll_live_page(-1, page_rows);
+        }
+        LiveScrollAction::Follow => {
+            let _ = context.ui.follow_live();
+        }
+    }
+    true
+}
+
+fn handle_input_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) {
+    let action = input_action(key, context.ui.busy, context.ui.popup.is_some());
+    handle_input_action(action, context);
+}
+
+fn handle_input_action(action: InputAction, context: &mut KeyEventContext<'_>) {
+    match action {
+        InputAction::Interrupt => {
+            if let Some(handle) = context.task.take() {
+                *context.momentary_hold = false;
+                interrupt_task(context, handle, false);
+            }
+        }
+        InputAction::Insert(_)
+        | InputAction::Backspace
+        | InputAction::Left
+        | InputAction::Right
+        | InputAction::Home
+        | InputAction::End
+        | InputAction::NewLine
+        | InputAction::CursorUpOrHistory
+        | InputAction::CursorDownOrHistory => edit_input(action, context.ui),
+        InputAction::PopupOpen
+        | InputAction::PopupNext
+        | InputAction::PopupPrev
+        | InputAction::PopupAccept
+        | InputAction::PopupSubmit
+        | InputAction::PopupClose => handle_popup_action(action, context),
+        InputAction::Submit | InputAction::Queue | InputAction::PushNow => {
+            handle_submission_action(action, context.ui, context.pending_submit)
+        }
+        InputAction::ToggleDetails
+        | InputAction::ToggleReasoning
+        | InputAction::ToggleAnswer
+        | InputAction::ToggleActivity => apply_attention_action(context.ui, action),
+        InputAction::OpenLiveSearch => {
+            if !context.ui.open_live_search("") {
+                context.ui.note("no live blocks to search", Color::Gray);
+            }
+        }
+        InputAction::Ignore => {}
+    }
+}
+
+fn edit_input(action: InputAction, ui: &mut Ui) {
+    match action {
+        InputAction::Insert(c) => {
+            ui.input.insert(c);
+            ui.popup = build_popup(&ui.input);
+        }
+        InputAction::Backspace => {
+            ui.input.backspace();
+            ui.popup = build_popup(&ui.input);
+        }
+        InputAction::Left => ui.input.left(),
+        InputAction::Right => ui.input.right(),
+        InputAction::Home => ui.input.home(),
+        InputAction::End => ui.input.end(),
+        InputAction::NewLine => ui.input.insert('\n'),
+        InputAction::CursorUpOrHistory => {
+            if !ui.input.move_up() {
+                let width = crossterm::terminal::size()
+                    .map(|(columns, _)| columns)
+                    .unwrap_or(80)
+                    .saturating_sub(2);
+                if up_fallback_is_home(&ui.input.buffer, ui.input.cursor, width) {
+                    ui.input.home();
+                } else {
+                    ui.input.recall_prev();
+                }
+            }
+        }
+        InputAction::CursorDownOrHistory => cursor_down_or_history(ui),
+        _ => {}
+    }
+}
+
+fn cursor_down_or_history(ui: &mut Ui) {
+    if ui.input.move_down() {
+        return;
+    }
+    ui.input.recall_next();
+}
+
+fn handle_popup_action(action: InputAction, context: &mut KeyEventContext<'_>) {
+    match action {
+        InputAction::PopupOpen => context.ui.popup = build_popup(&context.ui.input),
+        InputAction::PopupNext => {
+            if let Some(popup) = &mut context.ui.popup {
+                popup.selected = (popup.selected + 1) % popup.items.len();
+            }
+        }
+        InputAction::PopupPrev => {
+            if let Some(popup) = &mut context.ui.popup {
+                popup.selected = (popup.selected + popup.items.len() - 1) % popup.items.len();
+            }
+        }
+        InputAction::PopupAccept => {
+            if let Some(popup) = context.ui.popup.take() {
+                apply_completion(&mut context.ui.input, &popup);
+            }
+        }
+        InputAction::PopupSubmit => {
+            if let Some(popup) = context.ui.popup.take() {
+                apply_completion(&mut context.ui.input, &popup);
+            }
+            let input = context.ui.input.take().trim().to_owned();
+            if !input.is_empty() {
+                submit_or_queue_input(input, context);
+            }
+        }
+        InputAction::PopupClose => context.ui.popup = None,
+        _ => {}
+    }
+}
+
+fn submit_or_queue_input(input: String, context: &mut KeyEventContext<'_>) {
+    if context.ui.busy {
+        queue_input(context.ui, input);
+    } else {
+        *context.pending_submit = Some(input);
+    }
+}
+
+fn handle_submission_action(action: InputAction, ui: &mut Ui, pending_submit: &mut Option<String>) {
+    let input = ui.input.take().trim().to_owned();
+    if input.is_empty() {
+        return;
+    }
+    match action {
+        InputAction::Submit => *pending_submit = Some(input),
+        InputAction::Queue => queue_input(ui, input),
+        InputAction::PushNow => push_queue_front(ui, input),
+        _ => {}
+    }
+}
+
+fn queue_input(ui: &mut Ui, input: String) {
+    ui.queued.push_back(input.clone());
+    ui.refresh_queue_panel();
+    ui.record_activity(
+        ActivityKind::Queue,
+        format!("queued 路 {}", clip_display_cells(&input, 48)),
+    );
+    ui.note(
+        format!(
+            "鈴?queued ({} pending; current turn continues): {input}",
+            ui.queued.len()
+        ),
+        role_color(Role::Muted),
+    );
+}
+
+fn push_queue_front(ui: &mut Ui, input: String) {
+    ui.queued.push_front(input.clone());
+    ui.refresh_queue_panel();
+    ui.record_activity(
+        ActivityKind::Queue,
+        format!("front-queued 路 {}", clip_display_cells(&input, 44)),
+    );
+    ui.note(
+        format!(
+            "鈴?front-queued ({} pending; current turn continues): {input}",
+            ui.queued.len()
+        ),
+        role_color(Role::Primary),
+    );
+}
+
+const TUI_MAX_RETRIES: usize = 10;
+type StartTask = Box<dyn Fn(&str, &[Message]) -> tokio::task::JoinHandle<()>>;
+
+fn tui_approver(
+    skip_danger: bool,
+    tx: tokio::sync::mpsc::UnboundedSender<ApprovalRequest>,
+) -> Arc<dyn Approver> {
+    if skip_danger {
+        Arc::new(AutoApprove)
+    } else {
+        Arc::new(TuiApprover { tx })
+    }
+}
+
+fn session_input_history(history: &[Message]) -> Vec<String> {
+    if history.is_empty() {
+        return load_global_input_history();
+    }
+    let saved = load_session_input_history();
+    if !saved.is_empty() {
+        return saved;
+    }
+    history
+        .iter()
+        .filter_map(|message| match message.role {
+            provider::Role::User => Some(message.content.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn note_initial_ui(ui: &mut Ui, skip_danger: bool, history: &[Message]) {
+    ui.note(
+        "RidgeCode  路  inline mode: output lands in terminal history (native scroll/select) 路 Enter send/queue 路 Ctrl+Enter front-queue without interrupt 路 Ctrl+I/Alt+I live inspect 路 Ctrl+Q queue 路 Ctrl+Space hold/follow 路 Ctrl+A answers 路 Ctrl+T activity 路 Ctrl+J newline 路 Esc/Ctrl-C takeover; press Ctrl-C twice to exit 路 /help",
+        Color::Cyan,
+    );
+    if skip_danger {
+        ui.note(
+            "鈿?skip-danger: tools auto-approved (disaster commands still hard-blocked)",
+            Color::Red,
+        );
+    }
+    if !history.is_empty() {
+        ui.note(
+            format!("restored {} session messages", history.len()),
+            Color::Green,
+        );
+    }
+}
+
+fn keylog_path() -> Option<std::path::PathBuf> {
+    let dir = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(|home| std::path::PathBuf::from(home).join(".ridge"))
+        .unwrap_or_else(std::env::temp_dir);
+    let enabled = std::env::var_os("RIDGE_KEYLOG").is_some() || dir.join("keylog.on").exists();
+    enabled.then(|| dir.join("keylog.txt"))
+}
+
+fn spawn_key_reader() -> tokio::sync::mpsc::UnboundedReceiver<Event> {
+    let (key_tx, key_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+    std::thread::spawn(move || {
+        while let Ok(event) = event::read() {
+            if key_tx.send(event).is_err() {
+                break;
+            }
+        }
+    });
+    key_rx
+}
+
+fn poll_model_catalog(
+    ui: &mut Ui,
+    meta: &mut ReplMeta,
+    swap: &Arc<SwapProvider>,
+    receiver: &mut Option<tokio::sync::oneshot::Receiver<(ModelCatalog, u32)>>,
+) -> bool {
+    if ui.model_catalog_reload {
+        ui.model_catalog_reload = false;
+        ui.model_catalog = None;
+        *receiver = Some(start_model_catalog_preload(&meta.provider, &meta.base_url));
+    }
+    let result = match receiver.as_mut() {
+        Some(receiver) => match receiver.try_recv() {
+            Ok(result) => Some(result),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => Some((Vec::new(), 1)),
+        },
+        None => None,
+    };
+    let Some((grouped, failures)) = result else {
+        return false;
+    };
+    *receiver = None;
+    auto_select_chatgpt_model(&grouped, meta, swap, ui);
+    let empty = grouped.is_empty();
+    ui.model_catalog = Some(grouped);
+    if empty && failures > 0 {
+        ui.note(
+            "model catalog unavailable; retry /model after checking credentials or network",
+            Color::Yellow,
+        );
+    }
+    true
+}
+
+fn poll_device_oauth(ui: &mut Ui) -> Option<DeviceOAuthEvent> {
+    match ui.oauth_device.as_mut() {
+        Some(flow) => match flow.receiver.try_recv() {
+            Ok(event) => Some(event),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => None,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => Some(
+                DeviceOAuthEvent::Complete(Err("device OAuth task stopped".into())),
+            ),
+        },
+        None => None,
+    }
+}
+
+fn handle_device_oauth_event(
+    event: DeviceOAuthEvent,
+    ui: &mut Ui,
+    meta: &mut ReplMeta,
+    swap: &Arc<SwapProvider>,
+) {
+    match event {
+        DeviceOAuthEvent::Ready { user_code, opened } => {
+            ui.device_auth_status = Some(format!("Device code: {user_code}"));
+            ui.note(
+                format!(
+                    "Codex device auth: {} browser at {} and enter code: {user_code}",
+                    if opened {
+                        "browser opened; visit"
+                    } else {
+                        "open"
+                    },
+                    provider::oauth::OPENAI_DEVICE_VERIFICATION_URL
+                ),
+                Color::Cyan,
+            );
+        }
+        DeviceOAuthEvent::Complete(result) => {
+            ui.oauth_device.take();
+            match result {
+                Ok(token) => {
+                    ui.device_auth_status = None;
+                    apply_oauth_token(&provider::oauth::OPENAI, token, meta, swap, ui);
+                }
+                Err(error) => {
+                    ui.device_auth_status = Some(format!("Device auth failed: {error}"));
+                    ui.note(format!("Codex device OAuth failed: {error}"), Color::Red);
+                }
+            }
+        }
+    }
+}
+
+fn poll_oauth_callback(ui: &mut Ui) -> Option<Result<String, String>> {
+    match ui.oauth_callback.as_mut() {
+        Some(callback) => match callback.receiver.try_recv() {
+            Ok(result) => Some(result),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                Some(Err("local OAuth callback listener stopped".into()))
+            }
+        },
+        None => None,
+    }
+}
+
+struct EventStepResult {
+    exit: bool,
+    dirty: bool,
+}
+
+struct EventStepContext<'a> {
+    ui: &'a mut Ui,
+    meta: &'a mut ReplMeta,
+    swap: &'a Arc<SwapProvider>,
+    bus: &'a TokenBus,
+    pending: &'a mut Option<ApprovalRequest>,
+    task: &'a mut Option<tokio::task::JoinHandle<()>>,
+    task_started: &'a mut Option<Instant>,
+    retry_count: &'a mut usize,
+    pending_submit: &'a mut Option<String>,
+    momentary_hold: &'a mut bool,
+    last_ctrl_c: &'a mut Option<Instant>,
+    pressed: &'a mut std::collections::HashSet<KeyCode>,
+    keylog_path: &'a Option<std::path::PathBuf>,
+    last_activity: &'a mut Option<Instant>,
+    history: &'a mut Vec<Message>,
+    printed: &'a mut usize,
+    last_task: &'a Option<String>,
+    session_tokens: &'a mut usize,
+    session_turns: &'a mut usize,
+    start_task: &'a StartTask,
+    key_rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<Event>,
+    token_rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<provider::StreamChunk>,
+    event_rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<StreamEvent<AgentState>>,
+    approval_rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<ApprovalRequest>,
+    done_rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<Result<AgentState, String>>,
+    tick: &'a mut tokio::time::Interval,
+    terminal: &'a Term,
+    animation_due: &'a mut bool,
+}
+
+async fn run_event_step(context: EventStepContext<'_>) -> anyhow::Result<EventStepResult> {
+    let EventStepContext {
+        ui,
+        meta,
+        swap,
+        bus,
+        pending,
+        task,
+        task_started,
+        retry_count,
+        pending_submit,
+        momentary_hold,
+        last_ctrl_c,
+        pressed,
+        keylog_path,
+        last_activity,
+        history,
+        printed,
+        last_task,
+        session_tokens,
+        session_turns,
+        start_task,
+        key_rx,
+        token_rx,
+        event_rx,
+        approval_rx,
+        done_rx,
+        tick,
+        terminal,
+        animation_due,
+    } = context;
+    let dirty = tokio::select! {
+        biased;
+        Some(event) = key_rx.recv() => {
+            let result = handle_key_event(
+                event,
+                &mut KeyEventContext {
+                    ui,
+                    meta,
+                    swap,
+                    bus,
+                    pending,
+                    task,
+                    task_started,
+                    retry_count,
+                    pending_submit,
+                    momentary_hold,
+                    last_ctrl_c,
+                    pressed,
+                    keylog_path,
+                },
+            ).await?;
+            if matches!(result, KeyEventResult::Exit) {
+                return Ok(EventStepResult { exit: true, dirty: true });
+            }
+            true
+        }
+        Some(chunk) = token_rx.recv() => {
+            handle_token_chunk(chunk, ui, last_activity, token_rx);
+            true
+        }
+        Some(event) = event_rx.recv() => {
+            handle_stream_event(
+                event,
+                &mut StreamEventContext {
+                    ui,
+                    task_started: &*task_started,
+                    last_activity,
+                    printed,
+                },
+            );
+            true
+        }
+        Some(request) = approval_rx.recv() => {
+            *pending = Some(request);
+            *momentary_hold = false;
+            ui.scroll = 0;
+            ui.busy = false;
+            ui.waiting = false;
+            ui.mark_approval_required();
+            true
+        }
+        Some(result) = done_rx.recv() => {
+            handle_done_result(
+                result,
+                &mut DoneEventContext {
+                    ui,
+                    history,
+                    task,
+                    pending_submit,
+                    momentary_hold,
+                    task_started,
+                    last_activity,
+                    printed,
+                    retry_count,
+                    last_task,
+                    session_tokens,
+                    session_turns,
+                    start_task: start_task.as_ref(),
+                },
+            );
+            true
+        }
+        _ = tick.tick() => {
+            *animation_due = ui.busy && pending.is_none() && ui.panel.is_none();
+            handle_tick(ui, &*last_activity, &*pending, terminal)
+        }
+        else => return Ok(EventStepResult { exit: true, dirty: false }),
+    };
+    Ok(EventStepResult { exit: false, dirty })
+}
+
+struct PendingSubmitContext<'a> {
+    ui: &'a mut Ui,
+    history: &'a mut Vec<Message>,
+    meta: &'a mut ReplMeta,
+    swap: &'a Arc<SwapProvider>,
+    agents: &'a agent::Agents,
+    commands: &'a [agent::SlashCommand],
+    skills: &'a [Skill],
+    session_tokens: usize,
+    session_turns: usize,
+    pending_submit: &'a mut Option<String>,
+    retry_count: &'a mut usize,
+    last_task: &'a mut Option<String>,
+    task_started: &'a mut Option<Instant>,
+    last_activity: &'a mut Option<Instant>,
+    printed: &'a mut usize,
+    task: &'a mut Option<tokio::task::JoinHandle<()>>,
+    start_task: &'a StartTask,
+}
+
+async fn process_pending_submit(context: &mut PendingSubmitContext<'_>) -> anyhow::Result<bool> {
+    let Some(input) = context.pending_submit.take() else {
+        return Ok(false);
+    };
+    let command_catalog = CommandCatalog {
+        agents: context.agents,
+        commands: context.commands,
+        skills: context.skills,
+    };
+    let should_exit = run_command(
+        &input,
+        context.ui,
+        context.history,
+        context.meta,
+        context.swap,
+        &command_catalog,
+        CommandStats {
+            tokens: context.session_tokens,
+            turns: context.session_turns,
+        },
+    )
+    .await?;
+    let starts_session = !input.starts_with('/') || context.ui.run_task.is_some();
+    if starts_session && !context.ui.input.session_mode {
+        context.ui.input.drop_last_history_if(&input);
+        save_global_input_history(&context.ui.input.history);
+        context.ui.input.begin_session();
+        context.ui.input.push_history(&input);
+    } else if !context.ui.input.session_mode {
+        save_global_input_history(&context.ui.input.history);
+    }
+    if context.ui.input.session_mode {
+        save_session_input_history(&context.ui.input.history);
+    }
+    if should_exit {
+        return Ok(true);
+    }
+    let task_input = if input.starts_with('/') {
+        context.ui.run_task.take()
+    } else {
+        Some(input.clone())
+    };
+    if let Some(task_input) = task_input {
+        context
+            .ui
+            .note(format!("鈥?{input}"), role_color(Role::Command));
+        context
+            .history
+            .push(Message::user(expand_mentions(&task_input)));
+        *context.last_task = Some(task_input.clone());
+        *context.retry_count = 0;
+        reset_task_ui(context.ui);
+        *context.task_started = Some(Instant::now());
+        *context.last_activity = *context.task_started;
+        *context.printed = 0;
+        *context.task = Some((context.start_task)(&task_input, context.history));
+    }
+    Ok(false)
+}
+
+fn reset_task_ui(ui: &mut Ui) {
+    ui.busy = true;
+    ui.waiting = false;
+    ui.phase = "reasoning".into();
+    ui.set_activity("starting task");
+    ui.clear_streams();
+    ui.stream_tokens = 0;
+    ui.input_tokens = 0;
+    ui.output_tokens = 0;
+    ui.superstep = 0;
+    ui.stall = 0;
+    ui.err_streak = 0;
+    ui.explore_streak = 0;
+    ui.pending_call = None;
+}
+
+struct DrawFrameContext<'a> {
+    terminal: &'a mut Term,
+    ui: &'a mut Ui,
+    meta: &'a ReplMeta,
+    history: &'a [Message],
+    session_tokens: usize,
+    pending: Option<&'a ApprovalRequest>,
+    task_started: Option<Instant>,
+    live_cache: &'a mut LiveOutputCache,
+}
+
+fn draw_tui_frame(context: &mut DrawFrameContext<'_>) -> anyhow::Result<()> {
+    tui_trace("draw.begin");
+    context.ui.frame = context.ui.frame.wrapping_add(1);
+    let elapsed_ms = context
+        .task_started
+        .map(|started| started.elapsed().as_millis())
+        .unwrap_or(0);
+    let ctx_used = context
+        .history
+        .iter()
+        .map(|message| est_tokens(&message.content))
+        .sum::<usize>();
+    let vitals = Vitals {
+        step: context.ui.superstep,
+        elapsed_s: (elapsed_ms / 1000) as u64,
+        task_tokens: context.ui.stream_tokens,
+        rate: token_rate(context.ui.stream_tokens, elapsed_ms),
+        ctx_used,
+        queued: context.ui.queued.len(),
+    };
+    context.terminal.draw(|frame| {
+        draw_with_cache(
+            frame,
+            context.ui,
+            context.meta,
+            context.session_tokens,
+            &vitals,
+            context.pending,
+            context.live_cache,
+        )
+    })?;
+    tui_trace("draw.end");
+    Ok(())
+}
+
+struct LoopPrepareContext<'a> {
+    ui: &'a mut Ui,
+    meta: &'a mut ReplMeta,
+    swap: &'a Arc<SwapProvider>,
+    model_catalog_rx: &'a mut Option<tokio::sync::oneshot::Receiver<(ModelCatalog, u32)>>,
+    pending_submit: &'a mut Option<String>,
+    task: &'a mut Option<tokio::task::JoinHandle<()>>,
+    history: &'a mut Vec<Message>,
+    agents: &'a agent::Agents,
+    commands: &'a [agent::SlashCommand],
+    skills: &'a [Skill],
+    session_tokens: usize,
+    session_turns: usize,
+    retry_count: &'a mut usize,
+    last_task: &'a mut Option<String>,
+    task_started: &'a mut Option<Instant>,
+    last_activity: &'a mut Option<Instant>,
+    printed: &'a mut usize,
+    start_task: &'a StartTask,
+    terminal: &'a mut Term,
+    live_cache: &'a mut LiveOutputCache,
+    pending: &'a Option<ApprovalRequest>,
+    dirty: &'a mut bool,
+    animation_due: &'a mut bool,
+}
+
+async fn prepare_loop(context: &mut LoopPrepareContext<'_>) -> anyhow::Result<bool> {
+    if poll_model_catalog(
+        context.ui,
+        context.meta,
+        context.swap,
+        context.model_catalog_rx,
+    ) {
+        *context.dirty = true;
+    }
+    if let Some(event) = poll_device_oauth(context.ui) {
+        handle_device_oauth_event(event, context.ui, context.meta, context.swap);
+        *context.dirty = true;
+    }
+    if let Some(result) = poll_oauth_callback(context.ui) {
+        context.ui.oauth_callback.take();
+        match result {
+            Ok(code) => {
+                apply_oauth_code(
+                    &provider::oauth::OPENAI,
+                    &code,
+                    context.meta,
+                    context.swap,
+                    context.ui,
+                )
+                .await;
+            }
+            Err(error) => context
+                .ui
+                .note(format!("OAuth callback failed: {error}"), Color::Red),
+        }
+        *context.dirty = true;
+    }
+    if can_start_task(context.ui.busy, context.task.is_some())
+        && process_pending_submit(&mut PendingSubmitContext {
+            ui: context.ui,
+            history: context.history,
+            meta: context.meta,
+            swap: context.swap,
+            agents: context.agents,
+            commands: context.commands,
+            skills: context.skills,
+            session_tokens: context.session_tokens,
+            session_turns: context.session_turns,
+            pending_submit: context.pending_submit,
+            retry_count: context.retry_count,
+            last_task: context.last_task,
+            task_started: context.task_started,
+            last_activity: context.last_activity,
+            printed: context.printed,
+            task: context.task,
+            start_task: context.start_task,
+        })
+        .await?
+    {
+        return Ok(true);
+    }
+    if !context.ui.commits.is_empty() {
+        flush_commits(context.terminal, context.ui)?;
+        *context.dirty = true;
+    }
+    if should_draw(*context.dirty, *context.animation_due) {
+        draw_tui_frame(&mut DrawFrameContext {
+            terminal: context.terminal,
+            ui: context.ui,
+            meta: context.meta,
+            history: context.history,
+            session_tokens: context.session_tokens,
+            pending: context.pending.as_ref(),
+            task_started: *context.task_started,
+            live_cache: context.live_cache,
+        })?;
+        *context.dirty = false;
+        *context.animation_due = false;
+    }
+    Ok(false)
+}
+
+fn handle_token_chunk(
+    chunk: provider::StreamChunk,
+    ui: &mut Ui,
+    last_activity: &mut Option<Instant>,
+    token_rx: &mut tokio::sync::mpsc::UnboundedReceiver<provider::StreamChunk>,
+) {
+    ui.busy = true;
+    ui.waiting = false;
+    *last_activity = Some(Instant::now());
+    set_token_activity(ui, &chunk);
+    ui.push_chunk(chunk);
+    for _ in 0..MAX_STREAM_CHUNKS_PER_WAKE {
+        match next_token_chunk(token_rx, ui) {
+            Some(chunk) => ui.push_chunk(chunk),
+            None => break,
+        }
+    }
+}
+
+fn set_token_activity(ui: &mut Ui, chunk: &provider::StreamChunk) {
+    ui.set_activity(match chunk {
+        provider::StreamChunk::Answer(_) => "model 路 answering",
+        provider::StreamChunk::Reasoning(_) => "model 路 thinking",
+    });
+}
+
+fn next_token_chunk(
+    token_rx: &mut tokio::sync::mpsc::UnboundedReceiver<provider::StreamChunk>,
+    ui: &mut Ui,
+) -> Option<provider::StreamChunk> {
+    match token_rx.try_recv() {
+        Ok(chunk) => {
+            set_token_activity(ui, &chunk);
+            Some(chunk)
+        }
+        Err(_) => None,
+    }
+}
+
+struct StreamEventContext<'a> {
+    ui: &'a mut Ui,
+    task_started: &'a Option<Instant>,
+    last_activity: &'a mut Option<Instant>,
+    printed: &'a mut usize,
+}
+
+fn handle_stream_event(event: StreamEvent<AgentState>, context: &mut StreamEventContext<'_>) {
+    context.ui.waiting = false;
+    *context.last_activity = Some(Instant::now());
+    match event {
+        StreamEvent::NodeFinished { node, .. } => {
+            context.ui.phase = node_label(&node);
+            context
+                .ui
+                .set_activity(format!("node 路 {}", context.ui.phase));
+            context.ui.busy = true;
+        }
+        StreamEvent::Superstep {
+            step,
+            active,
+            state,
+        } => handle_superstep_event(step, &active, state, context),
+    }
+}
+
+fn handle_superstep_event(
+    step: usize,
+    active: &[String],
+    state: AgentState,
+    context: &mut StreamEventContext<'_>,
+) {
+    context.ui.superstep = step;
+    context.ui.input_tokens = state.input_tokens;
+    context.ui.output_tokens = state.output_tokens;
+    context.ui.stall = state.stall;
+    context.ui.err_streak = state.err_streak;
+    context.ui.explore_streak = state.explore_streak;
+    context.ui.pending_call = state.pending_call.clone();
+    let active_label = active
+        .iter()
+        .map(|node| node_label(node))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    context.ui.set_activity(superstep_activity(
+        &active_label,
+        state.pending_call.as_ref(),
+    ));
+    let answer_step = context.ui.superstep;
+    let answer_elapsed_s = context
+        .task_started
+        .as_ref()
+        .map(|started| started.elapsed().as_secs())
+        .unwrap_or(0);
+    let answer_tokens = context.ui.stream_tokens;
+    for message in state.messages.iter().skip(*context.printed) {
+        present_stream_message(
+            message,
+            context.ui,
+            answer_step,
+            answer_elapsed_s,
+            answer_tokens,
+        );
+    }
+    *context.printed = state.messages.len();
+    record_todo_snapshot(context.ui, &state.todos);
+    context.ui.todos = state.todos;
+    context
+        .ui
+        .commit_live_reasoning(answer_step, answer_elapsed_s);
+    context.ui.commit_live_tools();
+    context.ui.clear_streams();
+    context.ui.busy = superstep_is_busy(active);
+}
+
+fn superstep_activity(active_label: &str, pending_call: Option<&provider::ToolCall>) -> String {
+    if let Some(call) = pending_call {
+        format!("tool 路 {}", call.name)
+    } else if active_label.is_empty() {
+        "settling result".to_owned()
+    } else {
+        format!("next 路 {active_label}")
+    }
+}
+
+fn present_stream_message(
+    message: &str,
+    ui: &mut Ui,
+    answer_step: usize,
+    answer_elapsed_s: u64,
+    answer_tokens: usize,
+) {
+    if let Some(tool) = tool_preview(message) {
+        ui.push_tool(tool);
+        return;
+    }
+    let is_final = is_final_event(message);
+    for (line, color) in summarize_event(message) {
+        if is_final {
+            ui.note_markdown_with_meta(line, answer_step, answer_elapsed_s, answer_tokens);
+        } else {
+            ui.note(line, color);
+        }
+    }
+}
+
+fn record_todo_snapshot(ui: &mut Ui, todos: &[agent::Todo]) {
+    let todo_snapshot = render_todo_block(todos);
+    if todo_snapshot != render_todo_block(&ui.todos) && !todos.is_empty() {
+        ui.record_plan(todo_snapshot);
+    }
+}
+
+struct DoneEventContext<'a> {
+    ui: &'a mut Ui,
+    history: &'a mut Vec<Message>,
+    task: &'a mut Option<tokio::task::JoinHandle<()>>,
+    pending_submit: &'a mut Option<String>,
+    momentary_hold: &'a mut bool,
+    task_started: &'a mut Option<Instant>,
+    last_activity: &'a mut Option<Instant>,
+    printed: &'a mut usize,
+    retry_count: &'a mut usize,
+    last_task: &'a Option<String>,
+    session_tokens: &'a mut usize,
+    session_turns: &'a mut usize,
+    start_task: &'a dyn Fn(&str, &[Message]) -> tokio::task::JoinHandle<()>,
+}
+
+fn handle_done_result(result: Result<AgentState, String>, context: &mut DoneEventContext<'_>) {
+    *context.task = None;
+    *context.momentary_hold = false;
+    context.ui.busy = false;
+    context.ui.waiting = false;
+    if let Some(reason) = unfinished_answer_reason(&result) {
+        commit_done_answer(context, reason);
+    }
+    commit_done_streams(context);
+    match result {
+        Ok(output) => handle_successful_run(output, context),
+        Err(error) => handle_failed_run(error, context),
+    }
+    if context.pending_submit.is_none() {
+        *context.pending_submit = context.ui.queued.pop_front();
+        context.ui.refresh_queue_panel();
+    }
+}
+
+fn commit_done_answer(context: &mut DoneEventContext<'_>, reason: &str) {
+    let elapsed = done_elapsed(context);
+    context
+        .ui
+        .commit_live_answers(reason, context.ui.superstep, elapsed);
+}
+
+fn commit_done_streams(context: &mut DoneEventContext<'_>) {
+    let elapsed = done_elapsed(context);
+    context
+        .ui
+        .commit_live_reasoning(context.ui.superstep, elapsed);
+    context.ui.clear_streams();
+    context.ui.commit_live_tools();
+    context.ui.superstep = 0;
+    context.ui.pending_call = None;
+    *context.task_started = None;
+    *context.last_activity = None;
+    *context.printed = 0;
+}
+
+fn done_elapsed(context: &DoneEventContext<'_>) -> u64 {
+    context
+        .task_started
+        .as_ref()
+        .map(|started| started.elapsed().as_secs())
+        .unwrap_or(0)
+}
+
+fn handle_successful_run(output: AgentState, context: &mut DoneEventContext<'_>) {
+    *context.retry_count = 0;
+    *context.history = output.history.clone();
+    save_session(&session_path(), context.history);
+    context.ui.input_tokens = output.input_tokens;
+    context.ui.output_tokens = output.output_tokens;
+    *context.session_tokens += output.total_tokens;
+    *context.session_turns += 1;
+    context.ui.todos = output.todos.clone();
+    let reason = halt_reason(&output);
+    context.ui.mark_task_outcome_with_reason(
+        output.approved,
+        (!output.approved).then_some(halt_reason_display(reason)),
+    );
+    let (status, color) = if output.approved {
+        ("鉁?approved".to_string(), Color::Green)
+    } else {
+        (
+            format!(
+                "鉁?not approved ({}) 路 {}",
+                halt_reason_display(reason),
+                halt_reason_guidance(reason)
+            ),
+            Color::Red,
+        )
+    };
+    context.ui.note(
+        format!(
+            "{status} 路 steps={} 路 tokens={}",
+            output.steps, output.total_tokens
+        ),
+        color,
+    );
+    agent::fire_session_hooks(
+        "stop",
+        &format!("steps={} tokens={}", output.steps, output.total_tokens),
+    );
+}
+
+fn handle_failed_run(error: String, context: &mut DoneEventContext<'_>) {
+    let retryable = is_retryable_error(&error);
+    if let Some(task_input) = context
+        .last_task
+        .clone()
+        .filter(|_| retryable && *context.retry_count < TUI_MAX_RETRIES)
+    {
+        *context.retry_count += 1;
+        let retry = *context.retry_count;
+        context.ui.note(
+            format!("鈫?Transient failure, retrying {retry}/{TUI_MAX_RETRIES} (last: {error})"),
+            Color::Yellow,
+        );
+        context.ui.busy = true;
+        context.ui.waiting = false;
+        context.ui.phase = "reasoning".into();
+        context
+            .ui
+            .set_activity(format!("retrying 路 reasoning {retry}/{TUI_MAX_RETRIES}"));
+        context.ui.superstep = 0;
+        context.ui.stall = 0;
+        context.ui.err_streak = 0;
+        context.ui.explore_streak = 0;
+        context.ui.pending_call = None;
+        *context.task_started = Some(Instant::now());
+        *context.last_activity = *context.task_started;
+        *context.task = Some((context.start_task)(&task_input, context.history));
+        return;
+    }
+    let tail = if !retryable {
+        format!("error (not retryable, stopped): {error}")
+    } else if *context.retry_count >= TUI_MAX_RETRIES {
+        format!("error (failed after {TUI_MAX_RETRIES} retries): {error}")
+    } else {
+        format!("error: {error}")
+    };
+    context.ui.note(tail, Color::Red);
+    context.ui.mark_error();
+    agent::fire_session_hooks("stop", "error");
+    *context.retry_count = 0;
+}
+
+fn handle_tick(
+    ui: &mut Ui,
+    last_activity: &Option<Instant>,
+    pending: &Option<ApprovalRequest>,
+    terminal: &Term,
+) -> bool {
+    let was_waiting = ui.waiting;
+    ui.waiting = ui.busy && last_activity.is_some_and(|at| at.elapsed() >= Duration::from_secs(8));
+    if ui.waiting && !was_waiting {
+        ui.record_activity(ActivityKind::Waiting, "waiting 路 no stream for 8s");
+    }
+    if ui.splash >= SPLASH_TICKS || ui.busy || pending.is_some() {
+        return false;
+    }
+    ui.splash += 1;
+    let width = terminal
+        .size()
+        .map(|size| size.width as usize)
+        .unwrap_or(80);
+    if ui.splash == SPLASH_TICKS {
+        ui.note(splash_block(width).join("\n"), role_color(Role::Primary));
+        ui.clear_streams();
+    } else {
+        ui.transcript.set_splash(indent(
+            &splash_frame(ui.splash, SPLASH_TICKS),
+            splash_pad(width),
+        ));
+    }
+    true
+}
+
+struct TuiLoopContext {
+    swap: Arc<SwapProvider>,
+    skills: Vec<Skill>,
+    agents: Arc<agent::Agents>,
+    commands: Vec<agent::SlashCommand>,
+    history: Vec<Message>,
+    meta: ReplMeta,
+    terminal: Term,
+    ui: Ui,
+    live_cache: LiveOutputCache,
+    model_catalog_rx: Option<tokio::sync::oneshot::Receiver<(ModelCatalog, u32)>>,
+    approval_rx: tokio::sync::mpsc::UnboundedReceiver<ApprovalRequest>,
+    event_rx: tokio::sync::mpsc::UnboundedReceiver<StreamEvent<AgentState>>,
+    token_rx: tokio::sync::mpsc::UnboundedReceiver<provider::StreamChunk>,
+    done_rx: tokio::sync::mpsc::UnboundedReceiver<Result<AgentState, String>>,
+    key_rx: tokio::sync::mpsc::UnboundedReceiver<Event>,
+    tick: tokio::time::Interval,
+    bus: TokenBus,
+    start_task: StartTask,
+    keylog_path: Option<std::path::PathBuf>,
+    pending: Option<ApprovalRequest>,
+    task: Option<tokio::task::JoinHandle<()>>,
+    session_tokens: usize,
+    session_turns: usize,
+    printed: usize,
+    task_started: Option<Instant>,
+    last_activity: Option<Instant>,
+    pending_submit: Option<String>,
+    retry_count: usize,
+    last_task: Option<String>,
+    pressed: std::collections::HashSet<KeyCode>,
+    momentary_hold: bool,
+    last_ctrl_c: Option<Instant>,
+    dirty: bool,
+    animation_due: bool,
+}
+
+async fn run_event_loop(context: TuiLoopContext) -> anyhow::Result<()> {
+    let TuiLoopContext {
+        swap,
+        skills,
+        agents,
+        commands,
+        mut history,
+        mut meta,
+        mut terminal,
+        mut ui,
+        mut live_cache,
+        mut model_catalog_rx,
+        mut approval_rx,
+        mut event_rx,
+        mut token_rx,
+        mut done_rx,
+        mut key_rx,
+        mut tick,
+        bus,
+        start_task,
+        keylog_path,
+        mut pending,
+        mut task,
+        mut session_tokens,
+        mut session_turns,
+        mut printed,
+        mut task_started,
+        mut last_activity,
+        mut pending_submit,
+        mut retry_count,
+        mut last_task,
+        mut pressed,
+        mut momentary_hold,
+        mut last_ctrl_c,
+        mut dirty,
+        mut animation_due,
+    } = context;
+    'main: loop {
+        if prepare_loop(&mut LoopPrepareContext {
+            ui: &mut ui,
+            meta: &mut meta,
+            swap: &swap,
+            model_catalog_rx: &mut model_catalog_rx,
+            pending_submit: &mut pending_submit,
+            task: &mut task,
+            history: &mut history,
+            agents: &agents,
+            commands: &commands,
+            skills: &skills,
+            session_tokens,
+            session_turns,
+            retry_count: &mut retry_count,
+            last_task: &mut last_task,
+            task_started: &mut task_started,
+            last_activity: &mut last_activity,
+            printed: &mut printed,
+            start_task: &start_task,
+            terminal: &mut terminal,
+            live_cache: &mut live_cache,
+            pending: &pending,
+            dirty: &mut dirty,
+            animation_due: &mut animation_due,
+        })
+        .await?
+        {
+            break 'main;
+        }
+        let step = run_event_step(EventStepContext {
+            ui: &mut ui,
+            meta: &mut meta,
+            swap: &swap,
+            bus: &bus,
+            pending: &mut pending,
+            task: &mut task,
+            task_started: &mut task_started,
+            retry_count: &mut retry_count,
+            pending_submit: &mut pending_submit,
+            momentary_hold: &mut momentary_hold,
+            last_ctrl_c: &mut last_ctrl_c,
+            pressed: &mut pressed,
+            keylog_path: &keylog_path,
+            last_activity: &mut last_activity,
+            history: &mut history,
+            printed: &mut printed,
+            last_task: &last_task,
+            session_tokens: &mut session_tokens,
+            session_turns: &mut session_turns,
+            start_task: &start_task,
+            key_rx: &mut key_rx,
+            token_rx: &mut token_rx,
+            event_rx: &mut event_rx,
+            approval_rx: &mut approval_rx,
+            done_rx: &mut done_rx,
+            tick: &mut tick,
+            terminal: &terminal,
+            animation_due: &mut animation_due,
+        })
+        .await?;
+        if step.dirty {
+            dirty = true;
+        }
+        if step.exit {
+            break 'main;
+        }
+    }
+    if let Some(handle) = task {
+        handle.abort();
+    }
+    Ok(())
+}
+
 /// TUI 是交互入口；只有非 TTY 的自动化管道才会回落到 headless。
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run(
@@ -247,8 +1965,8 @@ pub(super) async fn run(
     skills: Vec<Skill>,
     skip_danger: bool,
     budget: usize,
-    mut history: Vec<Message>,
-    mut meta: ReplMeta,
+    history: Vec<Message>,
+    meta: ReplMeta,
     agents: Arc<agent::Agents>,
     read_only: bool,
     commands: Vec<agent::SlashCommand>,
@@ -256,12 +1974,8 @@ pub(super) async fn run(
 ) -> anyhow::Result<()> {
     tui_trace("run.enter");
     set_dynamic_commands(&commands); // 自定义/skill 命令名进补全源(iter-39)
-    let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
-    let approver: Arc<dyn Approver> = if skip_danger {
-        Arc::new(AutoApprove)
-    } else {
-        Arc::new(TuiApprover { tx: approval_tx })
-    };
+    let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
+    let approver = tui_approver(skip_danger, approval_tx);
     let bus = null_token_bus();
     let app = Arc::new(build_llm_agent_full(
         swap.clone(),
@@ -273,95 +1987,56 @@ pub(super) async fn run(
         read_only,
     )?);
     tui_trace("agent.ready");
-    let (event_tx, mut event_rx) =
-        tokio::sync::mpsc::unbounded_channel::<StreamEvent<AgentState>>();
-    let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<provider::StreamChunk>();
-    let (done_tx, mut done_rx) =
-        tokio::sync::mpsc::unbounded_channel::<Result<AgentState, String>>();
-    let (_guard, mut terminal) = TerminalGuard::enter()?;
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent<AgentState>>();
+    let (token_tx, token_rx) = tokio::sync::mpsc::unbounded_channel::<provider::StreamChunk>();
+    let (done_tx, done_rx) = tokio::sync::mpsc::unbounded_channel::<Result<AgentState, String>>();
+    let (_guard, terminal) = TerminalGuard::enter()?;
     tui_trace("terminal.ready");
-    let mut live_cache = LiveOutputCache::default();
+    let live_cache = LiveOutputCache::default();
     let mut ui = Ui {
         effort: Some(initial_effort),
         ..Ui::default()
     };
-    let session_input_history = if history.is_empty() {
-        load_global_input_history()
-    } else {
-        let saved = load_session_input_history();
-        if saved.is_empty() {
-            history
-                .iter()
-                .filter_map(|message| match message.role {
-                    provider::Role::User => Some(message.content.clone()),
-                    _ => None,
-                })
-                .collect()
-        } else {
-            saved
-        }
-    };
+    let session_input_history = session_input_history(&history);
     ui.input
         .set_history(session_input_history, !history.is_empty());
-    let mut model_catalog_rx = Some(start_model_catalog_preload(&meta.provider, &meta.base_url));
-    ui.note(
-        "RidgeCode  ·  inline mode: output lands in terminal history (native scroll/select) · Enter send/queue · Ctrl+Enter front-queue without interrupt · Ctrl+I/Alt+I live inspect · Ctrl+Q queue · Ctrl+Space hold/follow · Ctrl+A answers · Ctrl+T activity · Ctrl+J newline · Esc/Ctrl-C takeover; press Ctrl-C twice to exit · /help",
-        Color::Cyan,
-    );
-    if skip_danger {
-        ui.note(
-            "⚠ skip-danger: tools auto-approved (disaster commands still hard-blocked)",
-            Color::Red,
-        );
-    }
-    if !history.is_empty() {
-        ui.note(
-            format!("restored {} session messages", history.len()),
-            Color::Green,
-        );
-    }
-    let mut pending: Option<ApprovalRequest> = None;
-    let mut task: Option<tokio::task::JoinHandle<()>> = None;
-    let mut session_tokens = 0usize;
-    let mut session_turns = 0usize;
-    let mut printed = 0usize;
+    let model_catalog_rx = Some(start_model_catalog_preload(&meta.provider, &meta.base_url));
+    note_initial_ui(&mut ui, skip_danger, &history);
+    let pending: Option<ApprovalRequest> = None;
+    let task: Option<tokio::task::JoinHandle<()>> = None;
+    let session_tokens = 0usize;
+    let session_turns = 0usize;
+    let printed = 0usize;
     // 忙碌粘条计时(iter-31):任务起点,Submit 置、done/中断清;读秒/速率据此算(app 运行时用 Instant,非脚本)。
-    let mut task_started: Option<Instant> = None;
-    let mut last_activity: Option<Instant> = None;
+    let task_started: Option<Instant> = None;
+    let last_activity: Option<Instant> = None;
     // 统一提交点(iter-33):键入的新提交 or 队首,非 busy 时于主环顶消费(起任务/跑命令),消除重复。
     // Opt-in no-network fixture starts one durable task before the first draw;
     // the real input path remains unchanged and production never auto-submits.
-    let mut pending_submit: Option<String> = (std::env::var("RIDGE_TUI_FIXTURE").ok().as_deref()
+    let pending_submit: Option<String> = (std::env::var("RIDGE_TUI_FIXTURE").ok().as_deref()
         == Some("busy"))
     .then(|| "fixture busy task".to_string());
 
     // 阻塞读线程(iter-23):不开 crossterm `event-stream` feature(免引 futures 依赖),
     // std 线程 `event::read()` 转发进 tokio 通道;主环退出后线程仍阻塞在 read 上,随进程结束回收。
-    let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
-    std::thread::spawn(move || {
-        while let Ok(ev) = event::read() {
-            if key_tx.send(ev).is_err() {
-                break;
-            }
-        }
-    });
+    let key_rx = spawn_key_reader();
     // tick 只登记 busy 时的动画帧需求;业务 busy 不再直接触发 draw。
-    let mut tick = tokio::time::interval(Duration::from_millis(100));
-    let mut dirty = true;
-    let mut animation_due = false;
+    let tick = tokio::time::interval(Duration::from_millis(100));
+    let dirty = true;
+    let animation_due = false;
 
     // 失败自动重试(用户需求:给 10 次机会)—— 端点抖动/超时等瞬时失败自动重跑,不打断用户;
     // 成功/中断/新任务清零。`start_task` 据任务串 + 当前 history 装配 state 并 spawn(初次与重试共用)。
-    const MAX_RETRIES: usize = 10;
-    let mut retry_count = 0usize;
-    let mut last_task: Option<String> = None;
-    let start_task = |ti: &str, hist: &[Message]| -> tokio::task::JoinHandle<()> {
+    let retry_count = 0usize;
+    let last_task: Option<String> = None;
+    let task_bus = bus.clone();
+    let start_task: StartTask = Box::new(move |ti: &str, hist: &[Message]| {
         let state = AgentState::new(ti)
             .with_history(hist.to_vec())
             .with_budget(budget)
             .with_signals(agent::load_signal_block());
         let app = app.clone();
-        let bus = bus.clone();
+        let bus = task_bus.clone();
         let tx = event_tx.clone();
         let done = done_tx.clone();
         let tokens = token_tx.clone();
@@ -374,1099 +2049,55 @@ pub(super) async fn run(
             *bus.lock().unwrap() = None;
             let _ = done.send(result);
         })
-    };
+    });
 
     // 诊断开关:env `RIDGE_KEYLOG` **或** 标记文件 `~/.ridge/keylog.on` 任一存在即开(标记文件防呆:
     // 免 env 未被子进程继承之坑)。日志写**绝对路径** `~/.ridge/keylog.txt`(不依赖 cwd,便于定位)。
     // 供排查「某键(如空格)按了没反应」—— 看它被投递成什么 KeyCode/kind/modifiers,还是根本没到进程。
-    let keylog_path: Option<std::path::PathBuf> = {
-        let dir = std::env::var_os("USERPROFILE")
-            .or_else(|| std::env::var_os("HOME"))
-            .map(|h| std::path::PathBuf::from(h).join(".ridge"))
-            .unwrap_or_else(std::env::temp_dir);
-        let on = std::env::var_os("RIDGE_KEYLOG").is_some() || dir.join("keylog.on").exists();
-        on.then(|| dir.join("keylog.txt"))
-    };
+    let keylog_path = keylog_path();
 
     // 「已按下集」:去重 Windows 每键的 Press+Release,并识别输入法「仅 Release」的悬空字符注入。
-    let mut pressed: std::collections::HashSet<KeyCode> = std::collections::HashSet::new();
+    let pressed: std::collections::HashSet<KeyCode> = std::collections::HashSet::new();
     // Ctrl+Space 的按住审计标记；无 Release 能力的终端自然退化为原有 toggle。
-    let mut momentary_hold = false;
-    let mut last_ctrl_c: Option<Instant> = None;
+    let momentary_hold = false;
+    let last_ctrl_c: Option<Instant> = None;
 
-    'main: loop {
-        if ui.model_catalog_reload {
-            ui.model_catalog_reload = false;
-            ui.model_catalog = None;
-            model_catalog_rx = Some(start_model_catalog_preload(&meta.provider, &meta.base_url));
-        }
-        let model_catalog_result = match model_catalog_rx.as_mut() {
-            Some(receiver) => match receiver.try_recv() {
-                Ok(result) => Some(result),
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => Some((Vec::new(), 1)),
-            },
-            None => None,
-        };
-        if let Some((grouped, failures)) = model_catalog_result {
-            model_catalog_rx = None;
-            auto_select_chatgpt_model(&grouped, &mut meta, &swap, &mut ui);
-            let empty = grouped.is_empty();
-            ui.model_catalog = Some(grouped);
-            if empty && failures > 0 {
-                ui.note(
-                    "model catalog unavailable; retry /model after checking credentials or network",
-                    Color::Yellow,
-                );
-            }
-            dirty = true;
-        }
-        let oauth_device_event = match ui.oauth_device.as_mut() {
-            Some(flow) => match flow.receiver.try_recv() {
-                Ok(event) => Some(event),
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => None,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => Some(
-                    DeviceOAuthEvent::Complete(Err("device OAuth task stopped".into())),
-                ),
-            },
-            None => None,
-        };
-        if let Some(event) = oauth_device_event {
-            match event {
-                DeviceOAuthEvent::Ready { user_code, opened } => {
-                    ui.device_auth_status = Some(format!("Device code: {user_code}"));
-                    ui.note(
-                        format!(
-                            "Codex device auth: {} browser at {} and enter code: {user_code}",
-                            if opened {
-                                "browser opened; visit"
-                            } else {
-                                "open"
-                            },
-                            provider::oauth::OPENAI_DEVICE_VERIFICATION_URL
-                        ),
-                        Color::Cyan,
-                    );
-                }
-                DeviceOAuthEvent::Complete(result) => {
-                    ui.oauth_device.take();
-                    match result {
-                        Ok(token) => {
-                            ui.device_auth_status = None;
-                            apply_oauth_token(
-                                &provider::oauth::OPENAI,
-                                token,
-                                &mut meta,
-                                &swap,
-                                &mut ui,
-                            );
-                        }
-                        Err(error) => {
-                            ui.device_auth_status = Some(format!("Device auth failed: {error}"));
-                            ui.note(format!("Codex device OAuth failed: {error}"), Color::Red)
-                        }
-                    }
-                }
-            }
-            dirty = true;
-        }
-        // OAuth callback server runs independently of keyboard input; poll it on
-        // the 100ms event loop so browser completion needs no code paste.
-        let oauth_result = match ui.oauth_callback.as_mut() {
-            Some(callback) => match callback.receiver.try_recv() {
-                Ok(result) => Some(result),
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    Some(Err("local OAuth callback listener stopped".into()))
-                }
-            },
-            None => None,
-        };
-        if let Some(result) = oauth_result {
-            ui.oauth_callback.take();
-            match result {
-                Ok(code) => {
-                    apply_oauth_code(&provider::oauth::OPENAI, &code, &mut meta, &swap, &mut ui)
-                        .await;
-                }
-                Err(error) => ui.note(format!("OAuth callback failed: {error}"), Color::Red),
-            }
-            dirty = true;
-        }
-        // 统一提交点(iter-33):非 busy 时消费 pending_submit —— 键入的新提交,或上一任务毕后接跑的队首。
-        // 起任务/跑命令的逻辑**只此一处**(键 Submit 臂与 done 队列接跑共用),消除重复。
-        if can_start_task(ui.busy, task.is_some()) {
-            if let Some(input) = pending_submit.take() {
-                let should_exit = run_command(
-                    &input,
-                    &mut ui,
-                    &mut history,
-                    &mut meta,
-                    &swap,
-                    &agents,
-                    &commands,
-                    &skills,
-                    session_tokens,
-                    session_turns,
-                )
-                .await?;
-                let starts_session = !input.starts_with('/') || ui.run_task.is_some();
-                if starts_session && !ui.input.session_mode {
-                    ui.input.drop_last_history_if(&input);
-                    save_global_input_history(&ui.input.history);
-                    ui.input.begin_session();
-                    ui.input.push_history(&input);
-                } else if !ui.input.session_mode {
-                    save_global_input_history(&ui.input.history);
-                }
-                if ui.input.session_mode {
-                    save_session_input_history(&ui.input.history);
-                }
-                if should_exit {
-                    break 'main;
-                }
-                // 普通输入直接是任务;斜杠命令若为自定义/skill 命令,run_command 已把展开的 prompt 置 ui.run_task。
-                let task_input = if input.starts_with('/') {
-                    ui.run_task.take()
-                } else {
-                    Some(input.clone())
-                };
-                if let Some(ti) = task_input {
-                    ui.note(format!("› {input}"), role_color(Role::Command));
-                    history.push(Message::user(expand_mentions(&ti)));
-                    last_task = Some(ti.clone());
-                    retry_count = 0; // 新任务:重试计数清零
-                    ui.busy = true;
-                    ui.waiting = false;
-                    ui.phase = "reasoning".into();
-                    ui.set_activity("starting task");
-                    ui.clear_streams();
-                    ui.stream_tokens = 0;
-                    ui.input_tokens = 0;
-                    ui.output_tokens = 0;
-                    ui.superstep = 0;
-                    ui.stall = 0;
-                    ui.err_streak = 0;
-                    ui.explore_streak = 0;
-                    ui.pending_call = None;
-                    task_started = Some(Instant::now());
-                    last_activity = task_started;
-                    printed = 0;
-                    task = Some(start_task(&ti, &history));
-                }
-                dirty = true;
-            }
-        }
-        // 静态提交先于绘制:历史行离开 Live 视口,进终端 scrollback。
-        if !ui.commits.is_empty() {
-            flush_commits(&mut terminal, &mut ui)?;
-            dirty = true;
-        }
-        if should_draw(dirty, animation_due) {
-            tui_trace("draw.begin");
-            ui.frame = ui.frame.wrapping_add(1);
-            let elapsed_ms = task_started.map(|t| t.elapsed().as_millis()).unwrap_or(0);
-            let ctx_used = history
-                .iter()
-                .map(|m| est_tokens(&m.content))
-                .sum::<usize>();
-            let vitals = Vitals {
-                step: ui.superstep,
-                elapsed_s: (elapsed_ms / 1000) as u64,
-                task_tokens: ui.stream_tokens,
-                rate: token_rate(ui.stream_tokens, elapsed_ms),
-                ctx_used,
-                queued: ui.queued.len(),
-            };
-            terminal.draw(|frame| {
-                draw_with_cache(
-                    frame,
-                    &ui,
-                    &meta,
-                    session_tokens,
-                    &vitals,
-                    pending.as_ref(),
-                    &mut live_cache,
-                )
-            })?;
-            tui_trace("draw.end");
-            dirty = false;
-            animation_due = false;
-        }
-        // 事件驱动多路复用替代固定轮询(iter-23):无事时阻塞挂起,不烧 CPU。
-        tokio::select! {
-            biased;
-            Some(ev) = key_rx.recv() => {
-                dirty = true; // 键盘/粘贴/resize 皆需重绘
-                if let Some(p) = &keylog_path {
-                    // Press 过滤之前记录,连 Release/Repeat 都留痕(诊断空格丢失的关键证据)。
-                    use std::io::Write;
-                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
-                        let _ = writeln!(f, "{ev:?}");
-                    }
-                }
-                let key = match terminal_event_action(ev) {
-                    TerminalEventAction::Paste(text) => {
-                        apply_paste(&mut ui, &text);
-                        continue;
-                    }
-                    TerminalEventAction::Redraw => continue,
-                    TerminalEventAction::Key(key) => key,
-                };
-                // 去重 Windows 的 Press+Release 双触发,并**兜住输入法「仅 Release」的字符注入**
-                //(实测:某些中文/国际输入法把空格键作为 Char('\u{a0}') 且只发 Release,旧「只收 Press」
-                // 逻辑整个丢弃 → 打不出空格)。顺带把 no-break/全角空格归一为普通空格。见 `decide_key`。
-                let Some(key) = decide_key(&mut pressed, &key) else {
-                    continue;
-                };
-                if live_hold_release_action(&key, ui.popup.is_some()) {
-                    if momentary_hold {
-                        momentary_hold = false;
-                        let _ = ui.follow_live();
-                    }
-                    continue;
-                }
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && matches!(key.code, KeyCode::Char('c' | 'C'))
-                {
-                    let now = Instant::now();
-                    if is_second_ctrl_c(last_ctrl_c, now) {
-                        break 'main;
-                    }
-                    last_ctrl_c = Some(now);
-                    if let Some(handle) = task.take() {
-                        momentary_hold = false;
-                        mark_takeover_requested(&mut ui);
-                        handle.abort();
-                        *bus.lock().unwrap() = None;
-                        ui.busy = false;
-                        ui.waiting = false;
-                        ui.commit_live_reasoning(
-                            ui.superstep,
-                            task_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
-                        );
-                        ui.commit_live_answers(
-                            "interrupted before final response",
-                            ui.superstep,
-                            task_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
-                        );
-                        ui.clear_streams();
-                        ui.commit_live_tools();
-                        ui.superstep = 0;
-                        ui.pending_call = None;
-                        task_started = None;
-                        last_activity = None;
-                        retry_count = 0;
-                        pending_submit = None;
-                        ui.mark_takeover_ready();
-                        let kept = ui.queued.len();
-                        let tail = if kept > 0 {
-                            format!("interrupted current task · takeover ready · {kept} queued kept")
-                        } else {
-                            "interrupted current task · takeover ready".into()
-                        };
-                        ui.note(tail, Color::Yellow);
-                    } else {
-                        ui.note(
-                            "press Ctrl-C again within 2 seconds to exit",
-                            Color::Yellow,
-                        );
-                    }
-                    continue;
-                }
-                if pending.is_some() {
-                    // 模态状态机:审批态下滚动键**只滚不拒**(可先看 diff),仅 y/Enter 批准、n/Esc 拒绝,余键忽略。
-                    match approval_action(key.code) {
-                        ApprovalAction::Approve => {
-                            if let Some(r) = pending.take() {
-                                if r.reply.send(true).is_ok() {
-                                    ui.resume_after_approval();
-                                }
-                            }
-                            ui.note("✓ approved", Color::Green);
-                        }
-                        ApprovalAction::Reject => {
-                            if let Some(r) = pending.take() {
-                                if r.reply.send(false).is_ok() {
-                                    ui.resume_after_approval();
-                                }
-                            }
-                            ui.note("✗ rejected", Color::Red);
-                        }
-                        ApprovalAction::Scroll(d) => ui.scroll = apply_scroll(ui.scroll, d),
-                        ApprovalAction::Ignore => {}
-                    }
-                    continue;
-                }
-                if queue_panel_toggle_action(&key)
-                    && (ui.panel.is_none()
-                        || ui
-                            .panel
-                            .as_ref()
-                            .is_some_and(|panel| panel.allows_attention_switch()))
-                    && ui.popup.is_none()
-                {
-                    ui.toggle_queue_panel();
-                    continue;
-                }
-                if live_history_toggle_action(
-                    &key,
-                    ui.popup.is_some(),
-                    ui.transcript.has_history(),
-                ) && (ui.panel.is_none()
-                    || ui
-                        .panel
-                        .as_ref()
-                        .is_some_and(|panel| panel.allows_attention_switch()))
-                {
-                    ui.toggle_live_history();
-                    continue;
-                }
-                if let Some(action) = panel_attention_action(
-                    &key,
-                    ui.panel
-                        .as_ref()
-                        .is_some_and(|panel| panel.allows_attention_switch()),
-                    ui.popup.is_some(),
-                ) {
-                    match action {
-                        InputAction::ToggleDetails
-                        | InputAction::ToggleReasoning
-                        | InputAction::ToggleAnswer
-                        | InputAction::ToggleActivity => apply_attention_action(&mut ui, action),
-                        _ => unreachable!("panel_attention_action only returns attention actions"),
-                    }
-                    continue;
-                }
-                // 交互页模态(iter-35):优先级 审批 > Panel > 浮窗 > 输入。编辑态字符入编辑缓冲,浏览态入 query。
-                if ui.panel.is_some() {
-                    if key.kind == KeyEventKind::Press
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
-                        && matches!(key.code, KeyCode::Char('t' | 'T'))
-                        && ui
-                            .panel
-                            .as_ref()
-                            .is_some_and(|panel| panel.kind == PanelKind::Activity)
-                    {
-                        ui.toggle_activity_panel();
-                        continue;
-                    }
-                    match panel_action(&key) {
-                        PanelAction::Esc => {
-                            let cancel_oauth = ui.panel.as_ref().is_some_and(|p| {
-                                p.editing.is_some() && p.oauth_verifier.is_some()
-                            });
-                            let cancel_device = ui.oauth_device.is_some()
-                                || ui.device_auth_status.is_some();
-                            let p = ui.panel.as_mut().unwrap();
-                            if p.editing.is_some() {
-                                p.editing = None; // 取消编辑
-                            } else {
-                                ui.panel = None; // 关页
-                            }
-                            if cancel_oauth {
-                                ui.oauth_callback.take();
-                            }
-                            if cancel_device {
-                                ui.oauth_device.take();
-                                ui.device_auth_status = None;
-                            }
-                        }
-                        PanelAction::Remove => {
-                            let selection = ui.panel.as_ref().and_then(|panel| {
-                                if panel.editing.is_some() {
-                                    return None;
-                                }
-                                match panel.selected_action() {
-                                    PanelRowAction::RemoveQueued(index) => Some((index, true)),
-                                    PanelRowAction::None if panel.kind == PanelKind::Queue => {
-                                        panel.selected_index().map(|index| (index, false))
-                                    }
-                                    PanelRowAction::None | PanelRowAction::FocusLiveBlock(_) => None,
-                                }
-                            });
-                            if let Some((index, from_live_panel)) = selection {
-                                if let Some(message) = ui.remove_queued(index) {
-                                    ui.record_activity(
-                                        ActivityKind::Queue,
-                                        format!("removed · {}", clip_display_cells(&message, 44)),
-                                    );
-                                    ui.note(
-                                        format!(
-                                            "removed pending item ({} left): {}",
-                                            ui.queued.len(),
-                                            message
-                                        ),
-                                        role_color(Role::Warn),
-                                    );
-                                    if from_live_panel {
-                                        ui.refresh_live_history_panel();
-                                    } else {
-                                        ui.refresh_queue_panel();
-                                    }
-                                }
-                            } else if key.code == KeyCode::Backspace {
-                                let p = ui.panel.as_mut().unwrap();
-                                match &mut p.editing {
-                                    Some(buf) => {
-                                        buf.pop();
-                                    }
-                                    None => {
-                                        p.query.pop();
-                                        p.retype();
-                                    }
-                                }
-                            }
-                        }
-                        PanelAction::Up => {
-                            {
-                                let p = ui.panel.as_mut().unwrap();
-                                if p.editing.is_none() {
-                                    p.move_up();
-                                }
-                            }
-                            ui.sync_live_panel_focus();
-                        }
-                        PanelAction::Down => {
-                            {
-                                let p = ui.panel.as_mut().unwrap();
-                                if p.editing.is_none() {
-                                    p.move_down();
-                                }
-                            }
-                            ui.sync_live_panel_focus();
-                        }
-                        PanelAction::DetailPageUp => {
-                            let p = ui.panel.as_mut().unwrap();
-                            if p.editing.is_none() {
-                                let _ = p.scroll_detail(-1);
-                            }
-                        }
-                        PanelAction::DetailPageDown => {
-                            let p = ui.panel.as_mut().unwrap();
-                            if p.editing.is_none() {
-                                let _ = p.scroll_detail(1);
-                            }
-                        }
-                        PanelAction::PageUp => {
-                            {
-                                let p = ui.panel.as_mut().unwrap();
-                                if p.editing.is_none() {
-                                    p.page_up();
-                                }
-                            }
-                            ui.sync_live_panel_focus();
-                        }
-                        PanelAction::PageDown => {
-                            {
-                                let p = ui.panel.as_mut().unwrap();
-                                if p.editing.is_none() {
-                                    p.page_down();
-                                }
-                            }
-                            ui.sync_live_panel_focus();
-                        }
-                        PanelAction::First => {
-                            {
-                                let p = ui.panel.as_mut().unwrap();
-                                if p.editing.is_none() {
-                                    p.first();
-                                }
-                            }
-                            ui.sync_live_panel_focus();
-                        }
-                        PanelAction::Last => {
-                            {
-                                let p = ui.panel.as_mut().unwrap();
-                                if p.editing.is_none() {
-                                    p.last();
-                                }
-                            }
-                            ui.sync_live_panel_focus();
-                        }
-                        PanelAction::Backspace => {
-                            let p = ui.panel.as_mut().unwrap();
-                            match &mut p.editing {
-                                Some(buf) => {
-                                    buf.pop();
-                                }
-                                None => {
-                                    p.query.pop();
-                                    p.retype();
-                                }
-                            }
-                            ui.sync_live_panel_focus();
-                        }
-                        PanelAction::Char(c) => {
-                            let toggle_live = {
-                                let p = ui.panel.as_mut().unwrap();
-                                if p.kind == PanelKind::LiveHistory
-                                    && p.editing.is_none()
-                                    && c == ' '
-                                {
-                                    true
-                                } else {
-                                    match &mut p.editing {
-                                        Some(buf) => buf.push(c),
-                                        None => {
-                                            p.query.push(c);
-                                            p.retype();
-                                        }
-                                    }
-                                    false
-                                }
-                            };
-                            if toggle_live {
-                                ui.toggle_live_panel_detail();
-                            } else {
-                                ui.sync_live_panel_focus();
-                            }
-                        }
-                        PanelAction::Enter => {
-                            // 登录页 key 输入态提交 → 异步校验 + 接入(唯一异步 Enter 分支);余走同步 panel_enter。
-                            let login_submit = matches!(ui.panel.as_ref(), Some(p) if p.kind == PanelKind::Login && p.editing.is_some());
-                            if login_submit {
-                                let (id, key) = {
-                                    let p = ui.panel.as_ref().unwrap();
-                                    (
-                                        p.selected().map(|r| r.key.clone()),
-                                        p.editing.clone().unwrap_or_default(),
-                                    )
-                                };
-                                // 订阅 OAuth 行(iter-43 claude / iter-48 codex)→ 泛化交换分支。
-                                let ocfg = match id.as_deref() {
-                                    Some(k) if k == CLAUDE_OAUTH_ROW => {
-                                        Some(&provider::oauth::ANTHROPIC)
-                                    }
-                                    Some(k) if k == CODEX_OAUTH_ROW => {
-                                        Some(&provider::oauth::OPENAI)
-                                    }
-                                    _ => None,
-                                };
-                                if let Some(ocfg) = ocfg {
-                                    apply_oauth_code(ocfg, key.trim(), &mut meta, &swap, &mut ui)
-                                        .await;
-                                } else {
-                                    match id.as_deref().and_then(preset_by_id) {
-                                        Some(preset) if !key.trim().is_empty() => {
-                                            ui.note(
-                                                format!("verifying {}…", preset.id),
-                                                Color::Gray,
-                                            );
-                                            login_apply_verified(
-                                                preset,
-                                                key.trim(),
-                                                &mut meta,
-                                                &swap,
-                                                &mut ui,
-                                            )
-                                            .await;
-                                        }
-                                        Some(_) => {
-                                            ui.note("enter a non-empty API key", Color::Yellow)
-                                        }
-                                        None => ui.note("no provider selected", Color::Red),
-                                    }
-                                }
-                            } else {
-                                panel_enter(&mut ui, &mut meta, &swap);
-                            }
-                        }
-                        PanelAction::Ignore => {}
-                    }
-                    continue;
-                }
-                if let Some(delta) = tool_focus_action(&key, ui.popup.is_some(), ui.has_live_tools()) {
-                    let _ = ui.move_tool_focus(delta);
-                    continue;
-                }
-                if let Some(delta) = semantic_focus_action(
-                    &key,
-                    ui.popup.is_some(),
-                    ui.transcript.is_inspecting(),
-                    ui.has_inspectable_live_output(),
-                ) {
-                    let _ = ui.move_semantic_focus(delta);
-                    ui.note("Alt+←/→ · semantic focus", role_color(Role::Info));
-                    continue;
-                }
-                if let Some(delta) = tool_detail_scroll_action(
-                    &key,
-                    ui.popup.is_some(),
-                    ui.has_scrollable_live_tool(),
-                ) {
-                    let _ = ui.scroll_tool_details(delta);
-                    continue;
-                }
-                if live_hold_toggle_action(
-                    &key,
-                    ui.popup.is_some(),
-                    ui.has_inspectable_live_output(),
-                ) {
-                    if ui.transcript.is_inspecting() {
-                        momentary_hold = false;
-                        let _ = ui.follow_live();
-                    } else {
-                        let _ = ui.hold_live();
-                        momentary_hold = true;
-                    }
-                    continue;
-                }
-                if live_semantic_toggle_action(
-                    &key,
-                    ui.popup.is_some(),
-                    ui.transcript.is_inspecting(),
-                    ui.has_live_tools() || ui.transcript.has_reasoning(),
-                ) {
-                    let _ = ui.toggle_focused_semantic();
-                    ui.note("Space · semantic block toggled", role_color(Role::Info));
-                    continue;
-                }
-                if let Some(action) = live_scroll_action(
-                    &key,
-                    ui.popup.is_some(),
-                    ui.has_scrollable_live_tool(),
-                    ui.has_inspectable_live_output(),
-                ) {
-                    match action {
-                        LiveScrollAction::Older => {
-                            let _ = ui.scroll_live(1);
-                        }
-                        LiveScrollAction::Newer => {
-                            let _ = ui.scroll_live(-1);
-                        }
-                        LiveScrollAction::OlderPage => {
-                            let page_rows = crossterm::terminal::size()
-                                .map(|(_, height)| live_page_rows(height))
-                                .unwrap_or(12);
-                            let _ = ui.scroll_live_page(1, page_rows);
-                        }
-                        LiveScrollAction::NewerPage => {
-                            let page_rows = crossterm::terminal::size()
-                                .map(|(_, height)| live_page_rows(height))
-                                .unwrap_or(12);
-                            let _ = ui.scroll_live_page(-1, page_rows);
-                        }
-                        LiveScrollAction::Follow => {
-                            let _ = ui.follow_live();
-                        }
-                    }
-                    continue;
-                }
-                match input_action(&key, ui.busy, ui.popup.is_some()) {
-                    InputAction::Interrupt => {
-                        if let Some(handle) = task.take() {
-                            momentary_hold = false;
-                            mark_takeover_requested(&mut ui);
-                            handle.abort();
-                            *bus.lock().unwrap() = None;
-                            ui.busy = false;
-                            ui.commit_live_reasoning(
-                                ui.superstep,
-                                task_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
-                            );
-                            ui.commit_live_answers(
-                                "interrupted before final response",
-                                ui.superstep,
-                                task_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
-                            );
-                            ui.clear_streams();
-                            ui.commit_live_tools();
-                            ui.superstep = 0;
-                            ui.pending_call = None;
-                            task_started = None;
-                            retry_count = 0; // 中断即取消重试链
-                            pending_submit = None;
-                            ui.mark_takeover_ready();
-                            let kept = ui.queued.len();
-                            let tail = if kept > 0 {
-                                format!("interrupted current task · takeover ready · {kept} queued kept")
-                            } else {
-                                "interrupted current task · takeover ready".into()
-                            };
-                            ui.note(tail, Color::Yellow);
-                        }
-                    }
-                    InputAction::Insert(c) => {
-                        // 随打随滤(iter-35):打 `/`/`@` 即弹补全并实时过滤,余字符自然关窗(build_popup→None)。
-                        ui.input.insert(c);
-                        ui.popup = build_popup(&ui.input);
-                    }
-                    InputAction::Backspace => {
-                        ui.input.backspace();
-                        ui.popup = build_popup(&ui.input);
-                    }
-                    InputAction::Left => ui.input.left(),
-                    InputAction::Right => ui.input.right(),
-                    InputAction::Home => ui.input.home(),
-                    InputAction::End => ui.input.end(),
-                    InputAction::NewLine => ui.input.insert('\n'),
-                    InputAction::CursorUpOrHistory => {
-                        // 转换函数惯例(iter-27):非首行 = 光标上移;首行 = 历史召回。
-                        // iter-48 G5:首行折多视觉行且非行首 → 先跳行首,再 Up 才召回
-                        // (修长草稿被历史突变替换=「光标卡首行」)。
-                        if !ui.input.move_up() {
-                            let w = crossterm::terminal::size()
-                                .map(|(c, _)| c)
-                                .unwrap_or(80)
-                                .saturating_sub(2);
-                            if up_fallback_is_home(&ui.input.buffer, ui.input.cursor, w) {
-                                ui.input.home();
-                            } else {
-                                ui.input.recall_prev();
-                            }
-                        }
-                    }
-                    InputAction::CursorDownOrHistory => {
-                        if !ui.input.move_down() {
-                            ui.input.recall_next();
-                        }
-                    }
-                    InputAction::PopupOpen => ui.popup = build_popup(&ui.input),
-                    InputAction::PopupNext => {
-                        if let Some(p) = &mut ui.popup {
-                            p.selected = (p.selected + 1) % p.items.len();
-                        }
-                    }
-                    InputAction::PopupPrev => {
-                        if let Some(p) = &mut ui.popup {
-                            p.selected = (p.selected + p.items.len() - 1) % p.items.len();
-                        }
-                    }
-                    InputAction::PopupAccept => {
-                        if let Some(p) = ui.popup.take() {
-                            apply_completion(&mut ui.input, &p);
-                        }
-                    }
-                    InputAction::PopupSubmit => {
-                        if let Some(p) = ui.popup.take() {
-                            apply_completion(&mut ui.input, &p);
-                        }
-                        let input = ui.input.take().trim().to_owned();
-                        if !input.is_empty() {
-                            if ui.busy {
-                                ui.queued.push_back(input.clone());
-                                ui.note(
-                                    format!("⏳ queued ({} pending; current turn continues): {input}", ui.queued.len()),
-                                    role_color(Role::Muted),
-                                );
-                            } else {
-                                pending_submit = Some(input);
-                            }
-                        }
-                    }
-                    InputAction::PopupClose => ui.popup = None,
-                    action @ (InputAction::ToggleDetails
-                    | InputAction::ToggleReasoning
-                    | InputAction::ToggleAnswer
-                    | InputAction::ToggleActivity) => apply_attention_action(&mut ui, action),
-                    InputAction::OpenLiveSearch => {
-                        if !ui.open_live_search("") {
-                            ui.note("no live blocks to search", Color::Gray);
-                        }
-                    }
-                    InputAction::Submit => {
-                        // 空闲提交:交主环顶统一提交点起任务/跑命令(iter-33)。
-                        let input = ui.input.take().trim().to_owned();
-                        if !input.is_empty() {
-                            pending_submit = Some(input);
-                        }
-                    }
-                    InputAction::Queue => {
-                        // busy 提交:入队,当前任务毕自动接跑(iter-33)。
-                        let input = ui.input.take().trim().to_owned();
-                        if !input.is_empty() {
-                            ui.queued.push_back(input.clone());
-                            ui.refresh_queue_panel();
-                            ui.record_activity(
-                                ActivityKind::Queue,
-                                format!("queued · {}", clip_display_cells(&input, 48)),
-                            );
-                            ui.note(
-                                format!("⏳ queued ({} pending; current turn continues): {input}", ui.queued.len()),
-                                role_color(Role::Muted),
-                            );
-                        }
-                    }
-                    InputAction::PushNow => {
-                        let input = ui.input.take().trim().to_owned();
-                        if !input.is_empty() {
-                            ui.queued.push_front(input.clone());
-                            ui.refresh_queue_panel();
-                            ui.record_activity(
-                                ActivityKind::Queue,
-                                format!("front-queued · {}", clip_display_cells(&input, 44)),
-                            );
-                            ui.note(
-                                format!("⏩ front-queued ({} pending; current turn continues): {input}", ui.queued.len()),
-                                role_color(Role::Primary),
-                            );
-                        }
-                    }
-                    InputAction::Ignore => {}
-                }
-            }
-            Some(chunk) = token_rx.recv() => {
-                ui.busy = true;
-                ui.waiting = false;
-                last_activity = Some(Instant::now());
-                ui.set_activity(match &chunk {
-                    provider::StreamChunk::Answer(_) => "model · answering",
-                    provider::StreamChunk::Reasoning(_) => "model · thinking",
-                });
-                ui.push_chunk(chunk); // 分道:回答→白尾巴,思考→灰尾巴
-                // 批量排空积压 token,免逐 token 一帧。
-                for _ in 0..MAX_STREAM_CHUNKS_PER_WAKE {
-                    match token_rx.try_recv() {
-                        Ok(c) => {
-                            ui.set_activity(match &c {
-                                provider::StreamChunk::Answer(_) => "model · answering",
-                                provider::StreamChunk::Reasoning(_) => "model · thinking",
-                            });
-                            ui.push_chunk(c);
-                        }
-                        Err(_) => break,
-                    }
-                }
-                dirty = true;
-            }
-            Some(event) = event_rx.recv() => {
-                ui.waiting = false;
-                last_activity = Some(Instant::now());
-                match event {
-                    StreamEvent::NodeFinished { node, .. } => {
-                        ui.phase = node_label(&node);
-                        ui.set_activity(format!("node · {}", ui.phase));
-                        ui.busy = true;
-                    }
-                    StreamEvent::Superstep {
-                        step,
-                        active,
-                        state,
-                    } => {
-                        ui.superstep = step;
-                        ui.input_tokens = state.input_tokens;
-                        ui.output_tokens = state.output_tokens;
-                        ui.stall = state.stall;
-                        ui.err_streak = state.err_streak;
-                        ui.explore_streak = state.explore_streak;
-                        ui.pending_call = state.pending_call.clone();
-                        let active_label = active
-                            .iter()
-                            .map(|node| node_label(node))
-                            .collect::<Vec<_>>()
-                            .join(" + ");
-                        let activity = if let Some(call) = state.pending_call.as_ref() {
-                            format!("tool · {}", call.name)
-                        } else if active_label.is_empty() {
-                            "settling result".to_owned()
-                        } else {
-                            format!("next · {active_label}")
-                        };
-                        ui.set_activity(activity);
-                        let answer_step = ui.superstep;
-                        let answer_elapsed_s =
-                            task_started.map(|started| started.elapsed().as_secs()).unwrap_or(0);
-                        let answer_tokens = ui.stream_tokens;
-                        for m in state.messages.iter().skip(printed) {
-                            // 总览化(用户需求):读只显路径、写显预览、改显 ± diff;减噪。
-                            if let Some(tool) = tool_preview(m) {
-                                ui.push_tool(tool);
-                            } else {
-                                let is_final = is_final_event(m);
-                                for (line, color) in summarize_event(m) {
-                                    if is_final {
-                                        ui.note_markdown_with_meta(
-                                            line,
-                                            answer_step,
-                                            answer_elapsed_s,
-                                            answer_tokens,
-                                        );
-                                    } else {
-                                        ui.note(line, color);
-                                    }
-                                }
-                            }
-                        }
-                        printed = state.messages.len();
-                        // TODO 变更 → 进入有界 PLAN 活动锚点；详情仍由 Ctrl+T 展开。
-                        let todo_snapshot = render_todo_block(&state.todos);
-                        if todo_snapshot != render_todo_block(&ui.todos)
-                            && !state.todos.is_empty()
-                        {
-                            ui.record_plan(todo_snapshot);
-                        }
-                        ui.todos = state.todos;
-                        // 流式已完段落随 Superstep 消息历史化,Live 只留尾巴。
-                        ui.commit_live_reasoning(
-                            ui.superstep,
-                            task_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
-                        );
-                        // Tool blocks that finished at this boundary leave the
-                        // bounded Live view too, so ongoing investigations stay
-                        // auditable in native scrollback before task completion.
-                        ui.commit_live_tools();
-                        ui.clear_streams();
-                        ui.busy = superstep_is_busy(&active);
-                    }
-                }
-                dirty = true;
-            }
-            Some(request) = approval_rx.recv() => {
-                pending = Some(request);
-                momentary_hold = false;
-                ui.scroll = 0; // 新审批从头看
-                ui.busy = false;
-                ui.waiting = false;
-                ui.mark_approval_required();
-                dirty = true;
-            }
-            Some(result) = done_rx.recv() => {
-                task = None;
-                momentary_hold = false;
-                ui.busy = false;
-                ui.waiting = false;
-                let partial_answer_reason = unfinished_answer_reason(&result);
-                ui.commit_live_reasoning(
-                    ui.superstep,
-                    task_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
-                );
-                if let Some(reason) = partial_answer_reason {
-                    ui.commit_live_answers(
-                        reason,
-                        ui.superstep,
-                        task_started.map(|t| t.elapsed().as_secs()).unwrap_or(0),
-                    );
-                }
-                ui.clear_streams();
-                ui.commit_live_tools();
-                ui.superstep = 0;
-                ui.pending_call = None;
-                task_started = None;
-                last_activity = None;
-                printed = 0;
-                match result {
-                    Ok(out) => {
-                        retry_count = 0; // 成功:重试计数清零
-                        history = out.history.clone();
-                        save_session(&session_path(), &history);
-                        ui.input_tokens = out.input_tokens;
-                        ui.output_tokens = out.output_tokens;
-                        session_tokens += out.total_tokens;
-                        session_turns += 1;
-                        ui.todos = out.todos.clone();
-                        let reason = halt_reason(&out);
-                        ui.mark_task_outcome_with_reason(
-                            out.approved,
-                            (!out.approved).then_some(halt_reason_display(reason)),
-                        );
-                        // 显停机原因:未通过时把 halt_reason 一并播报(为何停一眼可见),配合「收束回合」的模型陈述。
-                        let status = if out.approved {
-                            "✓ approved".to_string()
-                        } else {
-                            format!(
-                                "✗ not approved ({}) · {}",
-                                halt_reason_display(reason),
-                                halt_reason_guidance(reason)
-                            )
-                        };
-                        ui.note(
-                            format!(
-                                "{status} · steps={} · tokens={}",
-                                out.steps, out.total_tokens
-                            ),
-                            if out.approved {
-                                Color::Green
-                            } else {
-                                Color::Red
-                            },
-                        );
-                        // Hook(iter-40):任务毕 → 审计留痕 +(notify)响铃 + config stop hook。
-                        agent::fire_session_hooks(
-                            "stop",
-                            &format!("steps={} tokens={}", out.steps, out.total_tokens),
-                        );
-                    }
-                    Err(e) => {
-                        // 自动重试只管**瞬时**失败(端点抖动/超时/5xx/限流),不打断用户;
-                        // **永久**失败(余额不足/鉴权失败/400 坏请求)不进重试链 —— 重试同样输入只白烧,
-                        // 立刻把 provider 原文摊给用户,让「余额/key 失效」一眼可辨(iter-51)。
-                        let retryable = is_retryable_error(&e);
-                        match last_task.clone() {
-                            Some(ti) if retryable && retry_count < MAX_RETRIES => {
-                                retry_count += 1;
-                                ui.note(
-                                    format!(
-                                        "↻ Transient failure, retrying {retry_count}/{MAX_RETRIES} (last: {e})"
-                                    ),
-                                    Color::Yellow,
-                                );
-                                ui.busy = true;
-                                ui.waiting = false;
-                                ui.phase = "reasoning".into();
-                                ui.set_activity(format!("retrying · reasoning {retry_count}/{MAX_RETRIES}"));
-                                ui.superstep = 0;
-                                ui.stall = 0;
-                                ui.err_streak = 0;
-                                ui.explore_streak = 0;
-                                ui.pending_call = None;
-                                task_started = Some(Instant::now());
-                                last_activity = task_started;
-                                task = Some(start_task(&ti, &history));
-                            }
-                            _ => {
-                                let tail = if !retryable {
-                                    format!("error (not retryable, stopped): {e}")
-                                } else if retry_count >= MAX_RETRIES {
-                                    format!("error (failed after {MAX_RETRIES} retries): {e}")
-                                } else {
-                                    format!("error: {e}")
-                                };
-                                ui.note(tail, Color::Red);
-                                ui.mark_error();
-                                agent::fire_session_hooks("stop", "error");
-                                retry_count = 0;
-                            }
-                        }
-                    }
-                }
-                // 排队接跑(iter-33):任务毕,取队首交主环顶统一提交点起下一任务。
-                if pending_submit.is_none() {
-                    pending_submit = ui.queued.pop_front();
-                    ui.refresh_queue_panel();
-                }
-                dirty = true;
-            }
-            _ = tick.tick() => {
-                let was_waiting = ui.waiting;
-                ui.waiting = ui.busy
-                    && last_activity
-                        .is_some_and(|at| at.elapsed() >= Duration::from_secs(8));
-                if ui.waiting && !was_waiting {
-                    ui.record_activity(ActivityKind::Waiting, "waiting · no stream for 8s");
-                }
-                animation_due = ui.busy && pending.is_none() && ui.panel.is_none();
-                // 启动帧序列(iter-28;iter-36 居中+防折行):空闲时借 tick 渐显 banner,末帧整幅入历史。
-                if ui.splash < SPLASH_TICKS && !ui.busy && pending.is_none() {
-                    ui.splash += 1;
-                    let width = terminal.size().map(|s| s.width as usize).unwrap_or(80);
-                    if ui.splash == SPLASH_TICKS {
-                        // 落定 banner:居中 + 不折行(splash_block 逐行 ≤ width)+ tagline。
-                        ui.note(splash_block(width).join("\n"), role_color(Role::Primary));
-                        ui.clear_streams();
-                    } else {
-                        // 动画帧与落定 banner 同一居中偏移,消除「揭示→落定」的横跳。
-                        ui.transcript
-                            .set_splash(indent(&splash_frame(ui.splash, SPLASH_TICKS), splash_pad(width)));
-                    }
-                    dirty = true;
-                }
-            }
-            else => break 'main,
-        }
-    }
-    if let Some(handle) = task {
-        handle.abort();
-    }
+    run_event_loop(TuiLoopContext {
+        swap,
+        skills,
+        agents,
+        commands,
+        history,
+        meta,
+        terminal,
+        ui,
+        live_cache,
+        model_catalog_rx,
+        approval_rx,
+        event_rx,
+        token_rx,
+        done_rx,
+        key_rx,
+        tick,
+        bus,
+        start_task,
+        keylog_path,
+        pending,
+        task,
+        session_tokens,
+        session_turns,
+        printed,
+        task_started,
+        last_activity,
+        pending_submit,
+        retry_count,
+        last_task,
+        pressed,
+        momentary_hold,
+        last_ctrl_c,
+        dirty,
+        animation_due,
+    })
+    .await?;
     Ok(())
 }

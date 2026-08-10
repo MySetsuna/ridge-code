@@ -1,5 +1,9 @@
 //! 供应商登录/认证/OAuth:key 校验、login 子命令、Claude 订阅 OAuth(iter-43)。
-use crate::*;
+use crate::{auth_path, config_path, ridge_home, secure_file};
+use agent::{apply_login, auth_upsert, preset_by_id, Config, PROVIDER_PRESETS};
+use provider::{AnthropicProvider, LlmProvider, Message};
+use std::io::Write;
+use std::sync::Arc;
 
 /// 校验核:经 `fetch_models` 打 `{base_url}/models` 鉴权 GET → Ok(模型数) / Err(原因)。
 /// 走注入的 HttpClient(接缝),测试可零网络。`get_json` 非 2xx 返 Err → 错 key/坏端点如实失败。
@@ -82,17 +86,8 @@ pub(crate) async fn run_login(args: &[String]) -> anyhow::Result<()> {
         }
     }
     // OAuth(PKCE)订阅登录,与 api-key 登录分道(iter-43 claude / iter-48 codex)。
-    if oauth_claude {
-        if device_auth {
-            anyhow::bail!("--device-auth is only supported with `--codex`");
-        }
-        return run_login_oauth(&provider::oauth::ANTHROPIC, no_verify).await;
-    }
-    if oauth_codex {
-        if device_auth {
-            return run_login_device_auth(no_verify).await;
-        }
-        return run_login_oauth(&provider::oauth::OPENAI, no_verify).await;
+    if let Some(result) = run_oauth_login(oauth_claude, oauth_codex, device_auth, no_verify).await {
+        return result;
     }
     if list || positional.is_empty() {
         print_presets();
@@ -171,6 +166,31 @@ pub(crate) async fn run_login(args: &[String]) -> anyhow::Result<()> {
         println!("     registered as a profile. Switch in the TUI with: /provider use {prof_name}");
     }
     Ok(())
+}
+
+async fn run_oauth_login(
+    claude: bool,
+    codex: bool,
+    device_auth: bool,
+    no_verify: bool,
+) -> Option<anyhow::Result<()>> {
+    if claude {
+        if device_auth {
+            return Some(Err(anyhow::anyhow!(
+                "--device-auth is only supported with `--codex`"
+            )));
+        }
+        return Some(run_login_oauth(&provider::oauth::ANTHROPIC, no_verify).await);
+    }
+    if codex {
+        let result = if device_auth {
+            run_login_device_auth(no_verify).await
+        } else {
+            run_login_oauth(&provider::oauth::OPENAI, no_verify).await
+        };
+        return Some(result);
+    }
+    None
 }
 
 /// `~/.ridge/oauth.json` OAuth 凭据库路径(`RIDGE_OAUTH` 可覆盖;独立于 config/auth)。
@@ -551,10 +571,10 @@ impl Drop for LocalOAuthCallback {
     }
 }
 
-pub(crate) fn start_local_callback(expected_state: String) -> Result<LocalOAuthCallback, String> {
+fn bind_local_callback_listener() -> Result<(std::net::TcpListener, u16), String> {
     const PORTS: &[u16] = &[1455, 1457];
     let mut errors = Vec::new();
-    let (listener, port) = PORTS
+    PORTS
         .iter()
         .find_map(
             |port| match std::net::TcpListener::bind(("127.0.0.1", *port)) {
@@ -570,23 +590,32 @@ pub(crate) fn start_local_callback(expected_state: String) -> Result<LocalOAuthC
                 "{}; tried registered ports 1455 and 1457",
                 errors.join("; ")
             )
-        })?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|e| format!("cannot configure localhost:{port}: {e}"))?;
-    let (tx, receiver) = tokio::sync::oneshot::channel();
-    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let thread_cancel = cancel.clone();
+        })
+}
+
+fn send_callback_result(
+    sender: &mut Option<tokio::sync::oneshot::Sender<Result<String, String>>>,
+    result: Result<String, String>,
+) {
+    if let Some(sender) = sender.take() {
+        let _ = sender.send(result);
+    }
+}
+
+fn spawn_local_callback_listener(
+    listener: std::net::TcpListener,
+    expected_state: String,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    sender: tokio::sync::oneshot::Sender<Result<String, String>>,
+) {
     std::thread::spawn(move || {
-        let mut sender = Some(tx);
-        while !thread_cancel.load(std::sync::atomic::Ordering::Acquire) {
+        let mut sender = Some(sender);
+        while !cancel.load(std::sync::atomic::Ordering::Acquire) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     if let Some(result) = handle_local_callback_stream(&mut stream, &expected_state)
                     {
-                        if let Some(tx) = sender.take() {
-                            let _ = tx.send(result);
-                        }
+                        send_callback_result(&mut sender, result);
                         break;
                     }
                 }
@@ -594,14 +623,25 @@ pub(crate) fn start_local_callback(expected_state: String) -> Result<LocalOAuthC
                     std::thread::sleep(std::time::Duration::from_millis(40));
                 }
                 Err(error) => {
-                    if let Some(tx) = sender.take() {
-                        let _ = tx.send(Err(format!("local OAuth listener failed: {error}")));
-                    }
+                    send_callback_result(
+                        &mut sender,
+                        Err(format!("local OAuth listener failed: {error}")),
+                    );
                     break;
                 }
             }
         }
     });
+}
+
+pub(crate) fn start_local_callback(expected_state: String) -> Result<LocalOAuthCallback, String> {
+    let (listener, port) = bind_local_callback_listener()?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("cannot configure localhost:{port}: {error}"))?;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    spawn_local_callback_listener(listener, expected_state, cancel.clone(), sender);
     Ok(LocalOAuthCallback {
         port,
         redirect_uri: format!("http://localhost:{port}/auth/callback"),
@@ -732,84 +772,121 @@ pub(crate) async fn resolve_claude_oauth_provider(
     effort: &str,
 ) -> Option<Arc<dyn LlmProvider>> {
     let text = std::fs::read_to_string(oauth_path()).ok()?;
-    for ocfg in [&provider::oauth::ANTHROPIC, &provider::oauth::OPENAI] {
-        let Some(mut token) = agent::oauth_get(&text, ocfg.provider) else {
-            continue;
-        };
-        let now = now_epoch();
-        if token.needs_refresh(now) {
-            let http = provider::http::ReqwestClient::new();
-            match provider::oauth::refresh(&http, ocfg, &token.refresh_token, now).await {
-                Ok(mut fresh) => {
-                    fresh.preserve_chatgpt_metadata_from(&token);
-                    let _ = save_oauth_token(ocfg.provider, &fresh);
-                    token = fresh;
-                }
-                Err(e) => eprintln!("[ridgecode] OAuth refresh failed: {e}; using existing token"),
-            }
+    for oauth_config in [&provider::oauth::ANTHROPIC, &provider::oauth::OPENAI] {
+        if let Some(provider) = resolve_oauth_candidate(cfg, effort, &text, oauth_config).await {
+            return Some(provider);
         }
-        let (mut model, base) = oauth_model_and_base(cfg, ocfg.provider);
-        if ocfg.provider == "openai" {
-            // ChatGPT subscriptions expose an account-scoped Codex catalog;
-            // the public/API default (for example `gpt-5`) may be rejected by
-            // the subscription endpoint. Prefer the configured model only
-            // when it is present in that live catalog, otherwise use its first
-            // visible entry and keep startup usable in headless mode too.
-            let http = provider::http::ReqwestClient::new();
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                provider::models::fetch_chatgpt_models(
-                    &http,
-                    &base,
-                    &token.access_token,
-                    token.account_id.as_deref(),
-                ),
-            )
-            .await
-            {
-                Ok(Ok(models)) if !models.is_empty() => {
-                    let selected = models
-                        .iter()
-                        .find(|candidate| candidate.id.eq_ignore_ascii_case(&model))
-                        .or_else(|| models.first());
-                    if let Some(selected) = selected {
-                        if selected.id != model {
-                            eprintln!(
-                                "[ridgecode] ChatGPT model {model} unavailable; using account model {}",
-                                selected.id
-                            );
-                            model = selected.id.clone();
-                        }
-                    }
-                }
-                Ok(Err(error)) => eprintln!(
-                    "[ridgecode] ChatGPT model catalog unavailable: {error}; keeping model {model}"
-                ),
-                Err(_) => eprintln!(
-                    "[ridgecode] ChatGPT model catalog timed out (10s); keeping model {model}"
-                ),
-                Ok(Ok(_)) => {}
-            }
-        }
-        eprintln!(
-            "[ridgecode] starting with {} subscription (OAuth) · {model}",
-            ocfg.provider
-        );
-        return Some(oauth_provider(
-            ocfg.provider,
-            base,
-            model,
-            token.access_token,
-            token.account_id,
-            effort,
-        ));
     }
     None
 }
 
+async fn resolve_oauth_candidate(
+    cfg: &Config,
+    effort: &str,
+    text: &str,
+    oauth_config: &provider::oauth::OAuthConfig,
+) -> Option<Arc<dyn LlmProvider>> {
+    let mut token = agent::oauth_get(text, oauth_config.provider)?;
+    refresh_oauth_token(oauth_config, &mut token).await;
+    let (model, base) = oauth_model_and_base(cfg, oauth_config.provider);
+    let model = select_oauth_model(oauth_config.provider, &base, &token, model).await;
+    eprintln!(
+        "[ridgecode] starting with {} subscription (OAuth) · {model}",
+        oauth_config.provider
+    );
+    Some(oauth_provider(
+        oauth_config.provider,
+        base,
+        model,
+        token.access_token,
+        token.account_id,
+        effort,
+    ))
+}
+
+async fn refresh_oauth_token(
+    oauth_config: &provider::oauth::OAuthConfig,
+    token: &mut provider::oauth::OAuthToken,
+) {
+    let now = now_epoch();
+    if !token.needs_refresh(now) {
+        return;
+    }
+    let http = provider::http::ReqwestClient::new();
+    match provider::oauth::refresh(&http, oauth_config, &token.refresh_token, now).await {
+        Ok(mut fresh) => {
+            fresh.preserve_chatgpt_metadata_from(token);
+            let _ = save_oauth_token(oauth_config.provider, &fresh);
+            *token = fresh;
+        }
+        Err(error) => {
+            eprintln!("[ridgecode] OAuth refresh failed: {error}; using existing token");
+        }
+    }
+}
+
+async fn select_oauth_model(
+    provider_id: &str,
+    base: &str,
+    token: &provider::oauth::OAuthToken,
+    model: String,
+) -> String {
+    if provider_id != "openai" {
+        return model;
+    }
+    let http = provider::http::ReqwestClient::new();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        provider::models::fetch_chatgpt_models(
+            &http,
+            base,
+            &token.access_token,
+            token.account_id.as_deref(),
+        ),
+    )
+    .await;
+    match result {
+        Ok(Ok(models)) if !models.is_empty() => choose_catalog_model(models, model),
+        Ok(Err(error)) => {
+            eprintln!(
+                "[ridgecode] ChatGPT model catalog unavailable: {error}; keeping model {model}"
+            );
+            model
+        }
+        Err(_) => {
+            eprintln!("[ridgecode] ChatGPT model catalog timed out (10s); keeping model {model}");
+            model
+        }
+        Ok(Ok(_)) => model,
+    }
+}
+
+fn choose_catalog_model(models: Vec<provider::models::ModelInfo>, model: String) -> String {
+    let selected = models
+        .iter()
+        .find(|candidate| candidate.id.eq_ignore_ascii_case(&model))
+        .or_else(|| models.first());
+    match selected {
+        Some(selected) if selected.id != model => {
+            eprintln!(
+                "[ridgecode] ChatGPT model {model} unavailable; using account model {}",
+                selected.id
+            );
+            selected.id.clone()
+        }
+        Some(selected) => selected.id.clone(),
+        None => model,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        choose_catalog_model, handle_local_callback_stream, now_epoch, oauth_defaults,
+        oauth_model_and_base, oauth_model_info, register_oauth_profile, run_login,
+        save_oauth_token, verify_key_via,
+    };
+    use crate::Config;
 
     /// 连接校验核(iter-38):stub HttpClient 零网络 —— 模型 JSON → Ok(数);get 失败 → Err。
     #[tokio::test]
@@ -842,6 +919,54 @@ mod tests {
         assert!(verify_key_via(&bad, "openai", "https://x", "k")
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn login_argument_guards_are_deterministic_without_network() {
+        assert!(run_login(&["--list".into()]).await.is_ok());
+        let unknown = run_login(&["not-a-provider".into()])
+            .await
+            .expect_err("unknown provider");
+        assert!(unknown.to_string().contains("unknown provider"));
+        let empty_key = run_login(&["openai".into(), String::new()])
+            .await
+            .expect_err("empty key");
+        assert!(empty_key.to_string().contains("no API key"));
+        let wrong_device = run_login(&["--claude".into(), "--device-auth".into()])
+            .await
+            .expect_err("claude device auth");
+        assert!(wrong_device.to_string().contains("only supported"));
+
+        let root = std::env::temp_dir().join(format!("ridge-login-args-{}", std::process::id()));
+        let auth_file = root.join("auth.json");
+        let config_file = root.join("config.json");
+        let previous_auth = std::env::var_os("RIDGE_AUTH");
+        let previous_config = std::env::var_os("RIDGE_CONFIG");
+        std::env::set_var("RIDGE_AUTH", &auth_file);
+        std::env::set_var("RIDGE_CONFIG", &config_file);
+        let registered = run_login(&[
+            "openai".into(),
+            "test-key".into(),
+            "--no-verify".into(),
+            "--no-default".into(),
+            "--model".into(),
+            "test-model".into(),
+            "--name".into(),
+            "test-profile".into(),
+        ])
+        .await;
+        match previous_auth {
+            Some(value) => std::env::set_var("RIDGE_AUTH", value),
+            None => std::env::remove_var("RIDGE_AUTH"),
+        }
+        match previous_config {
+            Some(value) => std::env::set_var("RIDGE_CONFIG", value),
+            None => std::env::remove_var("RIDGE_CONFIG"),
+        }
+        assert!(registered.is_ok());
+        assert!(auth_file.is_file());
+        assert!(config_file.is_file());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -927,6 +1052,83 @@ mod tests {
         assert_eq!(oauth_defaults("anthropic").0, "claude-sonnet-4-6");
         assert_eq!(oauth_defaults("unknown").1, "https://api.anthropic.com/v1");
         assert!(now_epoch() > 0);
+    }
+
+    #[test]
+    fn oauth_model_selection_respects_provider_config_and_environment() {
+        fn without_env<T>(name: &str, f: impl FnOnce() -> T) -> T {
+            let previous = std::env::var_os(name);
+            std::env::remove_var(name);
+            let result = f();
+            match previous {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+            result
+        }
+
+        without_env("RIDGE_MODEL", || {
+            without_env("RIDGE_CHATGPT_BASE_URL", || {
+                without_env("RIDGE_BASE_URL", || {
+                    let mut cfg = Config {
+                        provider: Some("chatgpt-plus".into()),
+                        model: Some("account-model".into()),
+                        base_url: Some(oauth_defaults("openai").1.into()),
+                        ..Config::default()
+                    };
+                    assert_eq!(
+                        oauth_model_and_base(&cfg, "openai"),
+                        ("account-model".into(), oauth_defaults("openai").1.into())
+                    );
+                    cfg.provider = Some("other".into());
+                    cfg.base_url = Some("https://example.test".into());
+                    assert_eq!(oauth_model_and_base(&cfg, "openai").0, "gpt-5");
+                    cfg.base_url = Some(oauth_defaults("openai").1.into());
+                    assert_eq!(oauth_model_and_base(&cfg, "openai").0, "account-model");
+                    cfg.model = Some("claude-config".into());
+                    cfg.base_url = Some("https://anthropic.example".into());
+                    assert_eq!(
+                        oauth_model_and_base(&cfg, "anthropic"),
+                        ("claude-config".into(), "https://anthropic.example".into())
+                    );
+                    std::env::set_var("RIDGE_MODEL", "env-model");
+                    std::env::set_var("RIDGE_BASE_URL", "https://env.example");
+                    assert_eq!(
+                        oauth_model_and_base(&cfg, "anthropic"),
+                        ("env-model".into(), "https://env.example".into())
+                    );
+                    std::env::remove_var("RIDGE_MODEL");
+                    std::env::remove_var("RIDGE_BASE_URL");
+                })
+            })
+        });
+    }
+
+    #[test]
+    fn catalog_model_selection_handles_exact_fallback_and_empty_catalog() {
+        let models = vec![
+            provider::models::ModelInfo {
+                id: "gpt-5".into(),
+                context: None,
+            },
+            provider::models::ModelInfo {
+                id: "gpt-4o".into(),
+                context: Some(128_000),
+            },
+        ];
+        assert_eq!(
+            choose_catalog_model(models.clone(), "gpt-4o".into()),
+            "gpt-4o"
+        );
+        assert_eq!(
+            choose_catalog_model(models.clone(), "GPT-5".into()),
+            "gpt-5"
+        );
+        assert_eq!(choose_catalog_model(models, "missing".into()), "gpt-5");
+        assert_eq!(
+            choose_catalog_model(Vec::new(), "configured".into()),
+            "configured"
+        );
     }
 
     fn with_env<T>(name: &str, value: &str, f: impl FnOnce() -> T) -> T {

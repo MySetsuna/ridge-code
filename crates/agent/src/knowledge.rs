@@ -117,21 +117,7 @@ pub fn expand_command(body: &str, args: &str) -> String {
 /// 目录不存在 → 只有 skill 命令。供 TUI 斜杠命令扩展(name→/name)。
 pub fn load_commands(dir: impl AsRef<std::path::Path>, skills: &[Skill]) -> Vec<SlashCommand> {
     let mut out: Vec<SlashCommand> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for e in entries.flatten() {
-            let path = e.path();
-            if path.extension().and_then(|x| x.to_str()) == Some("md") {
-                if let (Some(stem), Ok(text)) = (
-                    path.file_stem().and_then(|s| s.to_str()),
-                    std::fs::read_to_string(&path),
-                ) {
-                    if !stem.is_empty() {
-                        out.push(parse_command_md(&text, stem));
-                    }
-                }
-            }
-        }
-    }
+    out.extend(load_command_files(&dir));
     for s in skills {
         if !out.iter().any(|c| c.name == s.name) {
             out.push(SlashCommand {
@@ -145,6 +131,28 @@ pub fn load_commands(dir: impl AsRef<std::path::Path>, skills: &[Skill]) -> Vec<
     for (name, text) in BUILTIN_COMMANDS {
         if !out.iter().any(|c| c.name == *name) {
             out.push(parse_command_md(text, name));
+        }
+    }
+    out
+}
+
+fn load_command_files(dir: impl AsRef<std::path::Path>) -> Vec<SlashCommand> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("md") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if !stem.is_empty() {
+                out.push(parse_command_md(&text, stem));
+            }
         }
     }
     out
@@ -625,8 +633,16 @@ pub(crate) async fn dispatch_obs(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        builtin_agents, dispatch_obs, expand_command, load_commands, load_project_rules,
+        load_skills, parse_agent, parse_command_md, readonly_tool_specs, resolve_command, Agent,
+        AgentProvider, Agents, Skill,
+    };
     use crate::brain::{build_system_prompt, BASE_SYSTEM};
+    use crate::route::{RouteRequest, RouteRole};
+    use provider::{CompletionRequest, LlmProvider, ToolCall};
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
     #[test]
     fn parse_agent_reads_frontmatter_and_body() {

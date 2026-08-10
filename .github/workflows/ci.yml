@@ -43,6 +43,8 @@ jobs:
       - run: cargo test --workspace --locked
 
   quality:
-    name: coverage + Sonar quality gate
+    name: deterministic quality gates (local Sonar runs on release runner)
     uses: ./.github/workflows/quality-gate.yml
+    with:
+      run_sonar: false
     secrets: inherit

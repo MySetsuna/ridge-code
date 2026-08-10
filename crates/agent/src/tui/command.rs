@@ -1,4 +1,28 @@
-use super::*;
+use std::sync::Arc;
+use std::time::Duration;
+
+use agent::{
+    apply_login, auth_upsert, compact_history, resolve_top_level_key, Config, PROVIDER_PRESETS,
+};
+use provider::{AnthropicProvider, Message, SwapProvider};
+use ratatui::style::Color;
+
+use crate::{
+    auth_path, config_path, load_auth, make_provider, now_epoch, oauth_defaults, oauth_path,
+    persist_config, register_oauth_profile, save_oauth_token, save_session, secure_file,
+    session_path, start_device_oauth, start_local_callback, verify_provider_key,
+    LocalOAuthCallback, ReplMeta,
+};
+
+use super::{
+    agent_panel, config_panel, login_panel, mcp_panel, models_panel_with_effort, provider_panel,
+    skills_panel, tools_panel, ModelCatalog, PanelKind, Ui, CLAUDE_OAUTH_ROW, CODEX_OAUTH_ROW,
+    DEFAULT_STATUS_BAR,
+};
+use crate::tui;
+use agent::preset_by_id;
+#[cfg(test)]
+use provider::ScriptedProvider;
 
 fn profile_for_runtime<'a>(
     cfg: &'a Config,
@@ -139,54 +163,66 @@ fn build_model_targets(
     let active_is_oauth = active_provider == "openai"
         && active_base_url.trim_end_matches('/') == oauth_base.trim_end_matches('/');
     if active_is_oauth {
-        if let Some(token) = openai_oauth_token() {
-            targets.push(ModelTarget {
-                name: CHATGPT_MODEL_GROUP.to_string(),
-                kind: "openai".to_string(),
-                base_url: active_base_url.to_string(),
-                key: token.access_token,
-                oauth: true,
-                account_id: token.account_id,
-            });
-        }
+        append_oauth_model_target(&mut targets, active_base_url);
     } else if let Some(key) = api_key_for_runtime(cfg, auth, active_provider, active_base_url) {
-        targets.push(ModelTarget {
-            name: active_provider.to_string(),
-            kind: active_provider.to_string(),
-            base_url: active_base_url.to_string(),
-            key,
-            oauth: false,
-            account_id: None,
-        });
+        targets.push(api_model_target(active_provider, active_base_url, key));
     }
     for profile in &cfg.providers {
-        if profile.use_oauth == Some(true) && profile.kind == "openai" {
-            if !targets.iter().any(|target| target.oauth) {
-                if let Some(token) = openai_oauth_token() {
-                    targets.push(ModelTarget {
-                        name: CHATGPT_MODEL_GROUP.to_string(),
-                        kind: "openai".to_string(),
-                        base_url: oauth_base.clone(),
-                        key: token.access_token,
-                        oauth: true,
-                        account_id: token.account_id,
-                    });
-                }
-            }
-        } else if let Some(key) = profile.resolve_key_with(auth) {
-            if !targets.iter().any(|target| target.name == profile.name) {
-                targets.push(ModelTarget {
-                    name: profile.name.clone(),
-                    kind: profile.kind.clone(),
-                    base_url: profile.base_url.clone(),
-                    key,
-                    oauth: false,
-                    account_id: None,
-                });
-            }
-        }
+        append_profile_model_target(&mut targets, profile, auth, &oauth_base);
     }
     targets
+}
+
+fn api_model_target(provider: &str, base_url: &str, key: String) -> ModelTarget {
+    ModelTarget {
+        name: provider.to_string(),
+        kind: provider.to_string(),
+        base_url: base_url.to_string(),
+        key,
+        oauth: false,
+        account_id: None,
+    }
+}
+
+fn append_oauth_model_target(targets: &mut Vec<ModelTarget>, base_url: &str) {
+    if let Some(token) = openai_oauth_token() {
+        targets.push(ModelTarget {
+            name: CHATGPT_MODEL_GROUP.to_string(),
+            kind: "openai".to_string(),
+            base_url: base_url.to_string(),
+            key: token.access_token,
+            oauth: true,
+            account_id: token.account_id,
+        });
+    }
+}
+
+fn append_profile_model_target(
+    targets: &mut Vec<ModelTarget>,
+    profile: &agent::ProviderProfile,
+    auth: &std::collections::BTreeMap<String, String>,
+    oauth_base: &str,
+) {
+    if profile.use_oauth == Some(true) && profile.kind == "openai" {
+        if !targets.iter().any(|target| target.oauth) {
+            append_oauth_model_target(targets, oauth_base);
+        }
+        return;
+    }
+    let Some(key) = profile.resolve_key_with(auth) else {
+        return;
+    };
+    if targets.iter().any(|target| target.name == profile.name) {
+        return;
+    }
+    targets.push(ModelTarget {
+        name: profile.name.clone(),
+        kind: profile.kind.clone(),
+        base_url: profile.base_url.clone(),
+        key,
+        oauth: false,
+        account_id: None,
+    });
 }
 
 async fn fetch_model_catalog(targets: Vec<ModelTarget>) -> (ModelCatalog, u32) {
@@ -345,38 +381,57 @@ pub(crate) async fn login_apply_verified(
 pub(crate) fn begin_oauth(ui: &mut Ui, ocfg: &provider::oauth::OAuthConfig) {
     let pkce = provider::oauth::Pkce::generate();
     let state = provider::oauth::random_token();
-    let callback = if ocfg.token_wire == provider::oauth::TokenWire::Form {
-        match start_local_callback(state.clone()) {
-            Ok(callback) => Some(callback),
-            Err(error) => {
-                if ocfg.provider == "openai" {
-                    ui.device_auth_status = Some("Requesting device code...".into());
-                    ui.oauth_device = Some(start_device_oauth());
-                    if let Some(panel) = ui.panel.as_mut() {
-                        panel.editing = None;
-                        panel.title =
-                            "Codex OAuth · device auth · browser will open · Esc cancel".into();
-                    }
-                    ui.note(
-                        format!(
-                            "OAuth localhost callback unavailable: {error}. Switching to device auth; browser will open automatically."
-                        ),
-                        Color::Yellow,
-                    );
-                    return;
-                }
-                ui.note(
-                    format!(
-                        "OAuth local callback unavailable: {error}. Manual callback paste remains available."
-                    ),
-                    Color::Yellow,
-                );
-                None
-            }
-        }
-    } else {
-        None
+    let callback = match prepare_oauth_callback(ui, ocfg, state.clone()) {
+        Ok(callback) => callback,
+        Err(()) => return,
     };
+    finish_oauth_start(ui, ocfg, pkce, state, callback);
+}
+
+fn prepare_oauth_callback(
+    ui: &mut Ui,
+    ocfg: &provider::oauth::OAuthConfig,
+    state: String,
+) -> Result<Option<LocalOAuthCallback>, ()> {
+    if ocfg.token_wire != provider::oauth::TokenWire::Form {
+        return Ok(None);
+    }
+    match start_local_callback(state) {
+        Ok(callback) => Ok(Some(callback)),
+        Err(error) if ocfg.provider == "openai" => {
+            ui.device_auth_status = Some("Requesting device code...".into());
+            ui.oauth_device = Some(start_device_oauth());
+            if let Some(panel) = ui.panel.as_mut() {
+                panel.editing = None;
+                panel.title = "Codex OAuth · device auth · browser will open · Esc cancel".into();
+            }
+            ui.note(
+                format!(
+                    "OAuth localhost callback unavailable: {error}. Switching to device auth; browser will open automatically."
+                ),
+                Color::Yellow,
+            );
+            Err(())
+        }
+        Err(error) => {
+            ui.note(
+                format!(
+                    "OAuth local callback unavailable: {error}. Manual callback paste remains available."
+                ),
+                Color::Yellow,
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn finish_oauth_start(
+    ui: &mut Ui,
+    ocfg: &provider::oauth::OAuthConfig,
+    pkce: provider::oauth::Pkce,
+    state: String,
+    callback: Option<LocalOAuthCallback>,
+) {
     let redirect_uri = callback
         .as_ref()
         .map(|c| c.redirect_uri.clone())
@@ -394,13 +449,7 @@ pub(crate) fn begin_oauth(ui: &mut Ui, ocfg: &provider::oauth::OAuthConfig) {
             ocfg.provider
         );
     }
-    let hint = if ui.oauth_callback.is_some() {
-        "2. Authorize in the browser; RidgeCode will receive the localhost callback and connect automatically."
-    } else if ocfg.token_wire == provider::oauth::TokenWire::Form {
-        "2. After authorizing, paste the FULL localhost callback URL here and press Enter (fallback)."
-    } else {
-        "2. Paste the returned code#state here and press Enter."
-    };
+    let hint = oauth_input_hint(ui, ocfg);
     // 页面即触发:best-effort 自动开系统浏览器(失败仍显 URL 手动打开)。
     let opened = open_in_browser(&url);
     let lead = if opened {
@@ -412,6 +461,16 @@ pub(crate) fn begin_oauth(ui: &mut Ui, ocfg: &provider::oauth::OAuthConfig) {
         format!("{} OAuth:\n{lead}\n{url}\n{hint}", ocfg.provider),
         Color::Cyan,
     );
+}
+
+fn oauth_input_hint(ui: &Ui, ocfg: &provider::oauth::OAuthConfig) -> &'static str {
+    if ui.oauth_callback.is_some() {
+        "2. Authorize in the browser; RidgeCode will receive the localhost callback and connect automatically."
+    } else if ocfg.token_wire == provider::oauth::TokenWire::Form {
+        "2. After authorizing, paste the FULL localhost callback URL here and press Enter (fallback)."
+    } else {
+        "2. Paste the returned code#state here and press Enter."
+    }
 }
 
 /// 用系统默认浏览器开 URL(best-effort;detach 不等待)。授权 URL 无空格/引号,直接传参安全。
@@ -753,33 +812,7 @@ pub(crate) fn apply_config_live(
     match key {
         "allow_jailbreak" => agent::set_allow_jailbreak(val == "true"),
         "model" => swap_model(swap, meta, val, ui),
-        "provider" | "base_url" => {
-            let cfg = Config::load(config_path());
-            if key == "provider" {
-                // Config stores the selected profile name (for example
-                // `Zai`), while the runtime needs its wire kind (`openai`).
-                // Route named selections through the same atomic switch path
-                // as `/provider use` so endpoint, model, credential and label
-                // cannot drift apart.
-                if let Some(profile_name) = named_profile_name(&cfg, val) {
-                    switch_provider(&profile_name, meta, swap, ui);
-                    return;
-                }
-                meta.provider = val.to_string();
-            } else {
-                meta.base_url = val.to_string();
-            }
-            let auth = load_auth();
-            if let Some(k) = api_key_for_runtime(&cfg, &auth, &meta.provider, &meta.base_url) {
-                swap.swap(make_provider(
-                    &meta.provider,
-                    &meta.model,
-                    &meta.base_url,
-                    k,
-                ));
-            }
-            refresh_provider_label(meta);
-        }
+        "provider" | "base_url" => apply_endpoint_live(key, val, meta, swap, ui),
         "status_bar" => {
             meta.status_bar = if val.trim().is_empty() {
                 DEFAULT_STATUS_BAR.to_string()
@@ -787,199 +820,79 @@ pub(crate) fn apply_config_live(
                 val.to_string()
             }
         }
-        "effort" => {
-            if let Some(effort) = provider::normalize_reasoning_effort(val) {
-                ui.effort = Some(effort.to_string());
-                let oauth_base = std::env::var("RIDGE_CHATGPT_BASE_URL")
-                    .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
-                if meta.provider == "openai"
-                    && meta.base_url.trim_end_matches('/') == oauth_base.trim_end_matches('/')
-                {
-                    if let Some(token) = openai_oauth_token() {
-                        swap.swap(oauth_swap_provider(
-                            "openai",
-                            meta.base_url.clone(),
-                            meta.model.clone(),
-                            token.access_token,
-                            token.account_id,
-                            effort,
-                        ));
-                    }
-                }
-            }
-        }
+        "effort" => apply_effort_live(val, meta, swap, ui),
         // 代理即时注入 env:下一次登录 verify / 新建 provider 立即走它,无需重启。
         "proxy" => crate::apply_proxy_env(val),
         _ => {} // budget_tokens/skills_dir/skip_danger:仅持久化,下次启动生效。
     }
 }
 
+fn apply_endpoint_live(
+    key: &str,
+    val: &str,
+    meta: &mut ReplMeta,
+    swap: &Arc<SwapProvider>,
+    ui: &mut Ui,
+) {
+    let cfg = Config::load(config_path());
+    if key == "provider" {
+        if let Some(profile_name) = named_profile_name(&cfg, val) {
+            switch_provider(&profile_name, meta, swap, ui);
+            return;
+        }
+        meta.provider = val.to_string();
+    } else {
+        meta.base_url = val.to_string();
+    }
+    let auth = load_auth();
+    if let Some(key) = api_key_for_runtime(&cfg, &auth, &meta.provider, &meta.base_url) {
+        swap.swap(make_provider(
+            &meta.provider,
+            &meta.model,
+            &meta.base_url,
+            key,
+        ));
+    }
+    refresh_provider_label(meta);
+}
+
+fn apply_effort_live(val: &str, meta: &ReplMeta, swap: &Arc<SwapProvider>, ui: &mut Ui) {
+    let Some(effort) = provider::normalize_reasoning_effort(val) else {
+        return;
+    };
+    ui.effort = Some(effort.to_string());
+    let oauth_base = std::env::var("RIDGE_CHATGPT_BASE_URL")
+        .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
+    let is_chatgpt = meta.provider == "openai"
+        && meta.base_url.trim_end_matches('/') == oauth_base.trim_end_matches('/');
+    if is_chatgpt {
+        if let Some(token) = openai_oauth_token() {
+            swap.swap(oauth_swap_provider(
+                "openai",
+                meta.base_url.clone(),
+                meta.model.clone(),
+                token.access_token,
+                token.account_id,
+                effort,
+            ));
+        }
+    }
+}
+
 /// 交互页 Enter 动作分派(iter-35):先把选中项数据 clone 出(释放对 `ui.panel` 的不可变借用),
 /// 再按 kind/编辑态改 `ui`/`meta`/热切换。Config=进/提交编辑;Models=切模型;Provider=切档;Tools/Agent=只读关页。
 pub(crate) fn panel_enter(ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvider>) {
-    let Some(panel) = ui.panel.as_ref() else {
+    let Some(selection) = panel_selection(ui) else {
         return;
     };
-    let kind = panel.kind;
-    let editing = panel.editing.clone();
-    let sel_key = panel.selected().map(|r| r.key.clone());
-    let sel_val = panel.selected().map(|r| r.value.clone());
-    let sel_ctx = panel.selected().and_then(|r| r.ctx);
-    match (kind, editing) {
-        // 配置页:提交编辑 → 持久化 + live 应用 + 刷新页(退编辑态)。
-        (PanelKind::Config, Some(newval)) => {
-            let Some(key) = sel_key else { return };
-            let val = newval.trim().to_string();
-            match persist_config(&key, &val) {
-                Ok(_) => {
-                    apply_config_live(&key, &val, meta, swap, ui);
-                    ui.note(format!("saved {key}={val}"), Color::Green);
-                    ui.panel = Some(config_panel());
-                }
-                Err(e) => {
-                    ui.note(format!("write failed: {e}"), Color::Red);
-                    if let Some(p) = ui.panel.as_mut() {
-                        p.editing = None;
-                    }
-                }
-            }
+    match (selection.kind, selection.editing) {
+        (PanelKind::Config, Some(value)) => {
+            panel_enter_config_edit(ui, meta, swap, selection.key, value)
         }
-        // 配置页:进入编辑 → 预填当前值(「(未设)」视为空)。
-        (PanelKind::Config, None) => {
-            let cur = sel_val.map(|v| if v == "(unset)" { String::new() } else { v });
-            if let (Some(p), Some(cur)) = (ui.panel.as_mut(), cur) {
-                p.editing = Some(cur);
-            }
-        }
-        // 模型页:切到选中模型(跨 provider 时先切 provider 再切模型)。
-        (PanelKind::Models, _) => {
-            if let Some(key) = sel_key {
-                // key 格式: "provider · model_id"
-                let (provider_name, model) = key.split_once(" · ").unwrap_or(("", &key));
-                if provider_name == EFFORT_MODEL_GROUP {
-                    apply_effort(swap, meta, model, ui);
-                    ui.panel = None;
-                    return;
-                } else if provider_name == CHATGPT_MODEL_GROUP {
-                    if let Some(token) = openai_oauth_token() {
-                        let base_url = std::env::var("RIDGE_CHATGPT_BASE_URL")
-                            .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
-                        swap.swap(oauth_swap_provider(
-                            "openai",
-                            base_url.clone(),
-                            model.to_string(),
-                            token.access_token,
-                            token.account_id,
-                            current_effort(ui),
-                        ));
-                        meta.provider = "openai".to_string();
-                        meta.model = model.to_string();
-                        meta.base_url = base_url;
-                        persist_default_selection(ui, &meta.provider, model, &meta.base_url);
-                        refresh_provider_label(meta);
-                        if let Some(w) = sel_ctx {
-                            meta.ctx_window = w;
-                        }
-                        ui.note(
-                            format!("switched to {CHATGPT_MODEL_GROUP} / {model}"),
-                            Color::Green,
-                        );
-                        ui.panel = None;
-                        return;
-                    }
-                    ui.note(
-                        "no ChatGPT OAuth credential; run /login --codex first",
-                        Color::Red,
-                    );
-                } else if !provider_name.is_empty() && provider_name != meta.provider {
-                    // 跨 provider:查档案,全量切换
-                    let cfg = Config::load(config_path());
-                    let auth = load_auth();
-                    if let Some(p) = cfg.providers.into_iter().find(|p| p.name == provider_name) {
-                        if p.use_oauth == Some(true) && p.kind == "openai" {
-                            if let Some(token) = openai_oauth_token() {
-                                let base_url = std::env::var("RIDGE_CHATGPT_BASE_URL")
-                                    .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
-                                swap.swap(oauth_swap_provider(
-                                    "openai",
-                                    base_url.clone(),
-                                    model.to_string(),
-                                    token.access_token,
-                                    token.account_id,
-                                    current_effort(ui),
-                                ));
-                                meta.provider = p.kind;
-                                meta.model = model.to_string();
-                                meta.base_url = base_url;
-                                persist_default_selection(
-                                    ui,
-                                    &meta.provider,
-                                    model,
-                                    &meta.base_url,
-                                );
-                                refresh_provider_label(meta);
-                                if let Some(w) = sel_ctx {
-                                    meta.ctx_window = w;
-                                }
-                                ui.note(
-                                    format!("switched to {} / {model}", provider_name),
-                                    Color::Green,
-                                );
-                                ui.panel = None;
-                                return;
-                            }
-                        } else if let Some(k) = p.resolve_key_with(&auth) {
-                            swap.swap(make_provider(&p.kind, model, &p.base_url, k));
-                            meta.provider = p.kind;
-                            meta.model = model.to_string();
-                            meta.base_url = p.base_url;
-                            persist_default_selection(ui, &meta.provider, model, &meta.base_url);
-                            refresh_provider_label(meta);
-                            if let Some(w) = sel_ctx {
-                                meta.ctx_window = w;
-                            }
-                            ui.note(
-                                format!("switched to {} / {model}", provider_name),
-                                Color::Green,
-                            );
-                            ui.panel = None;
-                            return;
-                        }
-                    }
-                    ui.note(format!("no key for provider {provider_name}"), Color::Red);
-                } else {
-                    // 同 provider:只切模型
-                    if let Some(w) = sel_ctx {
-                        meta.ctx_window = w;
-                    }
-                    swap_model(swap, meta, if model.is_empty() { &key } else { model }, ui);
-                }
-                ui.panel = None;
-            }
-        }
-        // Provider 页:切到选中档。
-        (PanelKind::Provider, _) => {
-            if let Some(name) = sel_key {
-                switch_provider(&name, meta, swap, ui);
-                ui.panel = None;
-            }
-        }
-        // 登录页:Enter 选中 preset → 起 key 输入态(标题提示选了哪家)。Some 分支(提交 key)由主环
-        // 异步处理(校验联网),不达此。
-        (PanelKind::Login, None) => {
-            if let (Some(p), Some(id)) = (ui.panel.as_mut(), sel_key) {
-                if id == CLAUDE_OAUTH_ROW {
-                    begin_oauth(ui, &provider::oauth::ANTHROPIC);
-                } else if id == CODEX_OAUTH_ROW {
-                    begin_oauth(ui, &provider::oauth::OPENAI);
-                } else {
-                    p.editing = Some(String::new());
-                    p.title = format!(
-                        "Login · enter API key for {id} · Enter verify & connect · Esc cancel"
-                    );
-                }
-            }
-        }
+        (PanelKind::Config, None) => panel_enter_config(ui, selection.value),
+        (PanelKind::Models, _) => panel_enter_models(ui, meta, swap, selection.key, selection.ctx),
+        (PanelKind::Provider, _) => panel_enter_provider(ui, meta, swap, selection.key),
+        (PanelKind::Login, None) => panel_enter_login(ui, selection.key),
         (PanelKind::Login, Some(_)) => {}
         (
             PanelKind::Activity
@@ -988,15 +901,14 @@ pub(crate) fn panel_enter(ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvi
             | PanelKind::AnswerHistory,
             _,
         ) => {
-            if let Some(p) = ui.panel.as_mut() {
-                p.toggle_detail();
+            if let Some(panel) = ui.panel.as_mut() {
+                panel.toggle_detail();
             }
         }
         (PanelKind::LiveHistory, _) => {
             ui.sync_live_panel_focus();
             ui.toggle_live_panel_detail();
         }
-        // 只读页:Enter 关页。
         (PanelKind::Tools, _)
         | (PanelKind::Agent, _)
         | (PanelKind::Mcp, _)
@@ -1005,18 +917,228 @@ pub(crate) fn panel_enter(ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvi
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct PanelSelection {
+    kind: PanelKind,
+    editing: Option<String>,
+    key: Option<String>,
+    value: Option<String>,
+    ctx: Option<u64>,
+}
+
+fn panel_selection(ui: &Ui) -> Option<PanelSelection> {
+    let panel = ui.panel.as_ref()?;
+    Some(PanelSelection {
+        kind: panel.kind,
+        editing: panel.editing.clone(),
+        key: panel.selected().map(|row| row.key.clone()),
+        value: panel.selected().map(|row| row.value.clone()),
+        ctx: panel.selected().and_then(|row| row.ctx),
+    })
+}
+
+fn panel_enter_config_edit(
+    ui: &mut Ui,
+    meta: &mut ReplMeta,
+    swap: &Arc<SwapProvider>,
+    key: Option<String>,
+    new_value: String,
+) {
+    let Some(key) = key else { return };
+    let value = new_value.trim().to_owned();
+    match persist_config(&key, &value) {
+        Ok(_) => {
+            apply_config_live(&key, &value, meta, swap, ui);
+            ui.note(format!("saved {key}={value}"), Color::Green);
+            ui.panel = Some(config_panel());
+        }
+        Err(error) => {
+            ui.note(format!("write failed: {error}"), Color::Red);
+            if let Some(panel) = ui.panel.as_mut() {
+                panel.editing = None;
+            }
+        }
+    }
+}
+
+fn panel_enter_config(ui: &mut Ui, value: Option<String>) {
+    let Some(panel) = ui.panel.as_mut() else {
+        return;
+    };
+    let Some(value) = value else { return };
+    panel.editing = Some(if value == "(unset)" {
+        String::new()
+    } else {
+        value
+    });
+}
+
+fn panel_enter_models(
+    ui: &mut Ui,
+    meta: &mut ReplMeta,
+    swap: &Arc<SwapProvider>,
+    key: Option<String>,
+    ctx: Option<u64>,
+) {
+    let Some(key) = key else { return };
+    let (provider_name, model) = key.split_once(" · ").unwrap_or(("", &key));
+    if provider_name == EFFORT_MODEL_GROUP {
+        apply_effort(swap, meta, model, ui);
+    } else if provider_name == CHATGPT_MODEL_GROUP {
+        panel_enter_chatgpt(ui, meta, swap, model, ctx);
+    } else if !provider_name.is_empty() && provider_name != meta.provider {
+        panel_enter_other_provider(ui, meta, swap, provider_name, model, ctx);
+    } else {
+        if let Some(ctx) = ctx {
+            meta.ctx_window = ctx;
+        }
+        swap_model(swap, meta, if model.is_empty() { &key } else { model }, ui);
+    }
+    ui.panel = None;
+}
+
+fn panel_enter_chatgpt(
+    ui: &mut Ui,
+    meta: &mut ReplMeta,
+    swap: &Arc<SwapProvider>,
+    model: &str,
+    ctx: Option<u64>,
+) {
+    let Some(token) = openai_oauth_token() else {
+        ui.note(
+            "no ChatGPT OAuth credential; run /login --codex first",
+            Color::Red,
+        );
+        return;
+    };
+    let base_url = std::env::var("RIDGE_CHATGPT_BASE_URL")
+        .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
+    swap.swap(oauth_swap_provider(
+        "openai",
+        base_url.clone(),
+        model.to_owned(),
+        token.access_token,
+        token.account_id,
+        current_effort(ui),
+    ));
+    meta.provider = "openai".to_owned();
+    meta.model = model.to_owned();
+    meta.base_url = base_url;
+    persist_default_selection(ui, &meta.provider, model, &meta.base_url);
+    refresh_provider_label(meta);
+    if let Some(ctx) = ctx {
+        meta.ctx_window = ctx;
+    }
+    ui.note(
+        format!("switched to {CHATGPT_MODEL_GROUP} / {model}"),
+        Color::Green,
+    );
+}
+
+fn panel_enter_other_provider(
+    ui: &mut Ui,
+    meta: &mut ReplMeta,
+    swap: &Arc<SwapProvider>,
+    provider_name: &str,
+    model: &str,
+    ctx: Option<u64>,
+) {
+    let cfg = Config::load(config_path());
+    let auth = load_auth();
+    let Some(profile) = cfg
+        .providers
+        .into_iter()
+        .find(|profile| profile.name == provider_name)
+    else {
+        ui.note(format!("no key for provider {provider_name}"), Color::Red);
+        return;
+    };
+    if profile.use_oauth == Some(true) && profile.kind == "openai" {
+        let Some(token) = openai_oauth_token() else {
+            ui.note(format!("no key for provider {provider_name}"), Color::Red);
+            return;
+        };
+        let base_url = std::env::var("RIDGE_CHATGPT_BASE_URL")
+            .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
+        swap.swap(oauth_swap_provider(
+            "openai",
+            base_url.clone(),
+            model.to_owned(),
+            token.access_token,
+            token.account_id,
+            current_effort(ui),
+        ));
+        meta.provider = profile.kind;
+        meta.model = model.to_owned();
+        meta.base_url = base_url;
+    } else {
+        let Some(key) = profile.resolve_key_with(&auth) else {
+            ui.note(format!("no key for provider {provider_name}"), Color::Red);
+            return;
+        };
+        swap.swap(make_provider(&profile.kind, model, &profile.base_url, key));
+        meta.provider = profile.kind;
+        meta.model = model.to_owned();
+        meta.base_url = profile.base_url;
+    }
+    persist_default_selection(ui, &meta.provider, model, &meta.base_url);
+    refresh_provider_label(meta);
+    if let Some(ctx) = ctx {
+        meta.ctx_window = ctx;
+    }
+    ui.note(
+        format!("switched to {provider_name} / {model}"),
+        Color::Green,
+    );
+}
+
+fn panel_enter_provider(
+    ui: &mut Ui,
+    meta: &mut ReplMeta,
+    swap: &Arc<SwapProvider>,
+    key: Option<String>,
+) {
+    if let Some(name) = key {
+        switch_provider(&name, meta, swap, ui);
+        ui.panel = None;
+    }
+}
+
+fn panel_enter_login(ui: &mut Ui, key: Option<String>) {
+    let Some(id) = key else { return };
+    if id == CLAUDE_OAUTH_ROW {
+        begin_oauth(ui, &provider::oauth::ANTHROPIC);
+        return;
+    }
+    if id == CODEX_OAUTH_ROW {
+        begin_oauth(ui, &provider::oauth::OPENAI);
+        return;
+    }
+    let Some(panel) = ui.panel.as_mut() else {
+        return;
+    };
+    panel.editing = Some(String::new());
+    panel.title = format!("Login · enter API key for {id} · Enter verify & connect · Esc cancel");
+}
+
+pub(crate) struct CommandCatalog<'a> {
+    pub(crate) agents: &'a agent::Agents,
+    pub(crate) commands: &'a [agent::SlashCommand],
+    pub(crate) skills: &'a [agent::Skill],
+}
+
+pub(crate) struct CommandStats {
+    pub(crate) tokens: usize,
+    pub(crate) turns: usize,
+}
+
 pub(crate) async fn run_command(
     input: &str,
     ui: &mut Ui,
     history: &mut Vec<Message>,
     meta: &mut ReplMeta,
     swap: &Arc<SwapProvider>,
-    agents: &agent::Agents,
-    commands: &[agent::SlashCommand],
-    skills: &[agent::Skill],
-    tokens: usize,
-    turns: usize,
+    catalog: &CommandCatalog<'_>,
+    stats: CommandStats,
 ) -> anyhow::Result<bool> {
     if input == "/help" {
         ui.note(
@@ -1025,41 +1147,92 @@ pub(crate) async fn run_command(
         );
         return Ok(false);
     }
+    if input == "/exit" || input == "/quit" {
+        return Ok(true);
+    }
+    if handle_navigation_command(input, ui, meta, history, stats.tokens, stats.turns)
+        || handle_model_command(input, ui, meta, swap)
+        || handle_security_command(input, ui)
+        || handle_provider_command(input, ui, meta, swap)
+        || handle_workspace_command(input, ui, catalog.agents, catalog.skills, catalog.commands)
+        || handle_custom_command(input, ui, catalog.commands)
+    {
+        return Ok(false);
+    }
+    if handle_login_command(input, ui, meta, swap).await {
+        return Ok(false);
+    }
+    Ok(false)
+}
+
+fn handle_navigation_command(
+    input: &str,
+    ui: &mut Ui,
+    meta: &ReplMeta,
+    history: &mut Vec<Message>,
+    tokens: usize,
+    turns: usize,
+) -> bool {
+    if handle_panel_navigation(input, ui, meta) {
+        return true;
+    }
+    handle_context_navigation(input, ui, history, tokens, turns)
+}
+
+fn handle_panel_navigation(input: &str, ui: &mut Ui, meta: &ReplMeta) -> bool {
     match input {
-        "/exit" | "/quit" => return Ok(true),
         "/tools" => ui.panel = Some(tools_panel(&meta.tools)),
         "/activity" => ui.open_activity_panel(),
-        "/inspect" | "/live" | "/transcript" | "/audit" => {
-            if !ui.open_live_history() {
-                ui.note("no live blocks to inspect", Color::Gray);
-            }
-        }
-        "/find" => {
-            if !ui.open_live_search("") {
-                ui.note("no live blocks to search", Color::Gray);
-            }
-        }
-        _ if input.starts_with("/find ") => {
-            if !ui.open_live_search(input[6..].trim()) {
-                ui.note("no live blocks to search", Color::Gray);
-            }
-        }
-        "/reasoning" | "/thinking" => {
-            if !ui.open_reasoning_history() {
-                ui.note("no completed reasoning history", Color::Gray);
-            }
-        }
-        "/answer" | "/answers" => {
-            if !ui.open_answer_history() {
-                ui.note("no recoverable answer history", Color::Gray);
-            }
-        }
+        "/inspect" | "/live" | "/transcript" | "/audit" => show_live_history(ui),
+        "/find" => show_live_search(ui, ""),
+        _ if input.starts_with("/find ") => show_live_search(ui, input[6..].trim()),
+        "/reasoning" | "/thinking" => show_reasoning_history(ui),
+        "/answer" | "/answers" => show_answer_history(ui),
         "/queue" => ui.open_queue_panel(),
-        "/history" => {
-            if !ui.open_tool_history() {
-                ui.note("no completed tool history", Color::Gray);
-            }
-        }
+        "/history" => show_tool_history(ui),
+        _ => return false,
+    }
+    true
+}
+
+fn show_live_history(ui: &mut Ui) {
+    if !ui.open_live_history() {
+        ui.note("no live blocks to inspect", Color::Gray);
+    }
+}
+
+fn show_live_search(ui: &mut Ui, query: &str) {
+    if !ui.open_live_search(query) {
+        ui.note("no live blocks to search", Color::Gray);
+    }
+}
+
+fn show_reasoning_history(ui: &mut Ui) {
+    if !ui.open_reasoning_history() {
+        ui.note("no completed reasoning history", Color::Gray);
+    }
+}
+
+fn show_answer_history(ui: &mut Ui) {
+    if !ui.open_answer_history() {
+        ui.note("no recoverable answer history", Color::Gray);
+    }
+}
+
+fn show_tool_history(ui: &mut Ui) {
+    if !ui.open_tool_history() {
+        ui.note("no completed tool history", Color::Gray);
+    }
+}
+
+fn handle_context_navigation(
+    input: &str,
+    ui: &mut Ui,
+    history: &mut Vec<Message>,
+    tokens: usize,
+    turns: usize,
+) -> bool {
+    match input {
         "/reset" => {
             history.clear();
             ui.reasoning_history.clear();
@@ -1068,14 +1241,7 @@ pub(crate) async fn run_command(
             save_session(&session_path(), history);
             ui.note("context cleared", Color::Yellow);
         }
-        "/compact" => {
-            let n = history.len();
-            *history = compact_history(std::mem::take(history), 4);
-            ui.note(
-                format!("context compacted: {n} → {} messages", history.len()),
-                Color::Yellow,
-            );
-        }
+        "/compact" => compact_context(ui, history),
         "/cost" => ui.note(
             format!("session total: {tokens} tokens · {turns} tasks"),
             Color::Gray,
@@ -1088,219 +1254,318 @@ pub(crate) async fn run_command(
             ),
             Color::Gray,
         ),
-        _ if input.starts_with("/effort ") => {
-            apply_effort(swap, meta, input[8..].trim(), ui);
-        }
-        // /model 单命令:无参 → 跨 provider 模型页(↑↓ 选、Enter 切);`/model <name>` → 直接热切。
-        // `/models` `/model pick` 保留为别名(旧肌肉记忆),补全表只呈现 `/model`。
-        _ if input == "/model" || input == "/models" || input == "/model pick" => {
-            let Some(grouped) = ui.model_catalog.as_ref() else {
-                ui.note(
-                    "model catalog is still loading; try /model again shortly",
-                    Color::Yellow,
-                );
-                return Ok(false);
-            };
-            if grouped.is_empty() {
-                ui.note(
-                    "no models returned (providers unreachable or authentication failed)",
-                    Color::Yellow,
-                );
-            } else {
-                let current_group = model_group_name(&meta.provider, &meta.base_url);
-                meta.ctx_window = grouped
-                    .iter()
-                    .find(|(name, _models)| name == &current_group)
-                    .and_then(|(_, models)| {
-                        models
-                            .iter()
-                            .find(|model| model.id == meta.model)
-                            .and_then(|model| model.context)
-                    })
-                    .unwrap_or(tui::DEFAULT_CTX_WINDOW);
-                ui.panel = Some(models_panel_with_effort(
-                    grouped,
-                    &current_group,
-                    &meta.model,
-                    current_effort(ui),
-                ));
-            }
-        }
-        _ if input.starts_with("/model ") => swap_model(swap, meta, input[7..].trim(), ui),
-        _ if input == "/jailbreak" => {
+        _ => return false,
+    }
+    true
+}
+
+fn compact_context(ui: &mut Ui, history: &mut Vec<Message>) {
+    let before = history.len();
+    *history = compact_history(std::mem::take(history), 4);
+    ui.note(
+        format!("context compacted: {before} → {} messages", history.len()),
+        Color::Yellow,
+    );
+}
+
+fn handle_model_command(
+    input: &str,
+    ui: &mut Ui,
+    meta: &mut ReplMeta,
+    swap: &Arc<SwapProvider>,
+) -> bool {
+    if let Some(effort) = input.strip_prefix("/effort ") {
+        apply_effort(swap, meta, effort.trim(), ui);
+        return true;
+    }
+    if input == "/model" || input == "/models" || input == "/model pick" {
+        return show_model_catalog(ui, meta);
+    }
+    if let Some(model) = input.strip_prefix("/model ") {
+        swap_model(swap, meta, model.trim(), ui);
+        return true;
+    }
+    false
+}
+
+fn show_model_catalog(ui: &mut Ui, meta: &mut ReplMeta) -> bool {
+    let Some(grouped) = ui.model_catalog.as_ref() else {
+        ui.note(
+            "model catalog is still loading; try /model again shortly",
+            Color::Yellow,
+        );
+        return true;
+    };
+    if grouped.is_empty() {
+        ui.note(
+            "no models returned (providers unreachable or authentication failed)",
+            Color::Yellow,
+        );
+        return true;
+    }
+    let current_group = model_group_name(&meta.provider, &meta.base_url);
+    meta.ctx_window = grouped
+        .iter()
+        .find(|(name, _)| name == &current_group)
+        .and_then(|(_, models)| {
+            models
+                .iter()
+                .find(|model| model.id == meta.model)
+                .and_then(|model| model.context)
+        })
+        .unwrap_or(tui::DEFAULT_CTX_WINDOW);
+    ui.panel = Some(models_panel_with_effort(
+        grouped,
+        &current_group,
+        &meta.model,
+        current_effort(ui),
+    ));
+    true
+}
+
+fn handle_security_command(input: &str, ui: &mut Ui) -> bool {
+    match input {
+        "/jailbreak" => {
             let on = agent::allow_jailbreak();
-            ui.note(if on { "jailbreak: ON ⚠ (can write outside cwd subtree; disaster commands / protected paths / read-only still blocked). Disable: /jailbreak off" } else { "jailbreak: OFF (writes limited to cwd subtree). Enable: /jailbreak on —— top status bar turns red when on" }, if on { Color::Red } else { Color::Gray });
+            let message = if on {
+                "jailbreak: ON ⚠ (can write outside cwd subtree; disaster commands / protected paths / read-only still blocked). Disable: /jailbreak off"
+            } else {
+                "jailbreak: OFF (writes limited to cwd subtree). Enable: /jailbreak on —— top status bar turns red when on"
+            };
+            ui.note(message, if on { Color::Red } else { Color::Gray });
         }
-        _ if input == "/jailbreak on" => {
+        "/jailbreak on" => {
             agent::set_allow_jailbreak(true);
             ui.note("⚠ jailbreak ON: can write outside cwd subtree (disaster commands / protected paths / read-only still hard-blocked). Session only; to persist: /config set allow_jailbreak true", Color::Red);
         }
-        _ if input == "/jailbreak off" => {
+        "/jailbreak off" => {
             agent::set_allow_jailbreak(false);
             ui.note(
                 "jailbreak OFF: writes limited back to cwd subtree",
                 Color::Green,
             );
         }
-        _ if input == "/config" => ui.panel = Some(config_panel()),
-        _ if input.starts_with("/config set ") => {
-            let parts: Vec<_> = input.splitn(4, ' ').collect();
-            if parts.len() == 4 {
-                match persist_config(parts[2], parts[3]) {
-                    Ok(path) => ui.note(
-                        format!("wrote {path}; takes effect next start"),
-                        Color::Green,
-                    ),
-                    Err(e) => ui.note(format!("write failed: {e}"), Color::Red),
-                }
-            } else {
-                ui.note("usage: /config set <key> <value>", Color::Yellow);
-            }
-        }
-        _ if input == "/provider" || input == "/provider list" => {
-            let cfg = Config::load(config_path());
-            if cfg.providers.is_empty() {
-                ui.note("no provider profiles. Add: /provider add <name> <kind> <model> <base_url> [key_env]", Color::Gray);
-            } else {
-                ui.panel = Some(provider_panel());
-            }
-        }
-        _ if input.starts_with("/provider add ") => {
-            match agent::parse_provider_add(input["/provider add ".len()..].trim()) {
-                Ok(profile) => {
-                    let path = config_path();
-                    let text = std::fs::read_to_string(&path).unwrap_or_default();
-                    match agent::config_add_provider(&text, &profile) {
-                        Ok(out) => match std::fs::write(&path, out) {
-                            Ok(_) => ui.note(format!("added provider \"{}\" → {} (switch: /provider use {}; set the API key in env var {})", profile.name, path, profile.name, profile.key_env), Color::Green),
-                            Err(e) => ui.note(format!("failed to write config: {e}"), Color::Red),
-                        },
-                        Err(e) => ui.note(format!("config transform failed: {e}"), Color::Red),
-                    }
-                }
-                Err(e) => ui.note(e, Color::Yellow),
-            }
-        }
-        _ if input.starts_with("/provider use ") => {
-            switch_provider(input[14..].trim(), meta, swap, ui)
-        }
-        _ if input == "/login" => ui.panel = Some(login_panel()),
-        _ if input == "/login list" => {
-            let ids: Vec<&str> = PROVIDER_PRESETS.iter().map(|p| p.id).collect();
-            ui.note(format!("built-in providers: {}\nOAuth: claude-oauth (/login --claude) · codex-oauth (/login --codex)\n端口受限时执行: ridgecode login --codex --device-auth\ninteractive: /login  ·  quick: /login <id> <API_KEY> (verified; key → ~/.ridge/auth.json, not config)", ids.join(", ")), Color::Gray);
-        }
-        _ if input == "/login --claude" || input == "/login claude-oauth" => {
-            ui.panel = Some(login_panel());
-            if let Some(panel) = ui.panel.as_mut() {
-                if let Some(pos) = panel
-                    .view
-                    .iter()
-                    .position(|&i| panel.rows[i].key == CLAUDE_OAUTH_ROW)
-                {
-                    panel.sel = pos;
-                }
-            }
-            begin_oauth(ui, &provider::oauth::ANTHROPIC);
-        }
-        _ if input == "/login --codex" || input == "/login codex-oauth" => {
-            ui.panel = Some(login_panel());
-            if let Some(panel) = ui.panel.as_mut() {
-                if let Some(pos) = panel
-                    .view
-                    .iter()
-                    .position(|&i| panel.rows[i].key == CODEX_OAUTH_ROW)
-                {
-                    panel.sel = pos;
-                }
-            }
-            begin_oauth(ui, &provider::oauth::OPENAI);
-        }
-        _ if input.starts_with("/login ") => {
-            let rest = input["/login ".len()..].trim();
-            let mut it = rest.split_whitespace();
-            match (it.next(), it.next()) {
-                (Some(id), Some(key)) => match preset_by_id(id) {
-                    Some(preset) => login_apply_verified(preset, key, meta, swap, ui).await,
-                    None => ui.note(
-                        format!("unknown provider \"{id}\"; see /login list"),
-                        Color::Yellow,
-                    ),
-                },
-                _ => ui.note(
-                    "usage: /login <id> <API_KEY>, or just /login to pick interactively",
-                    Color::Yellow,
-                ),
-            }
-        }
-        _ if input == "/goal" || input.starts_with("/goal ") => {
-            let args = input
-                .strip_prefix("/goal")
-                .unwrap_or_default()
-                .split_whitespace()
-                .map(str::to_string)
-                .collect::<Vec<_>>();
-            match agent::goal_command(&args) {
-                Ok(text) => ui.note(text, Color::Cyan),
-                Err(error) => ui.note(format!("goal error: {error}"), Color::Red),
-            }
-        }
-        _ if input == "/agent" => {
-            if agents.defs.is_empty() {
-                ui.note("no sub-agents available", Color::Gray);
-            } else {
-                ui.panel = Some(agent_panel(&agents.defs));
-            }
-        }
-        _ if input == "/mcp" => {
-            let cfg = Config::load(config_path());
-            if cfg.mcp.is_empty() {
-                ui.note("no MCP servers configured. Add them under \"mcp\": [ ... ] in ~/.ridge/config.json (each: name + cmd [+ args]).", Color::Gray);
-            } else {
-                ui.panel = Some(mcp_panel());
-            }
-        }
-        _ if input == "/skills" => {
-            if skills.is_empty() {
-                ui.note("no skills loaded. Add ~/.ridge/skills/<name>/SKILL.md (frontmatter name/description + body); loaded skills are injected into the system prompt.", Color::Gray);
-            } else {
-                ui.panel = Some(skills_panel(skills));
-            }
-        }
-        _ if input == "/commands" => {
-            if commands.is_empty() {
-                ui.note("no custom commands. Add ~/.ridge/commands/<name>.md (body = prompt, $ARGS = args); skills also appear here.", Color::Gray);
-            } else {
-                let lines: Vec<String> = commands
-                    .iter()
-                    .map(|c| {
-                        if c.description.is_empty() {
-                            format!("/{}", c.name)
-                        } else {
-                            format!("/{}  —— {}", c.name, c.description)
-                        }
-                    })
-                    .collect();
-                ui.note(
-                    format!("commands ({}):\n{}", commands.len(), lines.join("\n")),
-                    Color::Gray,
-                );
-            }
-        }
-        // 自定义 / skill 命令(iter-39):/name [args] → 展开 body(替 $ARGS)为任务(置 run_task,主环起任务)。
-        _ if input.starts_with('/') => {
-            let rest = &input[1..];
-            let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-            match agent::resolve_command(name, commands) {
-                Some(cmd) => ui.run_task = Some(agent::expand_command(&cmd.body, args.trim())),
-                None => ui.note(
-                    format!("unknown command: {input} (/help · /commands)"),
-                    Color::Yellow,
-                ),
-            }
-        }
-        _ => return Ok(false),
+        "/config" => ui.panel = Some(config_panel()),
+        _ if input.starts_with("/config set ") => return persist_config_command(input, ui),
+        _ => return false,
     }
-    Ok(false)
+    true
+}
+
+fn persist_config_command(input: &str, ui: &mut Ui) -> bool {
+    let parts: Vec<_> = input.splitn(4, ' ').collect();
+    if parts.len() == 4 {
+        match persist_config(parts[2], parts[3]) {
+            Ok(path) => ui.note(
+                format!("wrote {path}; takes effect next start"),
+                Color::Green,
+            ),
+            Err(error) => ui.note(format!("write failed: {error}"), Color::Red),
+        }
+    } else {
+        ui.note("usage: /config set <key> <value>", Color::Yellow);
+    }
+    true
+}
+
+fn handle_provider_command(
+    input: &str,
+    ui: &mut Ui,
+    meta: &mut ReplMeta,
+    swap: &Arc<SwapProvider>,
+) -> bool {
+    if input == "/provider" || input == "/provider list" {
+        return show_provider_panel(ui);
+    }
+    if let Some(rest) = input.strip_prefix("/provider add ") {
+        add_provider_command(rest.trim(), ui);
+        return true;
+    }
+    if let Some(name) = input.strip_prefix("/provider use ") {
+        switch_provider(name.trim(), meta, swap, ui);
+        return true;
+    }
+    false
+}
+
+fn show_provider_panel(ui: &mut Ui) -> bool {
+    let cfg = Config::load(config_path());
+    if cfg.providers.is_empty() {
+        ui.note(
+            "no provider profiles. Add: /provider add <name> <kind> <model> <base_url> [key_env]",
+            Color::Gray,
+        );
+    } else {
+        ui.panel = Some(provider_panel());
+    }
+    true
+}
+
+fn add_provider_command(input: &str, ui: &mut Ui) {
+    match agent::parse_provider_add(input) {
+        Ok(profile) => {
+            let path = config_path();
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            match agent::config_add_provider(&text, &profile) {
+                Ok(output) => match std::fs::write(&path, output) {
+                    Ok(_) => ui.note(format!("added provider \"{}\" → {} (switch: /provider use {}; set the API key in env var {})", profile.name, path, profile.name, profile.key_env), Color::Green),
+                    Err(error) => ui.note(format!("failed to write config: {error}"), Color::Red),
+                },
+                Err(error) => ui.note(format!("config transform failed: {error}"), Color::Red),
+            }
+        }
+        Err(error) => ui.note(error, Color::Yellow),
+    }
+}
+
+async fn handle_login_command(
+    input: &str,
+    ui: &mut Ui,
+    meta: &mut ReplMeta,
+    swap: &Arc<SwapProvider>,
+) -> bool {
+    match input {
+        "/login" => ui.panel = Some(login_panel()),
+        "/login list" => show_login_list(ui),
+        "/login --claude" | "/login claude-oauth" => {
+            begin_login_oauth(ui, &provider::oauth::ANTHROPIC, CLAUDE_OAUTH_ROW)
+        }
+        "/login --codex" | "/login codex-oauth" => {
+            begin_login_oauth(ui, &provider::oauth::OPENAI, CODEX_OAUTH_ROW)
+        }
+        _ if input.starts_with("/login ") => login_command(input, ui, meta, swap).await,
+        _ => return false,
+    }
+    true
+}
+
+fn show_login_list(ui: &mut Ui) {
+    let ids: Vec<&str> = PROVIDER_PRESETS.iter().map(|preset| preset.id).collect();
+    ui.note(format!("built-in providers: {}\nOAuth: claude-oauth (/login --claude) · codex-oauth (/login --codex)\n端口受限时执行: ridgecode login --codex --device-auth\ninteractive: /login  ·  quick: /login <id> <API_KEY> (verified; key → ~/.ridge/auth.json, not config)", ids.join(", ")), Color::Gray);
+}
+
+fn begin_login_oauth(ui: &mut Ui, provider: &provider::oauth::OAuthConfig, row_id: &str) {
+    ui.panel = Some(login_panel());
+    if let Some(panel) = ui.panel.as_mut() {
+        if let Some(position) = panel
+            .view
+            .iter()
+            .position(|&index| panel.rows[index].key == row_id)
+        {
+            panel.sel = position;
+        }
+    }
+    begin_oauth(ui, provider);
+}
+
+async fn login_command(input: &str, ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvider>) {
+    let rest = input["/login ".len()..].trim();
+    let mut parts = rest.split_whitespace();
+    match (parts.next(), parts.next()) {
+        (Some(id), Some(key)) => match preset_by_id(id) {
+            Some(preset) => login_apply_verified(preset, key, meta, swap, ui).await,
+            None => ui.note(
+                format!("unknown provider \"{id}\"; see /login list"),
+                Color::Yellow,
+            ),
+        },
+        _ => ui.note(
+            "usage: /login <id> <API_KEY>, or just /login to pick interactively",
+            Color::Yellow,
+        ),
+    }
+}
+
+fn handle_workspace_command(
+    input: &str,
+    ui: &mut Ui,
+    agents: &agent::Agents,
+    skills: &[agent::Skill],
+    commands: &[agent::SlashCommand],
+) -> bool {
+    if input == "/goal" || input.starts_with("/goal ") {
+        let args = input
+            .strip_prefix("/goal")
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        match agent::goal_command(&args) {
+            Ok(text) => ui.note(text, Color::Cyan),
+            Err(error) => ui.note(format!("goal error: {error}"), Color::Red),
+        }
+        return true;
+    }
+    match input {
+        "/agent" => show_agent_panel(ui, agents),
+        "/mcp" => show_mcp_panel(ui),
+        "/skills" => show_skills_panel(ui, skills),
+        "/commands" => show_commands(ui, commands),
+        _ => return false,
+    }
+    true
+}
+
+fn show_agent_panel(ui: &mut Ui, agents: &agent::Agents) {
+    if agents.defs.is_empty() {
+        ui.note("no sub-agents available", Color::Gray);
+    } else {
+        ui.panel = Some(agent_panel(&agents.defs));
+    }
+}
+
+fn show_mcp_panel(ui: &mut Ui) {
+    let cfg = Config::load(config_path());
+    if cfg.mcp.is_empty() {
+        ui.note("no MCP servers configured. Add them under \"mcp\": [ ... ] in ~/.ridge/config.json (each: name + cmd [+ args]).", Color::Gray);
+    } else {
+        ui.panel = Some(mcp_panel());
+    }
+}
+
+fn show_skills_panel(ui: &mut Ui, skills: &[agent::Skill]) {
+    if skills.is_empty() {
+        ui.note("no skills loaded. Add ~/.ridge/skills/<name>/SKILL.md (frontmatter name/description + body); loaded skills are injected into the system prompt.", Color::Gray);
+    } else {
+        ui.panel = Some(skills_panel(skills));
+    }
+}
+
+fn show_commands(ui: &mut Ui, commands: &[agent::SlashCommand]) {
+    if commands.is_empty() {
+        ui.note("no custom commands. Add ~/.ridge/commands/<name>.md (body = prompt, $ARGS = args); skills also appear here.", Color::Gray);
+        return;
+    }
+    let lines = commands
+        .iter()
+        .map(|command| {
+            if command.description.is_empty() {
+                format!("/{}", command.name)
+            } else {
+                format!("/{}  —— {}", command.name, command.description)
+            }
+        })
+        .collect::<Vec<_>>();
+    ui.note(
+        format!("commands ({}):\n{}", commands.len(), lines.join("\n")),
+        Color::Gray,
+    );
+}
+
+fn handle_custom_command(input: &str, ui: &mut Ui, commands: &[agent::SlashCommand]) -> bool {
+    if !input.starts_with('/') {
+        return false;
+    }
+    let rest = &input[1..];
+    let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    match agent::resolve_command(name, commands) {
+        Some(command) => ui.run_task = Some(agent::expand_command(&command.body, args.trim())),
+        None => ui.note(
+            format!("unknown command: {input} (/help · /commands)"),
+            Color::Yellow,
+        ),
+    }
+    true
 }
 
 #[cfg(test)]
@@ -1332,6 +1597,11 @@ mod tests {
             description: "ship it".into(),
             body: "deploy $ARGS".into(),
         }];
+        let catalog = CommandCatalog {
+            agents: &agents,
+            commands: &commands,
+            skills: &skills,
+        };
 
         for input in [
             "/help",
@@ -1340,24 +1610,40 @@ mod tests {
             "/inspect",
             "/find",
             "/find needle",
+            "/transcript",
+            "/audit",
             "/reasoning",
+            "/thinking",
+            "/answer",
             "/answers",
             "/queue",
             "/history",
+            "/reset",
             "/compact",
             "/cost",
             "/effort",
+            "/effort high",
             "/provider",
+            "/provider list",
+            "/provider add malformed",
             "/provider use missing",
+            "/config",
+            "/config set malformed",
             "/login",
             "/login list",
             "/login openai",
+            "/login unknown key",
             "/mcp",
             "/skills",
             "/commands",
+            "/agent",
             "/jailbreak",
+            "/jailbreak on",
+            "/jailbreak off",
             "/model",
+            "/model pick",
             "/model missing",
+            "/goal status",
             "/unknown",
         ] {
             assert!(!run_command(
@@ -1366,11 +1652,11 @@ mod tests {
                 &mut history,
                 &mut meta,
                 &swap,
-                &agents,
-                &commands,
-                &skills,
-                42,
-                3,
+                &catalog,
+                CommandStats {
+                    tokens: 42,
+                    turns: 3
+                },
             )
             .await
             .unwrap());
@@ -1389,14 +1675,31 @@ mod tests {
             &mut history,
             &mut meta,
             &swap,
-            &agents,
-            &commands,
-            &skills,
-            42,
-            3,
+            &catalog,
+            CommandStats {
+                tokens: 42,
+                turns: 3,
+            },
         )
         .await
         .unwrap();
+
+        for input in ["/model pick", "/model gpt-4o", "/effort low"] {
+            run_command(
+                input,
+                &mut ui,
+                &mut history,
+                &mut meta,
+                &swap,
+                &catalog,
+                CommandStats {
+                    tokens: 42,
+                    turns: 3,
+                },
+            )
+            .await
+            .unwrap();
+        }
 
         run_command(
             "/ship src/lib.rs",
@@ -1404,11 +1707,11 @@ mod tests {
             &mut history,
             &mut meta,
             &swap,
-            &agents,
-            &commands,
-            &skills,
-            42,
-            3,
+            &catalog,
+            CommandStats {
+                tokens: 42,
+                turns: 3,
+            },
         )
         .await
         .unwrap();
@@ -1419,11 +1722,11 @@ mod tests {
             &mut history,
             &mut meta,
             &swap,
-            &agents,
-            &commands,
-            &skills,
-            42,
-            3,
+            &catalog,
+            CommandStats {
+                tokens: 42,
+                turns: 3
+            },
         )
         .await
         .unwrap());

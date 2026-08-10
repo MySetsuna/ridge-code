@@ -1,6 +1,6 @@
 use crate::context::bound_observation;
-use crate::graph::*;
-use crate::state::*;
+use crate::graph::halt_reason;
+use crate::state::AgentState;
 use provider::{CompletionRequest, LlmProvider, Message, Role};
 
 // ───────────────────────── 信号复利(多 loop 共享大脑)─────────────────────────
@@ -294,8 +294,12 @@ pub async fn extract_signals_from_run(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::*;
+    use super::{
+        auto_signal_from_run, extract_signals_from_run, load_open_signals, parse_extracted_signals,
+        run_has_substance, signal_create, signal_extract_request, signal_resolve, signals_block,
+        Signal, MAX_EXTRACTED_SIGNALS, SIGNALS_BLOCK_MAX,
+    };
+    use crate::{AgentState, MAX_STEPS};
 
     /// 信号复利·产→消:产者落盘 open 信号,消费者读回;同内容 id 相同(幂等去重)。
     #[test]

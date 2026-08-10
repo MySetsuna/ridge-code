@@ -1,16 +1,10 @@
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 use std::sync::Arc;
 
 use agent::{
-    agent_run_config, apply_login, auth_parse, auth_upsert, auto_signal_from_run, build_agent,
-    build_llm_agent_full, builtin_tool_specs, compact_history, default_tool, est_tokens,
-    expand_mentions, extract_signals_from_run, halt_reason, load_commands, load_signal_block,
-    load_skills, null_token_bus, preset_by_id, render_todos, resolve_mcp, resolve_top_level_key,
-    scripted, signal_extract_enabled, tool_output_failed, write_run, AgentState, Approver,
-    AutoApprove, Color, Config, McpTools, RichOutput, Skill, SlashCommand, Todo, TokenBus,
-    PROVIDER_PRESETS,
+    auth_parse, builtin_tool_specs, load_commands, load_skills, resolve_mcp, Config, McpTools,
+    Skill, SlashCommand,
 };
-use langgraph::{CompiledGraph, StreamEvent};
 use mcp::{McpClient, McpError, StdioTransport};
 use provider::{
     AnthropicProvider, Completion, LlmProvider, Message, OpenAiProvider, ScriptedProvider,
@@ -18,8 +12,13 @@ use provider::{
 };
 
 mod tui;
-use login::*;
-use run::*;
+pub(crate) use login::{
+    now_epoch, oauth_defaults, oauth_model_info, oauth_path, register_oauth_profile,
+    resolve_claude_oauth_provider, run_login, save_oauth_token, start_device_oauth,
+    start_local_callback, verify_provider_key, DeviceOAuthEvent, DeviceOAuthFlow,
+    LocalOAuthCallback,
+};
+pub(crate) use run::{headless, node_label, run_demo, run_once};
 
 /// TUI 展示用元信息(`/tools` `/model` 命令用)。
 struct ReplMeta {
@@ -144,23 +143,16 @@ fn tui_fixture_provider(fallback: Arc<dyn LlmProvider>) -> Arc<dyn LlmProvider> 
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    run_cli().await
+}
+
+async fn run_cli() -> anyhow::Result<()> {
     if handle_meta_flags() {
         return Ok(());
     }
-    // `login` 子命令:内置供应商一键接入(在解析任务前拦下,免被当成任务串)。
     let raw: Vec<String> = std::env::args().skip(1).collect();
-    if raw.first().map(|s| s.as_str()) == Some("login") {
-        apply_config_proxy(&load_config()); // CLI login 的连通校验也走 config 里配的代理
-        return run_login(&raw[1..]).await;
-    }
-    if raw.first().map(|s| s.as_str()) == Some("goal") {
-        return match agent::goal_command(&raw[1..]) {
-            Ok(text) => {
-                println!("{text}");
-                Ok(())
-            }
-            Err(error) => Err(anyhow::anyhow!(error)),
-        };
+    if let Some(result) = handle_special_command(&raw).await {
+        return result;
     }
     init_tracing();
     let ParsedArgs {
@@ -174,155 +166,266 @@ async fn main() -> anyhow::Result<()> {
     if let Some(dir) = &cwd {
         std::env::set_current_dir(dir)?;
     }
-    let cfg = load_config(); // ~/.ridge/config.json(env 仍覆盖)
-    apply_config_proxy(&cfg); // 配了 proxy 则注入 HTTP(S)_PROXY,出站 HTTP 走它(墙内接 x.ai/claude 等)
-    let auth = load_auth(); // ~/.ridge/auth.json 密钥库(login 存的 key)
-
-    // key 优先(env/inline/key_env/providers[]);全无则回退 OAuth 订阅凭据(iter-43:login --claude)。
+    let cfg = load_config();
+    apply_config_proxy(&cfg);
+    let auth = load_auth();
     let effort = resolve_reasoning_effort(&cfg);
     let configured_provider = real_provider(&cfg, &auth);
     let using_oauth = configured_provider.is_none();
-    let resolved = match configured_provider {
-        Some(p) => Some(p),
+    let provider = match configured_provider {
+        Some(provider) => Some(provider),
         None => resolve_claude_oauth_provider(&cfg, &effort).await,
     };
-    match resolved {
-        Some(p) => {
-            let mcp = resolve_configured_mcp(&cfg).await; // config 多 server + 兼容旧 env 单 server
-            let skills = load_configured_skills(&cfg); // 声明式技能(领域知识)
-            let budget = cfg.budget_tokens.unwrap_or(0); // 0 = 不限
-            let skip_danger = cli_skip_danger || cfg.skip_danger.unwrap_or(false);
-            // 地址越狱(iter-34):启动从 config 置进程级开关,默认关(TUI 可 /jailbreak 实时切)。
-            agent::set_allow_jailbreak(cfg.allow_jailbreak.unwrap_or(false));
-            // Hook(iter-40):装 config 声明的 hooks + 通知开关,触发 session_start(内置审计留痕)。
-            agent::set_hooks(cfg.hooks.clone());
-            agent::set_notify(cfg.notify.unwrap_or(false));
-            // 外置沙箱包裹(iter-46):配了则 run_shell 经它跑(真隔离交平台 docker/wsl)。
-            agent::set_sandbox_cmd(cfg.sandbox_cmd.clone());
-            agent::fire_session_hooks("session_start", "");
-            let agents = Arc::new(build_agents(&cfg, &auth)); // sub-agent 注册表(内置 + 用户 + 命名 provider)
-            match task {
-                Some(t) => run_once(p, mcp, skills, &t, budget, agents, read_only, every).await, // 一次性 / --every 触发器
-                None => {
-                    // --resume:kill-9 / 关掉重开后恢复上一会话的多轮 history。
-                    let initial = if resume {
-                        load_session(&session_path())
-                    } else {
-                        Vec::new()
-                    };
-                    let (provider_kind, model, base_url) =
-                        resolve_start_model_info(&cfg, &auth, using_oauth);
-                    let provider_label = resolve_provider_label(&cfg, &provider_kind, &base_url);
-                    let mut tools: Vec<String> = builtin_tool_specs()
-                        .iter()
-                        .map(|s| s.name.clone())
-                        .collect();
-                    tools.extend(mcp.tool_names()); // 读工具名(在 mcp 被移入交互循环前)
-                    let meta = ReplMeta {
-                        tools,
-                        provider: provider_kind,
-                        provider_label,
-                        model,
-                        base_url,
-                        status_bar: cfg
-                            .status_bar
-                            .clone()
-                            .filter(|s| !s.trim().is_empty())
-                            .unwrap_or_else(|| tui::DEFAULT_STATUS_BAR.to_string()),
-                        ctx_window: tui::DEFAULT_CTX_WINDOW,
-                    };
-                    // 包一层 SwapProvider,让 TUI 的 /model 能热切换底层模型而不重建图。
-                    let swap = Arc::new(SwapProvider::new(tui_fixture_provider(p)));
-                    // 终端采用 TUI；管道/非 TTY 退回 headless，避免破坏脚本/重定向调用。
-                    if tui_requested() {
-                        // 自定义斜杠命令(iter-39):从同一 skills 派生(含 skill-as-命令),再移交 skills 给图。
-                        let commands = load_configured_commands(&cfg, &skills);
-                        tui::run(
-                            swap,
-                            mcp,
-                            skills,
-                            skip_danger,
-                            budget,
-                            initial,
-                            meta,
-                            agents,
-                            read_only,
-                            commands,
-                            effort.clone(),
-                        )
-                        .await
-                    } else {
-                        // 非 TTY(管道/CI/重定向):极简 headless,无 TUI、无斜杠命令。
-                        headless(swap, mcp, skills, budget, initial, agents, read_only).await
-                    }
-                }
-            }
+    match provider {
+        Some(provider) => {
+            run_with_provider(ProviderRun {
+                cfg: &cfg,
+                auth: &auth,
+                provider,
+                task,
+                cli_skip_danger,
+                resume,
+                read_only,
+                every,
+                using_oauth,
+            })
+            .await
         }
         None => {
-            if task.is_none() && tui_requested() {
-                let mcp = resolve_configured_mcp(&cfg).await;
-                let skills = load_configured_skills(&cfg);
-                let budget = cfg.budget_tokens.unwrap_or(0);
-                let skip_danger = cli_skip_danger || cfg.skip_danger.unwrap_or(false);
-                agent::set_allow_jailbreak(cfg.allow_jailbreak.unwrap_or(false));
-                agent::set_hooks(cfg.hooks.clone());
-                agent::set_notify(cfg.notify.unwrap_or(false));
-                agent::set_sandbox_cmd(cfg.sandbox_cmd.clone());
-                agent::fire_session_hooks("session_start", "");
-                let agents = Arc::new(build_agents(&cfg, &auth));
-                let initial = if resume {
-                    load_session(&session_path())
-                } else {
-                    Vec::new()
-                };
-                let (provider_kind, model, base_url) = resolve_configured_model_info(&cfg, &auth);
-                let provider_label = resolve_provider_label(&cfg, &provider_kind, &base_url);
-                let mut tools: Vec<String> = builtin_tool_specs()
-                    .iter()
-                    .map(|s| s.name.clone())
-                    .collect();
-                tools.extend(mcp.tool_names());
-                let meta = ReplMeta {
-                    tools,
-                    provider: provider_kind,
-                    provider_label,
-                    model,
-                    base_url,
-                    status_bar: cfg
-                        .status_bar
-                        .clone()
-                        .filter(|s| !s.trim().is_empty())
-                        .unwrap_or_else(|| tui::DEFAULT_STATUS_BAR.to_string()),
-                    ctx_window: tui::DEFAULT_CTX_WINDOW,
-                };
-                let swap = Arc::new(SwapProvider::new(tui_fixture_provider(
-                    missing_key_provider(),
-                )));
-                let commands = load_configured_commands(&cfg, &skills);
-                return tui::run(
-                    swap,
-                    mcp,
-                    skills,
-                    skip_danger,
-                    budget,
-                    initial,
-                    meta,
-                    agents,
-                    read_only,
-                    commands,
-                    effort,
-                )
-                .await;
-            }
-            eprintln!(
-                "[ridgecode] no key found, running the offline scripted demo. Provide a key to use a real LLM / TUI, pick one:\n  \
-                 · set the RIDGE_API_KEY env var; or\n  \
-                 · put \"api_key\" in one of the providers profiles in ~/.ridge/config.json (plaintext, at your own risk),\n    \
-                 or point \"key_env\" at an already-exported env var name. See config.example.json in the same directory.\n"
-            );
-            run_demo().await
+            run_without_provider(
+                &cfg,
+                &auth,
+                task,
+                cli_skip_danger,
+                resume,
+                read_only,
+                effort,
+            )
+            .await
         }
     }
+}
+
+async fn handle_special_command(raw: &[String]) -> Option<anyhow::Result<()>> {
+    let command = raw.first()?.as_str();
+    match command {
+        "login" => {
+            apply_config_proxy(&load_config());
+            Some(run_login(&raw[1..]).await)
+        }
+        "goal" => Some(match agent::goal_command(&raw[1..]) {
+            Ok(text) => {
+                println!("{text}");
+                Ok(())
+            }
+            Err(error) => Err(anyhow::anyhow!(error)),
+        }),
+        _ => None,
+    }
+}
+
+struct ProviderRun<'a> {
+    cfg: &'a Config,
+    auth: &'a std::collections::BTreeMap<String, String>,
+    provider: Arc<dyn LlmProvider>,
+    task: Option<String>,
+    cli_skip_danger: bool,
+    resume: bool,
+    read_only: bool,
+    every: Option<std::time::Duration>,
+    using_oauth: bool,
+}
+
+async fn run_with_provider(run: ProviderRun<'_>) -> anyhow::Result<()> {
+    let ProviderRun {
+        cfg,
+        auth,
+        provider,
+        task,
+        cli_skip_danger,
+        resume,
+        read_only,
+        every,
+        using_oauth,
+    } = run;
+    let mcp = resolve_configured_mcp(cfg).await;
+    let skills = load_configured_skills(cfg);
+    let budget = cfg.budget_tokens.unwrap_or(0);
+    configure_runtime(cfg);
+    let agents = Arc::new(build_agents(cfg, auth));
+    match task {
+        Some(task) => {
+            run_once(
+                provider, mcp, skills, &task, budget, agents, read_only, every,
+            )
+            .await
+        }
+        None => {
+            let effort = resolve_reasoning_effort(cfg);
+            run_interactive(InteractiveRun {
+                provider,
+                mcp,
+                skills,
+                budget,
+                resume,
+                agents,
+                cfg,
+                auth,
+                cli_skip_danger,
+                read_only,
+                using_oauth,
+                effort,
+            })
+            .await
+        }
+    }
+}
+
+fn configure_runtime(cfg: &Config) {
+    agent::set_allow_jailbreak(cfg.allow_jailbreak.unwrap_or(false));
+    agent::set_hooks(cfg.hooks.clone());
+    agent::set_notify(cfg.notify.unwrap_or(false));
+    agent::set_sandbox_cmd(cfg.sandbox_cmd.clone());
+    agent::fire_session_hooks("session_start", "");
+}
+
+struct InteractiveRun<'a> {
+    provider: Arc<dyn LlmProvider>,
+    mcp: McpTools,
+    skills: Vec<Skill>,
+    budget: usize,
+    resume: bool,
+    agents: Arc<agent::Agents>,
+    cfg: &'a Config,
+    auth: &'a std::collections::BTreeMap<String, String>,
+    cli_skip_danger: bool,
+    read_only: bool,
+    using_oauth: bool,
+    effort: String,
+}
+
+async fn run_interactive(run: InteractiveRun<'_>) -> anyhow::Result<()> {
+    let InteractiveRun {
+        provider,
+        mcp,
+        skills,
+        budget,
+        resume,
+        agents,
+        cfg,
+        auth,
+        cli_skip_danger,
+        read_only,
+        using_oauth,
+        effort,
+    } = run;
+    let initial = if resume {
+        load_session(&session_path())
+    } else {
+        Vec::new()
+    };
+    let meta = build_repl_meta(cfg, auth, &mcp, using_oauth);
+    let swap = Arc::new(SwapProvider::new(tui_fixture_provider(provider)));
+    let commands = load_configured_commands(cfg, &skills);
+    if tui_requested() {
+        tui::run(
+            swap,
+            mcp,
+            skills,
+            cli_skip_danger || cfg.skip_danger.unwrap_or(false),
+            budget,
+            initial,
+            meta,
+            agents,
+            read_only,
+            commands,
+            effort,
+        )
+        .await
+    } else {
+        headless(swap, mcp, skills, budget, initial, agents, read_only).await
+    }
+}
+
+fn build_repl_meta(
+    cfg: &Config,
+    auth: &std::collections::BTreeMap<String, String>,
+    mcp: &McpTools,
+    using_oauth: bool,
+) -> ReplMeta {
+    let (provider, model, base_url) = if using_oauth {
+        resolve_start_model_info(cfg, auth, true)
+    } else {
+        resolve_configured_model_info(cfg, auth)
+    };
+    let provider_label = resolve_provider_label(cfg, &provider, &base_url);
+    let mut tools: Vec<String> = builtin_tool_specs()
+        .iter()
+        .map(|spec| spec.name.clone())
+        .collect();
+    tools.extend(mcp.tool_names());
+    ReplMeta {
+        tools,
+        provider,
+        provider_label,
+        model,
+        base_url,
+        status_bar: cfg
+            .status_bar
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| tui::DEFAULT_STATUS_BAR.to_string()),
+        ctx_window: tui::DEFAULT_CTX_WINDOW,
+    }
+}
+
+async fn run_without_provider(
+    cfg: &Config,
+    auth: &std::collections::BTreeMap<String, String>,
+    task: Option<String>,
+    cli_skip_danger: bool,
+    resume: bool,
+    read_only: bool,
+    effort: String,
+) -> anyhow::Result<()> {
+    if task.is_some() || !tui_requested() {
+        eprintln!(
+            "[ridgecode] no key found, running the offline scripted demo. Provide a key to use a real LLM / TUI, pick one:\n  \
+             路 set the RIDGE_API_KEY env var; or\n  \
+             路 put \"api_key\" in one of the providers profiles in ~/.ridge/config.json (plaintext, at your own risk),\n    \
+             or point \"key_env\" at an already-exported env var name. See config.example.json in the same directory.\n"
+        );
+        return run_demo().await;
+    }
+    let mcp = resolve_configured_mcp(cfg).await;
+    let skills = load_configured_skills(cfg);
+    let budget = cfg.budget_tokens.unwrap_or(0);
+    configure_runtime(cfg);
+    let agents = Arc::new(build_agents(cfg, auth));
+    let initial = if resume {
+        load_session(&session_path())
+    } else {
+        Vec::new()
+    };
+    let meta = build_repl_meta(cfg, auth, &mcp, false);
+    let swap = Arc::new(SwapProvider::new(tui_fixture_provider(
+        missing_key_provider(),
+    )));
+    let commands = load_configured_commands(cfg, &skills);
+    tui::run(
+        swap,
+        mcp,
+        skills,
+        cli_skip_danger || cfg.skip_danger.unwrap_or(false),
+        budget,
+        initial,
+        meta,
+        agents,
+        read_only,
+        commands,
+        effort,
+    )
+    .await
 }
 
 fn missing_key_provider() -> Arc<dyn LlmProvider> {
@@ -935,7 +1038,15 @@ fn init_tracing() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        apply_proxy_env, configured_profile, global_input_history_path, load_prompt_history,
+        load_session, missing_key_provider, parse_duration, real_provider,
+        resolve_configured_model_info, resolve_model_info, resolve_provider_label,
+        resolve_start_model_info, save_prompt_history, save_session, session_input_history_path,
+        MAX_PROMPT_HISTORY,
+    };
+    use crate::Config;
+    use provider::Message;
 
     /// 时间触发器间隔解析:s/m/h 后缀 + 裸数字当秒;坏/零 → None。
     #[test]

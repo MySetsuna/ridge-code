@@ -1,9 +1,25 @@
 use std::borrow::Cow;
+use std::collections::VecDeque;
 
+use super::{
+    alert_edges, char_cells, clip_display_cells, compact_status_line, context_pressure_role,
+    ctx_percent, cwd_name, fence_language, fence_without_language, fmt_busy_phase, fmt_busy_signal,
+    fmt_progress_diagnostic, input_chrome, input_height, live_markdown_spans_with_alert_edge,
+    render_status_template, role_color, sanitize_display_text, selection_style,
+    status_line_projection, str_cells, stream_channel_badge, tail_display_cells, telemetry_surface,
+    todo_progress, wrap_input, wrapped_rows, ActivityEntry, ActivityKind, AlertEdge, AnswerEntry,
+    ApprovalRequest, InputChromeArgs, LiveBlockFocus, LiveChannel, LiveLine, LiveLineAnchor,
+    LiveLineKind, LiveTranscript, Panel, PanelKind, PanelRow, ReasoningEntry, ReplMeta, Role,
+    StatusVars, Ui, Vitals,
+};
 use ratatui::buffer::Buffer;
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Position, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+};
 use unicode_segmentation::UnicodeSegmentation;
-
-use super::*;
 
 /// Shared interactive surface grammar. Titles, roles, and dimensions remain
 /// owned by each caller; only the stable frame language lives here.
@@ -377,96 +393,116 @@ fn panel_micro_hint(kind: PanelKind) -> &'static str {
 }
 
 pub(crate) fn panel_hint(panel: &Panel, width: u16) -> String {
-    let full = if panel.editing.is_some() {
-        if panel.kind == PanelKind::Login {
+    let full = panel_full_hint(panel);
+    let compact = panel_compact_hint(panel, width);
+    let text = panel_width_hint(panel, width, full, compact);
+    // Keep the audit attention switch discoverable while a read-only panel
+    // covers the live stream.  Reserve its cells before clipping the longer
+    // panel-specific hint, so the affordance cannot disappear at the right
+    // edge and ordinary panel hints remain truthful at narrow widths.
+    panel_attention_hint(text, panel, width)
+}
+
+fn panel_full_hint(panel: &Panel) -> &'static str {
+    if panel.editing.is_some() {
+        return if panel.kind == PanelKind::Login {
             "Enter verify & connect · Esc cancel"
         } else {
             "Enter save · Esc cancel"
+        };
+    }
+    match panel.kind {
+        PanelKind::Config => "↑↓ select · Enter edit · type to filter · Esc close",
+        PanelKind::Models | PanelKind::Provider => {
+            "↑↓ select · Enter switch · type to filter · Esc close"
         }
-    } else {
-        match panel.kind {
-            PanelKind::Config => "↑↓ select · Enter edit · type to filter · Esc close",
-            PanelKind::Models | PanelKind::Provider => {
-                "↑↓ select · Enter switch · type to filter · Esc close"
-            }
-            PanelKind::Login => "↑↓ pick provider · Enter enter key · type to filter · Esc close",
-            PanelKind::Queue => "select · Delete remove · Ctrl+I inspect · type to filter · Esc close",
-            PanelKind::ToolHistory | PanelKind::ReasoningHistory | PanelKind::AnswerHistory => {
-                "↑↓/PgUp/PgDn select · Alt+PgUp/PgDn scroll detail · Home/End jump · Enter expand · Esc close"
-            }
-            PanelKind::LiveHistory => {
-                "Ctrl+Space hold/follow · ↑↓/PgUp/PgDn select · Alt+PgUp/PgDn scroll detail · Home/End jump · Enter/Space expand · Delete pending · Ctrl+Q queue · Esc close"
-            }
-            PanelKind::Activity => {
-                "↑↓ select · Alt+PgUp/PgDn scroll detail · Enter expand · type to filter · Esc close"
-            }
-            PanelKind::Tools
-            | PanelKind::Agent
-            | PanelKind::Mcp
-            | PanelKind::Skills => {
-                "↑↓ scroll · type to filter · Esc close"
-            }
+        PanelKind::Login => "↑↓ pick provider · Enter enter key · type to filter · Esc close",
+        PanelKind::Queue => "select · Delete remove · Ctrl+I inspect · type to filter · Esc close",
+        PanelKind::ToolHistory | PanelKind::ReasoningHistory | PanelKind::AnswerHistory => {
+            "↑↓/PgUp/PgDn select · Alt+PgUp/PgDn scroll detail · Home/End jump · Enter expand · Esc close"
         }
-    };
-    let compact = if panel.editing.is_some() {
-        "Enter · Esc"
-    } else if panel.kind == PanelKind::Queue {
-        "select · Del remove · Ctrl+I · Esc"
-    } else if matches!(
+        PanelKind::LiveHistory => {
+            "Ctrl+Space hold/follow · ↑↓/PgUp/PgDn select · Alt+PgUp/PgDn scroll detail · Home/End jump · Enter/Space expand · Delete pending · Ctrl+Q queue · Esc close"
+        }
+        PanelKind::Activity => {
+            "↑↓ select · Alt+PgUp/PgDn scroll detail · Enter expand · type to filter · Esc close"
+        }
+        PanelKind::Tools | PanelKind::Agent | PanelKind::Mcp | PanelKind::Skills => {
+            "↑↓ scroll · type to filter · Esc close"
+        }
+    }
+}
+
+fn panel_compact_hint(panel: &Panel, width: u16) -> &'static str {
+    if panel.editing.is_some() {
+        return "Enter · Esc";
+    }
+    if panel.kind == PanelKind::Queue {
+        return "select · Del remove · Ctrl+I · Esc";
+    }
+    if matches!(
         panel.kind,
         PanelKind::Activity
             | PanelKind::ToolHistory
             | PanelKind::ReasoningHistory
             | PanelKind::AnswerHistory
     ) {
-        if width >= 25 {
-            "Enter expand · Esc close"
-        } else if width >= 17 {
-            "↕ · Enter↗ · Esc"
-        } else {
-            "↕ Enter↗ · Esc"
-        }
-    } else if panel.kind == PanelKind::LiveHistory {
-        if width >= 24 {
-            "^Space hold/follow · ↑↓ · Enter/Space · Del pending · Ctrl+Q · Esc"
-        } else if width >= 17 {
-            "^Space·Enter↗·Esc"
-        } else {
-            "^Sp·Enter↗·Esc"
-        }
-    } else {
-        "↑↓ · Enter · Esc"
-    };
-    let text = if width >= 64 {
+        return match width {
+            width if width >= 25 => "Enter expand · Esc close",
+            width if width >= 17 => "↕ · Enter↗ · Esc",
+            _ => "↕ Enter↗ · Esc",
+        };
+    }
+    if panel.kind == PanelKind::LiveHistory {
+        return match width {
+            width if width >= 24 => {
+                "^Space hold/follow · ↑↓ · Enter/Space · Del pending · Ctrl+Q · Esc"
+            }
+            width if width >= 17 => "^Space·Enter↗·Esc",
+            _ => "^Sp·Enter↗·Esc",
+        };
+    }
+    "↑↓ · Enter · Esc"
+}
+
+fn panel_width_hint(
+    panel: &Panel,
+    width: u16,
+    full: &'static str,
+    compact: &'static str,
+) -> &'static str {
+    if width >= 64 {
         full
-    } else if width >= 32 {
-        match panel.kind {
+    } else if width >= 32
+        && matches!(
+            panel.kind,
             PanelKind::ToolHistory
-            | PanelKind::ReasoningHistory
-            | PanelKind::AnswerHistory
-            | PanelKind::Activity => "↑↓ · Enter expand · Esc close",
-            _ => full,
-        }
+                | PanelKind::ReasoningHistory
+                | PanelKind::AnswerHistory
+                | PanelKind::Activity
+        )
+    {
+        "↑↓ · Enter expand · Esc close"
+    } else if width >= 32 {
+        full
     } else if width >= 14 {
         compact
     } else {
         panel_micro_hint(panel.kind)
-    };
-    // Keep the audit attention switch discoverable while a read-only panel
-    // covers the live stream.  Reserve its cells before clipping the longer
-    // panel-specific hint, so the affordance cannot disappear at the right
-    // edge and ordinary panel hints remain truthful at narrow widths.
-    if width >= 64 && panel.allows_attention_switch() {
-        let attention = if width >= 96 {
-            " · ^A answers · ^R think · ^O tools · ^T activity"
-        } else {
-            " · ^A/^R/^O/^T audit"
-        };
-        let budget = width.saturating_sub(str_cells(attention) as u16);
-        format!("{}{attention}", clip_hint_with_close(text, budget))
-    } else {
-        clip_hint_with_close(text, width)
     }
+}
+
+fn panel_attention_hint(text: &str, panel: &Panel, width: u16) -> String {
+    if width < 64 || !panel.allows_attention_switch() {
+        return clip_hint_with_close(text, width);
+    }
+    let attention = if width >= 96 {
+        " · ^A answers · ^R think · ^O tools · ^T activity"
+    } else {
+        " · ^A/^R/^O/^T audit"
+    };
+    let budget = width.saturating_sub(str_cells(attention) as u16);
+    format!("{}{attention}", clip_hint_with_close(text, budget))
 }
 
 /// Preserve the close affordance when a long full hint is clipped from the
@@ -512,43 +548,56 @@ fn wrap_panel_lines(text: &str, width: u16) -> Vec<String> {
     let width = width.max(1) as usize;
     let mut lines = Vec::new();
     for logical in text.split('\n') {
-        let graphemes = logical.graphemes(true).collect::<Vec<_>>();
-        if graphemes.is_empty() {
-            lines.push(String::new());
-            continue;
-        }
-        let mut start = 0;
-        while start < graphemes.len() {
-            let line_start = start;
-            let mut end = start;
-            let mut cells = 0;
-            let mut last_break = None;
-            while end < graphemes.len() {
-                let used = str_cells(graphemes[end]);
-                if cells > 0 && cells + used > width {
-                    break;
-                }
-                cells += used;
-                end += 1;
-                if graphemes[end - 1].chars().all(char::is_whitespace) {
-                    last_break = Some(end);
-                }
-            }
-            let cut = if end < graphemes.len() {
-                last_break
-                    .filter(|&break_at| break_at > line_start)
-                    .unwrap_or(end)
-            } else {
-                end
-            };
-            lines.push(graphemes[line_start..cut].concat().trim_end().to_owned());
-            start = cut.max(line_start + 1);
-            while start < graphemes.len() && graphemes[start].chars().all(char::is_whitespace) {
-                start += 1;
-            }
+        lines.extend(wrap_panel_logical_line(logical, width));
+    }
+    lines
+}
+
+fn wrap_panel_logical_line(logical: &str, width: usize) -> Vec<String> {
+    let graphemes = logical.graphemes(true).collect::<Vec<_>>();
+    if graphemes.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut start = 0;
+    while start < graphemes.len() {
+        let (end, last_break) = panel_line_end(&graphemes, start, width);
+        let cut = panel_line_cut(end, last_break, start, graphemes.len());
+        lines.push(graphemes[start..cut].concat().trim_end().to_owned());
+        start = cut.max(start + 1);
+        while start < graphemes.len() && graphemes[start].chars().all(char::is_whitespace) {
+            start += 1;
         }
     }
     lines
+}
+
+fn panel_line_end(graphemes: &[&str], start: usize, width: usize) -> (usize, Option<usize>) {
+    let mut end = start;
+    let mut cells = 0;
+    let mut last_break = None;
+    while end < graphemes.len() {
+        let used = str_cells(graphemes[end]);
+        if cells > 0 && cells + used > width {
+            break;
+        }
+        cells += used;
+        end += 1;
+        if graphemes[end - 1].chars().all(char::is_whitespace) {
+            last_break = Some(end);
+        }
+    }
+    (end, last_break)
+}
+
+fn panel_line_cut(end: usize, last_break: Option<usize>, start: usize, len: usize) -> usize {
+    if end < len {
+        last_break
+            .filter(|&break_at| break_at > start)
+            .unwrap_or(end)
+    } else {
+        end
+    }
 }
 
 fn panel_item(text: String, width: u16) -> ListItem<'static> {
@@ -703,51 +752,12 @@ pub(crate) fn pending_queue_lines(
     let mut shown_messages = 0usize;
     let mut truncated = false;
     for (index, message) in queue.iter().enumerate() {
-        let prefix = if index == 0 {
-            "⏭ next ".to_owned()
-        } else {
-            format!("⏳ [{}] ", index + 1)
-        };
-        let body_width = width.saturating_sub(str_cells(&prefix) as u16).max(1);
-        // The visible preview is bounded by rows, so do not wrap an entire
-        // pasted command just to discard all but its first few rows.  The
-        // extra character probe is capped by the same preview budget and
-        // keeps the queue's full message untouched for later execution.
-        let preview_char_limit = (body_width as usize)
-            .saturating_mul(preview_rows)
-            .saturating_add(1)
-            .min(MAX_PENDING_PREVIEW_CHARS);
-        let preview = message.chars().take(preview_char_limit).collect::<String>();
-        let message_clipped = message.chars().nth(preview_char_limit).is_some();
-        let wrapped = wrap_input(&preview, preview.chars().count(), body_width).0;
-        let mut shown = false;
-        for (row, text) in wrapped.into_iter().enumerate() {
-            if lines.len() == preview_rows {
-                truncated = true;
-                break;
-            }
-            let lead = if row == 0 {
-                prefix.clone()
-            } else {
-                " ".repeat(str_cells(&prefix))
-            };
-            lines.push(Line::from(Span::styled(
-                format!("{lead}{text}"),
-                Style::default()
-                    // Queued work is active user intent, not a warning.
-                    .fg(role_color(Role::Primary))
-                    .add_modifier(if row == 0 {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::DIM
-                    }),
-            )));
-            shown = true;
-        }
-        if shown {
+        let preview = pending_message_preview(message, index, width, preview_rows);
+        truncated |= append_pending_preview(&mut lines, preview.lines, preview_rows);
+        if preview.shown {
             shown_messages += 1;
         }
-        truncated |= message_clipped;
+        truncated |= preview.clipped;
         if truncated {
             break;
         }
@@ -765,6 +775,74 @@ pub(crate) fn pending_queue_lines(
         )));
     }
     lines
+}
+
+fn append_pending_preview(
+    lines: &mut Vec<Line<'static>>,
+    preview: Vec<Line<'static>>,
+    max_rows: usize,
+) -> bool {
+    for line in preview {
+        if lines.len() == max_rows {
+            return true;
+        }
+        lines.push(line);
+    }
+    false
+}
+
+struct PendingMessagePreview {
+    lines: Vec<Line<'static>>,
+    shown: bool,
+    clipped: bool,
+}
+
+fn pending_message_preview(
+    message: &str,
+    index: usize,
+    width: u16,
+    preview_rows: usize,
+) -> PendingMessagePreview {
+    let prefix = if index == 0 {
+        "⏭ next ".to_owned()
+    } else {
+        format!("⏳ [{}] ", index + 1)
+    };
+    let body_width = width.saturating_sub(str_cells(&prefix) as u16).max(1);
+    let preview_char_limit = (body_width as usize)
+        .saturating_mul(preview_rows)
+        .saturating_add(1)
+        .min(MAX_PENDING_PREVIEW_CHARS);
+    let preview = message.chars().take(preview_char_limit).collect::<String>();
+    let clipped = message.chars().nth(preview_char_limit).is_some();
+    let lines = wrap_input(&preview, preview.chars().count(), body_width)
+        .0
+        .into_iter()
+        .enumerate()
+        .take(preview_rows)
+        .map(|(row, text)| {
+            let lead = if row == 0 {
+                prefix.clone()
+            } else {
+                " ".repeat(str_cells(&prefix))
+            };
+            Line::from(Span::styled(
+                format!("{lead}{text}"),
+                Style::default()
+                    .fg(role_color(Role::Primary))
+                    .add_modifier(if row == 0 {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::DIM
+                    }),
+            ))
+        })
+        .collect::<Vec<_>>();
+    PendingMessagePreview {
+        shown: !lines.is_empty(),
+        lines,
+        clipped,
+    }
 }
 
 /// A compact, low-saturation breadcrumb of observed phases.  It is a
@@ -995,57 +1073,67 @@ fn detail_match_row(line: &str, query: &str, width: usize) -> Option<usize> {
 
 /// 交互页模态绘制(iter-35):居中框(≤80 宽)= 搜索/编辑行 + 过滤列表(选中高亮)+ 提示行。
 fn standard_panel_items(panel: &Panel, width: u16) -> Vec<ListItem<'static>> {
-    if panel.kind == PanelKind::Models {
-        let mut items = Vec::new();
-        let mut last_group: Option<&str> = None;
-        for &i in &panel.view {
-            let row = &panel.rows[i];
-            let group = row.key.split_once(" · ").map(|(g, _)| g);
-            if group != last_group {
-                let header = format!(" ── {} ──", group.unwrap_or(""));
-                items.push(panel_item_styled(
-                    header,
-                    width,
-                    Style::default()
-                        .fg(role_color(Role::Muted))
-                        .add_modifier(Modifier::BOLD),
-                ));
-                last_group = group;
-            }
-            let name = row
-                .key
-                .split_once(" · ")
-                .map(|(_, model)| model)
-                .unwrap_or(&row.key);
-            let line = if row.value.is_empty() {
-                format!("  {name}")
-            } else {
-                format!("  {name:<18} {}", row.value)
-            };
-            items.push(panel_item(line, width));
-        }
-        items
-    } else if panel.kind == PanelKind::Activity {
-        panel
-            .view
-            .iter()
-            .map(|&index| panel_item(compact_activity_item(&panel.rows[index], width), width))
-            .collect()
-    } else {
-        panel
-            .view
-            .iter()
-            .map(|&index| {
-                let row = &panel.rows[index];
-                let line = if row.value.is_empty() {
-                    row.key.clone()
-                } else {
-                    format!("{:<18} {}", row.key, row.value)
-                };
-                panel_item(line, width)
-            })
-            .collect()
+    match panel.kind {
+        PanelKind::Models => model_panel_items(panel, width),
+        PanelKind::Activity => activity_panel_items(panel, width),
+        _ => value_panel_items(panel, width),
     }
+}
+
+fn model_panel_items(panel: &Panel, width: u16) -> Vec<ListItem<'static>> {
+    let mut items = Vec::new();
+    let mut last_group: Option<&str> = None;
+    for &i in &panel.view {
+        let row = &panel.rows[i];
+        let group = row.key.split_once(" · ").map(|(g, _)| g);
+        if group != last_group {
+            let header = format!(" ── {} ──", group.unwrap_or(""));
+            items.push(panel_item_styled(
+                header,
+                width,
+                Style::default()
+                    .fg(role_color(Role::Muted))
+                    .add_modifier(Modifier::BOLD),
+            ));
+            last_group = group;
+        }
+        let name = row
+            .key
+            .split_once(" · ")
+            .map(|(_, model)| model)
+            .unwrap_or(&row.key);
+        let line = if row.value.is_empty() {
+            format!("  {name}")
+        } else {
+            format!("  {name:<18} {}", row.value)
+        };
+        items.push(panel_item(line, width));
+    }
+    items
+}
+
+fn activity_panel_items(panel: &Panel, width: u16) -> Vec<ListItem<'static>> {
+    panel
+        .view
+        .iter()
+        .map(|&index| panel_item(compact_activity_item(&panel.rows[index], width), width))
+        .collect()
+}
+
+fn value_panel_items(panel: &Panel, width: u16) -> Vec<ListItem<'static>> {
+    panel
+        .view
+        .iter()
+        .map(|&index| {
+            let row = &panel.rows[index];
+            let line = if row.value.is_empty() {
+                row.key.clone()
+            } else {
+                format!("{:<18} {}", row.key, row.value)
+            };
+            panel_item(line, width)
+        })
+        .collect()
 }
 
 fn detail_panel_items(panel: &Panel, width: u16) -> Vec<ListItem<'static>> {
@@ -1057,36 +1145,50 @@ fn detail_panel_items(panel: &Panel, width: u16) -> Vec<ListItem<'static>> {
             let row = &panel.rows[index];
             let selected = selected_index == Some(index);
             if panel.kind == PanelKind::Activity {
-                return panel_item_styled(
+                panel_item_styled(
                     compact_activity_item(row, width),
                     width,
                     Style::default().fg(role_color(Role::Info)),
-                );
-            }
-            let marker = if row.value.is_empty() {
-                "· "
-            } else if panel.kind == PanelKind::ReasoningHistory {
-                if selected {
-                    "┃ "
-                } else {
-                    "│ "
-                }
-            } else if panel.kind == PanelKind::LiveHistory && selected {
-                "┃ "
-            } else if panel.detail_open && selected {
-                "▾ "
+                )
             } else {
-                "▸ "
-            };
-            let style = audit_row_style(panel.kind, &row.key, selected);
-            let (role, _) = audit_channel(panel.kind, &row.key);
-            if row.value.is_empty() {
-                panel_item_styled(format!("{marker}{}", row.key), width, style)
-            } else {
-                panel_item_with_rail(row.key.clone(), width, marker, role, style)
+                detail_panel_item(panel, row, selected, width)
             }
         })
         .collect()
+}
+
+fn detail_panel_item(
+    panel: &Panel,
+    row: &PanelRow,
+    selected: bool,
+    width: u16,
+) -> ListItem<'static> {
+    let marker = detail_panel_marker(panel, row, selected);
+    let style = audit_row_style(panel.kind, &row.key, selected);
+    let (role, _) = audit_channel(panel.kind, &row.key);
+    if row.value.is_empty() {
+        panel_item_styled(format!("{marker}{}", row.key), width, style)
+    } else {
+        panel_item_with_rail(row.key.clone(), width, marker, role, style)
+    }
+}
+
+fn detail_panel_marker(panel: &Panel, row: &PanelRow, selected: bool) -> &'static str {
+    if row.value.is_empty() {
+        "· "
+    } else if panel.kind == PanelKind::ReasoningHistory {
+        if selected {
+            "┃ "
+        } else {
+            "│ "
+        }
+    } else if panel.kind == PanelKind::LiveHistory && selected {
+        "┃ "
+    } else if panel.detail_open && selected {
+        "▾ "
+    } else {
+        "▸ "
+    }
 }
 
 #[cfg(test)]
@@ -1109,6 +1211,15 @@ fn draw_panel_with_cache(
         draw_history_detail_panel(frame, area, panel, panel_cache);
         return;
     }
+    draw_standard_panel(frame, area, panel, panel_cache);
+}
+
+fn draw_standard_panel(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    panel: &Panel,
+    panel_cache: &mut PanelLayoutCache,
+) {
     let rect = panel_rect_for_kind(area, panel.kind);
     let block = rounded_surface_block()
         .title(panel_title(panel, rect.width.saturating_sub(2)))
@@ -1120,33 +1231,10 @@ fn draw_panel_with_cache(
         .border_style(Style::default().fg(role_color(Role::Border)));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
-    let show_query = inner.height >= 3;
-    let show_hint = inner.height >= 2;
-    let mut constraints = Vec::with_capacity(3);
-    if show_query {
-        constraints.push(Constraint::Length(1)); // 搜索/编辑行
-    }
-    constraints.push(Constraint::Min(1)); // 列表
-    if show_hint {
-        constraints.push(Constraint::Length(1)); // 提示
-    }
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(inner);
+    let (rows, show_query, show_hint) = standard_panel_rows(inner);
     let list_index = usize::from(show_query);
     // 搜索行(编辑态显编辑缓冲;登录页的 key 输入掩码,防肩窥)。
-    let (head, head_color) = match &panel.editing {
-        Some(buf) if panel.kind == PanelKind::Login => (
-            format!("✎ API key: {}", "•".repeat(buf.chars().count())),
-            role_color(Role::Warn),
-        ),
-        Some(buf) => (format!("✎ new value: {buf}"), role_color(Role::Warn)),
-        None => (
-            panel_query(&panel.query, inner.width),
-            role_color(Role::Muted),
-        ),
-    };
+    let (head, head_color) = panel_head(panel, inner.width);
     if show_query {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -1157,25 +1245,7 @@ fn draw_panel_with_cache(
         );
     }
     // 过滤列表:key 左对齐 + 右列值。Models 页加 provider 分栏标题。
-    let sel_in_items = if panel.kind == PanelKind::Models {
-        let mut idx = 0;
-        let mut last_group: Option<&str> = None;
-        for (vi, &i) in panel.view.iter().enumerate() {
-            let row = &panel.rows[i];
-            let group = row.key.split_once(" · ").map(|(group, _)| group);
-            if group != last_group {
-                idx += 1;
-                last_group = group;
-            }
-            if vi == panel.sel {
-                break;
-            }
-            idx += 1;
-        }
-        (!panel.view.is_empty()).then_some(idx)
-    } else {
-        (!panel.view.is_empty()).then_some(panel.sel)
-    };
+    let sel_in_items = panel_item_selection(panel);
     let (items, selected_item) = panel_cache.items.viewport(
         panel,
         rows[list_index].width,
@@ -1199,6 +1269,56 @@ fn draw_panel_with_cache(
             rows[hint_index],
         );
     }
+}
+
+fn standard_panel_rows(inner: Rect) -> (std::rc::Rc<[Rect]>, bool, bool) {
+    let show_query = inner.height >= 3;
+    let show_hint = inner.height >= 2;
+    let mut constraints = Vec::with_capacity(3);
+    if show_query {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Min(1));
+    if show_hint {
+        constraints.push(Constraint::Length(1));
+    }
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+    (rows, show_query, show_hint)
+}
+
+fn panel_head(panel: &Panel, width: u16) -> (String, Color) {
+    match &panel.editing {
+        Some(buffer) if panel.kind == PanelKind::Login => (
+            format!("✎ API key: {}", "•".repeat(buffer.chars().count())),
+            role_color(Role::Warn),
+        ),
+        Some(buffer) => (format!("✎ new value: {buffer}"), role_color(Role::Warn)),
+        None => (panel_query(&panel.query, width), role_color(Role::Muted)),
+    }
+}
+
+fn panel_item_selection(panel: &Panel) -> Option<usize> {
+    if panel.kind != PanelKind::Models {
+        return (!panel.view.is_empty()).then_some(panel.sel);
+    }
+    let mut selected = 0;
+    let mut last_group: Option<&str> = None;
+    for (view_index, &row_index) in panel.view.iter().enumerate() {
+        let row = &panel.rows[row_index];
+        let group = row.key.split_once(" · ").map(|(group, _)| group);
+        if group != last_group {
+            selected += 1;
+            last_group = group;
+        }
+        if view_index == panel.sel {
+            break;
+        }
+        selected += 1;
+    }
+    (!panel.view.is_empty()).then_some(selected)
 }
 
 /// 历史块检视器:原生 scrollback 保持静态,当前摘要列表与有界详情在 live modal 中交互。
@@ -1317,11 +1437,36 @@ fn draw_history_detail_panel(
     let selected_detail = selected_row
         .filter(|row| panel.detail_open && !row.value.is_empty())
         .map(|row| row.value.clone());
-    // Wide audit frames have enough horizontal room to keep the block rail and
-    // the selected Answer/Reasoning detail visible at once.  Narrow frames
-    // retain the vertical stack so the detail column never becomes unreadable.
+    if draw_history_expanded_detail(
+        frame,
+        inner,
+        panel,
+        panel_cache,
+        selected_row,
+        selected_detail.as_deref(),
+    ) {
+        return;
+    }
+    draw_history_list_panel(
+        frame,
+        inner,
+        panel,
+        panel_cache,
+        selected_row,
+        selected_detail,
+    );
+}
+
+fn draw_history_expanded_detail(
+    frame: &mut ratatui::Frame,
+    inner: Rect,
+    panel: &Panel,
+    panel_cache: &mut PanelLayoutCache,
+    selected_row: Option<&PanelRow>,
+    selected_detail: Option<&str>,
+) -> bool {
     if inner.width >= 72 && inner.height >= 8 {
-        if let Some(detail) = selected_detail.as_deref() {
+        if let Some(detail) = selected_detail {
             draw_history_detail_split(
                 frame,
                 inner,
@@ -1330,18 +1475,26 @@ fn draw_history_detail_panel(
                 detail,
                 selected_row.map(|row| row.key.as_str()).unwrap_or_default(),
             );
-            return;
+            return true;
         }
     }
-    // In a narrow modal, an explicitly opened detail is the user's audit
-    // target.  Remove only the competing list projection; the selected row,
-    // query, scroll offset, and all key semantics remain unchanged.
     if inner.width < 72 && inner.height >= 6 {
-        if let (Some(detail), Some(row)) = (selected_detail.as_deref(), selected_row) {
+        if let (Some(detail), Some(row)) = (selected_detail, selected_row) {
             draw_narrow_history_detail(frame, inner, panel, panel_cache, detail, row.key.as_str());
-            return;
+            return true;
         }
     }
+    false
+}
+
+fn draw_history_list_panel(
+    frame: &mut ratatui::Frame,
+    inner: Rect,
+    panel: &Panel,
+    panel_cache: &mut PanelLayoutCache,
+    selected_row: Option<&PanelRow>,
+    selected_detail: Option<String>,
+) {
     let show_query = inner.height >= 3;
     let show_hint = inner.height >= 2;
     let max_detail = inner.height.saturating_sub(3).max(1) as usize;
@@ -2003,46 +2156,49 @@ fn live_wrap_units(spans: Vec<Span<'static>>) -> Vec<LiveWrapUnit> {
     for span in spans {
         let style = span.style;
         for grapheme in span.content.as_ref().graphemes(true) {
-            if grapheme == "\n" {
-                if let Some(kind) = kind.take() {
-                    let chunk = std::mem::take(&mut fragments);
-                    units.push(if kind {
-                        LiveWrapUnit::Whitespace(chunk)
-                    } else {
-                        LiveWrapUnit::Word(chunk)
-                    });
-                }
-                units.push(LiveWrapUnit::Newline);
-                continue;
-            }
-
-            let whitespace = grapheme.chars().all(char::is_whitespace);
-            if kind.is_some_and(|current| current != whitespace) {
-                let previous = kind.take().expect("live unit kind exists");
-                let chunk = std::mem::take(&mut fragments);
-                units.push(if previous {
-                    LiveWrapUnit::Whitespace(chunk)
-                } else {
-                    LiveWrapUnit::Word(chunk)
-                });
-            }
-            kind = Some(whitespace);
-            fragments.push(LiveFragment {
-                text: grapheme.to_owned(),
-                style,
-                cells: str_cells(grapheme),
-            });
+            append_live_wrap_grapheme(&mut units, &mut kind, &mut fragments, grapheme, style);
         }
     }
-
-    if let Some(kind) = kind {
-        units.push(if kind {
-            LiveWrapUnit::Whitespace(fragments)
-        } else {
-            LiveWrapUnit::Word(fragments)
-        });
-    }
+    flush_live_wrap_unit(&mut units, &mut kind, &mut fragments);
     units
+}
+
+fn append_live_wrap_grapheme(
+    units: &mut Vec<LiveWrapUnit>,
+    kind: &mut Option<bool>,
+    fragments: &mut Vec<LiveFragment>,
+    grapheme: &str,
+    style: Style,
+) {
+    if grapheme == "\n" {
+        flush_live_wrap_unit(units, kind, fragments);
+        units.push(LiveWrapUnit::Newline);
+        return;
+    }
+    let whitespace = grapheme.chars().all(char::is_whitespace);
+    if kind.is_some_and(|current| current != whitespace) {
+        flush_live_wrap_unit(units, kind, fragments);
+    }
+    *kind = Some(whitespace);
+    fragments.push(LiveFragment {
+        text: grapheme.to_owned(),
+        style,
+        cells: str_cells(grapheme),
+    });
+}
+
+fn flush_live_wrap_unit(
+    units: &mut Vec<LiveWrapUnit>,
+    kind: &mut Option<bool>,
+    fragments: &mut Vec<LiveFragment>,
+) {
+    let Some(kind) = kind.take() else { return };
+    let chunk = std::mem::take(fragments);
+    units.push(if kind {
+        LiveWrapUnit::Whitespace(chunk)
+    } else {
+        LiveWrapUnit::Word(chunk)
+    });
 }
 
 fn live_fragments_cells(fragments: &[LiveFragment]) -> usize {
@@ -2241,101 +2397,154 @@ pub(crate) fn wrap_live_spans_tail(
     let width = width.max(1) as usize;
     let max_rows = max_rows.max(1);
     if spans.iter().any(|span| span.content.contains('\n')) {
-        let rows = wrap_live_spans(spans, width as u16);
-        let skip = rows.len().saturating_sub(max_rows);
-        return rows.into_iter().skip(skip).collect();
+        return wrap_live_tail_newlines(spans, width, max_rows);
     }
     let total_cells = spans
         .iter()
         .map(|span| str_cells(span.content.as_ref()))
         .sum::<usize>();
     if total_cells <= width.saturating_mul(max_rows) {
-        let rows = wrap_live_spans(spans.clone(), width as u16);
-        if rows.len() <= max_rows {
-            return rows;
-        }
-        // A bounded synthetic tail (notably the leading `…` marker) must stay
-        // observable even when word-preferred breaks would waste a row.
-        return wrap_live_spans_greedy(spans, width as u16);
+        return wrap_live_tail_bounded(spans, width, max_rows);
     }
-    let has_whitespace = spans.iter().any(|span| {
+    if !live_spans_have_whitespace(&spans) {
+        return wrap_live_tail_hard(&spans, width, max_rows, total_cells);
+    }
+    wrap_live_tail_words(&spans, width, max_rows)
+}
+
+fn wrap_live_tail_newlines(
+    spans: Vec<Span<'static>>,
+    width: usize,
+    max_rows: usize,
+) -> Vec<Vec<Span<'static>>> {
+    let rows = wrap_live_spans(spans, width as u16);
+    let skip = rows.len().saturating_sub(max_rows);
+    rows.into_iter().skip(skip).collect()
+}
+
+fn wrap_live_tail_bounded(
+    spans: Vec<Span<'static>>,
+    width: usize,
+    max_rows: usize,
+) -> Vec<Vec<Span<'static>>> {
+    let rows = wrap_live_spans(spans.clone(), width as u16);
+    if rows.len() <= max_rows {
+        return rows;
+    }
+    wrap_live_spans_greedy(spans, width as u16)
+}
+
+fn live_spans_have_whitespace(spans: &[Span<'static>]) -> bool {
+    spans.iter().any(|span| {
         span.content
             .as_ref()
             .graphemes(true)
             .any(|grapheme| grapheme.chars().all(char::is_whitespace))
-    });
-    if !has_whitespace {
-        // Reverse traversal needs the first row's remainder to reproduce the
-        // forward hard-wrap for an unbroken token (e.g. 16 cells at width 14
-        // => 14 + 2, not 2 + 14).
-        let mut row_limit = if total_cells > width && total_cells % width != 0 {
-            total_cells % width
-        } else {
-            width
-        };
-        let mut rows = vec![Vec::new()];
-        let mut cells = 0usize;
+    })
+}
 
-        'spans: for span in spans.iter().rev() {
-            for grapheme in span.content.as_ref().graphemes(true).rev() {
-                let used = str_cells(grapheme);
-                if cells > 0 && cells.saturating_add(used) > row_limit {
-                    if rows.len() == max_rows {
-                        break 'spans;
-                    }
-                    rows.push(Vec::new());
-                    cells = 0;
-                    row_limit = width;
+fn wrap_live_tail_hard(
+    spans: &[Span<'static>],
+    width: usize,
+    max_rows: usize,
+    total_cells: usize,
+) -> Vec<Vec<Span<'static>>> {
+    let mut row_limit = if total_cells > width && !total_cells.is_multiple_of(width) {
+        total_cells % width
+    } else {
+        width
+    };
+    let mut rows = vec![Vec::new()];
+    let mut cells = 0usize;
+    'spans: for span in spans.iter().rev() {
+        for grapheme in span.content.as_ref().graphemes(true).rev() {
+            let used = str_cells(grapheme);
+            if cells > 0 && cells.saturating_add(used) > row_limit {
+                if rows.len() == max_rows {
+                    break 'spans;
                 }
-                rows.last_mut()
-                    .expect("live tail wrap always owns one row")
-                    .push(Span::styled(grapheme.to_owned(), span.style));
-                cells = cells.saturating_add(used);
+                rows.push(Vec::new());
+                cells = 0;
+                row_limit = width;
             }
+            rows.last_mut()
+                .expect("live tail wrap always owns one row")
+                .push(Span::styled(grapheme.to_owned(), span.style));
+            cells = cells.saturating_add(used);
         }
-        for row in &mut rows {
-            row.reverse();
-        }
-        rows.reverse();
-        return rows;
     }
+    rows.iter_mut().for_each(|row| row.reverse());
+    rows.reverse();
+    rows
+}
 
+fn wrap_live_tail_words(
+    spans: &[Span<'static>],
+    width: usize,
+    max_rows: usize,
+) -> Vec<Vec<Span<'static>>> {
     let mut wrap = LiveTailWrap::new(width, max_rows);
     let mut kind = None;
     let mut fragments = Vec::new();
     'spans: for span in spans.iter().rev() {
         for grapheme in span.content.as_ref().graphemes(true).rev() {
-            let whitespace = grapheme.chars().all(char::is_whitespace);
-            if kind.is_some_and(|current| current != whitespace) {
-                let previous = kind.take().expect("live tail unit kind exists");
-                let chunk = std::mem::take(&mut fragments);
-                let keep = if previous {
-                    wrap.whitespace(chunk);
-                    true
-                } else {
-                    wrap.word(chunk)
-                };
-                if !keep {
-                    break 'spans;
-                }
+            if !append_reverse_live_grapheme(
+                &mut wrap,
+                &mut kind,
+                &mut fragments,
+                grapheme,
+                span.style,
+            ) {
+                break 'spans;
             }
-            kind = Some(whitespace);
-            fragments.push(LiveFragment {
-                text: grapheme.to_owned(),
-                style: span.style,
-                cells: str_cells(grapheme),
-            });
         }
     }
-    if let Some(kind) = kind {
-        let chunk = std::mem::take(&mut fragments);
-        if kind {
-            wrap.whitespace(chunk);
-        } else {
-            wrap.word(chunk);
-        }
-    }
+    flush_reverse_live_unit(&mut wrap, &mut kind, &mut fragments);
     wrap.finish()
+}
+
+fn append_reverse_live_grapheme(
+    wrap: &mut LiveTailWrap,
+    kind: &mut Option<bool>,
+    fragments: &mut Vec<LiveFragment>,
+    grapheme: &str,
+    style: Style,
+) -> bool {
+    let whitespace = grapheme.chars().all(char::is_whitespace);
+    if kind.is_some_and(|current| current != whitespace) {
+        let previous = kind.take().expect("live tail unit kind exists");
+        let chunk = std::mem::take(fragments);
+        let keep = if previous {
+            wrap.whitespace(chunk);
+            true
+        } else {
+            wrap.word(chunk)
+        };
+        if !keep {
+            return false;
+        }
+    }
+    *kind = Some(whitespace);
+    fragments.push(LiveFragment {
+        text: grapheme.to_owned(),
+        style,
+        cells: str_cells(grapheme),
+    });
+    true
+}
+
+fn flush_reverse_live_unit(
+    wrap: &mut LiveTailWrap,
+    kind: &mut Option<bool>,
+    fragments: &mut Vec<LiveFragment>,
+) {
+    let Some(kind) = kind.take() else { return };
+    let chunk = std::mem::take(fragments);
+    if kind {
+        wrap.whitespace(chunk);
+    } else {
+        wrap.word(chunk);
+    }
 }
 
 fn live_continuation_rail(rail: &str) -> &'static str {
@@ -2426,15 +2635,48 @@ fn render_live_tail_projection(
             current != next
         })
         .collect::<Vec<_>>();
-    // Audit focus is a render projection over existing anchored rows. It must
-    // not become a second transcript or alter ordinary Follow rendering.
     let focused_block = transcript
         .is_inspecting()
         .then(|| transcript.focused_block())
         .flatten();
+    let physical_tail = collect_live_tail_rows(
+        visible_lines,
+        semantic_alert_edges,
+        block_ends,
+        LiveTailRowsConfig {
+            width,
+            max_rows,
+            busy,
+            anchored,
+            last_visible_line,
+            focused_block,
+        },
+    );
+    let anchor = physical_tail.front().and_then(|(anchor, _)| *anchor);
+    RenderedLiveTail {
+        lines: physical_tail.into_iter().map(|(_, line)| line).collect(),
+        anchor,
+    }
+}
+
+struct LiveTailRowsConfig {
+    width: u16,
+    max_rows: usize,
+    busy: bool,
+    anchored: bool,
+    last_visible_line: usize,
+    focused_block: Option<LiveBlockFocus>,
+}
+
+fn collect_live_tail_rows<'a>(
+    visible_lines: Vec<LiveLine<'a>>,
+    semantic_alert_edges: Vec<Option<AlertEdge>>,
+    block_ends: Vec<bool>,
+    config: LiveTailRowsConfig,
+) -> VecDeque<(Option<LiveLineAnchor>, Line<'static>)> {
     let mut row_state = LiveRowState {
-        focused_block,
-        max_rows: max_rows.max(1),
+        focused_block: config.focused_block,
+        max_rows: config.max_rows.max(1),
         ..LiveRowState::default()
     };
     // The transcript already chooses a bounded logical window.  Keep a second
@@ -2443,51 +2685,61 @@ fn render_live_tail_projection(
     // The queue retains only rows that can reach this frame; semantic state is
     // still advanced for every selected logical line so rails and code fences
     // remain correct at the physical tail.
-    let mut physical_tail = VecDeque::with_capacity(max_rows);
-    let mut stop_at_viewport = false;
+    let mut physical_tail = VecDeque::with_capacity(config.max_rows);
     for (index, (line, alert_edge)) in visible_lines
         .into_iter()
         .zip(semantic_alert_edges)
         .enumerate()
     {
         row_state.block_end = block_ends.get(index).copied().unwrap_or(false);
-        let line_anchor = line.anchor;
-        let line_width = if busy && index == last_visible_line {
-            width.saturating_sub(1)
-        } else {
-            width
-        };
-        for rendered in render_live_line_with_alert_edge(
+        let stop_at_viewport = append_live_tail_line(
+            &mut physical_tail,
             line,
             index,
-            last_visible_line,
-            line_width,
-            busy,
+            &config,
             alert_edge,
             &mut row_state,
-        ) {
-            if anchored {
-                if physical_tail.len() == max_rows {
-                    stop_at_viewport = true;
-                    break;
-                }
-                physical_tail.push_back((line_anchor, rendered));
-            } else {
-                if physical_tail.len() == max_rows {
-                    physical_tail.pop_front();
-                }
-                physical_tail.push_back((line_anchor, rendered));
-            }
-        }
+        );
         if stop_at_viewport {
             break;
         }
     }
-    let anchor = physical_tail.front().and_then(|(anchor, _)| *anchor);
-    RenderedLiveTail {
-        lines: physical_tail.into_iter().map(|(_, line)| line).collect(),
-        anchor,
+    physical_tail
+}
+
+fn append_live_tail_line<'a>(
+    physical_tail: &mut VecDeque<(Option<LiveLineAnchor>, Line<'static>)>,
+    line: LiveLine<'a>,
+    index: usize,
+    config: &LiveTailRowsConfig,
+    alert_edge: Option<AlertEdge>,
+    state: &mut LiveRowState,
+) -> bool {
+    let line_anchor = line.anchor;
+    let width = if config.busy && index == config.last_visible_line {
+        config.width.saturating_sub(1)
+    } else {
+        config.width
+    };
+    for rendered in render_live_line_with_alert_edge(
+        line,
+        index,
+        config.last_visible_line,
+        width,
+        config.busy,
+        alert_edge,
+        state,
+    ) {
+        if config.anchored {
+            if physical_tail.len() == config.max_rows {
+                return true;
+            }
+        } else if physical_tail.len() == config.max_rows {
+            physical_tail.pop_front();
+        }
+        physical_tail.push_back((line_anchor, rendered));
     }
+    false
 }
 
 #[cfg(test)]
@@ -2511,17 +2763,92 @@ fn render_live_line_with_alert_edge<'a>(
     alert_edge: Option<AlertEdge>,
     state: &mut LiveRowState,
 ) -> Vec<Line<'static>> {
+    let context = live_line_context(
+        &line,
+        index,
+        last_visible_line,
+        width,
+        busy,
+        alert_edge,
+        state,
+    );
+    let prefix = live_line_prefix(&line, &context, width);
+    let content = live_line_content(
+        &line,
+        &context,
+        prefix.text_width,
+        prefix.has_badge,
+        alert_edge,
+        state,
+    );
+    let rows = wrap_live_spans_tail(content, prefix.text_width, state.max_rows);
+    live_line_rows(rows, prefix, &context)
+}
+
+struct LiveLineContext<'a> {
+    previous_kind: Option<LiveLineKind>,
+    reasoning_role: Option<Role>,
+    fence_label: Option<&'a str>,
+    continuation_rail: Option<(&'static str, Role)>,
+    rail: Option<(&'static str, Role)>,
+    chrome_modifier: Modifier,
+    body_modifier: Modifier,
+}
+
+fn live_line_context<'a>(
+    line: &LiveLine<'a>,
+    index: usize,
+    last_visible_line: usize,
+    width: u16,
+    busy: bool,
+    alert_edge: Option<AlertEdge>,
+    state: &mut LiveRowState,
+) -> LiveLineContext<'a> {
     if line.kind != LiveLineKind::Answer {
         state.alert_role = None;
     }
     if line.kind == LiveLineKind::Answer {
-        // The opener may be above the bounded visible tail; use the
-        // transcript's render-only context instead of guessing false.
         state.code_before = line.fence_before;
     }
-    // Focus marker exists on the summary only; propagate it across the
-    // contiguous visible detail tail without adding block identity to
-    // the render model.
+    let flags = live_line_flags(line, index, last_visible_line, busy, state);
+    let rail = live_line_rail(line, &flags, alert_edge, state.block_end);
+    let continuation_rail = rail.map(|(rail, role)| (live_continuation_rail(rail), role));
+    state.previous_focused_tool = match line.kind {
+        LiveLineKind::ToolSummary => line.marker == Some("▸ "),
+        LiveLineKind::ToolDetail => flags.focused_tool,
+        _ => false,
+    };
+    state.previous_kind = Some(line.kind);
+    let (chrome_modifier, body_modifier) = live_line_modifiers(line.kind, &flags, width);
+    LiveLineContext {
+        previous_kind: flags.previous_kind,
+        reasoning_role: flags.reasoning_role,
+        fence_label: flags.fence_label,
+        continuation_rail,
+        rail,
+        chrome_modifier,
+        body_modifier,
+    }
+}
+
+struct LiveLineFlags<'a> {
+    focused_tool: bool,
+    focused: bool,
+    focus_context: bool,
+    previous_kind: Option<LiveLineKind>,
+    reasoning_role: Option<Role>,
+    code_before: bool,
+    fence_line: bool,
+    fence_label: Option<&'a str>,
+}
+
+fn live_line_flags<'a>(
+    line: &LiveLine<'a>,
+    index: usize,
+    last_visible_line: usize,
+    busy: bool,
+    state: &LiveRowState,
+) -> LiveLineFlags<'a> {
     let focused_tool = line.marker == Some("▸ ")
         || (line.kind == LiveLineKind::ToolDetail && state.previous_focused_tool);
     let focused = state
@@ -2535,97 +2862,139 @@ fn render_live_line_with_alert_edge<'a>(
     let fence_label = (!code_before && fence_line)
         .then(|| fence_language(line.text))
         .flatten();
-    let continuation_rail = (line.kind == LiveLineKind::Reasoning && line.continuation_before)
-        .then_some(("┊", reasoning_role.unwrap_or(Role::Reasoning)));
-    let rail = continuation_rail
-        .or_else(|| live_code_rail(code_before, fence_line))
-        .or_else(|| live_rail(line.kind, focused_tool, previous_kind))
+    LiveLineFlags {
+        focused_tool,
+        focused,
+        focus_context,
+        previous_kind,
+        reasoning_role,
+        code_before,
+        fence_line,
+        fence_label,
+    }
+}
+
+fn live_line_rail(
+    line: &LiveLine<'_>,
+    flags: &LiveLineFlags<'_>,
+    alert_edge: Option<AlertEdge>,
+    block_end: bool,
+) -> Option<(&'static str, Role)> {
+    let continuation = (line.kind == LiveLineKind::Reasoning && line.continuation_before)
+        .then_some(("┊", flags.reasoning_role.unwrap_or(Role::Reasoning)));
+    let rail = continuation
+        .or_else(|| live_code_rail(flags.code_before, flags.fence_line))
+        .or_else(|| live_rail(line.kind, flags.focused_tool, flags.previous_kind))
         .map(|(rail, role)| {
-            let role = reasoning_role.unwrap_or(role);
+            let role = flags.reasoning_role.unwrap_or(role);
             (rail, live_tool_rail_role(line.kind, line.color, role))
         });
-    let rail = if state.block_end && alert_edge.is_none() && !code_before && !fence_line {
+    if block_end && alert_edge.is_none() && !flags.code_before && !flags.fence_line {
         rail.map(|(rail, role)| (live_block_end_rail(rail), role))
     } else {
         rail
-    };
-    let continuation_rail = rail.map(|(rail, role)| (live_continuation_rail(rail), role));
-    state.previous_focused_tool = match line.kind {
-        LiveLineKind::ToolSummary => line.marker == Some("▸ "),
-        LiveLineKind::ToolDetail => focused_tool,
-        _ => false,
-    };
-    state.previous_kind = Some(line.kind);
-    let base_chrome_modifier = match line.kind {
-        LiveLineKind::Answer => Modifier::BOLD,
+    }
+}
+
+fn live_line_modifiers(
+    kind: LiveLineKind,
+    flags: &LiveLineFlags<'_>,
+    width: u16,
+) -> (Modifier, Modifier) {
+    let base_chrome = match kind {
+        LiveLineKind::Answer | LiveLineKind::ToolSummary | LiveLineKind::Splash => Modifier::BOLD,
         LiveLineKind::Reasoning => live_reasoning_chrome_modifier(width),
-        LiveLineKind::ToolSummary => Modifier::BOLD,
         LiveLineKind::ToolDetail => Modifier::DIM,
-        LiveLineKind::Splash => Modifier::BOLD,
     };
-    let chrome_modifier = if focused {
-        // A selected Reasoning/detail row sheds DIM; BOLD is the only added
-        // focus signal, keeping geometry and ANSI16 colors unchanged.
-        match line.kind {
+    let chrome = if flags.focused {
+        match kind {
             LiveLineKind::Reasoning | LiveLineKind::ToolDetail => Modifier::BOLD,
-            _ => base_chrome_modifier | Modifier::BOLD,
+            _ => base_chrome | Modifier::BOLD,
         }
-    } else if focus_context {
-        base_chrome_modifier | Modifier::DIM
+    } else if flags.focus_context {
+        base_chrome | Modifier::DIM
     } else {
-        base_chrome_modifier
+        base_chrome
     };
-    let base_body_modifier = match line.kind {
-        // Keep the channel marker/rail bold, but let long prose breathe. The
-        // Markdown renderer still applies heading/inline emphasis itself.
+    let base_body = match kind {
         LiveLineKind::Answer => Modifier::empty(),
-        // Details are intentionally quiet while collapsed/unfocused, but an
-        // explicitly focused Ctrl+O surface must be readable without another
-        // visual toggle or a second rendering path.
-        LiveLineKind::ToolDetail if focused_tool => Modifier::empty(),
-        _ => chrome_modifier,
+        LiveLineKind::ToolDetail if flags.focused_tool => Modifier::empty(),
+        _ => chrome,
     };
-    let body_modifier = if focused {
-        base_body_modifier | Modifier::BOLD
-    } else if focus_context {
-        base_body_modifier | Modifier::DIM
+    let body = if flags.focused {
+        base_body | Modifier::BOLD
+    } else if flags.focus_context {
+        base_body | Modifier::DIM
     } else {
-        base_body_modifier
+        base_body
     };
-    // Per-line step/time/token metadata changed while the model was idle and
-    // duplicated the authoritative top/bottom telemetry. Keep the semantic
-    // channel marker stable so the live layout cache survives telemetry ticks;
-    // actual reasoning text remains fully visible and inspectable.
-    let marker: Option<Cow<'static, str>> = line.marker.map(Cow::Borrowed);
-    let marker =
-        live_phase_marker(line.kind, marker.as_deref(), previous_kind, width).map(Cow::Owned);
-    let rail_cells = rail.map(|(rail, _)| str_cells(rail)).unwrap_or_default();
-    let marker = marker.and_then(|marker| fit_live_marker(marker, line.kind, width, rail_cells));
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(3);
-    if let Some((rail, rail_role)) = rail {
+    (chrome, body)
+}
+
+struct LiveLinePrefix {
+    spans: Vec<Span<'static>>,
+    prefix_cells: u16,
+    text_width: u16,
+    has_badge: bool,
+}
+
+fn live_line_prefix(
+    line: &LiveLine<'_>,
+    context: &LiveLineContext<'_>,
+    width: u16,
+) -> LiveLinePrefix {
+    let marker = line
+        .marker
+        .map(Cow::Borrowed)
+        .and_then(|marker| {
+            live_phase_marker(
+                line.kind,
+                Some(marker.as_ref()),
+                context.previous_kind,
+                width,
+            )
+        })
+        .map(Cow::Owned)
+        .and_then(|marker| {
+            fit_live_marker(
+                marker,
+                line.kind,
+                width,
+                context
+                    .rail
+                    .map(|(rail, _)| str_cells(rail))
+                    .unwrap_or_default(),
+            )
+        });
+    let rail_cells = context
+        .rail
+        .map(|(rail, _)| str_cells(rail))
+        .unwrap_or_default();
+    let marker_cells = marker.as_deref().map(str_cells).unwrap_or_default();
+    let mut spans = Vec::with_capacity(3);
+    if let Some((rail, role)) = context.rail {
         spans.push(Span::styled(
             rail,
             Style::default()
-                .fg(role_color(rail_role))
-                .add_modifier(chrome_modifier),
+                .fg(role_color(role))
+                .add_modifier(context.chrome_modifier),
         ));
     }
-    let marker_cells = marker.as_deref().map(str_cells).unwrap_or_default();
     if let Some(marker) = marker {
         let marker_role = match line.kind {
             LiveLineKind::Answer => Role::Primary,
-            LiveLineKind::Reasoning => reasoning_role.unwrap_or(Role::Reasoning),
+            LiveLineKind::Reasoning => context.reasoning_role.unwrap_or(Role::Reasoning),
             _ => Role::Info,
         };
         spans.push(Span::styled(
             marker,
             Style::default()
                 .fg(role_color(marker_role))
-                .add_modifier(chrome_modifier),
+                .add_modifier(context.chrome_modifier),
         ));
     }
     let base_prefix_cells = rail_cells + marker_cells;
-    let badge = fence_label.and_then(|language| {
+    let badge = context.fence_label.and_then(|language| {
         let badge = format!("‹{language}› ");
         let badge_cells = str_cells(&badge);
         (width.saturating_sub(base_prefix_cells as u16) >= badge_cells.saturating_add(4) as u16)
@@ -2641,87 +3010,114 @@ fn render_live_line_with_alert_edge<'a>(
                 .add_modifier(Modifier::BOLD),
         ));
     }
-    let prefix_cells = base_prefix_cells + badge_cells;
-    let prefix_cells = prefix_cells.min(width as usize) as u16;
-    let text_width = width.saturating_sub(prefix_cells);
-    let content = if line.kind == LiveLineKind::Answer {
-        let display_text = has_badge.then(|| fence_without_language(line.text));
-        let text = display_text.as_deref().unwrap_or(line.text);
-        // Keep syntax highlighting itself viewport-bounded, not only the final
-        // physical wrap.  This prevents a long Markdown line from paying a
-        // full inline-span scan when only a few tail rows can be seen. Alert
-        // openers stay intact so their semantic label remains truthful.
-        let highlight_budget = (text_width.max(1) as usize)
-            .saturating_mul(state.max_rows.max(1))
-            .saturating_mul(4);
-        let bounded = if alert_edge.is_none() && text.len() > highlight_budget {
-            Cow::Owned(tail_display_cells(text, text_width, state.max_rows))
-        } else {
-            Cow::Borrowed(text)
-        };
-        live_markdown_spans_with_alert_edge(
-            bounded.as_ref(),
-            &mut state.code_before,
-            line.color,
-            body_modifier,
-            &mut state.alert_role,
-            alert_edge,
-        )
+    let prefix_cells = (base_prefix_cells + badge_cells).min(width as usize) as u16;
+    LiveLinePrefix {
+        spans,
+        prefix_cells,
+        text_width: width.saturating_sub(prefix_cells),
+        has_badge,
+    }
+}
+
+fn live_line_content(
+    line: &LiveLine<'_>,
+    context: &LiveLineContext<'_>,
+    text_width: u16,
+    has_badge: bool,
+    alert_edge: Option<AlertEdge>,
+    state: &mut LiveRowState,
+) -> Vec<Span<'static>> {
+    if line.kind == LiveLineKind::Answer {
+        return live_answer_content(line, context, text_width, has_badge, alert_edge, state);
+    }
+    let display_text = if line.kind == LiveLineKind::ToolDetail
+        && line.text.trim_start().starts_with("[Ctrl+O details")
+        && str_cells(line.text) > text_width as usize
+    {
+        "[Ctrl+O]"
     } else {
-        // The collapsed hint is optional detail affordance. At narrow widths
-        // its full label can wrap into two physical rows and push the tool
-        // summary out of the viewport's physical tail; keep the affordance
-        // single-row so the summary remains observable.
-        let display_text = if line.kind == LiveLineKind::ToolDetail
-            && line.text.trim_start().starts_with("[Ctrl+O details")
-            && str_cells(line.text) > text_width as usize
-        {
-            "[Ctrl+O]"
-        } else {
-            line.text
-        };
-        let display_text = tail_display_cells(display_text, text_width, state.max_rows);
-        let body_color = if line.kind == LiveLineKind::Reasoning {
-            role_color(reasoning_role.unwrap_or(Role::Reasoning))
-        } else {
-            line.color
-        };
-        vec![Span::styled(
-            display_text,
-            Style::default().fg(body_color).add_modifier(body_modifier),
-        )]
+        line.text
     };
-    let rows = wrap_live_spans_tail(content, text_width, state.max_rows);
+    let display_text = tail_display_cells(display_text, text_width, state.max_rows);
+    let body_color = if line.kind == LiveLineKind::Reasoning {
+        role_color(context.reasoning_role.unwrap_or(Role::Reasoning))
+    } else {
+        line.color
+    };
+    vec![Span::styled(
+        display_text,
+        Style::default()
+            .fg(body_color)
+            .add_modifier(context.body_modifier),
+    )]
+}
+
+fn live_answer_content(
+    line: &LiveLine<'_>,
+    context: &LiveLineContext<'_>,
+    text_width: u16,
+    has_badge: bool,
+    alert_edge: Option<AlertEdge>,
+    state: &mut LiveRowState,
+) -> Vec<Span<'static>> {
+    let display_text = has_badge.then(|| fence_without_language(line.text));
+    let text = display_text.as_deref().unwrap_or(line.text);
+    let highlight_budget = (text_width.max(1) as usize)
+        .saturating_mul(state.max_rows.max(1))
+        .saturating_mul(4);
+    let bounded = if alert_edge.is_none() && text.len() > highlight_budget {
+        Cow::Owned(tail_display_cells(text, text_width, state.max_rows))
+    } else {
+        Cow::Borrowed(text)
+    };
+    live_markdown_spans_with_alert_edge(
+        bounded.as_ref(),
+        &mut state.code_before,
+        line.color,
+        context.body_modifier,
+        &mut state.alert_role,
+        alert_edge,
+    )
+}
+
+fn live_line_rows(
+    rows: Vec<Vec<Span<'static>>>,
+    prefix: LiveLinePrefix,
+    context: &LiveLineContext<'_>,
+) -> Vec<Line<'static>> {
     rows.into_iter()
         .enumerate()
         .map(|(row, body)| {
             let mut line_spans = if row == 0 {
-                spans.clone()
-            } else if prefix_cells == 0 {
-                Vec::new()
+                prefix.spans.clone()
             } else {
-                let mut prefix = Vec::with_capacity(2);
-                if let Some((rail, role)) = continuation_rail {
-                    prefix.push(Span::styled(
-                        rail,
-                        Style::default()
-                            .fg(role_color(role))
-                            .add_modifier(chrome_modifier),
-                    ));
-                    let rail_cells = str_cells(rail) as u16;
-                    let spaces = prefix_cells.saturating_sub(rail_cells);
-                    if spaces > 0 {
-                        prefix.push(Span::raw(" ".repeat(spaces as usize)));
-                    }
-                    prefix
-                } else {
-                    vec![Span::raw(" ".repeat(prefix_cells as usize))]
-                }
+                continuation_spans(context, prefix.prefix_cells)
             };
             line_spans.extend(body);
             Line::from(line_spans)
         })
         .collect()
+}
+
+fn continuation_spans(context: &LiveLineContext<'_>, prefix_cells: u16) -> Vec<Span<'static>> {
+    if prefix_cells == 0 {
+        return Vec::new();
+    }
+    if let Some((rail, role)) = context.continuation_rail {
+        let mut prefix = vec![Span::styled(
+            rail,
+            Style::default()
+                .fg(role_color(role))
+                .add_modifier(context.chrome_modifier),
+        )];
+        let spaces = prefix_cells.saturating_sub(str_cells(rail) as u16);
+        if spaces > 0 {
+            prefix.push(Span::raw(" ".repeat(spaces as usize)));
+        }
+        prefix
+    } else {
+        vec![Span::raw(" ".repeat(prefix_cells as usize))]
+    }
 }
 
 /// Bounded presentation rail for the top chrome.  It owns only display-cell
@@ -3126,9 +3522,7 @@ fn live_lifecycle_badge(ui: &Ui) -> Option<(&'static str, Role)> {
 
 fn live_surface_title_line(ui: &Ui, width: u16) -> Line<'static> {
     let (state_role, tag) = live_surface_state(ui);
-    let full = width >= 40;
-    let compact = width >= 18;
-    if !compact {
+    if width < 18 {
         return Line::default();
     }
 
@@ -3145,50 +3539,60 @@ fn live_surface_title_line(ui: &Ui, width: u16) -> Line<'static> {
             .fg(role_color(state_role))
             .add_modifier(Modifier::BOLD),
     ));
-    if full {
-        if let Some((badge, badge_role)) = live_lifecycle_badge(ui) {
-            spans.push(Span::styled(
-                " · ",
-                Style::default().fg(role_color(Role::Border)),
-            ));
-            spans.push(Span::styled(
-                badge,
-                Style::default()
-                    .fg(role_color(badge_role))
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        let channels = live_channel_tags(ui);
-        if channels.len() > 1 {
-            spans.push(Span::styled(
-                " · ",
-                Style::default().fg(role_color(Role::Border)),
-            ));
-            for (index, channel) in channels.into_iter().enumerate() {
-                if index > 0 {
-                    spans.push(Span::styled(
-                        "/",
-                        Style::default().fg(role_color(Role::Border)),
-                    ));
-                }
-                spans.push(Span::styled(
-                    channel,
-                    Style::default()
-                        .fg(role_color(live_channel_role(channel)))
-                        .add_modifier(Modifier::BOLD),
-                ));
-            }
-        }
-        if ui.transcript.is_inspecting() {
-            spans.push(Span::styled(
-                " · HOLD",
-                Style::default()
-                    .fg(role_color(Role::Warn))
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
+    if width >= 40 {
+        spans.extend(live_title_detail_spans(ui));
     }
     Line::from(spans)
+}
+
+fn live_title_detail_spans(ui: &Ui) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    if let Some((badge, badge_role)) = live_lifecycle_badge(ui) {
+        spans.push(Span::styled(
+            " · ",
+            Style::default().fg(role_color(Role::Border)),
+        ));
+        spans.push(Span::styled(
+            badge,
+            Style::default()
+                .fg(role_color(badge_role))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    let channels = live_channel_tags(ui);
+    if channels.len() > 1 {
+        spans.push(Span::styled(
+            " · ",
+            Style::default().fg(role_color(Role::Border)),
+        ));
+        spans.extend(live_channel_title_spans(channels));
+    }
+    if ui.transcript.is_inspecting() {
+        spans.push(Span::styled(
+            " · HOLD",
+            Style::default()
+                .fg(role_color(Role::Warn))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans
+}
+
+fn live_channel_title_spans(channels: Vec<&'static str>) -> Vec<Span<'static>> {
+    channels
+        .into_iter()
+        .enumerate()
+        .flat_map(|(index, channel)| {
+            let separator = (index > 0)
+                .then(|| Span::styled("/", Style::default().fg(role_color(Role::Border))));
+            separator.into_iter().chain(std::iter::once(Span::styled(
+                channel,
+                Style::default()
+                    .fg(role_color(live_channel_role(channel)))
+                    .add_modifier(Modifier::BOLD),
+            )))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -3275,60 +3679,9 @@ struct TopStatus {
 fn top_status(ui: &Ui, vitals: &Vitals, width: usize) -> TopStatus {
     let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][ui.frame % 10];
     let status_text = if ui.busy {
-        let busy_phase = if ui.waiting {
-            let target = waiting_target(ui);
-            if vitals.step > 0 {
-                format!("waiting · {target} · step {}", vitals.step)
-            } else {
-                format!("waiting · {target}")
-            }
-        } else {
-            let activity = if ui.activity.is_empty() {
-                ui.phase.as_str()
-            } else {
-                ui.activity.as_str()
-            };
-            fmt_busy_phase(activity, vitals.step).into_owned()
-        };
-        let mut status_text = format!(
-            " {spinner} {}",
-            fmt_busy_signal(
-                &busy_phase,
-                &ui.todos,
-                vitals.elapsed_s,
-                vitals.rate,
-                vitals.queued,
-                ui.pending_call.as_ref(),
-            )
-        );
-        if let Some(diagnostic) =
-            fmt_progress_diagnostic(ui.stall, ui.err_streak, ui.explore_streak)
-        {
-            status_text.push_str(" · ");
-            status_text.push_str(&diagnostic);
-        }
-        status_text
+        busy_top_status(ui, vitals, spinner)
     } else {
-        let todo = todo_progress(&ui.todos)
-            .map(|(done, total)| format!(" · todo {done}/{total}"))
-            .unwrap_or_default();
-        let outcome = ui
-            .activity_history
-            .back()
-            .filter(|entry| {
-                matches!(
-                    entry.kind,
-                    ActivityKind::Takeover
-                        | ActivityKind::Completed
-                        | ActivityKind::Error
-                        | ActivityKind::Approval
-                        | ActivityKind::Verification
-                        | ActivityKind::Conclusion
-                )
-            })
-            .map(|entry| format!(" · {}", entry.text))
-            .unwrap_or_default();
-        format!(" ready{outcome}{todo}")
+        ready_top_status(ui)
     };
     let status_text = if !ui.busy && width < 64 {
         // Keep the semantic activity tag ahead of the outcome.  Otherwise a
@@ -3345,6 +3698,63 @@ fn top_status(ui: &Ui, vitals: &Vitals, width: usize) -> TopStatus {
     }
 }
 
+fn busy_top_status(ui: &Ui, vitals: &Vitals, spinner: &str) -> String {
+    let busy_phase = if ui.waiting {
+        let target = waiting_target(ui);
+        if vitals.step > 0 {
+            format!("waiting · {target} · step {}", vitals.step)
+        } else {
+            format!("waiting · {target}")
+        }
+    } else {
+        let activity = if ui.activity.is_empty() {
+            ui.phase.as_str()
+        } else {
+            ui.activity.as_str()
+        };
+        fmt_busy_phase(activity, vitals.step).into_owned()
+    };
+    let mut text = format!(
+        " {spinner} {}",
+        fmt_busy_signal(
+            &busy_phase,
+            &ui.todos,
+            vitals.elapsed_s,
+            vitals.rate,
+            vitals.queued,
+            ui.pending_call.as_ref(),
+        )
+    );
+    if let Some(diagnostic) = fmt_progress_diagnostic(ui.stall, ui.err_streak, ui.explore_streak) {
+        text.push_str(" · ");
+        text.push_str(&diagnostic);
+    }
+    text
+}
+
+fn ready_top_status(ui: &Ui) -> String {
+    let todo = todo_progress(&ui.todos)
+        .map(|(done, total)| format!(" · todo {done}/{total}"))
+        .unwrap_or_default();
+    let outcome = ui
+        .activity_history
+        .back()
+        .filter(|entry| {
+            matches!(
+                entry.kind,
+                ActivityKind::Takeover
+                    | ActivityKind::Completed
+                    | ActivityKind::Error
+                    | ActivityKind::Approval
+                    | ActivityKind::Verification
+                    | ActivityKind::Conclusion
+            )
+        })
+        .map(|entry| format!(" · {}", entry.text))
+        .unwrap_or_default();
+    format!(" ready{outcome}{todo}")
+}
+
 /// 顶部 chrome 的唯一投影：品牌、越狱警示、真实流通道与 busy/ready 状态在此组装。
 /// 宽度不足时优先保留安全/通道 badge，再裁剪次要 phase 文案，避免窄端只剩无意义省略号。
 /// 不拥有任务状态；只消费 `Ui`/`Vitals` 的既有事实，令主布局函数只负责槽位与覆盖层。
@@ -3358,54 +3768,79 @@ pub(crate) fn top_chrome(ui: &Ui, vitals: &Vitals, area_width: u16) -> Line<'sta
         } else {
             Modifier::empty()
         });
-    let mut above = ChromeRail::new(area_width);
-    // On narrow busy frames, keep the full/compact channel badge and a compact
-    // live phase together when they fit. The bottom bar carries telemetry; do
-    // not let long usage text turn a critical phase into an ellipsis.
     if ui.busy && width < 48 {
-        if agent::allow_jailbreak() {
-            let style = Style::default()
-                .fg(Color::Black)
-                .bg(role_color(Role::Error))
-                .add_modifier(Modifier::BOLD);
-            let _ = above.push_fit(" [JAIL] ", style);
-        }
-        let phase = compact_busy_phase(ui);
-        let phase_chip = format!(" {phase}");
-        let queue_chip = queue_front_chip(vitals.queued, above.remaining());
-        let queue_cells = queue_chip.as_ref().map(|chip| str_cells(chip)).unwrap_or(0);
-        if let Some(channel) = ui.transcript.active_channel() {
-            // Reserve phase and front-queue feedback before selecting the
-            // channel badge; narrow frames fall back from full to compact.
-            let channel_reserve = if queue_cells > 0 && width >= 18 {
-                queue_cells + str_cells(&phase_chip)
-            } else {
-                0
-            };
-            let channel_width = width.saturating_sub(channel_reserve);
-            push_channel_badge(&mut above, channel_width, channel);
-        }
-        let phase_budget = above.remaining().saturating_sub(queue_cells);
-        if phase_budget > 0 {
-            let phase = clip_display_cells(&phase_chip, phase_budget as u16);
-            let _ = above.push_dynamic_fit(phase, status_style);
-        }
-        if let Some(queue_chip) = queue_chip {
-            let queue_style = Style::default()
-                .fg(role_color(Role::Primary))
-                .add_modifier(Modifier::BOLD);
-            let _ = above.push_dynamic_fit(queue_chip, queue_style);
-        }
-        if above.is_empty() {
-            above.push_clipped(&status.text, status_style);
-        }
-        return above.finish();
+        return top_chrome_narrow_busy(ui, vitals, area_width, &status, status_style);
     }
-    let wide = width >= 32;
-    if wide {
-        let brand_style = Style::default()
+    top_chrome_normal(ui, width, area_width, &status, status_style)
+}
+
+fn top_chrome_narrow_busy(
+    ui: &Ui,
+    vitals: &Vitals,
+    area_width: u16,
+    status: &TopStatus,
+    status_style: Style,
+) -> Line<'static> {
+    let width = area_width as usize;
+    let mut above = ChromeRail::new(area_width);
+    if agent::allow_jailbreak() {
+        let style = Style::default()
+            .fg(Color::Black)
+            .bg(role_color(Role::Error))
+            .add_modifier(Modifier::BOLD);
+        let _ = above.push_fit(" [JAIL] ", style);
+    }
+    let phase_chip = format!(" {}", compact_busy_phase(ui));
+    let queue_chip = queue_front_chip(vitals.queued, above.remaining());
+    let queue_cells = queue_chip.as_ref().map(|chip| str_cells(chip)).unwrap_or(0);
+    if let Some(channel) = ui.transcript.active_channel() {
+        let channel_reserve = if queue_cells > 0 && width >= 18 {
+            queue_cells + str_cells(&phase_chip)
+        } else {
+            0
+        };
+        push_channel_badge(&mut above, width.saturating_sub(channel_reserve), channel);
+    }
+    let phase_budget = above.remaining().saturating_sub(queue_cells);
+    if phase_budget > 0 {
+        let phase = clip_display_cells(&phase_chip, phase_budget as u16);
+        let _ = above.push_dynamic_fit(phase, status_style);
+    }
+    if let Some(queue_chip) = queue_chip {
+        let queue_style = Style::default()
             .fg(role_color(Role::Primary))
             .add_modifier(Modifier::BOLD);
+        let _ = above.push_dynamic_fit(queue_chip, queue_style);
+    }
+    if above.is_empty() {
+        above.push_clipped(&status.text, status_style);
+    }
+    above.finish()
+}
+
+fn top_chrome_normal(
+    ui: &Ui,
+    width: usize,
+    area_width: u16,
+    status: &TopStatus,
+    status_style: Style,
+) -> Line<'static> {
+    let mut above = ChromeRail::new(area_width);
+    push_brand_and_jail(&mut above, ui, width);
+    push_busy_context(&mut above, ui, width);
+    push_activity_signal(&mut above, ui, width);
+    push_live_inspection(&mut above, ui);
+    push_focus_chip(&mut above, ui, width);
+    push_reasoning_visibility(&mut above, ui, width);
+    above.push_clipped(&status.text, status_style);
+    above.finish()
+}
+
+fn push_brand_and_jail(above: &mut ChromeRail, ui: &Ui, width: usize) {
+    let brand_style = Style::default()
+        .fg(role_color(Role::Primary))
+        .add_modifier(Modifier::BOLD);
+    if width >= 32 {
         let _ = above.push_fit(" RidgeCode ", brand_style);
     }
     if agent::allow_jailbreak() {
@@ -3413,100 +3848,110 @@ pub(crate) fn top_chrome(ui: &Ui, vitals: &Vitals, area_width: u16) -> Line<'sta
             .fg(Color::Black)
             .bg(role_color(Role::Error))
             .add_modifier(Modifier::BOLD);
-        let full = " ⚠JAILBREAK ";
-        if !above.push_fit(full, style) {
+        if !above.push_fit(" ⚠JAILBREAK ", style) {
             let _ = above.push_fit(" [JAIL] ", style);
         }
     }
-    if ui.busy {
-        if let Some(channel) = ui.transcript.active_channel() {
-            push_channel_badge(&mut above, width, channel);
-        }
-        if width >= 64 {
-            if let Some(chip) = phase_trace_chip(&ui.transcript, above.remaining()) {
-                let style = Style::default()
-                    .fg(role_color(Role::Info))
-                    .add_modifier(Modifier::DIM);
-                let _ = above.push_dynamic_fit(chip, style);
-            }
-            if let Some(chip) = activity_breadcrumb(&ui.activity_history, above.remaining()) {
-                let style = Style::default()
-                    .fg(role_color(Role::Info))
-                    .add_modifier(Modifier::DIM);
-                let _ = above.push_dynamic_fit(chip, style);
-            }
-            let age = activity_age_label(ui);
-            if !age.is_empty() {
-                let style = Style::default()
-                    .fg(role_color(Role::Info))
-                    .add_modifier(Modifier::DIM);
-                let _ = above.push_dynamic_fit(age, style);
-            }
-        }
-    } else if !wide {
-        let brand_style = Style::default()
-            .fg(role_color(Role::Primary))
-            .add_modifier(Modifier::BOLD);
+    if width < 32 && !ui.busy {
         let _ = above.push_fit(" RDG ", brand_style);
     }
-    if ui.busy && (48..64).contains(&width) && !ui.transcript.is_inspecting() {
-        if let Some((chip, role)) = activity_signal_chip(ui, above.remaining()) {
-            let style = Style::default()
-                .fg(role_color(role))
-                .add_modifier(Modifier::BOLD);
-            let _ = above.push_dynamic_fit(chip, style);
-        }
+}
+
+fn push_busy_context(above: &mut ChromeRail, ui: &Ui, width: usize) {
+    if !ui.busy {
+        return;
     }
-    if ui.transcript.is_inspecting() {
-        if let Some(chip) = live_inspection_chip(
-            above.remaining(),
-            ui.has_live_tools() || ui.transcript.has_reasoning(),
-        ) {
-            let style = Style::default()
-                .fg(role_color(Role::Info))
-                .add_modifier(Modifier::BOLD);
-            let _ = above.push_dynamic_fit(chip, style);
-        }
+    if let Some(channel) = ui.transcript.active_channel() {
+        push_channel_badge(above, width, channel);
     }
-    if width >= 48 {
-        match ui.transcript.focused_block() {
-            Some(LiveBlockFocus::Tool(_)) if ui.has_live_tools() => {
-                if let Some(summary) = ui.transcript.focused_tool_summary() {
-                    if let Some(chip) = focused_tool_chip(summary, above.remaining()) {
-                        let style = Style::default()
-                            .fg(role_color(Role::Info))
-                            .add_modifier(Modifier::BOLD);
-                        let _ = above.push_dynamic_fit(chip, style);
-                    }
-                }
-            }
-            Some(focus @ (LiveBlockFocus::Answer(_) | LiveBlockFocus::Reasoning(_))) => {
-                if let Some((chip, role)) = focused_block_chip(focus, above.remaining()) {
+    if width < 64 {
+        return;
+    }
+    let style = Style::default()
+        .fg(role_color(Role::Info))
+        .add_modifier(Modifier::DIM);
+    if let Some(chip) = phase_trace_chip(&ui.transcript, above.remaining()) {
+        let _ = above.push_dynamic_fit(chip, style);
+    }
+    if let Some(chip) = activity_breadcrumb(&ui.activity_history, above.remaining()) {
+        let _ = above.push_dynamic_fit(chip, style);
+    }
+    let age = activity_age_label(ui);
+    if !age.is_empty() {
+        let _ = above.push_dynamic_fit(age, style);
+    }
+}
+
+fn push_activity_signal(above: &mut ChromeRail, ui: &Ui, width: usize) {
+    if !ui.busy || !(48..64).contains(&width) || ui.transcript.is_inspecting() {
+        return;
+    }
+    if let Some((chip, role)) = activity_signal_chip(ui, above.remaining()) {
+        let style = Style::default()
+            .fg(role_color(role))
+            .add_modifier(Modifier::BOLD);
+        let _ = above.push_dynamic_fit(chip, style);
+    }
+}
+
+fn push_live_inspection(above: &mut ChromeRail, ui: &Ui) {
+    if !ui.transcript.is_inspecting() {
+        return;
+    }
+    if let Some(chip) = live_inspection_chip(
+        above.remaining(),
+        ui.has_live_tools() || ui.transcript.has_reasoning(),
+    ) {
+        let style = Style::default()
+            .fg(role_color(Role::Info))
+            .add_modifier(Modifier::BOLD);
+        let _ = above.push_dynamic_fit(chip, style);
+    }
+}
+
+fn push_focus_chip(above: &mut ChromeRail, ui: &Ui, width: usize) {
+    if width < 48 {
+        return;
+    }
+    match ui.transcript.focused_block() {
+        Some(LiveBlockFocus::Tool(_)) if ui.has_live_tools() => {
+            if let Some(summary) = ui.transcript.focused_tool_summary() {
+                if let Some(chip) = focused_tool_chip(summary, above.remaining()) {
                     let style = Style::default()
-                        .fg(role_color(role))
+                        .fg(role_color(Role::Info))
                         .add_modifier(Modifier::BOLD);
                     let _ = above.push_dynamic_fit(chip, style);
                 }
             }
-            None | Some(LiveBlockFocus::Tool(_)) => {}
         }
+        Some(focus @ (LiveBlockFocus::Answer(_) | LiveBlockFocus::Reasoning(_))) => {
+            if let Some((chip, role)) = focused_block_chip(focus, above.remaining()) {
+                let style = Style::default()
+                    .fg(role_color(role))
+                    .add_modifier(Modifier::BOLD);
+                let _ = above.push_dynamic_fit(chip, style);
+            }
+        }
+        None | Some(LiveBlockFocus::Tool(_)) => {}
     }
-    if ui.busy
-        && ui.transcript.active_channel() == Some(LiveChannel::Answer)
-        && ui.transcript.has_reasoning()
-        && width >= 48
+}
+
+fn push_reasoning_visibility(above: &mut ChromeRail, ui: &Ui, width: usize) {
+    if !ui.busy
+        || ui.transcript.active_channel() != Some(LiveChannel::Answer)
+        || !ui.transcript.has_reasoning()
+        || width < 48
     {
-        if let Some(chip) =
-            reasoning_visibility_chip(ui.transcript.is_reasoning_expanded(), above.remaining())
-        {
-            let style = Style::default()
-                .fg(role_color(Role::Reasoning))
-                .add_modifier(Modifier::BOLD);
-            let _ = above.push_dynamic_fit(chip, style);
-        }
+        return;
     }
-    above.push_clipped(&status.text, status_style);
-    above.finish()
+    if let Some(chip) =
+        reasoning_visibility_chip(ui.transcript.is_reasoning_expanded(), above.remaining())
+    {
+        let style = Style::default()
+            .fg(role_color(Role::Reasoning))
+            .add_modifier(Modifier::BOLD);
+        let _ = above.push_dynamic_fit(chip, style);
+    }
 }
 
 /// 主 Live 四槽的响应式垂直预算：输出与输入优先，低高时收缩 chrome/底栏。
@@ -3742,86 +4187,113 @@ fn draw_input_surface(
     area: Rect,
     queue_preview: Vec<Line<'static>>,
 ) {
-    // A bordered block needs two rows for its frame.  Below three rows there
-    // is no honest inner editor viewport, so keep the draft visible as a
-    // compact plain-text surface instead of drawing an empty border.
     if area.height < 3 {
-        let pending_message = if area.height >= 2 {
-            ui.queued.front()
-        } else {
-            None
-        };
-        let pending_rows = u16::from(pending_message.is_some());
-        // With only one editor row, keep the queue count and draft on the
-        // same bounded line; with two rows, give the pending message its own
-        // sticky row above the draft.
-        let queue_prefix = if pending_message.is_none() && !ui.queued.is_empty() {
-            format!("⏭{} ", ui.queued.len())
-        } else {
-            String::new()
-        };
-        let (input_lines, cur_row, cur_col) = wrap_input(
-            &ui.input.buffer,
-            ui.input.cursor,
-            area.width.saturating_sub(str_cells(&queue_prefix) as u16),
-        );
-        let (visible_input_lines, visible_cur_row) = input_viewport(
-            &input_lines,
-            cur_row,
-            area.height.saturating_sub(pending_rows) as usize,
-        );
-        let mut content = Vec::with_capacity(visible_input_lines.len() + 1);
-        if let Some(message) = pending_message {
-            content.push(Line::from(clip_display_cells(
-                &format!("⏭ {}", message),
-                area.width,
-            )));
-        }
-        content.extend(visible_input_lines.iter().enumerate().map(|(index, line)| {
-            if index == 0 && !queue_prefix.is_empty() {
-                Line::from(format!("{queue_prefix}{line}"))
-            } else {
-                Line::from(line.as_str())
-            }
-        }));
-        let input_role = if ui.busy {
-            input_chrome(InputChromeArgs {
-                busy: ui.busy,
-                queued: ui.queued.len(),
-                width: area.width,
-                reasoning_expanded: ui.transcript.is_reasoning_expanded(),
-                has_reasoning: ui.transcript.has_reasoning(),
-                has_reasoning_history: !ui.reasoning_history.is_empty(),
-                has_live_answer: ui.busy && ui.transcript.has_answer(),
-                has_answer_history: !ui.answer_history.is_empty(),
-                has_live_history: ui.transcript.has_history(),
-                has_tools: ui.has_live_tools(),
-                has_history: !ui.tool_history.is_empty(),
-                has_scrollable_tool_details: ui.has_scrollable_live_tool(),
-                has_live_output: ui.has_inspectable_live_output(),
-                live_inspecting: ui.transcript.is_inspecting(),
-            })
-            .1
-        } else {
-            Role::Muted
-        };
-        frame.render_widget(
-            Paragraph::new(Text::from(content)).style(Style::default().fg(role_color(input_role))),
-            area,
-        );
-        if approval.is_none()
-            && ui.panel.is_none()
-            && !visible_input_lines.is_empty()
-            && area.width > 0
-            && area.height > 0
-        {
-            let x = (area.x + str_cells(&queue_prefix) as u16 + cur_col)
-                .min(area.right().saturating_sub(1));
-            let y = (area.y + pending_rows + visible_cur_row).min(area.bottom().saturating_sub(1));
-            frame.set_cursor_position(Position { x, y });
-        }
+        draw_compact_input_surface(frame, ui, approval, area);
         return;
     }
+    draw_bordered_input_surface(frame, ui, approval, area, queue_preview);
+}
+
+fn input_chrome_args(ui: &Ui, width: u16) -> InputChromeArgs {
+    InputChromeArgs {
+        busy: ui.busy,
+        queued: ui.queued.len(),
+        width,
+        reasoning_expanded: ui.transcript.is_reasoning_expanded(),
+        has_reasoning: ui.transcript.has_reasoning(),
+        has_reasoning_history: !ui.reasoning_history.is_empty(),
+        has_live_answer: ui.busy && ui.transcript.has_answer(),
+        has_answer_history: !ui.answer_history.is_empty(),
+        has_live_history: ui.transcript.has_history(),
+        has_tools: ui.has_live_tools(),
+        has_history: !ui.tool_history.is_empty(),
+        has_scrollable_tool_details: ui.has_scrollable_live_tool(),
+        has_live_output: ui.has_inspectable_live_output(),
+        live_inspecting: ui.transcript.is_inspecting(),
+    }
+}
+
+fn draw_compact_input_surface(
+    frame: &mut ratatui::Frame,
+    ui: &Ui,
+    approval: Option<&ApprovalRequest>,
+    area: Rect,
+) {
+    let pending_message = (area.height >= 2).then(|| ui.queued.front()).flatten();
+    let pending_rows = u16::from(pending_message.is_some());
+    let queue_prefix = if pending_message.is_none() && !ui.queued.is_empty() {
+        format!("⏭{} ", ui.queued.len())
+    } else {
+        String::new()
+    };
+    let (input_lines, cur_row, cur_col) = wrap_input(
+        &ui.input.buffer,
+        ui.input.cursor,
+        area.width.saturating_sub(str_cells(&queue_prefix) as u16),
+    );
+    let (visible_input_lines, visible_cur_row) = input_viewport(
+        &input_lines,
+        cur_row,
+        area.height.saturating_sub(pending_rows) as usize,
+    );
+    let content = compact_input_lines(
+        pending_message,
+        &queue_prefix,
+        &visible_input_lines,
+        area.width,
+    );
+    let input_role = if ui.busy {
+        input_chrome(input_chrome_args(ui, area.width)).1
+    } else {
+        Role::Muted
+    };
+    frame.render_widget(
+        Paragraph::new(Text::from(content)).style(Style::default().fg(role_color(input_role))),
+        area,
+    );
+    if approval.is_none()
+        && ui.panel.is_none()
+        && !visible_input_lines.is_empty()
+        && area.width > 0
+        && area.height > 0
+    {
+        let x = (area.x + str_cells(&queue_prefix) as u16 + cur_col)
+            .min(area.right().saturating_sub(1));
+        let y = (area.y + pending_rows + visible_cur_row).min(area.bottom().saturating_sub(1));
+        frame.set_cursor_position(Position { x, y });
+    }
+}
+
+fn compact_input_lines(
+    pending_message: Option<&String>,
+    queue_prefix: &str,
+    visible_input_lines: &[String],
+    width: u16,
+) -> Vec<Line<'static>> {
+    let mut content = Vec::with_capacity(visible_input_lines.len() + 1);
+    if let Some(message) = pending_message {
+        content.push(Line::from(clip_display_cells(
+            &format!("⏭ {message}"),
+            width,
+        )));
+    }
+    content.extend(visible_input_lines.iter().enumerate().map(|(index, line)| {
+        if index == 0 && !queue_prefix.is_empty() {
+            Line::from(format!("{queue_prefix}{line}"))
+        } else {
+            Line::from(line.clone())
+        }
+    }));
+    content
+}
+
+fn draw_bordered_input_surface(
+    frame: &mut ratatui::Frame,
+    ui: &Ui,
+    approval: Option<&ApprovalRequest>,
+    area: Rect,
+    queue_preview: Vec<Line<'static>>,
+) {
     let (input_lines, cur_row, cur_col) = wrap_input(
         &ui.input.buffer,
         ui.input.cursor,
@@ -3850,22 +4322,7 @@ fn draw_input_surface(
     );
     frame.render_widget(
         Paragraph::new(Text::from(input_content)).block({
-            let (input_title, input_role) = input_chrome(InputChromeArgs {
-                busy: ui.busy,
-                queued: ui.queued.len(),
-                width: area.width,
-                reasoning_expanded: ui.transcript.is_reasoning_expanded(),
-                has_reasoning: ui.transcript.has_reasoning(),
-                has_reasoning_history: !ui.reasoning_history.is_empty(),
-                has_live_answer: ui.busy && ui.transcript.has_answer(),
-                has_answer_history: !ui.answer_history.is_empty(),
-                has_live_history: ui.transcript.has_history(),
-                has_tools: ui.has_live_tools(),
-                has_history: !ui.tool_history.is_empty(),
-                has_scrollable_tool_details: ui.has_scrollable_live_tool(),
-                has_live_output: ui.has_inspectable_live_output(),
-                live_inspecting: ui.transcript.is_inspecting(),
-            });
+            let (input_title, input_role) = input_chrome(input_chrome_args(ui, area.width));
             rounded_surface_block()
                 .border_style(Style::default().fg(role_color(if ui.busy {
                     input_role
@@ -4260,10 +4717,31 @@ fn idle_error_detail(width: usize, text: &str) -> String {
 fn idle_result_summary(ui: &Ui, width: usize, rows: usize) -> Option<(String, Role, Vec<String>)> {
     let signal = ui.activity_history.back()?;
     let has_answer = !ui.answer_history.is_empty();
-    let has_reasoning = !ui.reasoning_history.is_empty();
     let partial_answer = ui.answer_history.back().is_some_and(|entry| entry.partial);
-    let answer_tag = if partial_answer { "PARTIAL" } else { "ANS" };
-    let (tag, role, headline, detail) = match signal.kind {
+    let result = idle_result_kind(signal.kind, width, partial_answer, has_answer)?;
+    let details = idle_result_details(ui, signal, width, rows, result.answer_tag, result.detail);
+    Some((
+        idle_result_headline(width, result.tag, result.headline),
+        result.role,
+        details,
+    ))
+}
+
+struct IdleResultKind {
+    tag: &'static str,
+    role: Role,
+    headline: &'static str,
+    detail: &'static str,
+    answer_tag: &'static str,
+}
+
+fn idle_result_kind(
+    kind: ActivityKind,
+    width: usize,
+    partial_answer: bool,
+    has_answer: bool,
+) -> Option<IdleResultKind> {
+    let (tag, role, headline) = match kind {
         ActivityKind::Completed => (
             "DONE",
             Role::Success,
@@ -4272,95 +4750,43 @@ fn idle_result_summary(ui: &Ui, width: usize, rows: usize) -> Option<(String, Ro
             } else {
                 "answer archived"
             },
-            if has_answer {
-                idle_answer_recovery(width, partial_answer)
-            } else {
-                idle_activity_recovery(width)
-            },
         ),
-        ActivityKind::Conclusion => (
-            "SUM",
-            Role::Success,
-            "result ready",
-            if has_answer {
-                idle_answer_recovery(width, partial_answer)
-            } else {
-                idle_activity_recovery(width)
-            },
-        ),
-        ActivityKind::Error => (
-            "ERR",
-            Role::Error,
-            "inspect failure",
-            if has_answer {
-                idle_answer_recovery(width, partial_answer)
-            } else {
-                idle_activity_recovery(width)
-            },
-        ),
+        ActivityKind::Conclusion => ("SUM", Role::Success, "result ready"),
+        ActivityKind::Error => ("ERR", Role::Error, "inspect failure"),
         _ => return None,
     };
+    Some(IdleResultKind {
+        tag,
+        role,
+        headline,
+        detail: if has_answer {
+            idle_answer_recovery(width, partial_answer)
+        } else {
+            idle_activity_recovery(width)
+        },
+        answer_tag: if partial_answer { "PARTIAL" } else { "ANS" },
+    })
+}
+
+fn idle_result_details(
+    ui: &Ui,
+    signal: &ActivityEntry,
+    width: usize,
+    rows: usize,
+    answer_tag: &str,
+    detail: &str,
+) -> Vec<String> {
     let mut details = Vec::with_capacity(4);
-    if matches!(
-        signal.kind,
-        ActivityKind::Completed | ActivityKind::Conclusion
-    ) {
-        if let Some(conclusion) = ui
-            .activity_history
-            .iter()
-            .rev()
-            .find(|entry| entry.kind == ActivityKind::Conclusion)
-        {
-            details.push(idle_conclusion_detail(width, &conclusion.text));
-        }
+    let has_answer = !ui.answer_history.is_empty();
+    let has_reasoning = !ui.reasoning_history.is_empty();
+    push_idle_conclusion(&mut details, ui, signal.kind, width);
+    if is_result_signal(signal.kind) && rows >= 5 && has_answer {
+        push_idle_answer_excerpt(&mut details, ui, width);
     }
-    if matches!(
-        signal.kind,
-        ActivityKind::Completed | ActivityKind::Conclusion | ActivityKind::Error
-    ) && rows >= 5
-        && has_answer
-    {
-        if let Some(answer) = ui.answer_history.back() {
-            if let Some(excerpt) = idle_answer_excerpt(width, answer) {
-                details.push(excerpt);
-            }
-        }
+    if is_result_signal(signal.kind) && width >= 48 && rows >= 10 {
+        push_idle_channel_meta(&mut details, ui, width, answer_tag);
     }
-    if matches!(
-        signal.kind,
-        ActivityKind::Completed | ActivityKind::Conclusion | ActivityKind::Error
-    ) && width >= 48
-        && rows >= 10
-    {
-        if let Some(answer) = ui.answer_history.back() {
-            if let Some(meta) = idle_channel_meta(
-                width,
-                answer_tag,
-                answer.step,
-                answer.elapsed_s,
-                answer.tokens,
-            ) {
-                details.push(meta);
-            }
-        }
-        if let Some(reasoning) = ui.reasoning_history.back() {
-            if let Some(meta) = idle_channel_meta(
-                width,
-                "THK",
-                reasoning.step,
-                reasoning.elapsed_s,
-                reasoning.tokens,
-            ) {
-                details.push(meta);
-            }
-        }
-    }
-    if matches!(
-        signal.kind,
-        ActivityKind::Completed | ActivityKind::Conclusion | ActivityKind::Error
-    ) && rows >= 6
-        && has_reasoning
-    {
+    if is_result_signal(signal.kind) && rows >= 6 && has_reasoning {
         if let Some(reasoning) = ui.reasoning_history.back() {
             if let Some(excerpt) = idle_reasoning_excerpt(width, reasoning) {
                 details.push(excerpt);
@@ -4372,71 +4798,156 @@ fn idle_result_summary(ui: &Ui, width: usize, rows: usize) -> Option<(String, Ro
     }
     details.push(detail.to_owned());
     details.push(idle_history_actions(width).to_owned());
-    Some((idle_result_headline(width, tag, headline), role, details))
+    details
+}
+
+fn is_result_signal(kind: ActivityKind) -> bool {
+    matches!(
+        kind,
+        ActivityKind::Completed | ActivityKind::Conclusion | ActivityKind::Error
+    )
+}
+
+fn push_idle_conclusion(details: &mut Vec<String>, ui: &Ui, kind: ActivityKind, width: usize) {
+    if !matches!(kind, ActivityKind::Completed | ActivityKind::Conclusion) {
+        return;
+    }
+    if let Some(conclusion) = ui
+        .activity_history
+        .iter()
+        .rev()
+        .find(|entry| entry.kind == ActivityKind::Conclusion)
+    {
+        details.push(idle_conclusion_detail(width, &conclusion.text));
+    }
+}
+
+fn push_idle_answer_excerpt(details: &mut Vec<String>, ui: &Ui, width: usize) {
+    if let Some(answer) = ui.answer_history.back() {
+        if let Some(excerpt) = idle_answer_excerpt(width, answer) {
+            details.push(excerpt);
+        }
+    }
+}
+
+fn push_idle_channel_meta(details: &mut Vec<String>, ui: &Ui, width: usize, answer_tag: &str) {
+    if let Some(answer) = ui.answer_history.back() {
+        if let Some(meta) = idle_channel_meta(
+            width,
+            answer_tag,
+            answer.step,
+            answer.elapsed_s,
+            answer.tokens,
+        ) {
+            details.push(meta);
+        }
+    }
+    if let Some(reasoning) = ui.reasoning_history.back() {
+        if let Some(meta) = idle_channel_meta(
+            width,
+            "THK",
+            reasoning.step,
+            reasoning.elapsed_s,
+            reasoning.tokens,
+        ) {
+            details.push(meta);
+        }
+    }
 }
 
 fn live_empty_state(ui: &Ui, width: u16, rows: usize) -> Vec<Line<'static>> {
     if width == 0 || rows == 0 {
         return Vec::new();
     }
+    match empty_state_content(ui, width, rows) {
+        EmptyStateContent::Card(lines) => lines,
+        EmptyStateContent::Text {
+            headline,
+            role,
+            details,
+        } => render_empty_state_text(&headline, role, details, width, rows),
+    }
+}
 
-    let (headline, headline_role, details) = if ui.busy && ui.waiting {
+enum EmptyStateContent {
+    Card(Vec<Line<'static>>),
+    Text {
+        headline: String,
+        role: Role,
+        details: Vec<String>,
+    },
+}
+
+fn empty_state_content(ui: &Ui, width: u16, rows: usize) -> EmptyStateContent {
+    let width = width as usize;
+    if ui.busy && ui.waiting {
         let phase = if ui.activity.trim().is_empty() {
             "no stream"
         } else {
             ui.activity.as_str()
         };
-        (
-            empty_state_headline(
-                width as usize,
+        return EmptyStateContent::Text {
+            headline: empty_state_headline(
+                width,
                 "WAIT",
                 sanitize_display_text(phase.trim()).trim(),
             ),
-            Role::Warn,
-            vec![empty_state_actions(width as usize, "WAIT")],
-        )
-    } else if ui.busy {
+            role: Role::Warn,
+            details: vec![empty_state_actions(width, "WAIT")],
+        };
+    }
+    if ui.busy {
         let phase = if ui.activity.trim().is_empty() {
             ui.phase.as_str()
         } else {
             ui.activity.as_str()
         };
-        (
-            empty_state_headline(
-                width as usize,
+        return EmptyStateContent::Text {
+            headline: empty_state_headline(
+                width,
                 "LIVE",
                 sanitize_display_text(phase.trim()).trim(),
             ),
-            Role::Primary,
-            vec![empty_state_actions(width as usize, "LIVE")],
-        )
-    } else if !ui.queued.is_empty() {
-        (
-            empty_state_headline(
-                width as usize,
-                "QUEUE",
-                &format!("{} pending", ui.queued.len()),
-            ),
-            Role::Warn,
-            vec![empty_state_actions(width as usize, "QUEUE")],
-        )
-    } else if let Some(summary) = idle_result_summary(ui, width as usize, rows) {
-        if let Some(card) = idle_result_card_lines(&summary, width, rows) {
-            return card;
+            role: Role::Primary,
+            details: vec![empty_state_actions(width, "LIVE")],
+        };
+    }
+    if !ui.queued.is_empty() {
+        return EmptyStateContent::Text {
+            headline: empty_state_headline(width, "QUEUE", &format!("{} pending", ui.queued.len())),
+            role: Role::Warn,
+            details: vec![empty_state_actions(width, "QUEUE")],
+        };
+    }
+    if let Some(summary) = idle_result_summary(ui, width, rows) {
+        if let Some(card) = idle_result_card_lines(&summary, width as u16, rows) {
+            return EmptyStateContent::Card(card);
         }
-        summary
-    } else {
-        (
-            empty_state_headline(width as usize, "READY", ""),
-            Role::Primary,
-            vec![empty_state_actions(width as usize, "READY")],
-        )
-    };
-    let width = width as usize;
-    let headline = clip_display_cells(&headline, width as u16);
+        let (headline, role, details) = summary;
+        return EmptyStateContent::Text {
+            headline,
+            role,
+            details,
+        };
+    }
+    EmptyStateContent::Text {
+        headline: empty_state_headline(width, "READY", ""),
+        role: Role::Primary,
+        details: vec![empty_state_actions(width, "READY")],
+    }
+}
+
+fn render_empty_state_text(
+    headline: &str,
+    role: Role,
+    details: Vec<String>,
+    width: u16,
+    rows: usize,
+) -> Vec<Line<'static>> {
+    let headline = clip_display_cells(headline, width);
     let details = details
         .into_iter()
-        .map(|detail| idle_detail_line(detail, width as u16))
+        .map(|detail| idle_detail_line(detail, width))
         .collect::<Vec<_>>();
     let content_rows = 1 + details.len();
     let mut lines = Vec::with_capacity(rows.min(content_rows));
@@ -4445,7 +4956,7 @@ fn live_empty_state(ui: &Ui, width: u16, rows: usize) -> Vec<Line<'static>> {
     lines.push(Line::from(Span::styled(
         headline,
         Style::default()
-            .fg(role_color(headline_role))
+            .fg(role_color(role))
             .add_modifier(Modifier::BOLD),
     )));
     for detail in details {
@@ -4783,7 +5294,9 @@ pub(crate) fn live_tool_rail_role(kind: LiveLineKind, color: Color, role: Role) 
 
 #[cfg(test)]
 mod snapshot_tests {
+    use super::super::{ToolBlock, MAX_PRESENTATION_RECORDS};
     use super::*;
+    use ratatui::Terminal;
 
     #[test]
     fn snapshot_preserves_rows_and_metadata() {
