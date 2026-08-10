@@ -519,7 +519,7 @@ fn terminate_process_tree(child: &mut std::process::Child) {
     {
         let group = format!("-{}", child.id());
         let killed = Command::new("kill")
-            .args(["-KILL", &group])
+            .args(["-KILL", "--", &group])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
