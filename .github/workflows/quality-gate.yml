@@ -56,7 +56,7 @@ jobs:
       - name: Checkout source without actions/checkout
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        shell: pwsh
+        shell: powershell
         run: |
           git init .
           git remote add origin "https://github.com/$env:GITHUB_REPOSITORY.git"
