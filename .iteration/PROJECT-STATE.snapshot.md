@@ -791,13 +791,13 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 <!-- PROJECT_STATE_RUNTIME -->
 ## 运行元数据
 
-- repository_head:`1643d6e4202b98820465b8143c2857932bafe943`
+- repository_head:`f702928609df5221a703bf20891bb11240c26668`
 - requirements_version:`v0.2.0`
 - requirements_hash:`aa57b6702840fd71854ff508b13b67a0a891ad9f4074e846b9314040aa952af9`
 - pending_hash:`a653cd735491bf6593b289e50840a5b084fe90ed2e89cd912d283366297387f3`
 - decision_hash:`044f10aca508fa7e2a8332470553fb83980bfb3c800a61fe6497c344c49ae11b`
-- generated_at:`2026-08-09T18:37:40+00:00`
-- current_git_diff:`.iteration/a2a-smoke-evidence-20260810.json,.iteration/archive-record-iter-20260810-a2a-context.json,crates/agent/src/communication.rs,docs/archive/events-2026-08.jsonl`
+- generated_at:`2026-08-10T01:20:12+00:00`
+- current_git_diff:`.iteration/archive-record-iter-20260810-a2a-context.json,.iteration/notebook-initialization-20260810.json,.iteration/notebooklm-response-a2a-deep-20260810.json,.iteration/research-status-a2a-20260810.json`
 
 ## 非权威 Pending 索引
 

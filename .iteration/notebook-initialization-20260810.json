@@ -1,0 +1,41 @@
+{
+  "status": "completed",
+  "iteration_id": "iter-20260810",
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "notebook_title": "RidgeCode现状、愿景、路线图",
+  "source_cleanup": {
+    "before": 47,
+    "deleted_research_and_duplicate_sources": 45,
+    "replaced_stale_baseline_sources": 2,
+    "after": 2,
+    "retained": [
+      {
+        "id": "32228037-c980-4200-bbc4-f5a1ed7b5aa4",
+        "title": "PROJECT-STATE.snapshot.md",
+        "local_basis": ".iteration/PROJECT-STATE.snapshot.md",
+        "verified_contains": ["f702928", "REQ-20260810-A2A-01"]
+      },
+      {
+        "id": "da1b5c50-b82c-45fd-9483-d25bf8cc1a97",
+        "title": "REQUIREMENTS-SPEC.md",
+        "local_basis": "docs/REQUIREMENTS-SPEC.md",
+        "verified_contains": ["REQ-20260810-A2A-01", "v0.2.0"]
+      }
+    ]
+  },
+  "open_vision_note": {
+    "id": "7e702c62-a035-44b1-a968-3d843c67f223",
+    "title": "Open Vision · 未实现/未列计划方向 · iter-20260810",
+    "topics": 7,
+    "excludes_currently_implemented": true
+  },
+  "note_inventory": {
+    "count": 2,
+    "preserved_historical_note": "aeb2c29a-3d94-4190-a458-aaa2c642abd5"
+  },
+  "evidence": [
+    "NotebookLM all-source synthesis completed before deletion",
+    "NotebookLM source inventory verified after cleanup: exactly 2 sources",
+    "notebooklm-response-a2a-deep-20260810.json validated by notebook_gate.py"
+  ]
+}

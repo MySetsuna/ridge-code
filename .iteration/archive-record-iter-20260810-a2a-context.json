@@ -16,9 +16,9 @@
   "paths": ["crates/agent/src/communication.rs"],
   "symbols": ["AgentTask", "AgentEnvelope::validate"],
   "next": [
-    "poll the existing NotebookLM research task after interactive re-authentication",
-    "re-run the same-version release after this verified context change"
+    "keep signed envelope, replay defense, response validation, and audit-chain work as a separate future requirement",
+    "NotebookLM iteration notebook initialized with exactly two current sources and one open-vision Note"
   ],
   "requirement_id": "REQ-20260810-A2A-01",
-  "status": "implemented_and_verified"
+  "status": "implemented_and_verified_and_researched"
 }

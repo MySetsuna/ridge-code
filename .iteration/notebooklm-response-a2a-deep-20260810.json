@@ -1,0 +1,59 @@
+{
+  "status": "PROCEED",
+  "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
+  "research_task_id": "1b886cb9-f606-4aa6-a32e-ecc38eedfa50",
+  "query_mode": "completed_deep_research_plus_existing_sources",
+  "sources_found": 10,
+  "sources_imported": 9,
+  "confirmed_facts": [
+    {
+      "fact": "MCP 适合模型与工具/资源的垂直边界，A2A 适合具备推理能力的 agent 间水平协作边界。",
+      "evidence": "NotebookLM completed research: MCP vs A2A vs ACP comparison; Architecture overview - Model Context Protocol"
+    },
+    {
+      "fact": "本仓库当前以独立 AgentEnvelope/AgentTransport 表达 agent 生命周期，并保留 MCP 作为传输或外部协议适配边界。",
+      "evidence": "Local CodeGraph and tests: crates/agent/src/communication.rs; crates/mcp/src/lib.rs"
+    },
+    {
+      "fact": "当前 REQ 已验证版本化信封、能力握手、关联 ID、取消/超时、结构化错误、只读权限与两种 bounded transport。",
+      "evidence": ".iteration/a2a-smoke-evidence-20260810.json; 13 communication tests; workspace quality gates"
+    }
+  ],
+  "contradictions": [
+    "NotebookLM 建议签名握手、重放防护与哈希审计；REQ-20260810-A2A-01 未批准外部身份/密钥体系，本迭代未将其作为完成条件。"
+  ],
+  "unverified_hypotheses": [
+    {
+      "hypothesis": "跨机器生产部署需要签名意图信封、双向响应校验与冻结错误码。",
+      "support": ["NotebookLM deep research cites zero-trust and signed-envelope sources"],
+      "against": ["当前 REQ 明确限制在本地 bounded transport 与现有权限门"],
+      "experiment": "下一迭代先定义密钥生命周期、重放窗口与兼容错误码，再以恶意响应和重放测试验证。"
+    },
+    {
+      "hypothesis": "独立 agent wire protocol 应继续与 MCP tools/call 解耦，并通过适配器互通。",
+      "support": ["NotebookLM MCP/A2A boundary conclusion", "local MCP transport only models JSON-RPC request/notify"],
+      "against": ["尚无跨进程外部 agent 互操作验收"],
+      "experiment": "增加受控 stdio 子进程互操作测试，验证业务状态机不感知传输差异。"
+    }
+  ],
+  "candidates": [
+    {
+      "core": "维持独立 AgentEnvelope/AgentTransport，并以 MCP/stdio 作为可插拔适配器。",
+      "constraints": ["不绕过只读、权限门、危险命令拦截与 verify", "所有请求有界超时/取消/关联 ID"],
+      "risks": ["未来跨机器认证与重放防护尚未定义"],
+      "reversibility": "高；通信模块与业务图解耦",
+      "scope": ["crates/agent/src/communication.rs", "dispatch_agent", "planner/worker"],
+      "validation": ["协议矩阵测试", "in-process 与 newline JSON-RPC smoke", "权限/取消/错误回归"]
+    }
+  ],
+  "recommendation": "本迭代实现与验收已闭合；保留签名、重放、审计链作为明确的后续研究项，不将来源建议直接升级为当前代码事实。",
+  "next_step": {
+    "type": "decision",
+    "value": "为跨机器 agent 协作单独定义认证、重放、响应校验与冻结错误码的需求包。"
+  },
+  "answer_summary": "NotebookLM confirmed the MCP/A2A boundary and identified signed envelopes, mutual response validation, replay defense, and append-only audit as future production-hardening candidates. Local implementation remains authoritative for current acceptance."
+  ,"stop_conditions": [
+    "不得把开放愿景直接升级为当前需求或代码事实",
+    "不得绕过现有权限门、只读约束、危险命令拦截与确定性 verify"
+  ]
+}

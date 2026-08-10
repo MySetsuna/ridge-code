@@ -1,8 +1,11 @@
 {
-  "status": "partial",
+  "status": "completed",
   "notebook_id": "24ef1fd0-37f5-4aa8-9a6d-53fe577b6b57",
   "research_task_id": "1b886cb9-f606-4aa6-a32e-ecc38eedfa50",
-  "completed": false,
+  "completed": true,
+  "sources_found": 10,
+  "sources_imported": 9,
+  "report_artifact": ".iteration/notebooklm-response-a2a-deep-20260810.json",
   "validated_source_query": true,
   "attempts": [
     {
@@ -24,5 +27,6 @@
     }
   ],
   "fallback_basis": ".iteration/notebooklm-response-a2a-sources-20260810.json",
-  "next_action": "After local NotebookLM re-authentication, poll only the existing task id; do not create a duplicate task."
+  "query_evidence": "NotebookLM completed query 2026-08-10: MCP/A2A boundary, current protocol constraints, and future signed-envelope/replay/audit candidates.",
+  "next_action": "NotebookLM iteration notebook initialized: open-vision Note reconciled; source inventory reduced to the current snapshot and requirements sources."
 }
