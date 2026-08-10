@@ -74,6 +74,67 @@ pub enum AutonomyLevel {
     Guarded,
 }
 
+/// Explicit governance metadata travels with a task, rather than being
+/// inferred from model text or a transport-specific header.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutonomyTier {
+    Observe,
+    Suggest,
+    ActWithApproval,
+    BoundedAutonomous,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalRequirement {
+    None,
+    Explicit,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GovernanceMetadata {
+    pub policy_id: String,
+    pub audit_id: String,
+    pub autonomy: AutonomyTier,
+    pub approval: ApprovalRequirement,
+    pub approval_granted: bool,
+    pub max_steps: usize,
+}
+
+impl GovernanceMetadata {
+    pub fn validate(&self) -> Result<(), AgentProtocolError> {
+        if self.policy_id.trim().is_empty() || self.audit_id.trim().is_empty() {
+            return Err(AgentProtocolError::Invalid(
+                "governance policy_id and audit_id must be non-empty".to_string(),
+            ));
+        }
+        if self.max_steps == 0 {
+            return Err(AgentProtocolError::Invalid(
+                "governance max_steps must be positive".to_string(),
+            ));
+        }
+        if matches!(self.approval, ApprovalRequirement::Explicit) && !self.approval_granted {
+            return Err(AgentProtocolError::Unauthorized(
+                "governance approval is required".to_string(),
+            ));
+        }
+        if matches!(self.autonomy, AutonomyTier::ActWithApproval)
+            && !matches!(self.approval, ApprovalRequirement::Explicit)
+        {
+            return Err(AgentProtocolError::Invalid(
+                "act-with-approval governance requires explicit approval".to_string(),
+            ));
+        }
+        if matches!(self.autonomy, AutonomyTier::Observe) && self.approval_granted {
+            return Err(AgentProtocolError::Invalid(
+                "observe-only governance cannot grant approval".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentCapability {
     pub name: String,
@@ -230,6 +291,8 @@ pub struct AgentEnvelope {
     pub to: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security: Option<AgentSecurityStamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governance: Option<GovernanceMetadata>,
     pub message: AgentMessage,
 }
 
@@ -389,6 +452,7 @@ impl AgentEnvelope {
             from: from.into(),
             to: to.into(),
             security: None,
+            governance: None,
             message,
         }
     }
@@ -493,6 +557,9 @@ impl AgentEnvelope {
         if let AgentMessage::Task(task) = &self.message {
             task.validate_context()?;
         }
+        if let Some(governance) = &self.governance {
+            governance.validate()?;
+        }
         let encoded = serde_json::to_vec(self)
             .map_err(|error| AgentProtocolError::Invalid(error.to_string()))?;
         if encoded.len() > MAX_AGENT_FRAME_BYTES {
@@ -505,6 +572,11 @@ impl AgentEnvelope {
 
     pub fn with_parent(mut self, parent_id: impl Into<String>) -> Self {
         self.parent_id = Some(parent_id.into());
+        self
+    }
+
+    pub fn with_governance(mut self, governance: GovernanceMetadata) -> Self {
+        self.governance = Some(governance);
         self
     }
 }
@@ -660,6 +732,41 @@ pub fn authorize_task(
     if task.budget_steps == 0 {
         return Err(AgentProtocolError::Invalid(
             "budget_steps must be positive".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn authorize_governance(
+    session: &NegotiatedSession,
+    task: &AgentTask,
+    governance: &GovernanceMetadata,
+) -> Result<(), AgentProtocolError> {
+    governance.validate()?;
+    if governance.max_steps < task.budget_steps {
+        return Err(AgentProtocolError::Unauthorized(
+            "task budget exceeds governance limit".to_string(),
+        ));
+    }
+    if matches!(governance.autonomy, AutonomyTier::Observe) && !task.read_only {
+        return Err(AgentProtocolError::Unauthorized(
+            "observe-only governance cannot run mutating tasks".to_string(),
+        ));
+    }
+    if matches!(governance.autonomy, AutonomyTier::Suggest)
+        && matches!(governance.approval, ApprovalRequirement::None)
+        && !task.read_only
+    {
+        return Err(AgentProtocolError::Unauthorized(
+            "suggest governance requires explicit approval for mutating tasks".to_string(),
+        ));
+    }
+    if matches!(governance.autonomy, AutonomyTier::BoundedAutonomous)
+        && session.remote_autonomy == AutonomyLevel::ReadOnly
+        && !task.read_only
+    {
+        return Err(AgentProtocolError::Unauthorized(
+            "read-only remote agent cannot run autonomous mutating tasks".to_string(),
         ));
     }
     Ok(())
@@ -971,6 +1078,9 @@ where
         ));
     };
     authorize_task(&session, task)?;
+    if let Some(governance) = &request.governance {
+        authorize_governance(&session, task, governance)?;
+    }
     let correlation_id = request.correlation_id.clone();
     let request_message_id = request.message_id.clone();
     let request_from = request.from.clone();

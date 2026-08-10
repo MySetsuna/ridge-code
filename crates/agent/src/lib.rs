@@ -60,3 +60,5 @@ mod orchestrate;
 pub use orchestrate::*;
 mod goal;
 pub use goal::*;
+mod open_vision;
+pub use open_vision::*;

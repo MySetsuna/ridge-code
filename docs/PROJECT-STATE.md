@@ -787,3 +787,10 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - `md_line_spans` 现复用既有无依赖 `code_line_spans`：Live 可见 fenced code 与已落入 inline 原生历史的 Answer 均对关键字、类型、字符串、数字、字面量、注释做 bounded ANSI16 语义色；未知 token 与跨行语法仍保持 Muted/不猜测。
 - 文本、围栏状态、折叠、工具协议、键位与 `insert_before` scrollback 语义不变；新增静态历史颜色回归，agent 99、TUI 121 及 workspace 测试、clippy、fmt、diff 检查通过。
 - `c01d526` 已推送 `origin/main`；v0.5.0 ReRelease 已覆盖，ZIP 大小 `3011947`，SHA-256 为 `b8bbb398e6e6bcf1f22b276c6b7862c17b7ff39c02584ac3bbdf761a2107eaed`，归档含 `ridgecode.exe`、`README.md`、`install.ps1`。
+
+## Open Vision 七切片落地（2026-08-11）
+
+- `REQ-20260810-OPEN-VISION-01` 已批准并保持不变；七类方向登记于 `docs/OPEN-VISION-SLICES.md`。
+- `crates/agent/src/open_vision.rs` 提供密钥绑定安全审计、治理元数据、Unicode 能力探测/安全回退、图谱推理投影、离线 store-and-forward/federated outbox、有界 Web/PWA 事件流/接管、推理树哈希链离线审计；所有边界均有容量、身份、父节点或载荷校验。
+- `communication.rs` 将治理元数据随 `AgentEnvelope` 传输，并在 exchange 前执行 `authorize_governance`；既有 HMAC、时钟窗口、nonce replay、只读能力协商仍为硬门。
+- 本轮统一 `scripts/quality-gate.ps1` exit 0：workspace tests（agent lib 151、ridgecode 357、其余套件全绿）、fmt、clippy `-D warnings`、build、`cargo llvm-cov --fail-under-lines 80` 与本机 Sonar quality gate 全通过；Sonar API 复核 coverage `85.2%`、new coverage `80.0%`、bugs/vulnerabilities/code_smells/issues `0`、duplication `0.9%`。无密钥 `ridgecode --version` 与离线 demo smoke exit 0；requirements/preflight/iteration gate 均通过。
