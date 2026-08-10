@@ -887,6 +887,14 @@ mod tests {
         save_oauth_token, verify_key_via,
     };
     use crate::Config;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     /// 连接校验核(iter-38):stub HttpClient 零网络 —— 模型 JSON → Ok(数);get 失败 → Err。
     #[tokio::test]
@@ -923,6 +931,7 @@ mod tests {
 
     #[tokio::test]
     async fn login_argument_guards_are_deterministic_without_network() {
+        let _env_guard = env_test_lock();
         assert!(run_login(&["--list".into()]).await.is_ok());
         let unknown = run_login(&["not-a-provider".into()])
             .await
@@ -1056,6 +1065,7 @@ mod tests {
 
     #[test]
     fn oauth_model_selection_respects_provider_config_and_environment() {
+        let _env_guard = env_test_lock();
         fn without_env<T>(name: &str, f: impl FnOnce() -> T) -> T {
             let previous = std::env::var_os(name);
             std::env::remove_var(name);
@@ -1132,6 +1142,7 @@ mod tests {
     }
 
     fn with_env<T>(name: &str, value: &str, f: impl FnOnce() -> T) -> T {
+        let _env_guard = env_test_lock();
         let previous = std::env::var_os(name);
         std::env::set_var(name, value);
         let result = f();
