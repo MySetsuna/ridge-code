@@ -866,4 +866,110 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("RidgeCode login successful"));
     }
+
+    fn callback_request(request: &str) -> (Option<Result<String, String>>, String) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let thread = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            handle_local_callback_stream(&mut stream, "expected")
+        });
+        let mut client = std::net::TcpStream::connect(addr).unwrap();
+        client.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        (thread.join().unwrap(), response)
+    }
+
+    #[test]
+    fn local_callback_handles_waiting_favicon_unknown_and_invalid_requests() {
+        let (waiting, response) = callback_request("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert_eq!(waiting, None);
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+
+        let (favicon, response) =
+            callback_request("GET /favicon.ico HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert_eq!(favicon, None);
+        assert!(response.starts_with("HTTP/1.1 204 No Content"));
+
+        let (unknown, response) =
+            callback_request("GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert_eq!(unknown, None);
+        assert!(response.starts_with("HTTP/1.1 404 Not Found"));
+
+        let (missing_code, response) = callback_request(
+            "GET /auth/callback?state=expected HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert_eq!(
+            missing_code,
+            Some(Err("OAuth callback did not contain a code".into()))
+        );
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+
+        let (mismatch, _) = callback_request(
+            "GET /auth/callback?code=abc&state=wrong HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert_eq!(
+            mismatch,
+            Some(Err("OAuth state mismatch; restart login".into()))
+        );
+    }
+
+    #[test]
+    fn oauth_defaults_keep_provider_specific_wire_identity() {
+        assert_eq!(oauth_defaults("openai").0, "gpt-5");
+        assert_eq!(
+            oauth_defaults("openai").1,
+            "https://chatgpt.com/backend-api/codex"
+        );
+        assert_eq!(oauth_defaults("anthropic").0, "claude-sonnet-4-6");
+        assert_eq!(oauth_defaults("unknown").1, "https://api.anthropic.com/v1");
+        assert!(now_epoch() > 0);
+    }
+
+    fn with_env<T>(name: &str, value: &str, f: impl FnOnce() -> T) -> T {
+        let previous = std::env::var_os(name);
+        std::env::set_var(name, value);
+        let result = f();
+        match previous {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+        result
+    }
+
+    #[test]
+    fn oauth_file_and_profile_registration_round_trip_without_plaintext_key() {
+        let root = std::env::temp_dir().join(format!("ridge-login-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&root);
+        let oauth_file = root.join("oauth.json");
+        let config_file = root.join("config.json");
+        let token = provider::oauth::OAuthToken {
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            expires_at_epoch: now_epoch() + 3600,
+            id_token: None,
+            account_id: Some("account".into()),
+        };
+        with_env("RIDGE_OAUTH", oauth_file.to_str().unwrap(), || {
+            let saved = save_oauth_token("openai", &token).unwrap();
+            assert_eq!(saved, oauth_file.to_string_lossy());
+            let text = std::fs::read_to_string(&oauth_file).unwrap();
+            assert_eq!(agent::oauth_get(&text, "openai").unwrap(), token);
+            assert_eq!(oauth_model_info(&Config::default()).unwrap().0, "openai");
+        });
+        with_env("RIDGE_CONFIG", config_file.to_str().unwrap(), || {
+            assert_eq!(
+                register_oauth_profile("anthropic").as_deref(),
+                Some("claude-max")
+            );
+            let cfg = Config::load(&config_file);
+            assert_eq!(cfg.providers.len(), 1);
+            assert_eq!(cfg.providers[0].use_oauth, Some(true));
+            assert!(cfg.providers[0].api_key.is_none());
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

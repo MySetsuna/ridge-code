@@ -983,4 +983,88 @@ mod tests {
         let _ = std::fs::remove_file(p);
         assert!(load_session("C:/no/such/ridge-session-xyz.json").is_empty());
     }
+
+    #[test]
+    fn prompt_history_persistence_filters_blanks_and_keeps_latest_bound() {
+        let path =
+            std::env::temp_dir().join(format!("ridge-input-history-{}.json", std::process::id()));
+        let mut values = vec![" ".to_string()];
+        values.extend((0..205).map(|index| format!("item-{index}")));
+        save_prompt_history(path.to_str().unwrap(), &values);
+        let loaded = load_prompt_history(path.to_str().unwrap());
+        assert_eq!(loaded.len(), MAX_PROMPT_HISTORY);
+        assert_eq!(loaded.first().map(String::as_str), Some("item-5"));
+        assert_eq!(loaded.last().map(String::as_str), Some("item-204"));
+        std::fs::write(&path, "not json").unwrap();
+        assert!(load_prompt_history(path.to_str().unwrap()).is_empty());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn config_resolution_prefers_named_profile_and_defaults_are_stable() {
+        let cfg = Config::parse(
+            r#"{
+                "provider": "Anthropic",
+                "providers": [{
+                    "name": "Anthropic",
+                    "kind": "anthropic",
+                    "model": "claude-test",
+                    "base_url": "https://example.test/v1",
+                    "api_key": "sk-test"
+                }]
+            }"#,
+        );
+        let auth = std::collections::BTreeMap::new();
+        assert_eq!(
+            configured_profile(&cfg, " anthropic ").unwrap().model,
+            "claude-test"
+        );
+        assert_eq!(
+            resolve_provider_label(&cfg, "anthropic", "https://other.test"),
+            "Anthropic"
+        );
+        assert_eq!(
+            resolve_model_info(&cfg),
+            (
+                "anthropic".into(),
+                "claude-test".into(),
+                "https://example.test/v1".into()
+            )
+        );
+        assert_eq!(
+            resolve_configured_model_info(&cfg, &auth),
+            resolve_model_info(&cfg)
+        );
+        assert_eq!(
+            resolve_start_model_info(&cfg, &auth, false),
+            resolve_model_info(&cfg)
+        );
+        assert!(real_provider(&cfg, &auth).is_some());
+        assert!(missing_key_provider()
+            .complete(&provider::CompletionRequest::default())
+            .await
+            .is_ok());
+    }
+
+    #[test]
+    fn proxy_application_and_history_path_helpers_are_stable() {
+        let names = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"];
+        let old = names
+            .iter()
+            .map(|name| (*name, std::env::var_os(name)))
+            .collect::<Vec<_>>();
+        apply_proxy_env("  http://127.0.0.1:9  ");
+        for name in names {
+            assert_eq!(std::env::var(name).unwrap(), "http://127.0.0.1:9");
+        }
+        apply_proxy_env(" ");
+        for (name, value) in old {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        assert!(global_input_history_path().ends_with("input-history.json"));
+        assert!(session_input_history_path().ends_with(".inputs.json"));
+    }
 }

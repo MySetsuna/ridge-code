@@ -726,6 +726,80 @@ fn repair_tool_history_removes_orphans_but_keeps_completed_pairs() {
     assert_eq!(input.len(), 4);
 }
 
+#[test]
+fn responses_stream_accumulator_handles_text_reasoning_tools_usage_and_errors() {
+    let mut acc = responses::StreamAcc::default();
+    let chunks = Arc::new(Mutex::new(Vec::new()));
+    let push_chunks = chunks.clone();
+    let push = move |chunk| push_chunks.lock().unwrap().push(chunk);
+    responses::accumulate_stream(
+        &mut acc,
+        &json!({"type":"response.output_text.delta","delta":"answer"}),
+        &push,
+    );
+    responses::accumulate_stream(
+        &mut acc,
+        &json!({"type":"response.reasoning_summary_text.delta","delta":"think"}),
+        &push,
+    );
+    responses::accumulate_stream(
+        &mut acc,
+        &json!({"type":"response.function_call_arguments.delta","call_id":"c1","item_id":"i1","delta":"{\"x\":"}),
+        &push,
+    );
+    responses::accumulate_stream(
+        &mut acc,
+        &json!({"type":"response.function_call_arguments.delta","call_id":"c1","delta":"1}"}),
+        &push,
+    );
+    responses::accumulate_stream(
+        &mut acc,
+        &json!({"type":"response.output_item.done","item":{"type":"function_call","id":"i1","call_id":"c1","name":"tool","arguments":"{\"x\":1}"}}),
+        &push,
+    );
+    responses::accumulate_stream(
+        &mut acc,
+        &json!({"type":"response.output_item.done","item":{"type":"message","content":[{"text":"fallback"},{"text":""}]}}),
+        &push,
+    );
+    responses::accumulate_stream(
+        &mut acc,
+        &json!({"type":"response.completed","response":{"usage":{"input_tokens":7,"output_tokens":3}}}),
+        &push,
+    );
+    assert!(acc.completed);
+    assert_eq!(acc.usage.prompt_tokens, 7);
+    assert_eq!(acc.usage.completion_tokens, 3);
+    let completion = acc.into_completion();
+    assert_eq!(completion.text, "answer");
+    assert_eq!(completion.reasoning, "think");
+    assert_eq!(completion.tool_calls[0].arguments, json!({"x":1}));
+    let chunks = chunks.lock().unwrap();
+    assert!(matches!(chunks[0], StreamChunk::Answer(_)));
+    assert!(matches!(chunks[1], StreamChunk::Reasoning(_)));
+
+    let mut failed = responses::StreamAcc::default();
+    responses::accumulate_stream(
+        &mut failed,
+        &json!({"type":"response.failed","response":{"error":{"message":"bad"}}}),
+        &|_| {},
+    );
+    assert!(responses::stream_error(&failed)
+        .unwrap()
+        .to_string()
+        .contains("bad"));
+    responses::accumulate_stream(
+        &mut failed,
+        &json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"cutoff"}}}),
+        &|_| {},
+    );
+    assert!(responses::stream_error(&failed)
+        .unwrap()
+        .to_string()
+        .contains("cutoff"));
+    responses::accumulate_stream(&mut failed, &json!({"type":"unknown"}), &|_| {});
+}
+
 #[tokio::test]
 async fn anthropic_provider_sends_api_key_version_and_system_top_level() {
     let cap = Arc::new(CapturingHttp::new(

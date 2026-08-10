@@ -29,5 +29,6 @@ ratatui = { workspace = true }
 crossterm = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]

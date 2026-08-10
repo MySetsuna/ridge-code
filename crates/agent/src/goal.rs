@@ -628,4 +628,119 @@ mod tests {
         assert_eq!(load_goal(&path).unwrap().status, GoalStatus::Active);
         let _ = fs::remove_file(path);
     }
+
+    #[test]
+    fn argument_helpers_reject_empty_and_bound_input() {
+        let args = vec![
+            "first".to_string(),
+            "--next".to_string(),
+            "follow".to_string(),
+        ];
+        assert_eq!(
+            parse_tail(&args).unwrap(),
+            (vec!["first".into()], Some("follow".into()))
+        );
+        assert!(parse_tail(&["--next".into()]).is_err());
+        assert_eq!(
+            join_required(&[" ship ".into(), "it ".into()], "title").unwrap(),
+            "ship  it"
+        );
+        assert!(bounded_required(" ", "title").is_err());
+        assert!(bounded_required(&"x".repeat(MAX_TEXT_CHARS + 1), "title").is_err());
+        assert_eq!(bounded_optional(None, "evidence").unwrap(), None);
+        assert!(bounded_optional(Some(" "), "evidence").is_err());
+        assert_eq!(slugify("  Hello, RidgeCode!  "), "hello--ridgecode");
+        assert_eq!(slugify("!!!"), "goal");
+        assert!(goal_usage().contains("ridgecode goal"));
+    }
+
+    #[test]
+    fn goal_validation_and_terminal_transitions_keep_state_consistent() {
+        assert_eq!(GoalStatus::Active.as_str(), "active");
+        assert_eq!(GoalStatus::Blocked.as_str(), "blocked");
+        assert_eq!(GoalStatus::Completed.as_str(), "completed");
+        assert_eq!(GoalStatus::Cancelled.as_str(), "cancelled");
+
+        let mut goal = Goal::new("state checks").unwrap();
+        assert!(goal.stop().is_err());
+        goal.start().unwrap();
+        goal.stop().unwrap();
+        assert_eq!(goal.phase, "paused");
+        goal.cancel(Some("user stopped")).unwrap();
+        assert_eq!(goal.status, GoalStatus::Cancelled);
+        assert!(goal.resume().is_ok());
+        assert!(goal.resume().is_err());
+        goal.complete("done").unwrap();
+        assert!(goal.cancel(None).is_err());
+
+        let mut invalid = Goal::new("invalid").unwrap();
+        invalid.schema_version = 99;
+        assert!(invalid.validate().is_err());
+        invalid.schema_version = GOAL_SCHEMA_VERSION;
+        invalid.evidence = vec!["e".into(); MAX_EVIDENCE + 1];
+        assert!(invalid.validate().is_err());
+        invalid.evidence.clear();
+        invalid.running = true;
+        invalid.status = GoalStatus::Blocked;
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn goal_commands_cover_status_lifecycle_and_errors() {
+        let path = temp_path("all-commands");
+        let args = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| (*item).to_string())
+                .collect::<Vec<_>>()
+        };
+        assert!(goal_command_at(&path, &args(&["help"]))
+            .unwrap()
+            .contains("goal ["));
+        assert!(goal_command_at(&path, &args(&["status"]))
+            .unwrap()
+            .contains("no goal at"));
+        goal_command_at(&path, &args(&["create", "quality", "gate"])).unwrap();
+        assert!(goal_command_at(&path, &args(&["create", "again"])).is_err());
+        goal_command_at(&path, &args(&["start"])).unwrap();
+        goal_command_at(&path, &args(&["stop"])).unwrap();
+        goal_command_at(
+            &path,
+            &args(&["advance", "tests", "pass", "--next", "coverage"]),
+        )
+        .unwrap();
+        goal_command_at(&path, &args(&["complete", "all", "green"])).unwrap();
+        assert!(goal_command_at(&path, &args(&["show"]))
+            .unwrap()
+            .contains("completed"));
+        assert!(goal_command_at(&path, &args(&["unknown"])).is_err());
+
+        let blocked = temp_path("block-command");
+        goal_command_at(&blocked, &args(&["create", "blocked"])).unwrap();
+        goal_command_at(&blocked, &args(&["block", "needs", "review"])).unwrap();
+        assert!(goal_command_at(&blocked, &args(&["cancel"])).is_ok());
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(blocked);
+    }
+
+    #[test]
+    fn goal_storage_and_rendering_report_invalid_or_optional_fields() {
+        let missing = temp_path("missing");
+        assert!(matches!(load_goal(&missing), Err(GoalError::NotFound(_))));
+        fs::write(&missing, "not json").unwrap();
+        assert!(matches!(load_goal(&missing), Err(GoalError::Json(_))));
+
+        let mut goal = Goal::new("render").unwrap();
+        assert!(goal.advance(" ", "evidence", None).is_err());
+        assert!(goal.complete("").is_err());
+        assert!(goal.block("", None).is_err());
+        goal.failure_reason = Some("blocked by review".into());
+        goal.next_step = Some("run quality gate".into());
+        goal.evidence.push("baseline captured".into());
+        let rendered = render_goal(&goal);
+        assert!(rendered.contains("1. baseline captured"));
+        assert!(rendered.contains("blocked by review"));
+        assert!(rendered.contains("run quality gate"));
+        let _ = fs::remove_file(missing);
+    }
 }

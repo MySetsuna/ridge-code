@@ -210,3 +210,16 @@ fn form_component(value: &str) -> String {
     }
     encoded
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn form_component_preserves_unreserved_and_escapes_wire_bytes() {
+        assert_eq!(form_component("abc-._~09"), "abc-._~09");
+        assert_eq!(form_component("a b+c/%"), "a%20b%2Bc%2F%25");
+        assert_eq!(form_component("中文"), "%E4%B8%AD%E6%96%87");
+        let _ = ReqwestClient::new();
+    }
+}

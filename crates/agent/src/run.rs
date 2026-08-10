@@ -363,4 +363,31 @@ mod tests {
         assert_eq!(truncate("abc", 10), "abc");
         assert!(truncate(&"x".repeat(50), 10).ends_with("… (truncated)"));
     }
+
+    #[test]
+    fn event_and_node_labels_cover_all_presentation_paths() {
+        assert_eq!(node_label("reason"), "reasoning");
+        assert_eq!(node_label("act"), "running tools");
+        assert_eq!(node_label("verify"), "verifying");
+        assert_eq!(node_label("wrapup"), "wrapping up");
+        assert_eq!(node_label("custom"), "custom");
+
+        assert!(format_event("verify: FAIL deterministic").contains("\x1b[31m"));
+        assert!(format_event("reason#1: tool_call").contains("\x1b[36m"));
+        assert!(format_event("plain event").contains("plain event"));
+        assert!(format_event("act: ").contains("\x1b[33m"));
+        assert!(truncate("中文", 1).starts_with('中'));
+    }
+
+    #[tokio::test]
+    async fn offline_demo_reaches_the_report_path() {
+        run_demo().await.unwrap();
+        assert!(run_artifacts_dir().to_string_lossy().contains(".ridge"));
+    }
+
+    #[test]
+    fn report_path_exposes_unapproved_status() {
+        let out = AgentState::new("needs verification");
+        print_report(&out);
+    }
 }

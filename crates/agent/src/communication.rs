@@ -11,6 +11,7 @@ use std::sync::{
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, Notify};
@@ -20,6 +21,8 @@ pub const AGENT_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(300);
 pub const MAX_AGENT_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_AGENT_CONTEXT_ENTRIES: usize = 32;
 pub const MAX_AGENT_CONTEXT_BYTES: usize = 16 * 1024;
+pub const MAX_AGENT_REPLAY_ENTRIES: usize = 1024;
+pub const MAX_AGENT_CLOCK_SKEW_SECS: u64 = 300;
 
 #[derive(Clone, Default)]
 pub struct AgentCancellation {
@@ -225,7 +228,62 @@ pub struct AgentEnvelope {
     pub parent_id: Option<String>,
     pub from: String,
     pub to: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<AgentSecurityStamp>,
     pub message: AgentMessage,
+}
+
+/// Optional wire-level authenticity metadata. Unsigned envelopes remain
+/// compatible with existing local transports; secure callers must opt in via
+/// [`AgentEnvelope::sign`] and [`AgentEnvelope::verify`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSecurityStamp {
+    pub key_id: String,
+    pub nonce: String,
+    pub issued_at_epoch: u64,
+    pub signature: String,
+}
+
+/// Bounded replay memory for one authenticated agent session.
+#[derive(Debug)]
+pub struct ReplayGuard {
+    seen: std::collections::BTreeSet<String>,
+    order: std::collections::VecDeque<String>,
+    capacity: usize,
+}
+
+impl ReplayGuard {
+    pub fn new() -> Self {
+        Self::with_capacity(MAX_AGENT_REPLAY_ENTRIES)
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            seen: std::collections::BTreeSet::new(),
+            order: std::collections::VecDeque::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    fn record_once(&mut self, nonce: &str) -> bool {
+        if self.seen.contains(nonce) {
+            return false;
+        }
+        self.seen.insert(nonce.to_string());
+        self.order.push_back(nonce.to_string());
+        while self.order.len() > self.capacity {
+            if let Some(evicted) = self.order.pop_front() {
+                self.seen.remove(&evicted);
+            }
+        }
+        true
+    }
+}
+
+impl Default for ReplayGuard {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AgentEnvelope {
@@ -330,8 +388,92 @@ impl AgentEnvelope {
             parent_id,
             from: from.into(),
             to: to.into(),
+            security: None,
             message,
         }
+    }
+
+    /// Add an HMAC-SHA256 stamp over the complete unsigned envelope.
+    pub fn sign(
+        &mut self,
+        key_id: impl Into<String>,
+        secret: &str,
+        nonce: impl Into<String>,
+        issued_at_epoch: u64,
+    ) -> Result<(), AgentProtocolError> {
+        let key_id = key_id.into();
+        let nonce = nonce.into();
+        if key_id.trim().is_empty() || nonce.trim().is_empty() || secret.is_empty() {
+            return Err(AgentProtocolError::Invalid(
+                "security key_id, nonce, and secret must be non-empty".to_string(),
+            ));
+        }
+        self.security = Some(AgentSecurityStamp {
+            key_id,
+            nonce,
+            issued_at_epoch,
+            signature: String::new(),
+        });
+        let payload = self.signed_payload()?;
+        let signature = hmac_sha256_hex(secret.as_bytes(), &payload);
+        if let Some(stamp) = self.security.as_mut() {
+            stamp.signature = signature;
+            Ok(())
+        } else {
+            Err(AgentProtocolError::Invalid(
+                "security stamp initialization failed".to_string(),
+            ))
+        }
+    }
+
+    /// Verify authenticity, freshness and nonce uniqueness for one session.
+    pub fn verify(
+        &self,
+        secret: &str,
+        now_epoch: u64,
+        replay: &mut ReplayGuard,
+    ) -> Result<(), AgentProtocolError> {
+        self.validate()?;
+        let Some(stamp) = &self.security else {
+            return Err(AgentProtocolError::Unauthorized(
+                "secure agent envelope required".to_string(),
+            ));
+        };
+        if secret.is_empty()
+            || stamp.key_id.trim().is_empty()
+            || stamp.nonce.trim().is_empty()
+            || stamp.signature.is_empty()
+        {
+            return Err(AgentProtocolError::Unauthorized(
+                "invalid agent security stamp".to_string(),
+            ));
+        }
+        if stamp.issued_at_epoch.abs_diff(now_epoch) > MAX_AGENT_CLOCK_SKEW_SECS {
+            return Err(AgentProtocolError::Unauthorized(
+                "agent envelope timestamp outside security window".to_string(),
+            ));
+        }
+        let expected = hmac_sha256_hex(secret.as_bytes(), &self.signed_payload()?);
+        if !constant_time_equal(stamp.signature.as_bytes(), expected.as_bytes()) {
+            return Err(AgentProtocolError::Unauthorized(
+                "agent envelope signature mismatch".to_string(),
+            ));
+        }
+        if !replay.record_once(&stamp.nonce) {
+            return Err(AgentProtocolError::Unauthorized(
+                "agent envelope nonce replayed".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn signed_payload(&self) -> Result<Vec<u8>, AgentProtocolError> {
+        let mut unsigned = self.clone();
+        if let Some(stamp) = unsigned.security.as_mut() {
+            stamp.signature.clear();
+        }
+        serde_json::to_vec(&unsigned)
+            .map_err(|error| AgentProtocolError::Invalid(error.to_string()))
     }
 
     pub fn validate(&self) -> Result<(), AgentProtocolError> {
@@ -365,6 +507,46 @@ impl AgentEnvelope {
         self.parent_id = Some(parent_id.into());
         self
     }
+}
+
+fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
+    const BLOCK: usize = 64;
+    let mut normalized = if key.len() > BLOCK {
+        Sha256::digest(key).to_vec()
+    } else {
+        key.to_vec()
+    };
+    normalized.resize(BLOCK, 0);
+    let mut inner_pad = [0x36u8; BLOCK];
+    let mut outer_pad = [0x5cu8; BLOCK];
+    for (index, byte) in normalized.iter().enumerate() {
+        inner_pad[index] ^= byte;
+        outer_pad[index] ^= byte;
+    }
+    let mut inner = Sha256::new();
+    inner.update(inner_pad);
+    inner.update(message);
+    let inner = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(64);
+    for byte in outer.finalize() {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+        == 0
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -952,6 +1134,64 @@ mod tests {
         let error = envelope.validate().expect_err("context limit");
         assert!(
             matches!(error, AgentProtocolError::Invalid(message) if message.contains("context"))
+        );
+    }
+
+    #[test]
+    fn signed_envelope_rejects_tampering_expiry_and_replay() {
+        let mut envelope = task();
+        envelope
+            .sign("worker-key", "shared-secret", "nonce-1", 1_000)
+            .unwrap();
+        let encoded = serde_json::to_string(&envelope).unwrap();
+        let decoded: AgentEnvelope = serde_json::from_str(&encoded).unwrap();
+        let mut replay = ReplayGuard::new();
+        decoded.verify("shared-secret", 1_100, &mut replay).unwrap();
+        assert!(matches!(
+            decoded.verify("shared-secret", 1_100, &mut replay),
+            Err(AgentProtocolError::Unauthorized(message)) if message.contains("replayed")
+        ));
+
+        let mut tampered = envelope.clone();
+        tampered.to = "other-worker".into();
+        assert!(matches!(
+            tampered.verify("shared-secret", 1_100, &mut ReplayGuard::new()),
+            Err(AgentProtocolError::Unauthorized(message)) if message.contains("signature")
+        ));
+        assert!(matches!(
+            envelope.verify("shared-secret", 2_000, &mut ReplayGuard::new()),
+            Err(AgentProtocolError::Unauthorized(message)) if message.contains("timestamp")
+        ));
+        assert!(matches!(
+            task().verify("shared-secret", 1_000, &mut ReplayGuard::new()),
+            Err(AgentProtocolError::Unauthorized(message)) if message.contains("required")
+        ));
+    }
+
+    #[test]
+    fn security_stamp_rejects_bad_inputs_and_replay_guard_is_bounded() {
+        let mut envelope = task();
+        assert!(envelope.sign("", "secret", "nonce", 1).is_err());
+        assert!(envelope.sign("key", "", "nonce", 1).is_err());
+        assert!(envelope.sign("key", "secret", "", 1).is_err());
+        envelope.sign("key", "secret", "nonce", 1).unwrap();
+        assert!(envelope
+            .verify("wrong", 1, &mut ReplayGuard::new())
+            .is_err());
+
+        let mut replay = ReplayGuard::with_capacity(2);
+        assert!(replay.record_once("a"));
+        assert!(!replay.record_once("a"));
+        assert!(replay.record_once("b"));
+        assert!(replay.record_once("c"));
+        assert!(replay.record_once("a"));
+    }
+
+    #[test]
+    fn hmac_sha256_matches_standard_vector() {
+        assert_eq!(
+            hmac_sha256_hex(b"key", b"The quick brown fox jumps over the lazy dog"),
+            "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
         );
     }
 

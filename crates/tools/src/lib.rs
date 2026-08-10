@@ -441,6 +441,7 @@ fn shell_timeout() -> Duration {
 }
 
 fn run_command_with_timeout(mut command: Command, timeout: Duration) -> io::Result<ShellResult> {
+    configure_process_group(&mut command);
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -473,7 +474,7 @@ fn run_command_with_timeout(mut command: Command, timeout: Duration) -> io::Resu
         match child.try_wait()? {
             Some(status) => break (status, false),
             None if started.elapsed() >= timeout => {
-                let _ = child.kill();
+                terminate_process_tree(&mut child);
                 break (child.wait()?, true);
             }
             None => thread::sleep(Duration::from_millis(10)),
@@ -499,6 +500,55 @@ fn run_command_with_timeout(mut command: Command, timeout: Duration) -> io::Resu
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
     })
+}
+
+#[cfg(unix)]
+fn configure_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    // Shells commonly spawn descendants. Put the command in its own process
+    // group so a timeout cannot leave descendants holding our output pipes.
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_process_group(_command: &mut Command) {}
+
+fn terminate_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let group = format!("-{}", child.id());
+        let killed = Command::new("kill")
+            .args(["-KILL", &group])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !killed {
+            let _ = child.kill();
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let pid = child.id().to_string();
+        let killed = Command::new("taskkill")
+            .args(["/PID", &pid, "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !killed {
+            let _ = child.kill();
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = child.kill();
+    }
 }
 
 #[cfg(test)]
@@ -539,16 +589,16 @@ mod tests {
         #[cfg(windows)]
         let out = run_shell_in_with_timeout(
             Some("powershell"),
-            "Start-Sleep -Seconds 1",
+            "Start-Sleep -Seconds 5",
             Duration::from_millis(50),
         )
         .unwrap();
         #[cfg(not(windows))]
         let out =
-            run_shell_in_with_timeout(Some("sh"), "sleep 1", Duration::from_millis(50)).unwrap();
+            run_shell_in_with_timeout(Some("sh"), "sleep 5", Duration::from_millis(50)).unwrap();
         assert_eq!(out.code, -1);
         assert!(out.stderr.contains("command timed out"), "{}", out.stderr);
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     /// 模型自主择 shell:显式指定的 shell 生效(退出码如实带回);未知/空 → 宿主默认,不报程序找不到。

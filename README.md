@@ -562,6 +562,11 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --workspace --locked
 ~~~
 
+Full quality gate also runs line coverage (minimum 80%) and the SonarQube
+quality gate. Run pwsh -File scripts/quality-gate.ps1 or
+sh scripts/quality-gate.sh locally. Missing sonar-scanner or SONAR_TOKEN is a
+hard failure; the scan cannot be skipped.
+
 ## 引擎 API（最小示例）
 
 crates/langgraph 不依赖 LLM，只负责状态、reducer、节点、边与 Pregel/BSP 执行：

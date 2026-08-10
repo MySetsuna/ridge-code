@@ -1302,3 +1302,181 @@ pub(crate) async fn run_command(
     }
     Ok(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta() -> ReplMeta {
+        ReplMeta {
+            tools: vec!["read_file".into(), "run_shell".into()],
+            provider: "openai".into(),
+            provider_label: "openai".into(),
+            model: "gpt-4o".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            status_bar: "{provider} {model}".into(),
+            ctx_window: tui::DEFAULT_CTX_WINDOW,
+        }
+    }
+
+    #[tokio::test]
+    async fn command_router_covers_read_only_panels_and_prompt_commands() {
+        let mut ui = Ui::default();
+        let mut history = vec![Message::user("hello")];
+        let mut meta = meta();
+        let swap = Arc::new(SwapProvider::new(Arc::new(ScriptedProvider::new(vec![]))));
+        let agents = agent::Agents::default();
+        let skills = Vec::new();
+        let commands = vec![agent::SlashCommand {
+            name: "ship".into(),
+            description: "ship it".into(),
+            body: "deploy $ARGS".into(),
+        }];
+
+        for input in [
+            "/help",
+            "/tools",
+            "/activity",
+            "/inspect",
+            "/find",
+            "/find needle",
+            "/reasoning",
+            "/answers",
+            "/queue",
+            "/history",
+            "/compact",
+            "/cost",
+            "/effort",
+            "/provider",
+            "/provider use missing",
+            "/login",
+            "/login list",
+            "/login openai",
+            "/mcp",
+            "/skills",
+            "/commands",
+            "/jailbreak",
+            "/model",
+            "/model missing",
+            "/unknown",
+        ] {
+            assert!(!run_command(
+                input,
+                &mut ui,
+                &mut history,
+                &mut meta,
+                &swap,
+                &agents,
+                &commands,
+                &skills,
+                42,
+                3,
+            )
+            .await
+            .unwrap());
+        }
+
+        ui.model_catalog = Some(vec![(
+            "openai".into(),
+            vec![provider::models::ModelInfo {
+                id: "gpt-4o".into(),
+                context: Some(128_000),
+            }],
+        )]);
+        run_command(
+            "/model",
+            &mut ui,
+            &mut history,
+            &mut meta,
+            &swap,
+            &agents,
+            &commands,
+            &skills,
+            42,
+            3,
+        )
+        .await
+        .unwrap();
+
+        run_command(
+            "/ship src/lib.rs",
+            &mut ui,
+            &mut history,
+            &mut meta,
+            &swap,
+            &agents,
+            &commands,
+            &skills,
+            42,
+            3,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ui.run_task.as_deref(), Some("deploy src/lib.rs"));
+        assert!(run_command(
+            "/exit",
+            &mut ui,
+            &mut history,
+            &mut meta,
+            &swap,
+            &agents,
+            &commands,
+            &skills,
+            42,
+            3,
+        )
+        .await
+        .unwrap());
+    }
+
+    #[test]
+    fn model_target_helpers_preserve_profile_identity_and_endpoint_rules() {
+        let cfg = Config::parse(
+            r#"{
+                "provider": "Zai",
+                "providers": [{
+                    "name": "Zai",
+                    "kind": "openai",
+                    "model": "glm-4.6",
+                    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                    "api_key": "sk-zai"
+                }]
+            }"#,
+        );
+        let auth = std::collections::BTreeMap::new();
+        assert_eq!(named_profile_name(&cfg, " zai ").as_deref(), Some("Zai"));
+        assert_eq!(
+            model_group_name("openai", "https://api.openai.com/v1"),
+            "openai"
+        );
+        assert!(same_endpoint(
+            "https://example.test/",
+            "HTTPS://EXAMPLE.TEST"
+        ));
+        assert_eq!(
+            profile_for_runtime(&cfg, "openai", "https://open.bigmodel.cn/api/paas/v4/")
+                .unwrap()
+                .name,
+            "Zai"
+        );
+        assert_eq!(
+            api_key_for_runtime(
+                &cfg,
+                &auth,
+                "openai",
+                "https://open.bigmodel.cn/api/paas/v4"
+            ),
+            Some("sk-zai".into())
+        );
+        let targets = build_model_targets(
+            &cfg,
+            &auth,
+            "openai",
+            "https://open.bigmodel.cn/api/paas/v4",
+        );
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].name, "openai");
+        assert_eq!(targets[1].name, "Zai");
+        assert!(!targets[0].oauth);
+    }
+}

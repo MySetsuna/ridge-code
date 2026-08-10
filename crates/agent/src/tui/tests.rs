@@ -8670,6 +8670,80 @@ fn panel_titles_are_english() {
 }
 
 #[test]
+fn halt_labels_and_task_guards_are_deterministic() {
+    let cases = [
+        (HaltReason::Approved, "approved", "result verified"),
+        (
+            HaltReason::Budget,
+            "budget limit",
+            "inspect activity before starting a smaller task",
+        ),
+        (
+            HaltReason::Stall,
+            "no verified progress",
+            "inspect reasoning/tools, then start the next task",
+        ),
+        (
+            HaltReason::StepCap,
+            "step limit",
+            "inspect activity, then narrow the next task",
+        ),
+        (
+            HaltReason::ConstraintBreach,
+            "safety constraint",
+            "inspect the blocked action and revise the request",
+        ),
+        (
+            HaltReason::ContextRot,
+            "context limit",
+            "start the next task with a smaller context",
+        ),
+        (
+            HaltReason::CircuitBroken,
+            "repeated tool errors",
+            "inspect the last tool error before retrying",
+        ),
+        (
+            HaltReason::Unverified,
+            "not verified",
+            "inspect the activity log before retrying",
+        ),
+    ];
+    for (reason, label, guidance) in cases {
+        assert_eq!(halt_reason_display(reason), label);
+        assert_eq!(halt_reason_guidance(reason), guidance);
+    }
+    assert_eq!(inline_height_cap(), 14);
+    assert!(superstep_is_busy(&["reason".into()]));
+    assert!(!superstep_is_busy(&[]));
+    assert!(can_start_task(false, false));
+    assert!(!can_start_task(true, false));
+    assert!(!can_start_task(false, true));
+}
+
+#[test]
+fn unfinished_answers_and_attention_fallbacks_remain_visible() {
+    let mut unfinished = AgentState::new("task");
+    assert_eq!(
+        unfinished_answer_reason(&Ok(unfinished.clone())),
+        Some("run stopped before final response")
+    );
+    assert_eq!(
+        unfinished_answer_reason(&Err("failed".into())),
+        Some("run ended before final response")
+    );
+    unfinished.messages.push("(final) done".into());
+    assert_eq!(unfinished_answer_reason(&Ok(unfinished)), None);
+
+    let mut ui = Ui::default();
+    mark_takeover_requested(&mut ui);
+    apply_attention_action(&mut ui, InputAction::ToggleDetails);
+    assert!(!ui.commits.is_empty());
+    apply_attention_action(&mut ui, InputAction::ToggleActivity);
+    assert!(!ui.activity_history.is_empty());
+}
+
+#[test]
 fn live_history_is_a_full_frame_transcript_audit_surface() {
     let area = Rect {
         x: 2,

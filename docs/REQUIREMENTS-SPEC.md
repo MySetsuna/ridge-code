@@ -65,6 +65,16 @@
 - Boundary:`范围限于 crates/agent 的 agent 协作协议/消息模型、dispatch 与 teammate 接缝、传输适配及必要的 crates/mcp/provider 直接边界与测试；优先复用现有 trait、MCP/stdio 与本地调用能力，不耦合具体第三方 agent SDK，不改变 langgraph BSP 语义、工具权限、危险命令拦截、provider trait 或 MCP JSON-RPC 语义；不得引入无界后台任务、隐式跨会话共享、未审计的远程执行或敏感信息上传。
 - Acceptance:`完成 request-intake、NotebookLM 深度研究假设核验与 CodeGraph 设计审计；定义版本化消息信封、关联/取消/错误语义与至少两种传输协议的可插拔适配；测试覆盖握手/能力协商、请求响应关联、并发隔离、超时/取消、传输失败、只读权限与 maker/checker 边界；通过 cargo fmt --all -- --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked，并完成本机无密钥 smoke，证明两种协议均可完成一次 agent-to-agent 任务闭环。
 - Traceability:`REQ → agent communication envelope/transport/dispatch symbols → protocol adapters and deterministic tests → local two-protocol smoke → workspace quality gates; NotebookLM output remains hypothesis and is archived only after current-code verification.`
+
+### REQ-20260810-OPEN-VISION-01 · 开放愿景落地与质量治理
+
+- Approval evidence:`用户批准 PENDING-REQ-20260810-OPEN-VISION-01`
+- Status:`ACTIVE`
+- Version:`v0.1.0`
+- Behavior: RidgeCode 将 Open Vision Note 中七类方向转为可独立验收的实现切片：高级 agent 通信安全与隐私边界（签名/认证/重放/审计，TEE 仅在可验证边界内）；自主权等级与治理元数据；原生 grapheme/Unicode 能力探测与安全回退；图谱支撑推理接缝；离线 store-and-forward/federated A2A 传输；有界 Web/PWA 事件流与接管；推理树离线审计。每个切片保持现有权限门、只读子 agent、maker/checker、确定性 verify、BSP 与 MCP/provider 边界；仓库同时提供可重复覆盖率采集、Sonar 扫描与不可绕过的质量阈值。
+- Boundary: 仅限当前 Rust workspace、必要的 scripts/.github 质量配置与明确的本地/CI 适配；不上传密钥、cookie、原始敏感日志；不引入无界后台任务、未审计远程执行、隐式跨会话共享或未经批准的第三方 agent SDK；开放愿景方向须分片提交，不改变既有安全不变量。
+- Acceptance: 七类方向分别登记为可追踪实现切片并给出本地证据；每个已实现切片有正向、失败、边界与回归测试，覆盖率较当前基线可量化提升；接入 SonarScanner/SonarCloud 或等价 Sonar 分析，固定配置、排除规则、覆盖率报告路径与质量阈值，扫描失败即失败；统一质量阀必须包含 cargo fmt --all -- --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked、cargo llvm-cov --workspace --all-features --lcov --fail-under-lines <approved threshold>、git diff --check 与 Sonar quality gate；阀失败须修复代码/测试/架构后重跑，不得降阈值、跳过扫描、排除失败目录或伪造结果；完成无密钥 smoke、状态/需求/迭代门禁、提交推送。
+- Traceability: Open Vision Note → REQ → per-slice design/code/tests → coverage artifact + Sonar report → deterministic quality gate → local smoke → archive evidence；NotebookLM 仅作候选方向来源，代码、测试、扫描与运行证据为事实依据。
 ## 修订账本 (Revision Ledger)
 
 关闭的 Pending、历史修订与审批证据写入 `docs/archive/events-YYYY-MM.jsonl`；本文件仅保留当前 Active 条款。

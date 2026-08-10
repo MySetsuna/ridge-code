@@ -478,4 +478,80 @@ mod tests {
         assert_eq!(Formatter::format_progress(50, 100), "[█████     ] 50.0%");
         assert_eq!(Formatter::format_progress(100, 100), "[██████████] 100.0%");
     }
+
+    #[test]
+    fn formatting_and_media_paths_cover_all_supported_variants() {
+        let colors = [
+            Color::Red,
+            Color::Green,
+            Color::Yellow,
+            Color::Blue,
+            Color::Magenta,
+            Color::Cyan,
+            Color::White,
+            Color::Black,
+            Color::BrightRed,
+            Color::BrightGreen,
+            Color::BrightYellow,
+            Color::BrightBlue,
+            Color::BrightMagenta,
+            Color::BrightCyan,
+            Color::BrightWhite,
+            Color::BrightBlack,
+        ];
+        for color in colors {
+            assert!(color.code().starts_with('\x1b'));
+        }
+        assert_eq!(Color::reset(), "\x1b[0m");
+        let rich = RichOutput::new()
+            .with_color(Color::Blue)
+            .bold()
+            .italic()
+            .underline();
+        let formatted = rich.format("styled");
+        assert!(formatted.contains("\x1b[34m"));
+        assert!(formatted.contains("\x1b[3m"));
+        assert!(formatted.contains("\x1b[4m"));
+
+        assert_eq!(Formatter::format_duration(30), "30秒");
+        assert_eq!(Formatter::format_duration(120), "2分钟");
+        assert_eq!(Formatter::format_duration(7200), "2小时");
+        assert_eq!(
+            Formatter::format_file_size(1024 * 1024 * 1024 * 1024),
+            "1.0 TB"
+        );
+        assert_eq!(Formatter::format_progress(1, 0), "[==========]");
+
+        let root = std::env::temp_dir().join(format!("ridge-media-{}", std::process::id()));
+        let _ = fs::create_dir_all(&root);
+        let paths = ["photo.png", "clip.mp4", "sound.mp3", "notes.txt"];
+        let expected = [
+            MediaType::Image,
+            MediaType::Video,
+            MediaType::Audio,
+            MediaType::File,
+        ];
+        for (name, media_type) in paths.into_iter().zip(expected) {
+            let path = root.join(name);
+            fs::write(&path, "data").unwrap();
+            let media = MediaInfo::from_path(&path)
+                .unwrap()
+                .with_description("demo");
+            assert_eq!(media.media_type, media_type);
+            MediaDisplay::new().display(&media);
+        }
+        let directory = MediaInfo::from_path(&root).unwrap();
+        assert_eq!(directory.media_type, MediaType::Directory);
+        MediaDisplay::new().display(&directory);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn empty_and_missing_display_inputs_are_handled_without_panics() {
+        assert!(MediaInfo::from_path("ridge-media-does-not-exist").is_none());
+        let output = RichOutput::new().with_color(Color::BrightBlack);
+        output.print("plain");
+        output.print_with_prefix("prefix", "text");
+        TableDisplay::new().display(&["Name"], &[]);
+    }
 }
