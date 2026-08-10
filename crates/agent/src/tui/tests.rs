@@ -642,9 +642,6 @@ async fn extracted_event_loop_exits_after_takeover_signal() {
     key_tx
         .send(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
         .expect("first Ctrl-C");
-    key_tx
-        .send(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
-        .expect("second Ctrl-C");
     let (_approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel();
     let (_event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (_token_tx, token_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -682,8 +679,8 @@ async fn extracted_event_loop_exits_after_takeover_signal() {
         last_task: None,
         pressed: std::collections::HashSet::new(),
         momentary_hold: false,
-        last_ctrl_c: None,
-        dirty: true,
+        last_ctrl_c: Some(Instant::now()),
+        dirty: false,
         animation_due: false,
     };
     run_event_loop(context).await.expect("event loop");
