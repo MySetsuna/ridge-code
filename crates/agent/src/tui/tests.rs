@@ -29,6 +29,16 @@ fn test_swap() -> Arc<provider::SwapProvider> {
     )))
 }
 
+fn test_crossterm_terminal() -> Terminal<CrosstermBackend<std::io::Stdout>> {
+    Terminal::with_options(
+        CrosstermBackend::new(std::io::stdout()),
+        TerminalOptions {
+            viewport: Viewport::Fixed(ratatui::layout::Rect::new(0, 0, 80, 24)),
+        },
+    )
+    .expect("terminal")
+}
+
 fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
     Event::Key(KeyEvent::new(code, modifiers))
 }
@@ -328,7 +338,7 @@ async fn extracted_event_step_covers_stream_approval_done_and_tick_branches() {
     let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
     let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut tick = tokio::time::interval(Duration::from_secs(3600));
-    let terminal = Terminal::new(CrosstermBackend::new(std::io::stdout())).expect("terminal");
+    let terminal = test_crossterm_terminal();
     let mut animation_due = false;
 
     macro_rules! step {
@@ -420,7 +430,7 @@ async fn extracted_prepare_loop_covers_idle_poll_and_draw_decision() {
     let mut last_activity = None;
     let mut printed = 0;
     let start_task: StartTask = Box::new(|_, _| tokio::spawn(async {}));
-    let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout())).expect("terminal");
+    let mut terminal = test_crossterm_terminal();
     let mut live_cache = LiveOutputCache::default();
     let pending = None;
     let mut dirty = false;
@@ -487,7 +497,7 @@ async fn extracted_prepare_loop_covers_idle_poll_and_draw_decision() {
 #[test]
 fn extracted_tick_handler_transitions_waiting_and_splash() {
     let mut ui = Ui::default();
-    let terminal = Terminal::new(CrosstermBackend::new(std::io::stdout())).expect("terminal");
+    let terminal = test_crossterm_terminal();
     let idle = None;
     let pending = None;
     for _ in 0..SPLASH_TICKS {
@@ -639,7 +649,7 @@ async fn extracted_event_loop_exits_after_takeover_signal() {
     let (_event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (_token_tx, token_rx) = tokio::sync::mpsc::unbounded_channel();
     let (_done_tx, done_rx) = tokio::sync::mpsc::unbounded_channel();
-    let terminal = Terminal::new(CrosstermBackend::new(std::io::stdout())).expect("terminal");
+    let terminal = test_crossterm_terminal();
     let context = TuiLoopContext {
         swap: test_swap(),
         skills: Vec::new(),
