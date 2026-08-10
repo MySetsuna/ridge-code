@@ -1,0 +1,47 @@
+name: quality-gate
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: coverage + Sonar quality gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview, clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+      - name: Deterministic quality gates
+        run: |
+          cargo fmt --all -- --check
+          git diff --check
+          cargo test --workspace --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          mkdir -p target/quality
+          cargo clippy --workspace --all-targets --locked --message-format=json -- -D warnings > target/quality/clippy.json
+          cargo build --workspace --locked
+          cargo llvm-cov --workspace --all-features --locked --lcov +            --output-path target/quality/lcov.info --fail-under-lines 80
+          test -s target/quality/lcov.info
+          test -s target/quality/clippy.json
+      - name: Require Sonar token
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: test -n "$SONAR_TOKEN"
+      - name: SonarQube Cloud scan and quality gate
+        uses: SonarSource/sonarqube-scan-action@v7
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >-
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=300

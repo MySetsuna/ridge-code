@@ -12,10 +12,16 @@ permissions:
   contents: write
 
 jobs:
+  quality:
+    name: release quality gate
+    uses: ./.github/workflows/quality-gate.yml
+    secrets: inherit
+
   # 先建好 Release(幂等),再让矩阵各目标往里传产物 —— 根除「五 job 并发抢着创建 Release
   # 全落空、轮询 release not found 超时」的竞态(此前偶发全败,靠重跑碰运气)。
   create-release:
     name: create-release
+    needs: quality
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
