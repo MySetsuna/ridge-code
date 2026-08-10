@@ -53,10 +53,16 @@ jobs:
     needs: quality
     runs-on: [self-hosted, ridgecode-sonar]
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: false
+      - name: Checkout source without actions/checkout
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          git init .
+          git remote add origin "https://github.com/$env:GITHUB_REPOSITORY.git"
+          $auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$env:GITHUB_TOKEN"))
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --depth=1 origin $env:GITHUB_SHA
+          git checkout --detach FETCH_HEAD
       - uses: actions/download-artifact@v4
         with:
           name: sonar-quality-reports
