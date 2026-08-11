@@ -5567,7 +5567,7 @@ fn models_panel_selects_current() {
             mi("c", None),
         ],
     )];
-    let p = models_panel_with_effort(&grouped, "test", "b", "medium");
+    let p = models_panel(&grouped, "test", "b");
     assert_eq!(p.kind, PanelKind::Models);
     // key 格式: "provider · model_id"
     assert_eq!(p.selected().map(|r| r.key.as_str()), Some("test · b"));
@@ -5584,7 +5584,7 @@ fn models_panel_keeps_chatgpt_in_dedicated_group() {
             vec![mi("gpt-5.6-sol", Some(200_000))],
         ),
     ];
-    let p = models_panel_with_effort(&grouped, CHATGPT_MODEL_GROUP, "gpt-5.6-sol", "medium");
+    let p = models_panel(&grouped, CHATGPT_MODEL_GROUP, "gpt-5.6-sol");
     assert_eq!(
         p.selected().map(|r| r.key.as_str()),
         Some("ChatGPT (Codex) · gpt-5.6-sol")
@@ -5596,17 +5596,18 @@ fn models_panel_keeps_chatgpt_in_dedicated_group() {
 }
 
 #[test]
-fn models_panel_exposes_effort_group_and_current_value() {
-    let p = models_panel_with_effort(&[], CHATGPT_MODEL_GROUP, "gpt-5.6-sol", "high");
-    assert_eq!(
-        p.rows
-            .iter()
-            .find(|row| row.key == "Effort · high")
-            .map(|row| row.value.as_str()),
-        Some("current")
-    );
-    assert!(p.rows.iter().any(|row| row.key == "Effort · max"));
-    assert!(p.title.contains("effort high"));
+fn models_panel_excludes_effort_rows() {
+    let p = models_panel(&[], CHATGPT_MODEL_GROUP, "gpt-5.6-sol");
+    assert!(p.rows.iter().all(|row| !row.key.starts_with("Effort")));
+    assert!(p.title.contains("provider/model"));
+}
+
+#[test]
+fn effort_panel_is_a_separate_second_stage() {
+    let p = effort_panel("high");
+    assert_eq!(p.kind, PanelKind::Effort);
+    assert_eq!(p.selected().map(|row| row.key.as_str()), Some("high"));
+    assert!(p.rows.iter().any(|row| row.key == "max"));
 }
 
 /// iter-35:斜杠即弹 —— 打 `/` 现全表、`/mo` 滤到 `/model`(iter-37 合并后 `/models` 退出补全表)。
@@ -5763,6 +5764,109 @@ async fn history_command_opens_bounded_tool_history() {
     assert!(SLASH_COMMANDS.contains(&"/history"));
     assert!(SLASH_COMMANDS.contains(&"/activity"));
     assert!(SLASH_COMMANDS.contains(&"/queue"));
+}
+
+#[tokio::test]
+async fn command_flow_keeps_login_catalog_search_and_effort_stages_complete() {
+    let mut ui = Ui {
+        model_catalog: Some(vec![
+            ("Zai".into(), vec![mi("glm-4.6", None), mi("glm-4.5", None)]),
+            ("Kimi".into(), vec![mi("kimi-k2", Some(128_000))]),
+        ]),
+        ..Ui::default()
+    };
+    let mut history = Vec::new();
+    let mut meta = ReplMeta {
+        tools: Vec::new(),
+        provider: "Zai".into(),
+        provider_label: "Zai".into(),
+        model: "glm-4.6".into(),
+        base_url: String::new(),
+        status_bar: String::new(),
+        ctx_window: 200_000,
+    };
+    let swap = Arc::new(provider::SwapProvider::new(Arc::new(
+        provider::ScriptedProvider::new(Vec::new()),
+    )));
+    let agents = agent::Agents::default();
+    let catalog = CommandCatalog {
+        agents: &agents,
+        commands: &[],
+        skills: &[],
+    };
+    let stats = || CommandStats {
+        tokens: 0,
+        turns: 0,
+    };
+
+    run_command(
+        "/login",
+        &mut ui,
+        &mut history,
+        &mut meta,
+        &swap,
+        &catalog,
+        stats(),
+    )
+    .await
+    .expect("login command");
+    assert_eq!(
+        ui.panel.as_ref().map(|panel| panel.kind),
+        Some(PanelKind::Login)
+    );
+
+    run_command(
+        "/provider",
+        &mut ui,
+        &mut history,
+        &mut meta,
+        &swap,
+        &catalog,
+        stats(),
+    )
+    .await
+    .expect("provider alias");
+    let panel = ui.panel.as_mut().expect("model catalog panel");
+    assert_eq!(panel.kind, PanelKind::Models);
+    assert!(panel.rows.iter().any(|row| row.key.starts_with("Kimi ·")));
+    assert!(panel
+        .rows
+        .iter()
+        .all(|row| !row.key.starts_with("Effort ·")));
+    panel.query = "glm-4.5".into();
+    panel.retype();
+    assert_eq!(panel.view.len(), 1);
+
+    panel.sel = 0;
+    panel_enter(&mut ui, &mut meta, &swap);
+    assert_eq!(
+        ui.panel.as_ref().map(|panel| panel.kind),
+        Some(PanelKind::Effort)
+    );
+    assert_eq!(
+        ui.pending_model
+            .as_ref()
+            .map(|pending| pending.key.as_str()),
+        Some("Zai · glm-4.5")
+    );
+
+    ui.note_markdown("全文答复：尾部仍可见");
+    run_command(
+        "/answer",
+        &mut ui,
+        &mut history,
+        &mut meta,
+        &swap,
+        &catalog,
+        stats(),
+    )
+    .await
+    .expect("answer command");
+    let answer_panel = ui.panel.as_ref().expect("latest answer panel");
+    assert!(answer_panel.detail_open);
+    assert!(answer_panel
+        .selected()
+        .is_some_and(|row| row.value.contains("尾部仍可见")));
 }
 
 /// 根因回归(输入法吞空格):去重 Windows 双触发 + 兜住输入法「仅 Release」的字符注入 +
@@ -7897,19 +8001,19 @@ fn partial_answer_marker_wraps_cjk_markdown_at_supported_widths() {
 }
 
 #[test]
-fn partial_answer_archive_bounds_and_expands_long_detail() {
+fn partial_answer_archive_keeps_full_long_detail() {
     let mut ui = Ui::default();
     let body = format!(
         "PARTIAL HEAD {}\n{}\nPARTIAL TAIL",
         "h".repeat(MAX_ANSWER_HISTORY_CHARS / 2),
         "middle ".repeat(600)
     );
-    ui.push_chunk(provider::StreamChunk::Answer(body));
+    ui.push_chunk(provider::StreamChunk::Answer(body.clone()));
     ui.commit_live_answers("run ended before final response", 4, 12);
 
     let stored = &ui.answer_history.back().expect("partial archive").text;
     assert!(stored.contains("PARTIAL HEAD"));
-    assert!(stored.contains("middle omitted"));
+    assert_eq!(stored, &body);
     assert!(stored.contains("PARTIAL TAIL"));
     assert!(ui.open_answer_history());
     let panel = ui.panel.as_mut().expect("answer archive panel");
@@ -8759,7 +8863,7 @@ fn static_scrollback_preserves_order_and_sanitizes_controls() {
 }
 
 #[test]
-fn long_static_answer_keeps_head_tail_archive_and_bounded_commit_work() {
+fn long_static_answer_keeps_full_archive_and_bounded_commit_work() {
     let mut terminal = Terminal::with_options(
         ratatui::backend::TestBackend::new(40, 12),
         TerminalOptions {
@@ -8772,13 +8876,13 @@ fn long_static_answer_keeps_head_tail_archive_and_bounded_commit_work() {
         "中文 CJK markdown stream with `token` and **emphasis**. ".repeat(2_000)
     );
     let mut ui = Ui::default();
-    ui.note_markdown(body);
+    ui.note_markdown(body.clone());
 
     flush_commits(&mut terminal, &mut ui).expect("bounded static answer");
 
     let archived = &ui.answer_history.back().expect("answer archive").text;
     assert!(archived.starts_with("STRESS_ANSWER_BEGIN"));
-    assert!(archived.contains("middle omitted"));
+    assert_eq!(archived, &body);
     assert!(archived.ends_with("STRESS_ANSWER_END"));
     assert!(ui.commits.is_empty());
 }
@@ -9307,6 +9411,7 @@ fn answer_history_shortcut_opens_and_closes_without_mutating_input() {
         ui.panel.as_ref().map(|panel| panel.kind),
         Some(PanelKind::AnswerHistory)
     );
+    assert!(ui.panel.as_ref().is_some_and(|panel| panel.detail_open));
     assert!(ui.toggle_answer_or_history());
     assert!(ui.panel.is_none());
 }
@@ -9366,9 +9471,9 @@ fn answer_history_bounds_large_detail_without_changing_scrollback_commit() {
 
     let stored = &ui.answer_history.back().expect("answer history").text;
     assert!(stored.contains("HEAD"));
-    assert!(stored.contains("middle omitted"));
+    assert!(stored.contains("middle "));
     assert!(stored.contains("TAIL conclusion"));
-    assert!(stored.chars().count() < body.chars().count());
+    assert_eq!(stored.chars().count(), body.chars().count());
     assert!(matches!(
         ui.commits.as_slice(),
         [CommitBlock::Markdown { text, .. }] if text == &body
@@ -9634,7 +9739,6 @@ fn splash_block_guards_width() {
 fn panel_titles_are_english() {
     let titles = [
         config_panel().title,
-        provider_panel().title,
         tools_panel(&[]).title,
         reasoning_history_panel(&std::collections::VecDeque::new()).title,
         answer_history_panel(&std::collections::VecDeque::new()).title,
@@ -9643,7 +9747,7 @@ fn panel_titles_are_english() {
             &std::collections::VecDeque::new(),
         )
         .title,
-        models_panel_with_effort(&[], "", "", "medium").title,
+        models_panel(&[], "", "").title,
         agent_panel(&[]).title,
     ];
     for t in &titles {
@@ -10044,19 +10148,19 @@ use super::{
     build_popup, can_start_task, char_cells, clip_display_cells, commit_height,
     compact_activity_item, compact_status_line, config_panel, context_pressure_role, ctx_percent,
     current_word, decide_key, detail_match_scroll, detail_scroll_position, draw, draw_panel,
-    draw_with_cache, event_color, fence_language, fence_without_language, filter_prefix,
-    flush_commits, fmt_busy_bar, fmt_busy_phase, fmt_busy_signal, fmt_ctx, fmt_progress_diagnostic,
-    fmt_reasoning_meta, fold_lines, format_event_plain, halt_reason_display, halt_reason_guidance,
-    inline_height_cap, input_action, input_chrome, input_height, is_final_event, is_second_ctrl_c,
-    live_code_rail, live_empty_state_for_test, live_history_panel_with_queue,
-    live_history_toggle_action, live_hold_release_action, live_hold_toggle_action,
-    live_markdown_line, live_markdown_spans_with_alert, live_page_rows, live_phase_anchor,
-    live_phase_marker, live_rail, live_scroll_action, live_semantic_toggle_action,
-    live_surface_title, live_tool_rail_role, login_panel, mark_takeover_requested, markdown_lines,
-    md_line_spans, models_panel_with_effort, multiline_shortcut_label, named_profile_name,
-    panel_action, panel_attention_action, panel_enter, panel_filter, panel_hint,
-    panel_rect_for_kind, panel_title_role, panel_viewport_range, pending_queue_lines, preset_by_id,
-    preview_lines, provider_panel, queue_panel_toggle_action, reasoning_commit_lines,
+    draw_with_cache, effort_panel, event_color, fence_language, fence_without_language,
+    filter_prefix, flush_commits, fmt_busy_bar, fmt_busy_phase, fmt_busy_signal, fmt_ctx,
+    fmt_progress_diagnostic, fmt_reasoning_meta, fold_lines, format_event_plain,
+    halt_reason_display, halt_reason_guidance, inline_height_cap, input_action, input_chrome,
+    input_height, is_final_event, is_second_ctrl_c, live_code_rail, live_empty_state_for_test,
+    live_history_panel_with_queue, live_history_toggle_action, live_hold_release_action,
+    live_hold_toggle_action, live_markdown_line, live_markdown_spans_with_alert, live_page_rows,
+    live_phase_anchor, live_phase_marker, live_rail, live_scroll_action,
+    live_semantic_toggle_action, live_surface_title, live_tool_rail_role, login_panel,
+    mark_takeover_requested, markdown_lines, md_line_spans, models_panel, multiline_shortcut_label,
+    named_profile_name, panel_action, panel_attention_action, panel_enter, panel_filter,
+    panel_hint, panel_rect_for_kind, panel_title_role, panel_viewport_range, pending_queue_lines,
+    preset_by_id, preview_lines, queue_panel_toggle_action, reasoning_commit_lines,
     reasoning_history_panel, render_status_template, render_todo_block, responsive_live_layout,
     role_color, run_command, sanitize_display_text, sanitize_paste, selection_style,
     semantic_focus_action, should_draw, splash_block, splash_frame, status_line_projection,

@@ -63,7 +63,7 @@
 - Version:`v0.5.0`
 - Behavior:`RidgeCode 支持有界、可审计的 agent-to-agent 协作：主 agent 可通过明确的通信信封与协议适配接缝向一个或多个角色 agent 发送任务、上下文/能力约束与取消信号，并接收带有发送方、关联 ID、状态、结果或错误的结构化响应；同一协作语义可落在至少两种传输协议上，协议差异不得泄漏进 agent 业务状态机；保留只读子 agent、安全门、maker/checker、确定性验证与并发/步数上限。
 - Boundary:`范围限于 crates/agent 的 agent 协作协议/消息模型、dispatch 与 teammate 接缝、传输适配及必要的 crates/mcp/provider 直接边界与测试；优先复用现有 trait、MCP/stdio 与本地调用能力，不耦合具体第三方 agent SDK，不改变 langgraph BSP 语义、工具权限、危险命令拦截、provider trait 或 MCP JSON-RPC 语义；不得引入无界后台任务、隐式跨会话共享、未审计的远程执行或敏感信息上传。
-- Acceptance:`完成 request-intake、NotebookLM 深度研究假设核验与 CodeGraph 设计审计；定义版本化消息信封、关联/取消/错误语义与至少两种传输协议的可插拔适配；测试覆盖握手/能力协商、请求响应关联、并发隔离、超时/取消、传输失败、只读权限与 maker/checker 边界；通过 cargo fmt --all -- --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked，并完成本机无密钥 smoke，证明两种协议均可完成一次 agent-to-agent 任务闭环。
+- Acceptance:`完成 request-intake、NotebookLM 深度研究假设核验与 CodeGraph 设计审计；定义版本化消息信封、关联/取消/错误语义与至少两种传输协议的可插拔适配；测试覆盖握手/能力协商、请求响应关联、并发隔离、超时/取消、传输失败、只读权限与 maker/checker 边界；提供可启动的跨进程 stdio peer（serve/call），可选 HMAC/时间窗/nonce replay 防护；通过 cargo fmt --all -- --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked，并完成本机无密钥 smoke，证明两种协议均可完成一次 agent-to-agent 任务闭环。
 - Traceability:`REQ → agent communication envelope/transport/dispatch symbols → protocol adapters and deterministic tests → local two-protocol smoke → workspace quality gates; NotebookLM output remains hypothesis and is archived only after current-code verification.`
 
 ### REQ-20260810-OPEN-VISION-01 · 开放愿景落地与质量治理
@@ -75,6 +75,16 @@
 - Boundary: 仅限当前 Rust workspace、必要的 scripts/.github 质量配置与明确的本地/CI 适配；不上传密钥、cookie、原始敏感日志；不引入无界后台任务、未审计远程执行、隐式跨会话共享或未经批准的第三方 agent SDK；开放愿景方向须分片提交，不改变既有安全不变量。
 - Acceptance: 七类方向分别登记为可追踪实现切片并给出本地证据；每个已实现切片有正向、失败、边界与回归测试，覆盖率较当前基线可量化提升；接入 SonarScanner/SonarCloud 或等价 Sonar 分析，固定配置、排除规则、覆盖率报告路径与质量阈值，扫描失败即失败；统一质量阀必须包含 cargo fmt --all -- --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked、cargo llvm-cov --workspace --all-features --lcov --fail-under-lines <approved threshold>、git diff --check 与 Sonar quality gate；阀失败须修复代码/测试/架构后重跑，不得降阈值、跳过扫描、排除失败目录或伪造结果；完成无密钥 smoke、状态/需求/迭代门禁、提交推送。
 - Traceability: Open Vision Note → REQ → per-slice design/code/tests → coverage artifact + Sonar report → deterministic quality gate → local smoke → archive evidence；NotebookLM 仅作候选方向来源，代码、测试、扫描与运行证据为事实依据。
+
+### REQ-20260811-COMMANDS-01 · Commands 业务完整性与 provider/model 两阶段选择
+
+- Approval evidence:`用户明确回复：批准这个需求`
+- Status:`ACTIVE`
+- Version:`v0.1.0`
+- Behavior:`建立可审计的 command inventory，使已实现业务均有可发现的命令、帮助文本、路由和取消/返回语义；恢复 /login，保证其在命令面板、帮助与路由中可发现且能进入既有登录流程。/model 进入 provider/model 选择流程时，展示当前配置中所有可用 provider 的模型，保留 provider 身份、模型身份与稳定排序，支持面板内搜索/过滤模型，空结果、加载失败与取消均有明确状态；模型列表不混入 effort。选定 provider/model 后，明确转入独立 effort 选择界面；effort 只作用于刚选中的模型，支持上下/回车/取消并持久化一致状态，不得在未选 model 前要求选择 effort。既有 /provider、/config、/tools、/agent、/compact、/help、/goal 等命令逐项核对，修复丢失、重复、不可达、状态错配与键盘行为不一致，并保持命令面板与直接命令入口一致。`
+- Boundary:`仅改动 RidgeCode commands 的声明/帮助/路由、TUI command palette 与 provider/model/effort 选择状态、必要配置/catalog 适配、相关单元测试、确定性离线 PTY E2E 与使用文档；不改变 langgraph BSP、安全门、危险命令拦截、provider/MCP 协议语义或无关视觉重构；测试 fixture 不联网、不使用真实密钥。`
+- Acceptance:`命令 inventory/路由/帮助覆盖全部公开 commands，覆盖 /login、/model、provider/model 搜索、两阶段 model→effort、取消/返回与错误状态；模型聚合与搜索覆盖多 provider、重复模型、空结果、加载失败、稳定排序与敏感信息不泄漏；PTY E2E 使用离线 fixture 证明 /help 能发现 /login，/login 可达，/model 展示多 provider 模型并可输入搜索，选 model 后才出现 effort 面板，Enter/Backspace/上下/取消均改变正确状态且无不可见 modal；通过 cargo fmt --all -- --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked、git diff --check 与现有质量阀。`
+- Traceability:`REQ → commands inventory/command router → provider/model catalog aggregation and TUI selection state → agent unit tests + deterministic PTY E2E → workspace quality gates.
 ## 修订账本 (Revision Ledger)
 
 关闭的 Pending、历史修订与审批证据写入 `docs/archive/events-YYYY-MM.jsonl`；本文件仅保留当前 Active 条款。

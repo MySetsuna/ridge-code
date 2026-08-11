@@ -15,9 +15,9 @@ use crate::{
 };
 
 use super::{
-    agent_panel, config_panel, login_panel, mcp_panel, models_panel_with_effort, provider_panel,
-    skills_panel, tools_panel, ModelCatalog, PanelKind, Ui, CLAUDE_OAUTH_ROW, CODEX_OAUTH_ROW,
-    DEFAULT_STATUS_BAR,
+    agent_panel, config_panel, effort_panel, login_panel, mcp_panel, models_panel, skills_panel,
+    tools_panel, ModelCatalog, PanelKind, PendingModelSelection, Ui, CLAUDE_OAUTH_ROW,
+    CODEX_OAUTH_ROW, DEFAULT_STATUS_BAR,
 };
 use crate::tui;
 use agent::preset_by_id;
@@ -68,7 +68,6 @@ fn openai_oauth_token() -> Option<provider::oauth::OAuthToken> {
 }
 
 pub(crate) const CHATGPT_MODEL_GROUP: &str = "ChatGPT (Codex)";
-pub(crate) const EFFORT_MODEL_GROUP: &str = "Effort";
 
 fn current_effort(ui: &Ui) -> &str {
     ui.effort
@@ -136,7 +135,8 @@ struct ModelTarget {
     name: String,
     kind: String,
     base_url: String,
-    key: String,
+    key: Option<String>,
+    fallback_model: String,
     oauth: bool,
     account_id: Option<String>,
 }
@@ -156,6 +156,7 @@ fn build_model_targets(
     auth: &std::collections::BTreeMap<String, String>,
     active_provider: &str,
     active_base_url: &str,
+    active_model: &str,
 ) -> Vec<ModelTarget> {
     let mut targets = Vec::new();
     let oauth_base = std::env::var("RIDGE_CHATGPT_BASE_URL")
@@ -163,9 +164,14 @@ fn build_model_targets(
     let active_is_oauth = active_provider == "openai"
         && active_base_url.trim_end_matches('/') == oauth_base.trim_end_matches('/');
     if active_is_oauth {
-        append_oauth_model_target(&mut targets, active_base_url);
-    } else if let Some(key) = api_key_for_runtime(cfg, auth, active_provider, active_base_url) {
-        targets.push(api_model_target(active_provider, active_base_url, key));
+        append_oauth_model_target(&mut targets, active_base_url, active_model);
+    } else {
+        targets.push(api_model_target(
+            active_provider,
+            active_base_url,
+            api_key_for_runtime(cfg, auth, active_provider, active_base_url),
+            active_model,
+        ));
     }
     for profile in &cfg.providers {
         append_profile_model_target(&mut targets, profile, auth, &oauth_base);
@@ -173,28 +179,37 @@ fn build_model_targets(
     targets
 }
 
-fn api_model_target(provider: &str, base_url: &str, key: String) -> ModelTarget {
+fn api_model_target(
+    provider: &str,
+    base_url: &str,
+    key: Option<String>,
+    fallback_model: &str,
+) -> ModelTarget {
     ModelTarget {
         name: provider.to_string(),
         kind: provider.to_string(),
         base_url: base_url.to_string(),
         key,
+        fallback_model: fallback_model.to_string(),
         oauth: false,
         account_id: None,
     }
 }
 
-fn append_oauth_model_target(targets: &mut Vec<ModelTarget>, base_url: &str) {
-    if let Some(token) = openai_oauth_token() {
-        targets.push(ModelTarget {
-            name: CHATGPT_MODEL_GROUP.to_string(),
-            kind: "openai".to_string(),
-            base_url: base_url.to_string(),
-            key: token.access_token,
-            oauth: true,
-            account_id: token.account_id,
-        });
+fn append_oauth_model_target(targets: &mut Vec<ModelTarget>, base_url: &str, fallback_model: &str) {
+    if targets.iter().any(|target| target.oauth) {
+        return;
     }
+    let token = openai_oauth_token();
+    targets.push(ModelTarget {
+        name: CHATGPT_MODEL_GROUP.to_string(),
+        kind: "openai".to_string(),
+        base_url: base_url.to_string(),
+        key: token.as_ref().map(|token| token.access_token.clone()),
+        fallback_model: fallback_model.to_string(),
+        oauth: true,
+        account_id: token.and_then(|token| token.account_id),
+    });
 }
 
 fn append_profile_model_target(
@@ -205,13 +220,10 @@ fn append_profile_model_target(
 ) {
     if profile.use_oauth == Some(true) && profile.kind == "openai" {
         if !targets.iter().any(|target| target.oauth) {
-            append_oauth_model_target(targets, oauth_base);
+            append_oauth_model_target(targets, oauth_base, &profile.model);
         }
         return;
     }
-    let Some(key) = profile.resolve_key_with(auth) else {
-        return;
-    };
     if targets.iter().any(|target| target.name == profile.name) {
         return;
     }
@@ -219,7 +231,8 @@ fn append_profile_model_target(
         name: profile.name.clone(),
         kind: profile.kind.clone(),
         base_url: profile.base_url.clone(),
-        key,
+        key: profile.resolve_key_with(auth),
+        fallback_model: profile.model.clone(),
         oauth: false,
         account_id: None,
     });
@@ -235,9 +248,20 @@ async fn fetch_model_catalog(targets: Vec<ModelTarget>) -> (ModelCatalog, u32) {
                     kind,
                     base_url,
                     key,
+                    fallback_model,
                     oauth,
                     account_id,
                 } = target;
+                if key.is_none() {
+                    let models = (!fallback_model.trim().is_empty()).then(|| {
+                        vec![provider::models::ModelInfo {
+                            id: fallback_model,
+                            context: None,
+                        }]
+                    });
+                    return (name, models, false);
+                }
+                let key = key.expect("model target key checked above");
                 let http = provider::http::ReqwestClient::new();
                 let result = tokio::time::timeout(Duration::from_secs(10), async {
                     if oauth {
@@ -253,11 +277,18 @@ async fn fetch_model_catalog(targets: Vec<ModelTarget>) -> (ModelCatalog, u32) {
                     }
                 })
                 .await;
-                let models = match result {
-                    Ok(Ok(models)) if !models.is_empty() => Some(models),
-                    _ => None,
-                };
-                (name, models)
+                match result {
+                    Ok(Ok(models)) if !models.is_empty() => (name, Some(models), false),
+                    _ => {
+                        let models = (!fallback_model.trim().is_empty()).then(|| {
+                            vec![provider::models::ModelInfo {
+                                id: fallback_model,
+                                context: None,
+                            }]
+                        });
+                        (name, models, true)
+                    }
+                }
             })
         })
         .collect::<Vec<_>>();
@@ -265,24 +296,49 @@ async fn fetch_model_catalog(targets: Vec<ModelTarget>) -> (ModelCatalog, u32) {
     let mut failures = 0;
     for job in jobs {
         match job.await {
-            Ok((name, Some(models))) => grouped.push((name, models)),
-            Ok((_, None)) | Err(_) => failures += 1,
+            Ok((name, Some(models), failed)) => {
+                grouped.push((name, models));
+                failures += u32::from(failed);
+            }
+            Ok((_, None, _)) | Err(_) => failures += 1,
         }
     }
-    (grouped, failures)
+    (normalize_model_catalog(grouped), failures)
+}
+
+pub(crate) fn normalize_model_catalog(mut grouped: ModelCatalog) -> ModelCatalog {
+    for (_, models) in &mut grouped {
+        models.sort_by_key(|model| model.id.to_lowercase());
+        models.dedup_by(|left, right| left.id == right.id);
+    }
+    grouped.sort_by(|left, right| {
+        left.0
+            .to_lowercase()
+            .cmp(&right.0.to_lowercase())
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    grouped
 }
 
 pub(crate) fn start_model_catalog_preload(
     active_provider: &str,
     active_base_url: &str,
+    active_model: &str,
 ) -> tokio::sync::oneshot::Receiver<(ModelCatalog, u32)> {
     let cfg = Config::load(config_path());
     let auth = load_auth();
     let active_provider = active_provider.to_string();
     let active_base_url = active_base_url.to_string();
+    let active_model = active_model.to_string();
     let (sender, receiver) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let targets = build_model_targets(&cfg, &auth, &active_provider, &active_base_url);
+        let targets = build_model_targets(
+            &cfg,
+            &auth,
+            &active_provider,
+            &active_base_url,
+            &active_model,
+        );
         let result = fetch_model_catalog(targets).await;
         let _ = sender.send(result);
     });
@@ -890,8 +946,8 @@ pub(crate) fn panel_enter(ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvi
             panel_enter_config_edit(ui, meta, swap, selection.key, value)
         }
         (PanelKind::Config, None) => panel_enter_config(ui, selection.value),
-        (PanelKind::Models, _) => panel_enter_models(ui, meta, swap, selection.key, selection.ctx),
-        (PanelKind::Provider, _) => panel_enter_provider(ui, meta, swap, selection.key),
+        (PanelKind::Models, _) => panel_enter_models(ui, selection.key, selection.ctx),
+        (PanelKind::Effort, _) => panel_enter_effort(ui, meta, swap, selection.key),
         (PanelKind::Login, None) => panel_enter_login(ui, selection.key),
         (PanelKind::Login, Some(_)) => {}
         (
@@ -972,7 +1028,27 @@ fn panel_enter_config(ui: &mut Ui, value: Option<String>) {
     });
 }
 
-fn panel_enter_models(
+fn panel_enter_models(ui: &mut Ui, key: Option<String>, ctx: Option<u64>) {
+    let Some(key) = key else { return };
+    ui.pending_model = Some(PendingModelSelection { key, ctx });
+    ui.panel = Some(effort_panel(current_effort(ui)));
+}
+
+fn panel_enter_effort(
+    ui: &mut Ui,
+    meta: &mut ReplMeta,
+    swap: &Arc<SwapProvider>,
+    key: Option<String>,
+) {
+    let Some(effort) = key else { return };
+    if let Some(pending) = ui.pending_model.take() {
+        apply_model_selection(ui, meta, swap, Some(pending.key), pending.ctx);
+    }
+    apply_effort(swap, meta, &effort, ui);
+    ui.panel = None;
+}
+
+fn apply_model_selection(
     ui: &mut Ui,
     meta: &mut ReplMeta,
     swap: &Arc<SwapProvider>,
@@ -981,9 +1057,7 @@ fn panel_enter_models(
 ) {
     let Some(key) = key else { return };
     let (provider_name, model) = key.split_once(" · ").unwrap_or(("", &key));
-    if provider_name == EFFORT_MODEL_GROUP {
-        apply_effort(swap, meta, model, ui);
-    } else if provider_name == CHATGPT_MODEL_GROUP {
+    if provider_name == CHATGPT_MODEL_GROUP {
         panel_enter_chatgpt(ui, meta, swap, model, ctx);
     } else if !provider_name.is_empty() && provider_name != meta.provider {
         panel_enter_other_provider(ui, meta, swap, provider_name, model, ctx);
@@ -993,7 +1067,6 @@ fn panel_enter_models(
         }
         swap_model(swap, meta, if model.is_empty() { &key } else { model }, ui);
     }
-    ui.panel = None;
 }
 
 fn panel_enter_chatgpt(
@@ -1091,18 +1164,6 @@ fn panel_enter_other_provider(
     );
 }
 
-fn panel_enter_provider(
-    ui: &mut Ui,
-    meta: &mut ReplMeta,
-    swap: &Arc<SwapProvider>,
-    key: Option<String>,
-) {
-    if let Some(name) = key {
-        switch_provider(&name, meta, swap, ui);
-        ui.panel = None;
-    }
-}
-
 fn panel_enter_login(ui: &mut Ui, key: Option<String>) {
     let Some(id) = key else { return };
     if id == CLAUDE_OAUTH_ROW {
@@ -1142,13 +1203,16 @@ pub(crate) async fn run_command(
 ) -> anyhow::Result<bool> {
     if input == "/help" {
         ui.note(
-            "/exit /model /provider /config /effort /find [query] /goal [status|create|start|advance|resume|complete|block|cancel] /activity /inspect /transcript /audit /reasoning /answers /queue /tools /history /login /agent /mcp /skills /commands; Enter queues while busy; Ctrl+Enter front-queues without interrupting; Ctrl+F opens non-blocking live search; Ctrl+Q opens the queue and Delete removes a pending item; Ctrl+I/Alt+I inspects live blocks in Transcript Audit; Ctrl+A opens the Answer archive; Ctrl+R toggles live reasoning or opens Reasoning history; Ctrl+O toggles live tool details or opens Tool history; Ctrl+T opens recent Agent activity; Ctrl-C hands input back.",
+            "/exit /model /provider /config /effort /find [query] /goal [status|create|start|advance|resume|complete|block|cancel] /activity /inspect /transcript /audit /reasoning /answer /answers /queue /tools /history /login /agent /mcp /skills /commands; /provider opens the model catalog; /answer opens the latest full answer; /answers opens the searchable answer archive; Enter queues while busy; Ctrl+Enter front-queues without interrupting; Ctrl+F opens non-blocking live search; Ctrl+Q opens the queue and Delete removes a pending item; Ctrl+I/Alt+I inspects live blocks in Transcript Audit; Ctrl+A opens the latest full answer; Ctrl+R toggles live reasoning or opens Reasoning history; Ctrl+O toggles live tool details or opens Tool history; Ctrl+T opens recent Agent activity; Ctrl-C hands input back.",
             Color::Gray,
         );
         return Ok(false);
     }
     if input == "/exit" || input == "/quit" {
         return Ok(true);
+    }
+    if handle_login_command(input, ui, meta, swap).await {
+        return Ok(false);
     }
     if handle_navigation_command(input, ui, meta, history, stats.tokens, stats.turns)
         || handle_model_command(input, ui, meta, swap)
@@ -1157,9 +1221,6 @@ pub(crate) async fn run_command(
         || handle_workspace_command(input, ui, catalog.agents, catalog.skills, catalog.commands)
         || handle_custom_command(input, ui, catalog.commands)
     {
-        return Ok(false);
-    }
-    if handle_login_command(input, ui, meta, swap).await {
         return Ok(false);
     }
     Ok(false)
@@ -1187,7 +1248,8 @@ fn handle_panel_navigation(input: &str, ui: &mut Ui, meta: &ReplMeta) -> bool {
         "/find" => show_live_search(ui, ""),
         _ if input.starts_with("/find ") => show_live_search(ui, input[6..].trim()),
         "/reasoning" | "/thinking" => show_reasoning_history(ui),
-        "/answer" | "/answers" => show_answer_history(ui),
+        "/answer" => show_latest_answer(ui),
+        "/answers" => show_answer_history(ui),
         "/queue" => ui.open_queue_panel(),
         "/history" => show_tool_history(ui),
         _ => return false,
@@ -1219,6 +1281,12 @@ fn show_answer_history(ui: &mut Ui) {
     }
 }
 
+fn show_latest_answer(ui: &mut Ui) {
+    if !ui.open_latest_answer() {
+        ui.note("no recoverable answer history", Color::Gray);
+    }
+}
+
 fn show_tool_history(ui: &mut Ui) {
     if !ui.open_tool_history() {
         ui.note("no completed tool history", Color::Gray);
@@ -1246,14 +1314,6 @@ fn handle_context_navigation(
             format!("session total: {tokens} tokens · {turns} tasks"),
             Color::Gray,
         ),
-        "/effort" => ui.note(
-            format!(
-                "reasoning effort={} · options: {}",
-                current_effort(ui),
-                provider::REASONING_EFFORTS.join(", ")
-            ),
-            Color::Gray,
-        ),
         _ => return false,
     }
     true
@@ -1274,6 +1334,11 @@ fn handle_model_command(
     meta: &mut ReplMeta,
     swap: &Arc<SwapProvider>,
 ) -> bool {
+    if input == "/effort" {
+        ui.pending_model = None;
+        ui.panel = Some(effort_panel(current_effort(ui)));
+        return true;
+    }
     if let Some(effort) = input.strip_prefix("/effort ") {
         apply_effort(swap, meta, effort.trim(), ui);
         return true;
@@ -1303,7 +1368,12 @@ fn show_model_catalog(ui: &mut Ui, meta: &mut ReplMeta) -> bool {
         );
         return true;
     }
-    let current_group = model_group_name(&meta.provider, &meta.base_url);
+    let wire_group = model_group_name(&meta.provider, &meta.base_url);
+    let current_group = if grouped.iter().any(|(name, _)| name == &meta.provider_label) {
+        meta.provider_label.clone()
+    } else {
+        wire_group
+    };
     meta.ctx_window = grouped
         .iter()
         .find(|(name, _)| name == &current_group)
@@ -1314,12 +1384,8 @@ fn show_model_catalog(ui: &mut Ui, meta: &mut ReplMeta) -> bool {
                 .and_then(|model| model.context)
         })
         .unwrap_or(tui::DEFAULT_CTX_WINDOW);
-    ui.panel = Some(models_panel_with_effort(
-        grouped,
-        &current_group,
-        &meta.model,
-        current_effort(ui),
-    ));
+    ui.pending_model = None;
+    ui.panel = Some(models_panel(grouped, &current_group, &meta.model));
     true
 }
 
@@ -1375,7 +1441,7 @@ fn handle_provider_command(
     swap: &Arc<SwapProvider>,
 ) -> bool {
     if input == "/provider" || input == "/provider list" {
-        return show_provider_panel(ui);
+        return show_model_catalog(ui, meta);
     }
     if let Some(rest) = input.strip_prefix("/provider add ") {
         add_provider_command(rest.trim(), ui);
@@ -1386,19 +1452,6 @@ fn handle_provider_command(
         return true;
     }
     false
-}
-
-fn show_provider_panel(ui: &mut Ui) -> bool {
-    let cfg = Config::load(config_path());
-    if cfg.providers.is_empty() {
-        ui.note(
-            "no provider profiles. Add: /provider add <name> <kind> <model> <base_url> [key_env]",
-            Color::Gray,
-        );
-    } else {
-        ui.panel = Some(provider_panel());
-    }
-    true
 }
 
 fn add_provider_command(input: &str, ui: &mut Ui) {
@@ -1776,10 +1829,74 @@ mod tests {
             &auth,
             "openai",
             "https://open.bigmodel.cn/api/paas/v4",
+            "glm-4.6",
         );
         assert_eq!(targets.len(), 2);
         assert_eq!(targets[0].name, "openai");
         assert_eq!(targets[1].name, "Zai");
         assert!(!targets[0].oauth);
+    }
+
+    #[tokio::test]
+    async fn model_catalog_keeps_configured_profiles_without_credentials() {
+        let cfg = Config::parse(
+            r#"{
+                "providers": [
+                    {"name":"Zai","kind":"openai","model":"glm-4.6","base_url":"https://zai.invalid"},
+                    {"name":"Kimi","kind":"openai","model":"kimi-k2","base_url":"https://kimi.invalid"}
+                ]
+            }"#,
+        );
+        let targets = build_model_targets(
+            &cfg,
+            &std::collections::BTreeMap::new(),
+            "openai",
+            "https://active.invalid",
+            "gpt-5.6-sol",
+        );
+        let (grouped, failures) = fetch_model_catalog(targets).await;
+        assert_eq!(failures, 0);
+        assert_eq!(
+            grouped
+                .iter()
+                .map(|(name, models)| (name.as_str(), models[0].id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Kimi", "kimi-k2"),
+                ("openai", "gpt-5.6-sol"),
+                ("Zai", "glm-4.6")
+            ]
+        );
+    }
+
+    #[test]
+    fn model_catalog_normalization_is_sorted_and_deduplicated() {
+        let grouped = normalize_model_catalog(vec![(
+            "Zai".into(),
+            vec![
+                provider::models::ModelInfo {
+                    id: "b".into(),
+                    context: None,
+                },
+                provider::models::ModelInfo {
+                    id: "a".into(),
+                    context: Some(1),
+                },
+                provider::models::ModelInfo {
+                    id: "a".into(),
+                    context: Some(2),
+                },
+            ],
+        )]);
+        assert_eq!(grouped[0].0, "Zai");
+        assert_eq!(
+            grouped[0]
+                .1
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert_eq!(grouped[0].1[0].context, Some(1));
     }
 }

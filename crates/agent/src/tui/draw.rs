@@ -335,7 +335,6 @@ pub(crate) fn panel_rect_for_kind(area: Rect, kind: PanelKind) -> Rect {
 fn panel_kind_label(kind: PanelKind) -> &'static str {
     match kind {
         PanelKind::Config => "Config",
-        PanelKind::Provider => "Provider",
         PanelKind::Tools => "Tools",
         PanelKind::ToolHistory => "History",
         PanelKind::ReasoningHistory => "Reasoning",
@@ -344,6 +343,7 @@ fn panel_kind_label(kind: PanelKind) -> &'static str {
         PanelKind::Activity => "Activity",
         PanelKind::Queue => "Queue",
         PanelKind::Models => "Models",
+        PanelKind::Effort => "Effort",
         PanelKind::Agent => "Agents",
         PanelKind::Login => "Login",
         PanelKind::Mcp => "MCP",
@@ -413,9 +413,10 @@ fn panel_full_hint(panel: &Panel) -> &'static str {
     }
     match panel.kind {
         PanelKind::Config => "↑↓ select · Enter edit · type to filter · Esc close",
-        PanelKind::Models | PanelKind::Provider => {
-            "↑↓ select · Enter switch · type to filter · Esc close"
+        PanelKind::Models => {
+            "↑↓ select · Enter next · type to filter · Esc close"
         }
+        PanelKind::Effort => "↑↓ select · Enter apply · Esc close",
         PanelKind::Login => "↑↓ pick provider · Enter enter key · type to filter · Esc close",
         PanelKind::Queue => "select · Delete remove · Ctrl+I inspect · type to filter · Esc close",
         PanelKind::ToolHistory | PanelKind::ReasoningHistory | PanelKind::AnswerHistory => {

@@ -491,6 +491,7 @@ fn is_activity_toggle(key: &KeyEvent, ui: &Ui) -> bool {
 }
 
 fn close_panel(ui: &mut Ui) {
+    let closing_kind = ui.panel.as_ref().map(|panel| panel.kind);
     let cancel_oauth = ui
         .panel
         .as_ref()
@@ -501,6 +502,9 @@ fn close_panel(ui: &mut Ui) {
         panel.editing = None;
     } else {
         ui.panel = None;
+    }
+    if ui.panel.is_none() && matches!(closing_kind, Some(PanelKind::Models | PanelKind::Effort)) {
+        ui.pending_model = None;
     }
     if cancel_oauth {
         ui.oauth_callback.take();
@@ -1004,7 +1008,11 @@ fn poll_model_catalog(
     if ui.model_catalog_reload {
         ui.model_catalog_reload = false;
         ui.model_catalog = None;
-        *receiver = Some(start_model_catalog_preload(&meta.provider, &meta.base_url));
+        *receiver = Some(start_model_catalog_preload(
+            &meta.provider,
+            &meta.base_url,
+            &meta.model,
+        ));
     }
     let result = match receiver.as_mut() {
         Some(receiver) => match receiver.try_recv() {
@@ -2005,10 +2013,31 @@ pub(super) async fn run(
         effort: Some(initial_effort),
         ..Ui::default()
     };
+    let commands_fixture = std::env::var("RIDGE_TUI_FIXTURE").ok().as_deref() == Some("commands");
+    if commands_fixture {
+        ui.model_catalog = Some(vec![
+            (
+                "Kimi".into(),
+                vec![provider::models::ModelInfo {
+                    id: "kimi-k2".into(),
+                    context: Some(128_000),
+                }],
+            ),
+            (
+                "Zai".into(),
+                vec![provider::models::ModelInfo {
+                    id: "glm-4.5".into(),
+                    context: None,
+                }],
+            ),
+        ]);
+        ui.note_markdown_with_meta("fixture full answer: COMPLETE BODY TAIL", 0, 0, 0);
+    }
     let session_input_history = session_input_history(&history);
     ui.input
         .set_history(session_input_history, !history.is_empty());
-    let model_catalog_rx = Some(start_model_catalog_preload(&meta.provider, &meta.base_url));
+    let model_catalog_rx = (!commands_fixture)
+        .then(|| start_model_catalog_preload(&meta.provider, &meta.base_url, &meta.model));
     note_initial_ui(&mut ui, skip_danger, &history);
     let pending: Option<ApprovalRequest> = None;
     let task: Option<tokio::task::JoinHandle<()>> = None;

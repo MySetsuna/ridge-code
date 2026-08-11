@@ -60,9 +60,11 @@ crates/eval        离线评测 harness(ScriptedProvider 场景:pass/stuck 等)
 
 ### 2.6 sub-agent(恒只读)
 
-agent 定义 = frontmatter `.md`:内置 fastcontext/explorer/reviewer 编进二进制 + `~/.ridge/agents/*.md` 用户目录(同名覆盖)。`Agents{defs, providers}` 注册表;`provider:` 字段引 config 命名档(FastContext 走廉价模型省钱)。主 agent 经 `dispatch_agent` 自动派 / TUI `/agent` 手动派。**双重防御只读**:`READONLY_TOOLS = ["read_file", "search"]` 白名单裁剪(`readonly_tool_specs`),不下放写/shell;`SUBAGENT_MAX_STEPS = 15`。独立上下文、只回结论文本,不回灌工具轨迹 —— 省主上下文 token 的关键。
+agent 定义 = frontmatter `.md`:内置 fastcontext/explorer/reviewer 编进二进制 + `~/.ridge/agents/*.md` 用户目录(同名覆盖)。`Agents{defs, providers}` 注册表;`provider:` 字段引 config 命名档(FastContext 走廉价模型省钱)。主 agent 经 `dispatch_agent` 工具自动派；TUI `/agent` 当前只展示可用列表。**双重防御只读**:`READONLY_TOOLS = ["read_file", "search"]` 白名单裁剪(`readonly_tool_specs`),不下放写/shell;`SUBAGENT_MAX_STEPS = 15`。独立上下文、只回结论文本,不回灌工具轨迹 —— 省主上下文 token 的关键。
 
 **Agent route**:可用且已解析凭据的 `providers[]` 档进入 `route_candidates`;`ProviderProfile.route` 声明 `context_window`、成本/延迟等级、工具/推理能力与标签。`RouteRequest` 按任务文本确定性推断 `difficulty/size/kind`,再按 `RouteRole` 过滤排序；未知能力不从模型名猜。`dispatch_agent` 工具结果携带 `selected=provider::model`、选择理由与 fallback 标记；`run_planned_routed` 为 planner/teammate 提供同一策略并返回结构化 `RouteAudit`。偏好不可用先无偏好重选，仍无可用句柄才回落主 provider，且不把密钥写入理由或日志。
+
+**Agent-to-agent 协作**：`AgentEnvelope` 是业务唯一消息模型；`AgentTransport` 隔离传输。`in_process_exchange` 服务 `dispatch_agent` 与 routed teammate，`JsonRpcAgentTransport` 提供 newline JSON-RPC 适配；`request_once`/`serve_agent` 让同一语义可跨进程闭环。CLI 入口为 `ridgecode a2a serve` 与 `ridgecode a2a call`，均受版本、能力、关联/父 ID、帧/上下文、超时/取消、只读与治理校验约束；`RIDGE_A2A_SECRET` 启用 HMAC、时间窗与 nonce replay 防护。`ridge-mcp` 仍是 MCP 工具/资源边界，不充当 `AgentEnvelope` 响应端点。
 
 ### 2.7 Skills 与项目规则
 

@@ -2,8 +2,10 @@ use std::io::IsTerminal;
 use std::sync::Arc;
 
 use agent::{
-    auth_parse, builtin_tool_specs, load_commands, load_skills, resolve_mcp, Config, McpTools,
-    Skill, SlashCommand,
+    auth_parse, builtin_tool_specs, load_commands, load_skills, request_once, resolve_mcp,
+    serve_agent, AgentEnvelope, AgentHello, AgentMessage, AgentProtocolError, AgentResponse,
+    AgentRole, AgentStatus, AgentTask, AgentTransport, AuthenticatedAgentTransport, Config,
+    JsonRpcAgentTransport, McpTools, Skill, SlashCommand,
 };
 use mcp::{McpClient, McpError, StdioTransport};
 use provider::{
@@ -59,6 +61,9 @@ fn handle_meta_flags() -> bool {
              ridgecode \"task\"               one-shot task\n  \
              ridgecode --resume             resume the last session (continue after kill-9 / reopen)\n\n\
              ridgecode goal ...             persist and advance one long-running goal\n  \
+             ridgecode a2a serve            serve a bounded agent peer over stdio JSON-RPC\n  \
+             ridgecode a2a call ...         spawn a peer and complete one A2A task\n  \
+             ridgecode a2a smoke             no-key cross-process A2A smoke\n  \
              Options:\n  \
              --cwd <dir>                    run inside the target project directory\n  \
              --every <30s|5m|1h>            time trigger: re-run the task on an interval (resident; reloads compounding signals each round, Ctrl-C to stop)\n  \
@@ -220,8 +225,339 @@ async fn handle_special_command(raw: &[String]) -> Option<anyhow::Result<()>> {
             }
             Err(error) => Err(anyhow::anyhow!(error)),
         }),
+        "a2a" => Some(run_a2a_command(&raw[1..]).await),
         _ => None,
     }
+}
+
+async fn run_a2a_command(args: &[String]) -> anyhow::Result<()> {
+    match args.first().map(String::as_str) {
+        Some("serve") => run_a2a_serve(&args[1..]).await,
+        Some("call") => run_a2a_call(&args[1..]).await,
+        Some("smoke") => run_a2a_smoke().await,
+        _ => {
+            println!(
+                "Usage:\n  ridgecode a2a serve [--id ID] [--once] [--fixture]\n  ridgecode a2a call --peer COMMAND --task TASK [--peer-arg ARG] [--to ID]\n  ridgecode a2a smoke\n\nEnvironment:\n  RIDGE_A2A_SECRET   optional shared secret; enables HMAC + replay protection\n  RIDGE_A2A_KEY_ID   shared key id (default: ridgecode)"
+            );
+            Ok(())
+        }
+    }
+}
+
+fn a2a_has(args: &[String], flag: &str) -> bool {
+    args.iter().any(|arg| arg == flag)
+}
+
+fn a2a_value(args: &[String], flag: &str) -> anyhow::Result<Option<String>> {
+    let mut value = None;
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == flag {
+            let next = args
+                .get(index + 1)
+                .ok_or_else(|| anyhow::anyhow!("missing value for {flag}"))?;
+            if next.starts_with('-') {
+                return Err(anyhow::anyhow!("missing value for {flag}"));
+            }
+            value = Some(next.clone());
+            index += 1;
+        }
+        index += 1;
+    }
+    Ok(value)
+}
+
+fn a2a_values(args: &[String], flag: &str) -> anyhow::Result<Vec<String>> {
+    let mut values = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == flag {
+            let next = args
+                .get(index + 1)
+                .ok_or_else(|| anyhow::anyhow!("missing value for {flag}"))?;
+            values.push(next.clone());
+            index += 1;
+        }
+        index += 1;
+    }
+    Ok(values)
+}
+
+fn a2a_context(args: &[String]) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    let mut context = std::collections::BTreeMap::new();
+    for entry in a2a_values(args, "--context")? {
+        let (key, value) = entry
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--context expects key=value"))?;
+        if key.trim().is_empty() {
+            return Err(anyhow::anyhow!("--context key must not be empty"));
+        }
+        context.insert(key.to_string(), value.to_string());
+    }
+    Ok(context)
+}
+
+fn a2a_secret() -> Option<String> {
+    std::env::var("RIDGE_A2A_SECRET")
+        .ok()
+        .filter(|secret| !secret.is_empty())
+}
+
+fn a2a_key_id() -> String {
+    std::env::var("RIDGE_A2A_KEY_ID").unwrap_or_else(|_| "ridgecode".to_string())
+}
+
+fn a2a_message_id(prefix: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{prefix}-{nanos}")
+}
+
+async fn run_a2a_serve(args: &[String]) -> anyhow::Result<()> {
+    if a2a_has(args, "--help") || a2a_has(args, "-h") {
+        println!(
+            "Usage: ridgecode a2a serve [--id ID] [--once] [--fixture]\n\nReads newline JSON-RPC agent envelopes from stdin and writes responses to stdout. Logs stay on stderr.\nThe peer is read-only; configure a provider or use --fixture for a deterministic no-key worker."
+        );
+        return Ok(());
+    }
+    let agent_id = a2a_value(args, "--id")?.unwrap_or_else(|| "ridgecode-worker".to_string());
+    let once = a2a_has(args, "--once");
+    let fixture = a2a_has(args, "--fixture")
+        || std::env::var("RIDGE_A2A_FIXTURE").ok().as_deref() == Some("1");
+    let cfg = load_config();
+    apply_config_proxy(&cfg);
+    let auth = load_auth();
+    let effort = resolve_reasoning_effort(&cfg);
+    let provider = if fixture {
+        a2a_fixture_provider()
+    } else if let Some(provider) = real_provider(&cfg, &auth) {
+        provider
+    } else {
+        resolve_claude_oauth_provider(&cfg, &effort)
+            .await
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "a2a serve requires a configured provider; use --fixture for a no-key smoke"
+                )
+            })?
+    };
+    let hello = AgentHello::read_only(agent_id.clone(), AgentRole::Worker);
+    let stdin = tokio::io::stdin();
+    let stdout = tokio::io::stdout();
+    let raw = JsonRpcAgentTransport::new(stdin, stdout);
+    let handled = if let Some(secret) = a2a_secret() {
+        let transport =
+            AuthenticatedAgentTransport::new(raw, agent_id.clone(), a2a_key_id(), secret)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        run_a2a_server_transport(transport, hello, provider, once).await?
+    } else {
+        run_a2a_server_transport(raw, hello, provider, once).await?
+    };
+    eprintln!("[ridgecode] a2a peer stopped after {handled} task(s)");
+    Ok(())
+}
+
+fn a2a_fixture_provider() -> Arc<dyn LlmProvider> {
+    Arc::new(ScriptedProvider::new(vec![Completion {
+        text: "A2A fixture peer completed a bounded read-only task.".to_string(),
+        ..Default::default()
+    }]))
+}
+
+async fn run_a2a_server_transport<T>(
+    mut transport: T,
+    hello: AgentHello,
+    provider: Arc<dyn LlmProvider>,
+    once: bool,
+) -> Result<usize, AgentProtocolError>
+where
+    T: AgentTransport,
+{
+    serve_agent(
+        &mut transport,
+        hello,
+        move |incoming| {
+            let provider = provider.clone();
+            async move { handle_a2a_task(incoming, provider).await }
+        },
+        once,
+    )
+    .await
+}
+
+async fn handle_a2a_task(
+    incoming: AgentEnvelope,
+    provider: Arc<dyn LlmProvider>,
+) -> Result<AgentEnvelope, AgentProtocolError> {
+    let AgentMessage::Task(payload) = incoming.message else {
+        return Err(AgentProtocolError::Invalid("expected Task".to_string()));
+    };
+    let task = if payload.context.is_empty() {
+        payload.task
+    } else {
+        let context = payload
+            .context
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("{}\n\nRemote context:\n{context}", payload.task)
+    };
+    let app = agent::build_llm_agent_read_only(provider)
+        .map_err(|error| AgentProtocolError::Handler(error.to_string()))?;
+    let max_steps = payload.budget_steps.clamp(1, agent::MAX_STEPS);
+    let config = langgraph::RunConfig {
+        max_supersteps: max_steps.saturating_mul(2).saturating_add(50),
+    };
+    let outcome = app
+        .invoke_with(agent::AgentState::new(task), &config, None, None)
+        .await
+        .map_err(|error| AgentProtocolError::Handler(error.to_string()))?;
+    let summary = outcome
+        .messages
+        .last()
+        .cloned()
+        .unwrap_or_else(|| "agent peer returned no summary".to_string());
+    Ok(AgentEnvelope::response(
+        format!("{}:response", incoming.correlation_id),
+        incoming.to,
+        incoming.from,
+        incoming.correlation_id,
+        AgentResponse {
+            status: if outcome.approved {
+                AgentStatus::Done
+            } else {
+                AgentStatus::Failed
+            },
+            approved: outcome.approved,
+            steps: outcome.steps,
+            tokens: outcome.total_tokens,
+            summary,
+            modified_files: outcome.modified_files.into_iter().collect(),
+        },
+    )
+    .with_parent(incoming.message_id))
+}
+
+async fn run_a2a_call(args: &[String]) -> anyhow::Result<()> {
+    if a2a_has(args, "--help") || a2a_has(args, "-h") {
+        println!(
+            "Usage: ridgecode a2a call --peer COMMAND --task TASK [--peer-arg ARG] [--to ID] [--from ID] [--budget N] [--context key=value]\n\nThe peer command is spawned with stdin/stdout connected to the A2A newline JSON-RPC transport."
+        );
+        return Ok(());
+    }
+    let peer = a2a_value(args, "--peer")?
+        .ok_or_else(|| anyhow::anyhow!("a2a call requires --peer COMMAND"))?;
+    let task = a2a_value(args, "--task")?
+        .ok_or_else(|| anyhow::anyhow!("a2a call requires --task TASK"))?;
+    let peer_args = a2a_values(args, "--peer-arg")?;
+    let from = a2a_value(args, "--from")?.unwrap_or_else(|| "ridgecode-caller".to_string());
+    let to = a2a_value(args, "--to")?.unwrap_or_else(|| "ridgecode-worker".to_string());
+    let budget = a2a_value(args, "--budget")?
+        .map(|value| value.parse::<usize>())
+        .transpose()
+        .map_err(|_| anyhow::anyhow!("--budget must be a positive integer"))?
+        .unwrap_or(15);
+    if budget == 0 {
+        return Err(anyhow::anyhow!("--budget must be positive"));
+    }
+    let context = a2a_context(args)?;
+    let mut child = tokio::process::Command::new(&peer)
+        .args(&peer_args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|error| anyhow::anyhow!("spawn A2A peer {peer}: {error}"))?;
+    let child_stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("A2A peer stdin unavailable"))?;
+    let child_stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("A2A peer stdout unavailable"))?;
+    let raw = JsonRpcAgentTransport::new(child_stdout, child_stdin);
+    let request = AgentEnvelope::task(
+        a2a_message_id("task"),
+        from.clone(),
+        to.clone(),
+        a2a_message_id("corr"),
+        AgentTask::new(
+            task,
+            true,
+            vec!["read_file".to_string(), "search".to_string()],
+            budget,
+        )
+        .with_context(context),
+    );
+    let response = if let Some(secret) = a2a_secret() {
+        let transport = AuthenticatedAgentTransport::new(raw, from.clone(), a2a_key_id(), secret)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        run_a2a_client_transport(transport, from, to, request).await?
+    } else {
+        run_a2a_client_transport(raw, from, to, request).await?
+    };
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    match response.message {
+        AgentMessage::Response(result) => {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            if !result.approved {
+                return Err(anyhow::anyhow!("A2A peer did not approve the task"));
+            }
+        }
+        AgentMessage::Error(error) => {
+            return Err(anyhow::anyhow!(
+                "A2A peer error [{}]: {}",
+                error.code,
+                error.message
+            ));
+        }
+        _ => return Err(anyhow::anyhow!("A2A peer returned an unexpected message")),
+    }
+    Ok(())
+}
+
+async fn run_a2a_client_transport<T>(
+    mut transport: T,
+    from: String,
+    to: String,
+    request: AgentEnvelope,
+) -> Result<AgentEnvelope, AgentProtocolError>
+where
+    T: AgentTransport,
+{
+    request_once(
+        &mut transport,
+        AgentHello::guarded(from, AgentRole::Maker),
+        AgentHello::read_only(to, AgentRole::Worker),
+        request,
+    )
+    .await
+}
+
+async fn run_a2a_smoke() -> anyhow::Result<()> {
+    let exe = std::env::current_exe()?;
+    let args = vec![
+        "--peer".to_string(),
+        exe.to_string_lossy().into_owned(),
+        "--peer-arg".to_string(),
+        "a2a".to_string(),
+        "--peer-arg".to_string(),
+        "serve".to_string(),
+        "--peer-arg".to_string(),
+        "--once".to_string(),
+        "--peer-arg".to_string(),
+        "--fixture".to_string(),
+        "--task".to_string(),
+        "cross-process A2A smoke".to_string(),
+        "--budget".to_string(),
+        "4".to_string(),
+    ];
+    run_a2a_call(&args).await
 }
 
 struct ProviderRun<'a> {

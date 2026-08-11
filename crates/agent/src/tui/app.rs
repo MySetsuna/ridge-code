@@ -97,6 +97,12 @@ pub(crate) struct AnswerEntry {
     pub(crate) text: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingModelSelection {
+    pub(crate) key: String,
+    pub(crate) ctx: Option<u64>,
+}
+
 fn bound_history_text(text: &str, max_chars: usize) -> String {
     let count = text.chars().count();
     if count <= max_chars {
@@ -367,6 +373,8 @@ pub(crate) struct Ui {
     pub(crate) model_catalog_reload: bool,
     /// Active ChatGPT/Codex reasoning effort; `None` means provider default.
     pub(crate) effort: Option<String>,
+    /// Model picked in the first stage of the model -> effort flow.
+    pub(crate) pending_model: Option<PendingModelSelection>,
     /// 自定义/skill 命令请求「以任务身份跑」(iter-39):`run_command` 展开 body 置此,主环取走起任务。
     pub(crate) run_task: Option<String>,
 }
@@ -457,7 +465,6 @@ impl Ui {
         tokens: usize,
         partial: bool,
     ) {
-        let history_text = bound_answer_history_text(text);
         if self.answer_history.len() == MAX_ANSWER_HISTORY {
             let evict = self
                 .answer_history
@@ -472,7 +479,7 @@ impl Ui {
             elapsed_s,
             tokens,
             partial,
-            text: history_text,
+            text: text.to_owned(),
         });
     }
     #[cfg(test)]
@@ -872,7 +879,7 @@ impl Ui {
             self.panel = None;
             true
         } else {
-            self.open_answer_history()
+            self.open_latest_answer()
         }
     }
     pub(crate) fn scroll_live(&mut self, delta: i8) -> bool {
@@ -934,6 +941,16 @@ impl Ui {
             return false;
         }
         self.panel = Some(answer_history_panel(&self.answer_history));
+        true
+    }
+
+    pub(crate) fn open_latest_answer(&mut self) -> bool {
+        if self.answer_history.is_empty() {
+            return false;
+        }
+        let mut panel = answer_history_panel(&self.answer_history);
+        panel.detail_open = true;
+        self.panel = Some(panel);
         true
     }
 

@@ -13,6 +13,7 @@ param(
     [switch]$BusyFixture,
     [switch]$StressFixture,
     [switch]$CompletionFixture,
+    [switch]$CommandsFixture,
     [switch]$InspectLive,
     [switch]$InspectQueue,
     [switch]$InspectReasoning,
@@ -39,6 +40,9 @@ if ($BusyFixture -and $CompletionFixture) {
 if ($StressFixture -and ($BusyFixture -or $CompletionFixture)) {
     throw '-StressFixture is mutually exclusive with -BusyFixture and -CompletionFixture'
 }
+if ($CommandsFixture -and ($BusyFixture -or $StressFixture -or $CompletionFixture)) {
+    throw '-CommandsFixture is mutually exclusive with other fixtures'
+}
 if ($EscTakeover -and -not $BusyFixture) {
     throw '-EscTakeover requires -BusyFixture'
 }
@@ -49,6 +53,7 @@ if ($StressFixture) {
 }
 $stressFixtureRequested = [bool]$StressFixture
 $completionMode = [bool]($CompletionFixture -or $stressFixtureRequested)
+$commandsMode = [bool]$CommandsFixture
 if ($InspectLive -and -not $BusyFixture) {
     throw '-InspectLive requires -BusyFixture so a live block exists to inspect'
 }
@@ -365,8 +370,16 @@ namespace RidgeCode {
 
 $session = $null
 $text = New-Object System.Text.StringBuilder
-$deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+$runtimeTimeoutMs = if ($commandsMode) { [Math]::Max($TimeoutMs, 10000) } else { $TimeoutMs }
+$deadline = [DateTime]::UtcNow.AddMilliseconds($runtimeTimeoutMs)
 $sentHelp = $false
+$commandsStage = 0
+$commandsLoginObserved = $false
+$commandsModelsObserved = $false
+$commandsSearchObserved = $false
+$commandsEffortObserved = $false
+$commandsAnswerObserved = $false
+$commandsExitSent = $false
 $completionTaskSent = $false
 $completionObserved = $false
 $snapshotCompletionRaw = ''
@@ -477,6 +490,9 @@ try {
         $env:RIDGE_TUI_KITTY = '1'
     } elseif ($CompletionFixture) {
         $env:RIDGE_TUI_FIXTURE = 'complete'
+    } elseif ($CommandsFixture) {
+        $env:RIDGE_TUI_FIXTURE = 'commands'
+        $env:RIDGE_TUI_KITTY = '1'
     }
     [IO.File]::WriteAllText(
         $isolatedConfig,
@@ -489,11 +505,92 @@ try {
             $rawOutput.AddRange($bytes)
             [void]$text.Append([Text.Encoding]::UTF8.GetString($bytes))
         }
-        $elapsed = ($TimeoutMs - ($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+        $elapsed = ($runtimeTimeoutMs - ($deadline - [DateTime]::UtcNow).TotalMilliseconds)
         if (-not $sentHelp -and $elapsed -ge $EnterAfterMs) {
             $session.Send([Text.Encoding]::UTF8.GetBytes('/help'))
             $session.Send([byte[]](0x0d))
             $sentHelp = $true
+        }
+        if ($commandsMode) {
+            $commandsSnapshot = $null
+            if (Test-Path -LiteralPath $isolatedSnapshot) {
+                try {
+                    $commandsSnapshot = [IO.File]::ReadAllText($isolatedSnapshot) | ConvertFrom-Json
+                } catch {
+                    # Retry while the frame writer is replacing the snapshot.
+                }
+            }
+            $commandsPanelKind = if ($null -ne $commandsSnapshot -and $null -ne $commandsSnapshot.panel) {
+                [string]$commandsSnapshot.panel.kind
+            } else {
+                ''
+            }
+            $commandsRows = if ($null -ne $commandsSnapshot) { @($commandsSnapshot.rows) -join ' ' } else { '' }
+            switch ($commandsStage) {
+                0 {
+                    if ($sentHelp -and $elapsed -ge ($EnterAfterMs + 250)) {
+                        $session.Send([Text.Encoding]::UTF8.GetBytes('/login'))
+                        $session.Send([byte[]](0x0d))
+                        $commandsStage = 1
+                    }
+                }
+                1 {
+                    if ($commandsPanelKind -eq 'Login') {
+                        $commandsLoginObserved = $true
+                        $session.Send([byte[]](0x1b))
+                        $commandsStage = 2
+                    }
+                }
+                2 {
+                    if ($commandsLoginObserved -and $elapsed -ge ($EnterAfterMs + 650)) {
+                        $session.Send([Text.Encoding]::UTF8.GetBytes('/provider'))
+                        $session.Send([byte[]](0x0d))
+                        $commandsStage = 3
+                    }
+                }
+                3 {
+                    if ($commandsPanelKind -eq 'Models') {
+                        $commandsModelsObserved = $true
+                        $session.Send([Text.Encoding]::UTF8.GetBytes('glm'))
+                        $commandsStage = 4
+                    }
+                }
+                4 {
+                    if ($commandsPanelKind -eq 'Models' -and $null -ne $commandsSnapshot.panel -and
+                        [string]$commandsSnapshot.panel.query -match '(?i)glm') {
+                        $commandsSearchObserved = $true
+                        $session.Send([byte[]](0x0d))
+                        $commandsStage = 5
+                    }
+                }
+                5 {
+                    if ($commandsPanelKind -eq 'Effort') {
+                        $commandsEffortObserved = $true
+                        $session.Send([byte[]](0x1b))
+                        $commandsStage = 6
+                    }
+                }
+                6 {
+                    if ($commandsEffortObserved -and $elapsed -ge ($EnterAfterMs + 1100)) {
+                        $session.Send([Text.Encoding]::UTF8.GetBytes('/answer'))
+                        $session.Send([byte[]](0x0d))
+                        $commandsStage = 7
+                    }
+                }
+                7 {
+                    if ($commandsPanelKind -eq 'Answers' -and $null -ne $commandsSnapshot.panel -and
+                        $commandsSnapshot.panel.detail_open -and $commandsRows -match 'COMPLETE BODY TAIL') {
+                        $commandsAnswerObserved = $true
+                        $session.Send([byte[]](0x03))
+                        Start-Sleep -Milliseconds 80
+                        $session.Send([byte[]](0x03))
+                        $commandsExitSent = $true
+                        $sentInterrupt = $true
+                        $aliveAfterEnter = $true
+                        $commandsStage = 8
+                    }
+                }
+            }
         }
         if ($completionMode -and $sentHelp -and -not $completionTaskSent -and $elapsed -ge 850) {
             $session.Send([Text.Encoding]::UTF8.GetBytes('completion fixture task'))
@@ -753,7 +850,7 @@ try {
                 $frontFallbackSent = $true
             }
         }
-        if ($sentHelp -and -not $sentInterrupt -and $elapsed -ge $effectiveInterruptAfterMs) {
+        if (-not $commandsMode -and $sentHelp -and -not $sentInterrupt -and $elapsed -ge $effectiveInterruptAfterMs) {
             $aliveAfterEnter = -not $session.HasExited
             if (-not $aliveAfterEnter) { throw 'ridgecode exited before the takeover probe' }
             if ($EscTakeover) {
@@ -889,6 +986,11 @@ try {
     }
     $completionTextObserved = -not $completionMode -or ($completionReasoningObserved -and $completionAnswerObserved)
     $completionEvidenceSatisfied = -not $completionMode -or ($completionTaskSent -and $completionObserved -and $completionTextObserved)
+    $commandsHelpObserved = -not $commandsMode -or ($text.ToString() -match '(?i)/login')
+    $commandsEvidenceSatisfied = -not $commandsMode -or (
+        $commandsHelpObserved -and $commandsLoginObserved -and $commandsModelsObserved -and $commandsSearchObserved -and
+        $commandsEffortObserved -and $commandsAnswerObserved -and $commandsExitSent
+    )
     $takeoverEvidenceSatisfied = -not $EscTakeover -or $sentEsc
     if ($session.BytesRead -eq 0) {
         throw 'ConPTY produced no output bytes'
@@ -907,7 +1009,7 @@ try {
     }
     $outputPrefixHex = (($rawOutput | Select-Object -First 64 | ForEach-Object { '{0:X2}' -f $_ }) -join '')
     [pscustomobject]@{
-        status = if ($crosstermEventsObserved -and $busyFixtureFrontObserved -and $queueEvidenceSatisfied -and $inspectEvidenceSatisfied -and $inspectQueueEvidenceSatisfied -and $reasoningEvidenceSatisfied -and $answerInspectEvidenceSatisfied -and $holdEvidenceSatisfied -and $resizeEvidenceSatisfied -and $completionEvidenceSatisfied -and $takeoverEvidenceSatisfied) { 'passed' } else { 'partial' }
+        status = if ($crosstermEventsObserved -and $busyFixtureFrontObserved -and $queueEvidenceSatisfied -and $inspectEvidenceSatisfied -and $inspectQueueEvidenceSatisfied -and $reasoningEvidenceSatisfied -and $answerInspectEvidenceSatisfied -and $holdEvidenceSatisfied -and $resizeEvidenceSatisfied -and $completionEvidenceSatisfied -and $commandsEvidenceSatisfied -and $takeoverEvidenceSatisfied) { 'passed' } else { 'partial' }
         binary = $binaryPath
         pid = $session.ProcessId
         columns = $Columns
@@ -977,6 +1079,14 @@ try {
         completion_observed = $completionObserved
         completion_text_observed = $completionTextObserved
         completion_evidence_satisfied = $completionEvidenceSatisfied
+        commands_fixture_requested = $commandsMode
+        commands_help_observed = $commandsHelpObserved
+        commands_login_observed = $commandsLoginObserved
+        commands_models_observed = $commandsModelsObserved
+        commands_search_observed = $commandsSearchObserved
+        commands_effort_observed = $commandsEffortObserved
+        commands_answer_observed = $commandsAnswerObserved
+        commands_evidence_satisfied = $commandsEvidenceSatisfied
         snapshot_path = if ($KeepDiagnostics) { $isolatedSnapshot } else { $null }
         trace = $trace
         trace_path = if ($KeepDiagnostics) { $isolatedTrace } else { $null }

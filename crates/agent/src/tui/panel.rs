@@ -2,10 +2,7 @@ use agent::Config;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::transcript::LiveBlockFocus;
-use super::{
-    fmt_ctx, ActivityEntry, AnswerEntry, LiveTranscript, ReasoningEntry, ToolBlock,
-    EFFORT_MODEL_GROUP,
-};
+use super::{fmt_ctx, ActivityEntry, AnswerEntry, LiveTranscript, ReasoningEntry, ToolBlock};
 use crate::config_path;
 use agent::PROVIDER_PRESETS;
 
@@ -16,8 +13,6 @@ const DETAIL_SCROLL_STEP: i16 = 4;
 pub(crate) enum PanelKind {
     /// 配置页:Enter 就地编辑选中键的值。
     Config,
-    /// Provider 页:Enter 热切换到选中档。
-    Provider,
     /// 工具页:只读浏览 + 搜索。
     Tools,
     /// 已提交工具历史:摘要默认收起,Enter 在预览窗展开详情。
@@ -34,6 +29,8 @@ pub(crate) enum PanelKind {
     Queue,
     /// 模型页:Enter 热切换到选中模型 + 缓存 ctx_window。
     Models,
+    /// Model selection second stage: choose reasoning effort after choosing a model.
+    Effort,
     /// Sub-agent 页:只读浏览 + 搜索。
     Agent,
     /// 登录页(iter-38):↑↓ 选内置供应商 → Enter 就地输入 key(掩码)→ Enter 校验并接入。
@@ -276,30 +273,6 @@ pub(crate) fn config_panel() -> Panel {
     )
 }
 
-/// Provider 页:列命名档(名 · kind · model)。
-pub(crate) fn provider_panel() -> Panel {
-    let cfg = Config::load(config_path());
-    let rows = cfg
-        .providers
-        .iter()
-        .map(|p| PanelRow {
-            key: p.name.clone(),
-            // 订阅档标 oauth 徽标(iter-48 G6),与 key 档一眼可辨。
-            value: if p.use_oauth == Some(true) {
-                format!("{} · {} · oauth", p.kind, p.model)
-            } else {
-                format!("{} · {}", p.kind, p.model)
-            },
-            ctx: None,
-        })
-        .collect();
-    Panel::new(
-        PanelKind::Provider,
-        "Provider · ↑↓ select · Enter switch · Esc close".into(),
-        rows,
-    )
-}
-
 /// 工具页(只读):列工具名。
 pub(crate) fn tools_panel(tools: &[String]) -> Panel {
     let rows = tools
@@ -503,11 +476,10 @@ pub(crate) fn queue_panel(queue: &std::collections::VecDeque<String>) -> Panel {
 }
 
 /// 模型页:跨 provider 列实时模型(`provider · id` → ctx),`sel` 落当前 provider+模型。
-pub(crate) fn models_panel_with_effort(
+pub(crate) fn models_panel(
     grouped: &[(String, Vec<provider::models::ModelInfo>)],
     current_provider: &str,
     current_model: &str,
-    current_effort: &str,
 ) -> Panel {
     let rows: Vec<PanelRow> = grouped
         .iter()
@@ -522,28 +494,46 @@ pub(crate) fn models_panel_with_effort(
             })
         })
         .collect();
-    let mut rows = rows;
-    rows.extend(provider::REASONING_EFFORTS.iter().map(|effort| PanelRow {
-        key: format!("{} · {}", EFFORT_MODEL_GROUP, effort),
-        value: if *effort == current_effort {
-            "current".into()
-        } else {
-            "set reasoning effort".into()
-        },
-        ctx: None,
-    }));
     let target = format!("{} · {}", current_provider, current_model);
     let mut p = Panel::new(
         PanelKind::Models,
-        format!(
-            "Models · effort {current_effort} · ↑↓ select · Enter switch · type to filter · Esc close"
-        ),
+        "Models · provider/model · ↑↓ select · Enter next · type to filter · Esc close".into(),
         rows,
     );
     if let Some(pos) = p.view.iter().position(|&i| p.rows[i].key == target) {
         p.sel = pos;
     }
     p
+}
+
+/// Reasoning effort is a second-stage choice, shown only after a model row is
+/// selected (or directly through `/effort`).
+pub(crate) fn effort_panel(current_effort: &str) -> Panel {
+    let rows = provider::REASONING_EFFORTS
+        .iter()
+        .map(|effort| PanelRow {
+            key: (*effort).to_string(),
+            value: if *effort == current_effort {
+                "current".into()
+            } else {
+                "set reasoning effort".into()
+            },
+            ctx: None,
+        })
+        .collect();
+    let mut panel = Panel::new(
+        PanelKind::Effort,
+        "Reasoning effort · ↑↓ select · Enter apply · Esc close".into(),
+        rows,
+    );
+    if let Some(position) = panel
+        .view
+        .iter()
+        .position(|&index| panel.rows[index].key == current_effort)
+    {
+        panel.sel = position;
+    }
+    panel
 }
 
 /// Sub-agent 页(只读):列 agent 名 + 描述。

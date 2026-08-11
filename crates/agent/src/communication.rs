@@ -8,7 +8,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -958,6 +958,95 @@ pub fn json_rpc_loopback_pair() -> (JsonRpcLoopbackTransport, JsonRpcLoopbackTra
     )
 }
 
+/// Apply envelope authentication at the transport boundary.  This keeps the
+/// business protocol unaware of whether a peer is local or cross-process.
+/// The shared secret is supplied by the caller (normally `RIDGE_A2A_SECRET`),
+/// never serialized into the envelope.
+pub struct AuthenticatedAgentTransport<T> {
+    inner: T,
+    agent_id: String,
+    key_id: String,
+    secret: String,
+    next_nonce: u64,
+    replay: ReplayGuard,
+}
+
+impl<T> AuthenticatedAgentTransport<T> {
+    pub fn new(
+        inner: T,
+        agent_id: impl Into<String>,
+        key_id: impl Into<String>,
+        secret: impl Into<String>,
+    ) -> Result<Self, AgentProtocolError> {
+        let agent_id = agent_id.into();
+        let key_id = key_id.into();
+        let secret = secret.into();
+        if agent_id.trim().is_empty() || key_id.trim().is_empty() || secret.is_empty() {
+            return Err(AgentProtocolError::Invalid(
+                "authenticated transport requires agent_id, key_id, and secret".to_string(),
+            ));
+        }
+        Ok(Self {
+            inner,
+            agent_id,
+            key_id,
+            secret,
+            next_nonce: 1,
+            replay: ReplayGuard::default(),
+        })
+    }
+
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+
+    fn nonce(&mut self, message_id: &str) -> String {
+        let nonce = format!("{}:{}:{message_id}", self.agent_id, self.next_nonce);
+        self.next_nonce = self.next_nonce.saturating_add(1);
+        nonce
+    }
+}
+
+#[async_trait::async_trait]
+impl<T> AgentTransport for AuthenticatedAgentTransport<T>
+where
+    T: AgentTransport,
+{
+    async fn send(&mut self, mut envelope: AgentEnvelope) -> Result<(), AgentProtocolError> {
+        let message_id = envelope.message_id.clone();
+        let nonce = self.nonce(&message_id);
+        let key_id = self.key_id.clone();
+        let secret = self.secret.clone();
+        envelope.sign(key_id, &secret, nonce, agent_epoch_now())?;
+        self.inner.send(envelope).await
+    }
+
+    async fn recv(&mut self) -> Result<Option<AgentEnvelope>, AgentProtocolError> {
+        let Some(envelope) = self.inner.recv().await? else {
+            return Ok(None);
+        };
+        let Some(stamp) = envelope.security.as_ref() else {
+            return Err(AgentProtocolError::Unauthorized(
+                "authenticated agent envelope required".to_string(),
+            ));
+        };
+        if stamp.key_id != self.key_id {
+            return Err(AgentProtocolError::Unauthorized(
+                "unexpected agent security key id".to_string(),
+            ));
+        }
+        envelope.verify(&self.secret, agent_epoch_now(), &mut self.replay)?;
+        Ok(Some(envelope))
+    }
+}
+
+fn agent_epoch_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 pub async fn handshake<C, S>(
     client: &mut C,
     server: &mut S,
@@ -1056,6 +1145,129 @@ where
     .await
 }
 
+/// Perform one client-side exchange over a single real peer transport.
+/// Unlike [`exchange_once`], this does not require an in-process server half;
+/// it is the entry point for stdio/socket/process transports.
+pub async fn request_once<C>(
+    transport: &mut C,
+    client_hello: AgentHello,
+    server_hello: AgentHello,
+    request: AgentEnvelope,
+) -> Result<AgentEnvelope, AgentProtocolError>
+where
+    C: AgentTransport,
+{
+    request_once_with_cancellation(transport, client_hello, server_hello, request, None).await
+}
+
+pub async fn request_once_with_cancellation<C>(
+    transport: &mut C,
+    client_hello: AgentHello,
+    server_hello: AgentHello,
+    request: AgentEnvelope,
+    cancellation: Option<AgentCancellation>,
+) -> Result<AgentEnvelope, AgentProtocolError>
+where
+    C: AgentTransport,
+{
+    request.validate()?;
+    let AgentMessage::Task(task) = &request.message else {
+        return Err(AgentProtocolError::Invalid(
+            "request must be Task".to_string(),
+        ));
+    };
+    let task = task.clone();
+    let request_id = request.message_id.clone();
+    let correlation_id = request.correlation_id.clone();
+    let request_from = request.from.clone();
+    let request_to = request.to.clone();
+    let client_id = client_hello.agent_id.clone();
+    let server_id = server_hello.agent_id.clone();
+
+    transport
+        .send(AgentEnvelope::hello(
+            "hello-client",
+            client_id.clone(),
+            server_id.clone(),
+            client_hello.clone(),
+        ))
+        .await?;
+    let incoming = transport.recv().await?.ok_or_else(|| {
+        AgentProtocolError::Transport("server closed during handshake".to_string())
+    })?;
+    incoming.validate()?;
+    if incoming.message_id != "hello-server"
+        || incoming.correlation_id != "handshake"
+        || incoming.from != server_id
+        || incoming.to != client_id
+        || incoming.parent_id.is_some()
+    {
+        return Err(AgentProtocolError::Invalid(
+            "server Hello identity mismatch".to_string(),
+        ));
+    }
+    let AgentMessage::Hello(server_view) = incoming.message else {
+        return Err(AgentProtocolError::Invalid(
+            "expected server Hello".to_string(),
+        ));
+    };
+    let session = negotiate(&client_hello, &server_view)?;
+    if session.protocol_version != negotiate(&server_hello, &client_hello)?.protocol_version {
+        return Err(AgentProtocolError::NoCommonVersion);
+    }
+    authorize_task(&session, &task)?;
+    if let Some(governance) = &request.governance {
+        authorize_governance(&session, &task, governance)?;
+    }
+    transport.send(request).await?;
+
+    let deadline = tokio::time::sleep(AGENT_EXCHANGE_TIMEOUT);
+    tokio::pin!(deadline);
+    tokio::select! {
+            incoming = transport.recv() => {
+                let response = incoming?.ok_or_else(|| AgentProtocolError::Transport(
+                    "server closed before Response".to_string(),
+                ))?;
+                validate_server_response(&response, &AgentEnvelope::task(
+                    request_id.clone(),
+                    request_from.clone(),
+                    request_to.clone(),
+                    correlation_id.clone(),
+                    task.clone(),
+                ))?;
+                Ok(response)
+            }
+            _ = &mut deadline => {
+                let cancel = AgentEnvelope::cancel(
+                    format!("{request_id}:cancel"),
+                    request_from.clone(),
+                    request_to.clone(),
+                    correlation_id.clone(),
+                    "caller timed out waiting for agent task",
+                ).with_parent(&request_id);
+                let _ = transport.send(cancel).await;
+                Err(AgentProtocolError::Timeout)
+            }
+            _ = async {
+                if let Some(cancellation) = &cancellation {
+                    cancellation.cancelled().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                let cancel = AgentEnvelope::cancel(
+                    format!("{request_id}:cancel"),
+                    request_from.clone(),
+                    request_to.clone(),
+                    correlation_id.clone(),
+                    "caller cancelled agent task",
+                ).with_parent(&request_id);
+                let _ = transport.send(cancel).await;
+                Err(AgentProtocolError::Cancelled)
+            }
+    }
+}
+
 pub async fn exchange_once_with_cancellation<C, S, F, Fut>(
     client: &mut C,
     server: &mut S,
@@ -1107,8 +1319,8 @@ where
             _ = cancellation.cancelled() => {
                 let cancel = AgentEnvelope::cancel(
                     format!("{request_message_id}:cancel"),
-                    request_to.clone(),
                     request_from.clone(),
+                    request_to.clone(),
                     correlation_id.clone(),
                     "caller cancelled agent task",
                 ).with_parent(&request_message_id);
@@ -1138,6 +1350,192 @@ where
         .recv()
         .await?
         .ok_or_else(|| AgentProtocolError::Transport("client closed before Response".to_string()))
+}
+
+fn wire_error(error: &AgentProtocolError) -> AgentError {
+    let (code, retryable) = match error {
+        AgentProtocolError::Transport(_) => ("transport", true),
+        AgentProtocolError::Timeout => ("timeout", true),
+        AgentProtocolError::Cancelled => ("cancelled", false),
+        AgentProtocolError::Unauthorized(_) => ("unauthorized", false),
+        AgentProtocolError::Version(_) | AgentProtocolError::NoCommonVersion => ("version", false),
+        AgentProtocolError::Invalid(_) => ("invalid", false),
+        AgentProtocolError::Handler(_) => ("handler", false),
+    };
+    let message: String = error.to_string().chars().take(512).collect();
+    AgentError {
+        code: code.to_string(),
+        message,
+        retryable,
+    }
+}
+
+fn server_error(request: &AgentEnvelope, error: &AgentProtocolError) -> AgentEnvelope {
+    AgentEnvelope::error(
+        format!("{}:error", request.message_id),
+        request.to.clone(),
+        request.from.clone(),
+        request.correlation_id.clone(),
+        wire_error(error),
+    )
+    .with_parent(&request.message_id)
+}
+
+fn validate_server_response(
+    response: &AgentEnvelope,
+    request: &AgentEnvelope,
+) -> Result<(), AgentProtocolError> {
+    response.validate()?;
+    if response.correlation_id != request.correlation_id
+        || response.from != request.to
+        || response.to != request.from
+        || response.parent_id.as_deref() != Some(request.message_id.as_str())
+        || !matches!(
+            response.message,
+            AgentMessage::Response(_) | AgentMessage::Error(_)
+        )
+    {
+        return Err(AgentProtocolError::Invalid(
+            "server response identity mismatch".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn serve_task<C, Fut>(
+    transport: &mut C,
+    request: AgentEnvelope,
+    handler: Fut,
+) -> Result<(), AgentProtocolError>
+where
+    C: AgentTransport,
+    Fut: Future<Output = Result<AgentEnvelope, AgentProtocolError>>,
+{
+    let request_id = request.message_id.clone();
+    let request_from = request.from.clone();
+    let request_to = request.to.clone();
+    let correlation_id = request.correlation_id.clone();
+    let deadline = tokio::time::sleep(AGENT_EXCHANGE_TIMEOUT);
+    tokio::pin!(handler);
+    tokio::pin!(deadline);
+    tokio::select! {
+            result = &mut handler => {
+                let response = result.unwrap_or_else(|error| server_error(&request, &error));
+                validate_server_response(&response, &request)?;
+                transport.send(response).await?;
+                Ok(())
+            }
+            _ = &mut deadline => {
+                let response = server_error(&request, &AgentProtocolError::Timeout);
+                transport.send(response).await?;
+                Ok(())
+            }
+            incoming = transport.recv() => {
+                match incoming? {
+                    None => Err(AgentProtocolError::Transport(
+                        "client closed while agent task was running".to_string(),
+                    )),
+                    Some(incoming) => {
+                        incoming.validate()?;
+                        if matches!(incoming.message, AgentMessage::Cancel { .. })
+                            && incoming.from == request_from
+                            && incoming.to == request_to
+                            && incoming.correlation_id == correlation_id
+                            && incoming.parent_id.as_deref() == Some(request_id.as_str())
+                        {
+                            let response = server_error(&request, &AgentProtocolError::Cancelled);
+                            transport.send(response).await?;
+                            Ok(())
+                        } else {
+                            Err(AgentProtocolError::Invalid(
+                                "only a correlated Cancel is allowed while a task is running"
+                                    .to_string(),
+                            ))
+                        }
+                    }
+                }
+            }
+    }
+}
+
+/// Serve a real peer over any `AgentTransport`.
+///
+/// The server performs the protocol handshake once, then accepts bounded
+/// read-only/guarded tasks one at a time. `once` is useful for process-per-task
+/// workers and deterministic smoke tests; a long-lived stdio peer can leave it
+/// false. Cancellation is read from the same transport while the handler runs.
+pub async fn serve_agent<C, F, Fut>(
+    transport: &mut C,
+    server_hello: AgentHello,
+    mut handler: F,
+    once: bool,
+) -> Result<usize, AgentProtocolError>
+where
+    C: AgentTransport,
+    F: FnMut(AgentEnvelope) -> Fut,
+    Fut: Future<Output = Result<AgentEnvelope, AgentProtocolError>>,
+{
+    let incoming = transport.recv().await?.ok_or_else(|| {
+        AgentProtocolError::Transport("client closed during handshake".to_string())
+    })?;
+    incoming.validate()?;
+    let AgentMessage::Hello(remote_hello) = incoming.message.clone() else {
+        return Err(AgentProtocolError::Invalid(
+            "expected client Hello".to_string(),
+        ));
+    };
+    if incoming.message_id != "hello-client"
+        || incoming.correlation_id != "handshake"
+        || incoming.from != remote_hello.agent_id
+        || incoming.to != server_hello.agent_id
+        || incoming.parent_id.is_some()
+    {
+        return Err(AgentProtocolError::Invalid(
+            "client Hello identity mismatch".to_string(),
+        ));
+    }
+    let session = negotiate(&server_hello, &remote_hello)?;
+    let server_capability_session = negotiate(&remote_hello, &server_hello)?;
+    transport
+        .send(AgentEnvelope::hello(
+            "hello-server",
+            server_hello.agent_id.clone(),
+            remote_hello.agent_id,
+            server_hello,
+        ))
+        .await?;
+
+    let mut handled = 0;
+    loop {
+        let Some(request) = transport.recv().await? else {
+            return Ok(handled);
+        };
+        request.validate()?;
+        if request.from != session.remote_id || request.to != session.local_id {
+            return Err(AgentProtocolError::Invalid(
+                "task identity does not match negotiated peer".to_string(),
+            ));
+        }
+        let AgentMessage::Task(task) = &request.message else {
+            return Err(AgentProtocolError::Invalid(
+                "agent peer expected Task".to_string(),
+            ));
+        };
+        if let Err(error) = authorize_task(&server_capability_session, task).and_then(|()| {
+            request.governance.as_ref().map_or(Ok(()), |governance| {
+                authorize_governance(&server_capability_session, task, governance)
+            })
+        }) {
+            transport.send(server_error(&request, &error)).await?;
+        } else {
+            let response = request.clone();
+            serve_task(transport, request, handler(response)).await?;
+        }
+        handled += 1;
+        if once {
+            return Ok(handled);
+        }
+    }
 }
 
 pub async fn in_process_exchange<F, Fut>(
@@ -1356,6 +1754,105 @@ mod tests {
     async fn json_rpc_transport_completes_same_exchange() {
         let (client, server) = json_rpc_loopback_pair();
         exercise_transport(client, server).await;
+    }
+
+    #[tokio::test]
+    async fn json_rpc_server_completes_peer_exchange() {
+        let (mut client, mut server) = json_rpc_loopback_pair();
+        let (server_result, client_result) = tokio::join!(
+            serve_agent(
+                &mut server,
+                AgentHello::read_only("worker", AgentRole::Explorer),
+                |incoming| async move {
+                    let AgentMessage::Task(payload) = incoming.message else {
+                        return Err(AgentProtocolError::Invalid("expected Task".to_string()));
+                    };
+                    Ok(AgentEnvelope::response(
+                        "response-server",
+                        "worker",
+                        "main",
+                        incoming.correlation_id,
+                        AgentResponse {
+                            status: AgentStatus::Done,
+                            approved: true,
+                            steps: 1,
+                            tokens: 2,
+                            summary: payload.task,
+                            modified_files: Vec::new(),
+                        },
+                    )
+                    .with_parent(incoming.message_id))
+                },
+                true,
+            ),
+            request_once(
+                &mut client,
+                AgentHello::guarded("main", AgentRole::Maker),
+                AgentHello::read_only("worker", AgentRole::Explorer),
+                task(),
+            )
+        );
+        assert_eq!(server_result.expect("server exchange"), 1);
+        let response = client_result.expect("client exchange");
+        assert!(
+            matches!(response.message, AgentMessage::Response(_)),
+            "response={response:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticated_transport_completes_and_rejects_unsigned_peer() {
+        let (client, server) = json_rpc_loopback_pair();
+        let client = AuthenticatedAgentTransport::new(client, "main", "shared", "secret")
+            .expect("client auth");
+        let server = AuthenticatedAgentTransport::new(server, "worker", "shared", "secret")
+            .expect("server auth");
+        exercise_transport(client, server).await;
+
+        let (mut unsigned, authenticated) = json_rpc_loopback_pair();
+        let mut authenticated =
+            AuthenticatedAgentTransport::new(authenticated, "worker", "shared", "secret")
+                .expect("server auth");
+        unsigned.send(task()).await.expect("unsigned frame");
+        let error = authenticated.recv().await.expect_err("unsigned rejected");
+        assert!(
+            matches!(error, AgentProtocolError::Unauthorized(message) if message.contains("required"))
+        );
+    }
+
+    #[tokio::test]
+    async fn served_peer_cancellation_returns_structured_error() {
+        let (mut client, mut server) = in_process_pair();
+        let cancellation = AgentCancellation::new();
+        let trigger = cancellation.clone();
+        let trigger_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            trigger.cancel();
+        });
+        let (server_result, client_result) = tokio::join!(
+            serve_agent(
+                &mut server,
+                AgentHello::read_only("worker", AgentRole::Explorer),
+                |_incoming| async move {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    Err(AgentProtocolError::Timeout)
+                },
+                true,
+            ),
+            request_once_with_cancellation(
+                &mut client,
+                AgentHello::guarded("main", AgentRole::Maker),
+                AgentHello::read_only("worker", AgentRole::Explorer),
+                task(),
+                Some(cancellation),
+            )
+        );
+        trigger_task.await.expect("cancellation trigger");
+        assert!(
+            matches!(client_result, Err(AgentProtocolError::Cancelled)),
+            "client={client_result:?} server={server_result:?}"
+        );
+        assert_eq!(server_result.expect("server transport"), 1);
     }
 
     #[tokio::test]

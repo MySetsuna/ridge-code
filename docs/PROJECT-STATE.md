@@ -794,3 +794,11 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - `crates/agent/src/open_vision.rs` 提供密钥绑定安全审计、治理元数据、Unicode 能力探测/安全回退、图谱推理投影、离线 store-and-forward/federated outbox、有界 Web/PWA 事件流/接管、推理树哈希链离线审计；所有边界均有容量、身份、父节点或载荷校验。
 - `communication.rs` 将治理元数据随 `AgentEnvelope` 传输，并在 exchange 前执行 `authorize_governance`；既有 HMAC、时钟窗口、nonce replay、只读能力协商仍为硬门。
 - 本轮统一 `scripts/quality-gate.ps1` exit 0：workspace tests（agent lib 151、ridgecode 357、其余套件全绿）、fmt、clippy `-D warnings`、build、`cargo llvm-cov --fail-under-lines 80` 与本机 Sonar quality gate 全通过；Sonar API 复核 coverage `85.2%`、new coverage `80.0%`、bugs/vulnerabilities/code_smells/issues `0`、duplication `0.9%`。无密钥 `ridgecode --version` 与离线 demo smoke exit 0；requirements/preflight/iteration gate 均通过。
+
+## 历史集成审计（2026-08-11）
+
+- `ridge-mcp` 适配已按 MCP 边界落地：`Config.mcp`/`RIDGE_MCP_CMD` → `StdioTransport` → `McpClient` → `resolve_mcp`；真实安装的 `ridge-mcp.exe` 经 `stdio_mcp_chain` 完成 `initialize`、`tools/list`、`tools/call`，`ridge_get_team_profile` 返回非空结果。未新增专用 Ridge MCP 协议分支，避免第二身份源；证据见 `.iteration/ridge-mcp-smoke-evidence-20260811.json`。
+- Agent-to-agent 已完成跨进程闭环：`AgentEnvelope`/`AgentTransport`、`request_once`/`serve_agent`、stdio newline JSON-RPC peer、能力协商、关联/父 ID、取消/超时、结构化错误、只读与治理门；`ridgecode a2a serve/call/smoke` 是可运行入口，`communication::tests` 19 项通过，`a2a smoke` 已用两个真实 RidgeCode 子进程完成无密钥任务。`RIDGE_A2A_SECRET` 可启用 HMAC、时间窗与 nonce replay 防护；`ridge-mcp` 仍保持 MCP 边界。
+- Agent route 已落地：`build_agents` 仅把可解析凭据的 `providers[]` 放入候选；`RouteRequest` 按任务推断难度/规模/类型，`choose_route` 过滤排序，`dispatch_agent` 与 `run_planned_routed` 输出选择理由及单次 fallback。真实配置 smoke 观察到 `Zai::glm-4.6` 选择及 HTTP 429 后主 provider fallback；`/agent` 当前仅列出可用 agent，未接手动派发。
+- 发布/安装基线在本轮将递增至 `v0.5.17`；提交、推送、GitHub Release 与本机新包安装须以远端资产和 `ridgecode --version` 复核为准。
+- 本轮 NotebookLM 冷闸因用户请求触发，但本机认证已过期且 CDP 初始不可用；未消费未验证研究结论。上述代码、测试、配置与 smoke 为当前事实权威；跨进程 A2A/ridge-mcp 互操作须另立明确 receipt、身份、取消与响应契约后再开发。
