@@ -495,6 +495,14 @@ async fn extracted_prepare_loop_covers_idle_poll_and_draw_decision() {
 }
 
 #[test]
+fn submitted_command_marks_tui_dirty_for_first_panel_frame() {
+    let mut dirty = false;
+    super::mark_submit_dirty(true, &mut dirty);
+
+    assert!(dirty);
+}
+
+#[test]
 fn extracted_tick_handler_transitions_waiting_and_splash() {
     let mut ui = Ui::default();
     let terminal = test_crossterm_terminal();

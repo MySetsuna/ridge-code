@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "eval"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "agent",
  "anyhow",
@@ -728,7 +728,7 @@ dependencies = [
 
 [[package]]
 name = "langgraph"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "serde",
  "serde_json",
@@ -802,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "mcp"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "async-trait",
  "serde",
@@ -911,7 +911,7 @@ dependencies = [
 
 [[package]]
 name = "provider"
-version = "0.5.15"
+version = "0.5.16"
 dependencies = [
  "async-trait",
  "getrandom 0.2.17",
@@ -1530,7 +1530,7 @@ dependencies = [
 
 [[package]]
 name = "tools"
-version = "0.5.15"
+version = "0.5.16"
 
 [[package]]
 name = "tower"

@@ -87,6 +87,12 @@ fn can_start_task(busy: bool, task_running: bool) -> bool {
     !busy && !task_running
 }
 
+fn mark_submit_dirty(had_pending_submit: bool, dirty: &mut bool) {
+    if had_pending_submit {
+        *dirty = true;
+    }
+}
+
 /// Opt-in lifecycle trace for isolated terminal harnesses; normal TUI does no file I/O.
 fn tui_trace(stage: &str) {
     let Some(path) = std::env::var_os("RIDGE_TUI_TRACE") else {
@@ -1436,6 +1442,7 @@ async fn prepare_loop(context: &mut LoopPrepareContext<'_>) -> anyhow::Result<bo
         }
         *context.dirty = true;
     }
+    let had_pending_submit = context.pending_submit.is_some();
     if can_start_task(context.ui.busy, context.task.is_some())
         && process_pending_submit(&mut PendingSubmitContext {
             ui: context.ui,
@@ -1460,6 +1467,7 @@ async fn prepare_loop(context: &mut LoopPrepareContext<'_>) -> anyhow::Result<bo
     {
         return Ok(true);
     }
+    mark_submit_dirty(had_pending_submit, context.dirty);
     if !context.ui.commits.is_empty() {
         flush_commits(context.terminal, context.ui)?;
         *context.dirty = true;
