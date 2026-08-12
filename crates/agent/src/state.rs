@@ -30,6 +30,10 @@ pub struct Todo {
 pub struct AgentState {
     pub task: String,
     pub messages: Vec<String>,
+    /// Presentation-only event stream. Unlike `messages`, tool observations
+    /// keep their original text so the TUI can offer a complete audit view;
+    /// model context and reviewer input continue using the bounded stream.
+    pub display_messages: Vec<String>,
     pub last_action: Option<String>,
     pub tool_output: Option<String>,
     pub approved: bool,
@@ -54,6 +58,8 @@ pub struct AgentState {
     /// 成功写改(`write_file`/`edit_file`/`apply_edits`)或模型收尾时清零。到 [`MAX_EXPLORE`] 软暂停,
     /// 防「无休止只查不改 → 撞 step_cap → 再开一轮又从侦察重来」。
     pub explore_streak: usize,
+    pub explore_handoff: bool,
+    pub explore_action_used: bool,
     /// **模型面向**的多轮对话历史(system 之外的部分):user / assistant(可带 tool_calls)/ tool 结果。
     /// 这是发给 provider 的真身;REPL 跨轮携带它实现多轮上下文。
     pub history: Vec<Message>,
@@ -103,6 +109,7 @@ impl AgentState {
 #[derive(Debug)]
 pub enum Patch {
     Message(String),
+    DisplayMessage(String),
     Action(Option<String>),
     ToolOutput(Option<String>),
     Approved(bool),
@@ -113,6 +120,8 @@ pub enum Patch {
     SetStall(usize),
     SetErrStreak(usize),
     SetExploreStreak(usize),
+    SetExploreHandoff(bool),
+    SetExploreActionUsed(bool),
     PushHistory(Message),
     SetTodos(Vec<Todo>),
     RecordModified(String),
@@ -125,7 +134,17 @@ impl GraphState for AgentState {
     type Update = Patch;
     fn apply(&mut self, u: Patch) {
         match u {
-            Patch::Message(m) => self.messages.push(m), // append reducer
+            Patch::Message(m) => {
+                self.messages.push(m.clone()); // bounded execution/event stream
+                self.display_messages.push(m); // complete presentation stream
+            }
+            Patch::DisplayMessage(m) => {
+                if let Some(last) = self.display_messages.last_mut() {
+                    *last = m;
+                } else {
+                    self.display_messages.push(m);
+                }
+            }
             Patch::Action(a) => self.last_action = a,
             Patch::ToolOutput(o) => self.tool_output = o,
             Patch::Approved(b) => self.approved = b,
@@ -140,6 +159,8 @@ impl GraphState for AgentState {
             Patch::SetStall(n) => self.stall = n,
             Patch::SetErrStreak(n) => self.err_streak = n,
             Patch::SetExploreStreak(n) => self.explore_streak = n,
+            Patch::SetExploreHandoff(value) => self.explore_handoff = value,
+            Patch::SetExploreActionUsed(value) => self.explore_action_used = value,
             Patch::PushHistory(m) => self.history.push(m),
             Patch::SetTodos(t) => self.todos = t,
             Patch::RecordModified(p) => {

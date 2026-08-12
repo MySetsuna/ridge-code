@@ -7,10 +7,7 @@ use ratatui::{
 };
 
 use super::presentation::PresentationMetrics;
-use super::{
-    bound_answer_history_text, bound_reasoning_history_text, fmt_reasoning_meta,
-    wrap_live_spans_greedy, ActivityKind, ToolBlock,
-};
+use super::{fmt_reasoning_meta, wrap_live_spans_greedy, ActivityKind, ToolBlock};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// 要不要画这一帧:有状态变更(dirty)或显式动画需求才画;业务 busy 不直接拥有渲染决策。
@@ -1236,7 +1233,6 @@ pub(crate) fn reasoning_commit_text(
     elapsed_s: u64,
     tokens: usize,
 ) -> String {
-    let text = bound_reasoning_history_text(text);
     let meta = fmt_reasoning_meta(step, elapsed_s, tokens);
     let mut lines = text.lines();
     let Some(first) = lines.next() else {
@@ -1266,10 +1262,7 @@ pub(crate) fn reasoning_commit_lines(
     tokens: usize,
     width: u16,
 ) -> Vec<Line<'static>> {
-    let text = fold_lines(
-        &sanitize_display_text(&bound_reasoning_history_text(text)),
-        FOLD_MAX,
-    );
+    let text = sanitize_display_text(text);
     let meta = fmt_reasoning_meta(step, elapsed_s, tokens);
     let base = Style::default()
         .fg(role_color(Role::Reasoning))
@@ -1419,12 +1412,13 @@ pub(crate) fn commit_lines_with_answer_metrics(
     metrics: Option<PresentationMetrics>,
 ) -> Vec<Line<'static>> {
     let text = sanitize_display_text(&text);
+    // Answer/Diff details are user-controlled review surfaces: keep the full
+    // source text here and let the terminal viewport/wrap provide navigation.
     let text = if markdown {
-        bound_answer_history_text(&text)
-    } else {
         text
+    } else {
+        fold_lines(&text, FOLD_MAX)
     };
-    let text = fold_lines(&text, FOLD_MAX);
     let mut lines: Vec<Line> = vec![Line::default()];
     if markdown {
         lines.extend(answer_commit_lines_with_status_and_metrics(

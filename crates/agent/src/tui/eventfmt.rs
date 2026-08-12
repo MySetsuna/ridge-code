@@ -38,7 +38,7 @@ pub(crate) fn format_event_plain(m: &str) -> String {
         .unwrap_or_else(|| m.to_owned())
 }
 
-/// 按字符数截断(避免单行刷屏);超出加省略。
+/// 普通状态行按字符数截断；审阅详情使用原始内容路径，不调用此函数。
 pub(crate) fn clip(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
@@ -47,9 +47,7 @@ pub(crate) fn clip(s: &str, n: usize) -> String {
     }
 }
 
-/// 把一条 agent 消息转成**总览化**显示行(可多行,各带色)。核心:给总览、减细节 ——
-/// 读文件折叠显路径与完成计数,展开时显有界内容预览;写文件显首几行预览、改文件显 ± 着色 diff(形如 git diff)。
-/// **全文/全量在 run trace**;inline 已提交行不可回改,故预览截断并标注。
+/// 把一条 agent 消息转成可折叠显示行：折叠态显摘要，展开态显完整详情。
 /// provider/运行错误是否**值得重试**(瞬时 vs 永久)。TUI 自动重试只该管瞬时失败;永久性失败
 /// (余额/鉴权/坏请求)重试同样输入只白烧 —— 命中永久标记 → 不重试,余(含未知)默认可重试(不回退既有瞬时容错)。
 pub(crate) fn is_retryable_error(msg: &str) -> bool {
@@ -137,9 +135,7 @@ fn summarize_observation(m: &str) -> Option<Vec<(String, Color)>> {
     }
     let head = clip(obs.lines().next().unwrap_or(""), 200);
     let mut out = vec![(format!("  ✓ {name}: {head}"), ok)];
-    if obs.lines().count() > 1 {
-        out.extend(preview_lines(obs, 10));
-    }
+    out.extend(preview_lines(obs, 10));
     Some(out)
 }
 
@@ -147,16 +143,13 @@ fn format_failed_observation(name: &str, obs: &str) -> Vec<(String, Color)> {
     let err = role_color(Role::Error);
     let lines: Vec<&str> = obs.lines().collect();
     let first = lines.first().copied().unwrap_or("");
-    let mut out = vec![(format!("  ✗ {name}: {}", clip(first, 200)), err)];
-    for line in lines.iter().skip(1).take(8) {
-        out.push((format!("  │ {}", clip(line, 200)), err));
-    }
-    if lines.len() > 9 {
-        out.push((
-            format!("  │ … (+{} lines, full text in trace)", lines.len() - 9),
-            err,
-        ));
-    }
+    let mut out = vec![(format!("  ✗ {name}: {first}"), err)];
+    out.extend(
+        lines
+            .iter()
+            .skip(1)
+            .map(|line| (format!("  │ {line}"), err)),
+    );
     out
 }
 
@@ -177,10 +170,8 @@ pub(crate) fn tool_preview(m: &str) -> Option<ToolBlock> {
 }
 
 const MAX_BATCH_EDIT_SUMMARY_PATHS: usize = 3;
-const MAX_BATCH_EDIT_DETAIL_EDITS: usize = 4;
-const MAX_BATCH_EDIT_DETAIL_LINES: usize = 18;
 
-/// 批量编辑的有界投影：折叠态显文件范围，展开态显前几处 ± 预览。
+/// 批量编辑的摘要投影：折叠态显文件范围，展开态保留全部 ± 内容。
 /// 只读 tool-call 参数，不访问磁盘；成功/失败仍由对应 `act:` 观察行裁决。
 pub(crate) fn apply_edits_summary(args: &serde_json::Value, info: Color) -> Vec<(String, Color)> {
     let Some(edits) = args.get("edits").and_then(|value| value.as_array()) else {
@@ -233,86 +224,33 @@ pub(crate) fn apply_edits_summary(args: &serde_json::Value, info: Color) -> Vec<
         info,
     )];
 
-    let mut detail_lines = 0;
-    let mut truncated = false;
-    for (index, (path, old, new)) in parsed.iter().enumerate() {
-        if index >= MAX_BATCH_EDIT_DETAIL_EDITS || detail_lines >= MAX_BATCH_EDIT_DETAIL_LINES {
-            truncated = true;
-            break;
-        }
-        out.push((format!("  ── {}", clip(path, 96)), info));
-        detail_lines += 1;
+    for (path, old, new) in parsed {
+        out.push((format!("  ── {path}"), info));
         let diff = diff_lines(old, new);
-        let remaining = MAX_BATCH_EDIT_DETAIL_LINES.saturating_sub(detail_lines);
-        if diff.len() > remaining {
-            truncated = true;
-        }
-        let take = diff.len().min(remaining);
-        out.extend(diff.into_iter().take(take));
-        detail_lines += take;
-    }
-    if truncated {
-        out.push((
-            "  … (details limited, full text in trace)".to_owned(),
-            role_color(Role::Muted),
-        ));
+        out.extend(diff);
     }
     out
 }
 
-/// 写文件内容预览:保留首尾 `max` 行(每行截断),中间折叠；这样展开时既见入口又见收尾。
-pub(crate) fn preview_lines(content: &str, max: usize) -> Vec<(String, Color)> {
+/// 写文件/工具观察详情：保留收到的全部行，由详情视口负责滚动。
+pub(crate) fn preview_lines(content: &str, _max: usize) -> Vec<(String, Color)> {
     let muted = role_color(Role::Muted);
     let lines: Vec<&str> = content.lines().collect();
-    if max == 0 || lines.is_empty() {
+    if lines.is_empty() {
         return Vec::new();
     }
-    if lines.len() <= max {
-        return lines
-            .iter()
-            .map(|l| (format!("  │ {}", clip(l, 200)), muted))
-            .collect();
-    }
-    let tail = max.min(4);
-    let head = max.saturating_sub(tail).max(1);
-    let mut out: Vec<(String, Color)> = lines
+    lines
         .iter()
-        .take(head)
-        .map(|l| (format!("  │ {}", clip(l, 200)), muted))
-        .collect();
-    let hidden = lines.len().saturating_sub(head + tail);
-    if hidden > 0 {
-        out.push((
-            format!("  │ … (+{hidden} lines folded; full text in trace)"),
-            muted,
-        ));
-    }
-    out.extend(
-        lines
-            .iter()
-            .skip(lines.len().saturating_sub(tail))
-            .map(|l| (format!("  │ {}", clip(l, 200)), muted)),
-    );
-    out
+        .map(|line| (format!("  │ {line}"), muted))
+        .collect()
 }
 
-/// edit_file 的 git-diff 式呈现:old 行 `-`(红)、new 行 `+`(绿),各截断 + 限行。
+/// edit_file 的 git-diff 式呈现:old 行 `-`(红)、new 行 `+`(绿),保留全部行与行内文字。
 pub(crate) fn diff_lines(old: &str, new: &str) -> Vec<(String, Color)> {
     let (red, green) = (role_color(Role::Error), role_color(Role::Success));
     let mut out = Vec::new();
-    let cap = 12;
-    for l in old.lines().take(cap) {
-        out.push((format!("  - {}", clip(l, 200)), red));
-    }
-    if old.lines().count() > cap {
-        out.push(("  - …".to_string(), red));
-    }
-    for l in new.lines().take(cap) {
-        out.push((format!("  + {}", clip(l, 200)), green));
-    }
-    if new.lines().count() > cap {
-        out.push(("  + …".to_string(), green));
-    }
+    out.extend(old.lines().map(|line| (format!("  - {line}"), red)));
+    out.extend(new.lines().map(|line| (format!("  + {line}"), green)));
     out
 }
 /// 事件行配色：所有语义色经 Role 取色，避免终答绕过主题集中点。

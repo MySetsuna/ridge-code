@@ -85,6 +85,7 @@ pub(crate) struct ReasoningEntry {
 }
 
 pub(crate) const MAX_ANSWER_HISTORY: usize = 8;
+#[cfg(test)]
 pub(crate) const MAX_ANSWER_HISTORY_CHARS: usize = 8_192;
 
 #[derive(Clone, Debug)]
@@ -119,14 +120,6 @@ fn bound_history_text(text: &str, max_chars: usize) -> String {
         .rev()
         .collect::<String>();
     format!("{head}\n… [{count} chars; middle omitted]\n{tail}")
-}
-
-pub(crate) fn bound_answer_history_text(text: &str) -> String {
-    bound_history_text(text, MAX_ANSWER_HISTORY_CHARS)
-}
-
-pub(crate) fn bound_reasoning_history_text(text: &str) -> String {
-    bound_history_text(text, MAX_REASONING_HISTORY_CHARS)
 }
 
 pub(crate) const MAX_ACTIVITY_HISTORY: usize = 12;
@@ -314,9 +307,9 @@ pub(crate) struct Ui {
     pub(crate) commits: Vec<CommitBlock>,
     /// 有界实时 transcript：回答、思考与工具块由呈现层统一投影。
     pub(crate) transcript: LiveTranscript,
-    /// 已提交工具的有界检视索引；原生 scrollback 保持不可变，详情在此按需展开。
+    /// 已提交工具的检视索引；原生 scrollback 保持不可变，完整详情在此按需展开。
     pub(crate) tool_history: VecDeque<ToolBlock>,
-    /// 已提交 reasoning 的有界检视索引；原生 scrollback 保持不可变，详情在此按需展开。
+    /// 已提交 reasoning 的检视索引；原生 scrollback 保持不可变，完整详情在此按需展开。
     pub(crate) reasoning_history: VecDeque<ReasoningEntry>,
     /// Completed and interrupted Answer bodies stay available behind the
     /// bounded scrollback fold; `partial` keeps interruption distinct from a
@@ -741,7 +734,7 @@ impl Ui {
         let tokens = self.stream_tokens;
         for (id, text) in self.transcript.drain_reasoning_with_ids() {
             if !text.is_empty() {
-                let history_text = bound_reasoning_history_text(&text);
+                let history_text = text.clone();
                 if self.reasoning_history.len() == MAX_REASONING_HISTORY {
                     self.reasoning_history.pop_front();
                 }
@@ -1301,13 +1294,14 @@ pub(crate) fn apply_paste(ui: &mut Ui, text: &str) {
 
 pub(crate) fn flush_commits<B: Backend>(terminal: &mut Terminal<B>, ui: &mut Ui) -> io::Result<()> {
     let width = terminal.size()?.width;
+    let blocks = ui.drain_commit_blocks();
     let mut lines = Vec::new();
-    for block in ui.drain_commit_blocks() {
+    for block in &blocks {
         match block {
             CommitBlock::Text { text, color } => {
                 lines.extend(commit_lines(
-                    text,
-                    color,
+                    text.clone(),
+                    *color,
                     false,
                     false,
                     Modifier::empty(),
@@ -1315,12 +1309,12 @@ pub(crate) fn flush_commits<B: Backend>(terminal: &mut Terminal<B>, ui: &mut Ui)
                 ));
             }
             CommitBlock::Markdown { id, text } => {
-                debug_assert!(ui.presentation.contains(PresentationChannel::Answer, id));
-                let partial = ui.presentation.status(PresentationChannel::Answer, id)
+                debug_assert!(ui.presentation.contains(PresentationChannel::Answer, *id));
+                let partial = ui.presentation.status(PresentationChannel::Answer, *id)
                     == Some(PresentationStatus::Partial);
-                let metrics = ui.presentation.metrics(PresentationChannel::Answer, id);
+                let metrics = ui.presentation.metrics(PresentationChannel::Answer, *id);
                 lines.extend(commit_lines_with_answer_metrics(
-                    text,
+                    text.clone(),
                     role_color(Role::Answer),
                     true,
                     partial,
@@ -1336,9 +1330,11 @@ pub(crate) fn flush_commits<B: Backend>(terminal: &mut Terminal<B>, ui: &mut Ui)
                 elapsed_s,
                 tokens,
             } => {
-                debug_assert!(ui.presentation.contains(PresentationChannel::Reasoning, id));
+                debug_assert!(ui
+                    .presentation
+                    .contains(PresentationChannel::Reasoning, *id));
                 lines.extend(reasoning_commit_lines(
-                    &text, step, elapsed_s, tokens, width,
+                    text, *step, *elapsed_s, *tokens, width,
                 ));
             }
             CommitBlock::Activity {
@@ -1346,14 +1342,18 @@ pub(crate) fn flush_commits<B: Backend>(terminal: &mut Terminal<B>, ui: &mut Ui)
                 kind,
                 text,
             } => {
-                lines.extend(activity_commit_lines(sequence, kind, &text, width));
+                lines.extend(activity_commit_lines(*sequence, *kind, text, width));
             }
             CommitBlock::Tool(tool) => {
-                lines.extend(colored_commit_lines(static_tool_lines(&tool, width), width));
+                lines.extend(colored_commit_lines(static_tool_lines(tool, width), width));
             }
         }
     }
-    insert_bounded_commit_lines(terminal, lines)
+    let result = insert_bounded_commit_lines(terminal, lines);
+    if result.is_err() {
+        ui.commits.splice(0..0, blocks);
+    }
+    result
 }
 
 const MAX_COMMIT_INSERT_ROWS: usize = 8;

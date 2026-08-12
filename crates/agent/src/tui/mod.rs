@@ -15,7 +15,9 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, style::Color, Terminal, TerminalOptions, Viewport};
+use ratatui::{
+    backend::CrosstermBackend, layout::Rect, style::Color, Terminal, TerminalOptions, Viewport,
+};
 
 use agent::{
     agent_run_config, build_llm_agent_full, est_tokens, expand_mentions, halt_reason,
@@ -137,6 +139,7 @@ fn unfinished_answer_reason(result: &Result<AgentState, String>) -> Option<&'sta
 
 struct TerminalGuard {
     keyboard_enhancement_pushed: bool,
+    mouse_capture_enabled: bool,
 }
 impl TerminalGuard {
     fn enter() -> anyhow::Result<(Self, Term)> {
@@ -144,6 +147,7 @@ impl TerminalGuard {
         let mut stdout = io::stdout();
         // BPM best-effort(iter-24):旧 Windows conhost 不支持则静默退化为逐字粘贴,绝不阻 TUI 启动。
         let _ = execute!(stdout, event::EnableBracketedPaste);
+        let mouse_capture_enabled = execute!(stdout, event::EnableMouseCapture).is_ok();
         // CSI u best-effort(iter-27):现代终端(Ghostty/WezTerm/iTerm2/kitty)得 Shift+Enter
         // 精确修饰键;不支持则静默降级(Alt+Enter / Ctrl+J 仍可换行)。同时请求
         // REPORT_EVENT_TYPES，让 Ctrl+Space 可实现按住审计、松开跟随；decide_key
@@ -178,6 +182,7 @@ impl TerminalGuard {
         Ok((
             Self {
                 keyboard_enhancement_pushed,
+                mouse_capture_enabled,
             },
             term,
         ))
@@ -188,6 +193,9 @@ impl Drop for TerminalGuard {
         // 与 enter 对称:仅在 KKP 命令确实写出后还原,避免误发 pop。
         if self.keyboard_enhancement_pushed {
             let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        }
+        if self.mouse_capture_enabled {
+            let _ = execute!(io::stdout(), event::DisableMouseCapture);
         }
         let _ = execute!(io::stdout(), event::DisableBracketedPaste);
         let _ = disable_raw_mode();
@@ -276,6 +284,10 @@ async fn handle_key_event(
             apply_paste(context.ui, &text);
             return Ok(KeyEventResult::Continue);
         }
+        TerminalEventAction::Mouse(mouse) => {
+            handle_mouse_event(mouse, context);
+            return Ok(KeyEventResult::Continue);
+        }
         TerminalEventAction::Redraw => return Ok(KeyEventResult::Continue),
         TerminalEventAction::Key(key) => key,
     };
@@ -307,6 +319,73 @@ async fn handle_key_event(
     }
     handle_input_key(&key, context);
     Ok(KeyEventResult::Continue)
+}
+
+fn handle_mouse_event(mouse: crossterm::event::MouseEvent, context: &mut KeyEventContext<'_>) {
+    match mouse_action(&mouse) {
+        MouseAction::Scroll(delta) => {
+            if let Some(panel) = context.ui.panel.as_mut() {
+                if panel.detail_open {
+                    let _ = panel.scroll_detail(if delta > 0 { -1 } else { 1 });
+                } else if delta > 0 {
+                    panel.move_up();
+                } else {
+                    panel.move_down();
+                }
+                context.ui.sync_live_panel_focus();
+            } else {
+                let _ = context.ui.scroll_live(delta);
+            }
+        }
+        MouseAction::Select { column, row } => select_panel_row_at(context.ui, column, row),
+        MouseAction::Close => {
+            if context
+                .ui
+                .panel
+                .as_ref()
+                .is_some_and(|panel| panel.editing.is_none())
+            {
+                context.ui.panel = None;
+            }
+        }
+        MouseAction::Ignore => {}
+    }
+}
+
+fn select_panel_row_at(ui: &mut Ui, column: u16, row: u16) {
+    let Ok((width, height)) = crossterm::terminal::size() else {
+        return;
+    };
+    let Some(panel) = ui.panel.as_mut() else {
+        return;
+    };
+    let rect = panel_rect_for_kind(
+        Rect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        },
+        panel.kind,
+    );
+    let inner_height = rect.height.saturating_sub(2);
+    let show_query = inner_height >= 3;
+    let show_hint = inner_height >= 2;
+    let right = rect.x.saturating_add(rect.width);
+    let first_row = rect.y + 1 + u16::from(show_query);
+    let last_row = rect
+        .y
+        .saturating_add(rect.height.saturating_sub(1 + u16::from(show_hint)));
+    if column < rect.x
+        || column >= right
+        || row < first_row
+        || row >= last_row
+        || panel.view.is_empty()
+    {
+        return;
+    }
+    panel.sel = usize::from(row - first_row).min(panel.view.len() - 1);
+    ui.sync_live_panel_focus();
 }
 
 fn log_key_event(event: &Event, keylog_path: &Option<std::path::PathBuf>) {
@@ -558,6 +637,13 @@ fn navigate_panel(ui: &mut Ui, action: PanelAction) {
     if panel.editing.is_some() {
         return;
     }
+    let action = match action {
+        // Once detail is open, PageUp/PageDown operate on the full-screen
+        // document. Alt+PageUp/PageDown keep the same explicit path.
+        PanelAction::PageUp if panel.detail_open => PanelAction::DetailPageUp,
+        PanelAction::PageDown if panel.detail_open => PanelAction::DetailPageDown,
+        action => action,
+    };
     match action {
         PanelAction::Up => panel.move_up(),
         PanelAction::Down => panel.move_down(),
@@ -1580,6 +1666,7 @@ fn handle_superstep_event(
         .map(|node| node_label(node))
         .collect::<Vec<_>>()
         .join(" + ");
+    context.ui.phase = active_label.clone();
     context.ui.set_activity(superstep_activity(
         &active_label,
         state.pending_call.as_ref(),
@@ -1591,7 +1678,12 @@ fn handle_superstep_event(
         .map(|started| started.elapsed().as_secs())
         .unwrap_or(0);
     let answer_tokens = context.ui.stream_tokens;
-    for message in state.messages.iter().skip(*context.printed) {
+    let messages = if state.display_messages.len() == state.messages.len() {
+        &state.display_messages
+    } else {
+        &state.messages
+    };
+    for message in messages.iter().skip(*context.printed) {
         present_stream_message(
             message,
             context.ui,
@@ -1600,7 +1692,7 @@ fn handle_superstep_event(
             answer_tokens,
         );
     }
-    *context.printed = state.messages.len();
+    *context.printed = messages.len();
     record_todo_snapshot(context.ui, &state.todos);
     context.ui.todos = state.todos;
     context

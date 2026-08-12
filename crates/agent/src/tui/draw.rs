@@ -411,6 +411,16 @@ fn panel_full_hint(panel: &Panel) -> &'static str {
             "Enter save · Esc cancel"
         };
     }
+    if panel.detail_open && panel.supports_detail() {
+        return match panel.kind {
+            PanelKind::LiveHistory => {
+                "Ctrl+Space hold/follow · ↑↓ select · PgUp/PgDn scroll detail · Alt+PgUp/PgDn fine scroll · Enter/Space close · Esc close"
+            }
+            _ => {
+                "↑↓ select · PgUp/PgDn scroll detail · Alt+PgUp/PgDn fine scroll · Enter close · Esc close"
+            }
+        };
+    }
     match panel.kind {
         PanelKind::Config => "↑↓ select · Enter edit · type to filter · Esc close",
         PanelKind::Models => {
@@ -440,6 +450,20 @@ fn panel_compact_hint(panel: &Panel, width: u16) -> &'static str {
     }
     if panel.kind == PanelKind::Queue {
         return "select · Del remove · Ctrl+I · Esc";
+    }
+    if panel.detail_open && panel.supports_detail() {
+        if panel.kind == PanelKind::LiveHistory {
+            return if width >= 20 {
+                "^Space · Pg↕ · Esc"
+            } else {
+                "↕ · Enter · Esc"
+            };
+        }
+        return if width >= 25 {
+            "PgUp/PgDn scroll detail · Enter close · Esc close"
+        } else {
+            "Pg↕ scroll · Enter close · Esc"
+        };
     }
     if matches!(
         panel.kind,
@@ -482,6 +506,7 @@ fn panel_width_hint(
                 | PanelKind::AnswerHistory
                 | PanelKind::Activity
         )
+        && !panel.detail_open
     {
         "↑↓ · Enter expand · Esc close"
     } else if width >= 32 {
@@ -1015,7 +1040,7 @@ pub(crate) fn detail_scroll_position(
     query: &str,
     width: u16,
     visible_rows: u16,
-    adjustment: i16,
+    adjustment: i32,
 ) -> u16 {
     detail_scroll_position_with_total_rows(
         text,
@@ -1037,13 +1062,13 @@ pub(crate) fn detail_scroll_position_with_total_rows(
     width: u16,
     visible_rows: u16,
     total_rows: usize,
-    adjustment: i16,
+    adjustment: i32,
 ) -> u16 {
     let search_scroll = detail_match_scroll(text, query, width, visible_rows);
     let requested_scroll = if adjustment < 0 {
-        search_scroll.saturating_sub(adjustment.unsigned_abs())
+        search_scroll.saturating_sub(adjustment.unsigned_abs().min(u16::MAX as u32) as u16)
     } else {
-        search_scroll.saturating_add(adjustment as u16)
+        search_scroll.saturating_add(adjustment.min(u16::MAX as i32) as u16)
     };
     let max_scroll = total_rows
         .saturating_sub(visible_rows as usize)
@@ -1322,12 +1347,8 @@ fn panel_item_selection(panel: &Panel) -> Option<usize> {
     (!panel.view.is_empty()).then_some(selected)
 }
 
-/// 历史块检视器:原生 scrollback 保持静态,当前摘要列表与有界详情在 live modal 中交互。
-/// Narrow audit modal: once a detail is explicitly open, spend the scarce
-/// vertical budget on the selected Answer/Reasoning/Tool body instead of
-/// painting a list that can only show a few rows. Selection, query, scroll,
-/// and Enter/Esc semantics remain owned by `Panel`; this is only a projection.
-fn draw_narrow_history_detail(
+/// 历史块检视器：详情显于全屏面板，视口滚动而非截断源文本。
+fn draw_history_full_detail(
     frame: &mut ratatui::Frame,
     inner: Rect,
     panel: &Panel,
@@ -1421,7 +1442,14 @@ fn draw_history_detail_panel(
     panel: &Panel,
     panel_cache: &mut PanelLayoutCache,
 ) {
-    let rect = panel_rect_for_kind(area, panel.kind);
+    let expanded = panel
+        .selected()
+        .is_some_and(|row| panel.detail_open && !row.value.is_empty());
+    let rect = if expanded {
+        area
+    } else {
+        panel_rect_for_kind(area, panel.kind)
+    };
     let block = rounded_surface_block()
         .title(panel_title(panel, rect.width.saturating_sub(2)))
         .title_style(
@@ -1466,24 +1494,9 @@ fn draw_history_expanded_detail(
     selected_row: Option<&PanelRow>,
     selected_detail: Option<&str>,
 ) -> bool {
-    if inner.width >= 72 && inner.height >= 8 {
-        if let Some(detail) = selected_detail {
-            draw_history_detail_split(
-                frame,
-                inner,
-                panel,
-                panel_cache,
-                detail,
-                selected_row.map(|row| row.key.as_str()).unwrap_or_default(),
-            );
-            return true;
-        }
-    }
-    if inner.width < 72 && inner.height >= 6 {
-        if let (Some(detail), Some(row)) = (selected_detail, selected_row) {
-            draw_narrow_history_detail(frame, inner, panel, panel_cache, detail, row.key.as_str());
-            return true;
-        }
+    if let (Some(detail), Some(row)) = (selected_detail, selected_row) {
+        draw_history_full_detail(frame, inner, panel, panel_cache, detail, row.key.as_str());
+        return true;
     }
     false
 }
@@ -1597,108 +1610,6 @@ fn draw_history_list_panel(
             );
         }
     }
-    if show_hint {
-        let hint_index = rows.len() - 1;
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                panel_hint(panel, rows[hint_index].width),
-                Style::default().fg(role_color(Role::Muted)),
-            ))),
-            rows[hint_index],
-        );
-    }
-}
-
-fn draw_history_detail_split(
-    frame: &mut ratatui::Frame,
-    inner: Rect,
-    panel: &Panel,
-    panel_cache: &mut PanelLayoutCache,
-    detail: &str,
-    detail_key: &str,
-) {
-    let show_query = inner.height >= 3;
-    let show_hint = inner.height >= 2;
-    let mut constraints = Vec::with_capacity(3);
-    if show_query {
-        constraints.push(Constraint::Length(1));
-    }
-    constraints.push(Constraint::Min(1));
-    if show_hint {
-        constraints.push(Constraint::Length(1));
-    }
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(inner);
-    let list_index = usize::from(show_query);
-    if show_query {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                panel_query(&panel.query, rows[0].width),
-                Style::default().fg(role_color(Role::Muted)),
-            ))),
-            rows[0],
-        );
-    }
-
-    let content = rows[list_index];
-    let split = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Min(1)])
-        .split(content);
-    let (items, selected_item) = panel_cache.items.viewport(
-        panel,
-        split[0].width,
-        split[0].height,
-        (!panel.view.is_empty()).then_some(panel.sel),
-    );
-    let mut state = ListState::default();
-    state.select(selected_item);
-    frame.render_stateful_widget(
-        List::new(items).highlight_style(selection_style()),
-        split[0],
-        &mut state,
-    );
-
-    let (detail_role, detail_label) = audit_channel(panel.kind, detail_key);
-    let detail_block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" {detail_label} "))
-        .title_style(
-            Style::default()
-                .fg(role_color(detail_role))
-                .add_modifier(Modifier::BOLD),
-        )
-        .border_style(Style::default().fg(role_color(detail_role)));
-    let detail_inner = detail_block.inner(split[1]);
-    let detail_width = detail_inner.width.max(1);
-    let total_rows = panel_cache.detail.prepare(
-        panel.content_revision,
-        panel.selected_index().unwrap_or(usize::MAX),
-        detail,
-        panel.kind,
-        detail_key,
-        detail_width,
-    );
-    let visible_rows = detail_inner.height.max(1);
-    let detail_scroll = detail_scroll_position_with_total_rows(
-        detail,
-        &panel.query,
-        detail_width,
-        visible_rows,
-        total_rows,
-        panel.detail_scroll,
-    );
-    frame.render_widget(
-        Paragraph::new(panel_cache.detail.text())
-            .style(Style::default().fg(role_color(detail_role)))
-            .block(detail_block)
-            .wrap(Wrap { trim: false })
-            .scroll((detail_scroll, 0)),
-        split[1],
-    );
-
     if show_hint {
         let hint_index = rows.len() - 1;
         frame.render_widget(

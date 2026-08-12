@@ -1,6 +1,8 @@
 use std::sync::mpsc;
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use super::sanitize_paste;
 
@@ -102,6 +104,9 @@ fn canonical_key_code(key: &KeyEvent) -> KeyCode {
         // Ctrl-M is the byte-level CR spelling used by a few terminal/input
         // stacks for Enter.  Keep Ctrl-J as the explicit multiline shortcut.
         KeyCode::Char('m' | 'M') if key.modifiers.contains(KeyModifiers::CONTROL) => KeyCode::Enter,
+        // ConPTY, legacy Win32 input and a few PTYs expose Backspace as the
+        // raw BS/DEL bytes instead of KeyCode::Backspace.
+        KeyCode::Char('\x08' | '\x7f') => KeyCode::Backspace,
         other => other,
     }
 }
@@ -126,6 +131,8 @@ pub(crate) fn decide_key(
     pressed: &mut std::collections::HashSet<KeyCode>,
     ev: &KeyEvent,
 ) -> Option<KeyEvent> {
+    let legacy_control_release = ev.kind == KeyEventKind::Release
+        && matches!(ev.code, KeyCode::Char('\x08' | '\x7f' | '\r' | '\n'));
     let ev = normalize_key_event(ev);
     let process = match ev.kind {
         KeyEventKind::Press | KeyEventKind::Repeat => {
@@ -138,7 +145,8 @@ pub(crate) fn decide_key(
             } else if pressed.remove(&ev.code) {
                 false // 正常松键:对应的 Press 已处理过
             } else {
-                matches!(ev.code, KeyCode::Char(_)) // 悬空 Release:仅字符(输入法注入)才收
+                matches!(ev.code, KeyCode::Char(_)) || legacy_control_release
+                // 悬空 Release:接收字符/旧控制字节(输入法与兼容 PTY 注入),非功能键仍忽略
             }
         }
     };
@@ -161,16 +169,40 @@ pub(crate) fn decide_key(
 pub(crate) enum TerminalEventAction {
     Key(KeyEvent),
     Paste(String),
+    Mouse(MouseEvent),
     Redraw,
 }
 
 /// Classify terminal events before the main loop applies UI state changes.
-/// Resize/focus/mouse events redraw but never fall through to input editing.
+/// Resize/focus events redraw; mouse events stay typed so the main loop can
+/// scroll/select instead of silently discarding them.
 pub(crate) fn terminal_event_action(event: Event) -> TerminalEventAction {
     match event {
         Event::Key(key) => TerminalEventAction::Key(key),
         Event::Paste(text) => TerminalEventAction::Paste(sanitize_paste(&text)),
+        Event::Mouse(mouse) => TerminalEventAction::Mouse(mouse),
         _ => TerminalEventAction::Redraw,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MouseAction {
+    Scroll(i8),
+    Select { column: u16, row: u16 },
+    Close,
+    Ignore,
+}
+
+pub(crate) fn mouse_action(event: &MouseEvent) -> MouseAction {
+    match event.kind {
+        MouseEventKind::ScrollUp => MouseAction::Scroll(1),
+        MouseEventKind::ScrollDown => MouseAction::Scroll(-1),
+        MouseEventKind::Down(MouseButton::Left) => MouseAction::Select {
+            column: event.column,
+            row: event.row,
+        },
+        MouseEventKind::Down(MouseButton::Right) => MouseAction::Close,
+        _ => MouseAction::Ignore,
     }
 }
 

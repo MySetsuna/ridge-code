@@ -1,6 +1,7 @@
 use crate::brain::{
-    build_system_prompt_with_mode, is_explore_tool, is_land_edit_tool, reason_route,
-    verify_failure_reason, verify_node, verify_ok, verify_route_llm,
+    act_route, build_system_prompt_with_mode, explore_handoff_patch, is_explore_tool,
+    is_land_edit_tool, reason_route, verify_failure_reason, verify_node, verify_ok,
+    verify_route_llm,
 };
 use crate::context::{bound_observation, to_messages};
 use crate::exec::{
@@ -194,6 +195,9 @@ fn build_core(
         specs,
         token_bus,
     );
+    graph.add_node("explore_handoff", |state: AgentState| async move {
+        Ok::<_, Infallible>(explore_handoff_patch(&state))
+    });
     let fetch: Arc<dyn provider::search::WebFetch> =
         Arc::new(provider::search::ReqwestFetch::new());
     let net = Arc::new(std::sync::OnceLock::new());
@@ -214,7 +218,8 @@ fn build_core(
 
     graph.set_entry("reason");
     graph.add_conditional_edge("reason", reason_route);
-    graph.add_edge("act", "reason");
+    graph.add_edge("explore_handoff", "reason");
+    graph.add_conditional_edge("act", act_route);
     graph.add_conditional_edge("verify", verify_route_llm);
     graph_trace("compile.begin");
     let compiled = graph.compile();
@@ -247,11 +252,23 @@ fn add_reason_node(
     graph.add_node("reason", move |state: AgentState| {
         let provider = provider.clone();
         let system = system.clone();
-        let tools = specs.clone();
+        let force_action = state.explore_handoff && !state.explore_action_used;
+        let tools = if force_action {
+            handoff_tool_specs(&specs)
+        } else {
+            specs.clone()
+        };
         let bus = token_bus.clone();
         async move {
+            let mut messages = to_messages(&system, &state);
+            if force_action {
+                messages.push(Message::new(
+                    Role::System,
+                    "<explore_handoff>Read/search budget is exhausted. Do not call read, search, web, codegraph, or dispatch tools. Choose the smallest safe edit/write/apply_edits or verification command now; if no safe action is possible, state the concrete blocker. Do not claim completion without an objective result.</explore_handoff>",
+                ));
+            }
             let request = CompletionRequest {
-                messages: to_messages(&system, &state),
+                messages,
                 tools,
             };
             let on_token = move |chunk: StreamChunk| {
@@ -282,6 +299,18 @@ fn add_reason_node(
         }
     });
     graph_trace("system.ready");
+}
+
+fn handoff_tool_specs(specs: &[provider::ToolSpec]) -> Vec<provider::ToolSpec> {
+    // MCP action tools stay available here; `execute_pending_call` still
+    // applies the normal approval/read-only gates. Only known exploration
+    // tools are removed, so adding an MCP server does not make the handoff
+    // path silently unable to perform its domain-specific action.
+    specs
+        .iter()
+        .filter(|spec| !is_explore_tool(&spec.name))
+        .cloned()
+        .collect()
 }
 
 fn reason_patch(
@@ -332,7 +361,14 @@ fn add_act_node(graph: &mut StateGraph<AgentState>, context: ActContext) {
         async move {
             let patch = match state.pending_call.as_ref() {
                 Some(call) => {
-                    let observation = execute_pending_call(call, &context).await;
+                    let observation = if state.explore_handoff && is_explore_tool(&call.name) {
+                        format!(
+                            "BLOCKED (explore handoff): {} is read-only; choose an edit or verification action",
+                            call.name
+                        )
+                    } else {
+                        execute_pending_call(call, &context).await
+                    };
                     act_patch(&state, call, observation)
                 }
                 None => Patch::Message("act: no pending tool_call".to_string()),
@@ -366,6 +402,7 @@ async fn execute_pending_call(call: &provider::ToolCall, context: &ActContext) -
 }
 
 fn act_patch(state: &AgentState, call: &provider::ToolCall, observation: String) -> Patch {
+    let display_observation = observation.clone();
     let observation = bound_observation(observation);
     let stall = if state.tool_output.as_deref() == Some(observation.as_str()) {
         state.stall + 1
@@ -380,6 +417,7 @@ fn act_patch(state: &AgentState, call: &provider::ToolCall, observation: String)
     let explore_streak = next_explore_streak(state, call, &observation);
     let mut patches = vec![
         Patch::Message(format!("act: {} -> {}", call.name, observation)),
+        Patch::DisplayMessage(format!("act: {} -> {}", call.name, display_observation)),
         Patch::PushHistory(Message::tool_result(call.id.clone(), observation.clone())),
         Patch::SetStall(stall),
         Patch::SetErrStreak(err_streak),
@@ -387,6 +425,14 @@ fn act_patch(state: &AgentState, call: &provider::ToolCall, observation: String)
         Patch::ToolOutput(Some(observation.clone())),
         Patch::PendingCall(None),
     ];
+    if state.explore_handoff {
+        patches.push(Patch::SetExploreActionUsed(true));
+    }
+    if state.explore_handoff && is_land_edit_tool(&call.name) && !is_error_observation(&observation)
+    {
+        patches.push(Patch::SetExploreHandoff(false));
+        patches.push(Patch::SetExploreActionUsed(false));
+    }
     if call.name == "todo_write" {
         patches.push(Patch::SetTodos(parse_todos(call)));
     }
@@ -508,13 +554,33 @@ mod tests {
     use super::{call_mcp_with_timeout, halt_reason, is_error_observation, verify_route_llm};
     use crate::{
         build_agent, build_llm_agent, build_llm_agent_reviewed, build_llm_agent_with, default_tool,
-        resolve_mcp, scripted, AgentState, Brain, HaltReason, McpTools, Tool, MAX_STEPS,
+        resolve_mcp, scripted, AgentState, Brain, HaltReason, McpTools, Tool, MAX_EXPLORE,
+        MAX_STEPS,
     };
+    use langgraph::GraphState;
     use langgraph::RunConfig;
     use mcp::McpClient;
     use provider::ToolCall;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn display_stream_keeps_full_observation_while_model_stream_stays_bounded() {
+        let call = ToolCall {
+            id: "full-display".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({"path": "src/large.rs"}),
+        };
+        let observation = format!("HEAD_MARK\n{}\nTAIL_MARK", "middle line\n".repeat(2_000));
+        let mut state = AgentState::new("inspect");
+        state.apply(super::act_patch(&state, &call, observation));
+
+        assert!(state.messages[0].contains("截断"));
+        assert!(state.messages[0].chars().count() < state.display_messages[0].chars().count());
+        assert!(state.display_messages[0].contains("HEAD_MARK"));
+        assert!(state.display_messages[0].contains("middle line\nmiddle line\nmiddle line"));
+        assert!(state.display_messages[0].contains("TAIL_MARK"));
+    }
 
     #[tokio::test]
     async fn happy_path_converges_and_gets_approved() {
@@ -589,6 +655,57 @@ mod tests {
         );
         assert_eq!(out.steps, 2, "run_shell -> finish");
         assert!(out.messages.iter().any(|m| m.contains("run_shell")));
+    }
+
+    #[tokio::test]
+    async fn repeated_exploration_gets_one_real_action_turn() {
+        use provider::{Completion, ScriptedProvider};
+        let mut steps = Vec::with_capacity(MAX_EXPLORE + 1);
+        let mut paths = Vec::with_capacity(MAX_EXPLORE);
+        for index in 0..MAX_EXPLORE {
+            let mut path = std::env::temp_dir();
+            path.push(format!(
+                "ridge-explore-handoff-{}-{index}.txt",
+                std::process::id()
+            ));
+            std::fs::write(&path, format!("handoff target {index}")).unwrap();
+            let path_arg = path.to_string_lossy().into_owned();
+            paths.push(path);
+            steps.push(Completion {
+                tool_calls: vec![ToolCall {
+                    id: format!("read-{index}"),
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": path_arg}),
+                }],
+                ..Default::default()
+            });
+        }
+        steps.push(Completion {
+            tool_calls: vec![ToolCall {
+                id: "verify".into(),
+                name: "run_shell".into(),
+                arguments: serde_json::json!({"cmd": "exit 0"}),
+            }],
+            ..Default::default()
+        });
+        let scripted = ScriptedProvider::new(steps);
+        let app = build_llm_agent(Arc::new(scripted)).unwrap();
+        let out = app
+            .invoke(AgentState::new("inspect then verify"))
+            .await
+            .unwrap();
+        assert!(out.approved, "messages: {:?}", out.messages);
+        assert!(out
+            .messages
+            .iter()
+            .any(|message| message.contains("exploration guard triggered")));
+        assert!(out
+            .messages
+            .iter()
+            .any(|message| message.contains("run_shell")));
+        for path in paths {
+            std::fs::remove_file(path).ok();
+        }
     }
 
     /// P0b:一次工具调用后,模型面向的 history 里应出现 role=tool 结果(匹配 tool_call_id)+ 带 tool_calls 的 assistant。

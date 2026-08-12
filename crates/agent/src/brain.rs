@@ -107,6 +107,10 @@ pub(crate) fn explore_exhausted(s: &AgentState) -> bool {
     s.explore_streak >= MAX_EXPLORE
 }
 
+pub(crate) fn explore_needs_handoff(s: &AgentState) -> bool {
+    explore_exhausted(s) || (s.explore_streak > 0 && stalled(s))
+}
+
 /// 纯侦察类内置/MCP 入口(不含 run_shell:测构建/跑命令算干活)。
 pub(crate) fn is_explore_tool(name: &str) -> bool {
     matches!(
@@ -146,6 +150,9 @@ pub fn tool_output_failed(o: &str) -> bool {
 ///
 /// 编码任务仍严格卡 `exit 0`;只对「模型自己收尾且无客观失败」放行,兼顾通用性与 maker≠checker。
 pub(crate) fn verify_ok(s: &AgentState) -> bool {
+    if s.explore_handoff && !s.explore_action_used {
+        return false;
+    }
     let out = s.tool_output.as_deref();
     out.is_some_and(tool_output_ok)
         || (s.last_action.as_deref() == Some("finish") && !out.is_some_and(tool_output_failed))
@@ -174,8 +181,29 @@ pub(crate) fn must_stop(s: &AgentState) -> bool {
         || circuit_broken(s)
 }
 
-/// reason 之后的路由(scripted / llm 两条路径共用):finish 或需停机 → verify,否则 → act。
+pub(crate) fn explore_handoff_patch(s: &AgentState) -> Patch {
+    Patch::Batch(vec![
+        Patch::Message(format!(
+            "control: exploration guard triggered after {} read/search calls; next turn must edit, verify, or state the concrete blocker",
+            s.explore_streak
+        )),
+        Patch::SetExploreHandoff(true),
+        Patch::SetExploreActionUsed(false),
+    ])
+}
+
+/// reason 之后的路由(scripted / llm 两条路径共用):先给侦察耗尽一次行动交接。
 pub(crate) fn reason_route(s: &AgentState) -> Vec<String> {
+    if s.explore_handoff {
+        return if s.pending_call.is_some() && !s.explore_action_used {
+            vec!["act".to_string()]
+        } else {
+            vec!["verify".to_string()]
+        };
+    }
+    if explore_needs_handoff(s) {
+        return vec!["explore_handoff".to_string()];
+    }
     if must_stop(s) {
         return vec!["verify".to_string()];
     }
@@ -185,10 +213,20 @@ pub(crate) fn reason_route(s: &AgentState) -> Vec<String> {
     }
 }
 
+pub(crate) fn act_route(s: &AgentState) -> Vec<String> {
+    if s.explore_handoff && s.explore_action_used {
+        vec!["verify".to_string()]
+    } else if explore_needs_handoff(s) {
+        vec!["explore_handoff".to_string()]
+    } else {
+        vec!["reason".to_string()]
+    }
+}
+
 /// verify 之后的路由(**scripted 路径**):通过或需停机 → END,否则回 reason。
 /// (scripted 图无 `wrapup` 节点、大脑也不会写自然语言总结,故直接 END。)
 pub(crate) fn verify_route(s: &AgentState) -> Vec<String> {
-    if s.approved || must_stop(s) {
+    if s.approved || (s.explore_handoff && s.explore_action_used) || must_stop(s) {
         vec![END.to_string()]
     } else {
         vec!["reason".to_string()]
@@ -207,7 +245,10 @@ pub(crate) fn verify_route(s: &AgentState) -> Vec<String> {
 pub(crate) fn verify_route_llm(s: &AgentState) -> Vec<String> {
     if s.approved {
         vec![END.to_string()]
-    } else if must_stop(s) || s.last_action.as_deref() == Some("finish") {
+    } else if (s.explore_handoff && s.explore_action_used)
+        || must_stop(s)
+        || s.last_action.as_deref() == Some("finish")
+    {
         vec!["wrapup".to_string()]
     } else {
         vec!["reason".to_string()]
@@ -282,6 +323,10 @@ pub fn build_agent(
         }
     });
 
+    g.add_node("explore_handoff", |s: AgentState| async move {
+        Ok::<_, Infallible>(explore_handoff_patch(&s))
+    });
+
     // act:执行工具,把客观输出写回状态。
     let tool_c = tool.clone();
     g.add_node("act", move |s: AgentState| {
@@ -300,7 +345,8 @@ pub fn build_agent(
 
     g.set_entry("reason");
     g.add_conditional_edge("reason", reason_route);
-    g.add_edge("act", "reason"); // 反思环:工具跑完回 reason 复盘
+    g.add_edge("explore_handoff", "reason");
+    g.add_conditional_edge("act", act_route);
     g.add_conditional_edge("verify", verify_route);
 
     g.compile()
@@ -328,11 +374,12 @@ pub(crate) async fn verify_node(s: AgentState) -> Result<Patch, Infallible> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_system_prompt, build_system_prompt_with_mode, explore_exhausted, is_explore_tool,
-        is_land_edit_tool, must_stop, tool_output_failed, verify_failure_reason, verify_node,
-        AgentState, BASE_SYSTEM,
+        act_route, build_system_prompt, build_system_prompt_with_mode, explore_exhausted,
+        explore_handoff_patch, is_explore_tool, is_land_edit_tool, must_stop, reason_route,
+        tool_output_failed, verify_failure_reason, verify_node, AgentState, BASE_SYSTEM,
     };
     use crate::state::MAX_EXPLORE;
+    use langgraph::GraphState;
 
     /// 输出端省钱:BASE_SYSTEM 含 Lean-output 约束(简洁作答 + 只出最小编辑)。
     #[test]
@@ -485,5 +532,27 @@ mod tests {
         assert!(is_explore_tool("codegraph__codegraph_explore"));
         assert!(!is_explore_tool("run_shell"));
         assert!(is_land_edit_tool("edit_file"));
+    }
+
+    #[test]
+    fn exploration_exhaustion_routes_to_one_action_handoff() {
+        let state = AgentState {
+            explore_streak: MAX_EXPLORE,
+            ..Default::default()
+        };
+        assert_eq!(reason_route(&state), vec!["explore_handoff"]);
+        let mut handed = state.clone();
+        handed.apply(explore_handoff_patch(&state));
+        assert!(handed.explore_handoff);
+        assert!(!handed.explore_action_used);
+        assert_eq!(reason_route(&handed), vec!["verify"]);
+        handed.pending_call = Some(provider::ToolCall {
+            id: "handoff".into(),
+            name: "edit_file".into(),
+            arguments: serde_json::json!({}),
+        });
+        assert_eq!(reason_route(&handed), vec!["act"]);
+        handed.explore_action_used = true;
+        assert_eq!(act_route(&handed), vec!["verify"]);
     }
 }

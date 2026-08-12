@@ -448,6 +448,95 @@ pub fn goal_command_at(path: impl AsRef<Path>, args: &[String]) -> Result<String
     }
 }
 
+/// Parse TUI `/goal` text. A non-lifecycle first word is shorthand for
+/// `create`, so `/goal 'fix the parser'` and `/goal fix the parser` agree.
+pub fn parse_goal_text(text: &str) -> Result<Vec<String>, GoalError> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut token_started = false;
+    for character in text.trim().chars() {
+        if escaped {
+            if !matches!(character, '\\' | '\'' | '"') && !character.is_whitespace() {
+                current.push('\\');
+            }
+            current.push(character);
+            token_started = true;
+            escaped = false;
+            continue;
+        }
+        if character == '\\' && quote != Some('\'') {
+            escaped = true;
+            token_started = true;
+            continue;
+        }
+        if let Some(open) = quote {
+            if character == open {
+                quote = None;
+            } else {
+                current.push(character);
+            }
+            token_started = true;
+        } else if matches!(character, '\'' | '"') {
+            quote = Some(character);
+            token_started = true;
+        } else if character.is_whitespace() {
+            if token_started {
+                words.push(std::mem::take(&mut current));
+                token_started = false;
+            }
+        } else {
+            current.push(character);
+            token_started = true;
+        }
+    }
+    if escaped {
+        current.push('\\');
+        token_started = true;
+    }
+    if quote.is_some() {
+        return Err(GoalError::Invalid(
+            "unterminated quote in goal title".to_string(),
+        ));
+    }
+    if token_started {
+        words.push(current);
+    }
+    Ok(normalize_goal_args(&words))
+}
+
+fn normalize_goal_args(args: &[String]) -> Vec<String> {
+    let Some(first) = args.first() else {
+        return vec!["status".to_string()];
+    };
+    if is_goal_command(first) {
+        return args.to_vec();
+    }
+    let mut normalized = Vec::with_capacity(args.len() + 1);
+    normalized.push("create".to_string());
+    normalized.extend(args.iter().cloned());
+    normalized
+}
+
+fn is_goal_command(command: &str) -> bool {
+    matches!(
+        command,
+        "help"
+            | "status"
+            | "show"
+            | "create"
+            | "start"
+            | "stop"
+            | "resume"
+            | "continue"
+            | "advance"
+            | "complete"
+            | "block"
+            | "cancel"
+    )
+}
+
 fn parse_tail(args: &[String]) -> Result<(Vec<String>, Option<String>), GoalError> {
     let mut values = Vec::new();
     let mut next_step = None;
@@ -527,7 +616,7 @@ fn unix_millis() -> u128 {
 }
 
 fn goal_usage() -> &'static str {
-    "ridgecode goal [status|create <title>|start|stop|advance <phase> <evidence> [--next <step>]|resume|complete <evidence>|block <reason> [--next <step>]|cancel [reason]]"
+    "ridgecode goal [status|create <title>|start|stop|advance <phase> <evidence> [--next <step>]|resume|complete <evidence>|block <reason> [--next <step>]|cancel [reason]]; TUI shorthand: /goal 'title'"
 }
 
 #[cfg(not(windows))]
@@ -652,6 +741,26 @@ mod tests {
         assert_eq!(slugify("  Hello, RidgeCode!  "), "hello--ridgecode");
         assert_eq!(slugify("!!!"), "goal");
         assert!(goal_usage().contains("ridgecode goal"));
+    }
+
+    #[test]
+    fn shorthand_goal_text_accepts_quotes_and_persists_create_args() {
+        assert_eq!(
+            parse_goal_text("'修复终端输入并保留历史'").unwrap(),
+            vec!["create", "修复终端输入并保留历史"]
+        );
+        assert_eq!(
+            parse_goal_text("create \"ship stable\"").unwrap(),
+            vec!["create", "ship stable"]
+        );
+        assert_eq!(parse_goal_text("status").unwrap(), vec!["status"]);
+        assert!(parse_goal_text("'unterminated").is_err());
+        assert!(parse_goal_text("''").is_ok_and(|args| { args == vec!["create", ""] }));
+
+        let path = temp_path("shorthand");
+        goal_command_at(&path, &parse_goal_text("'ship stable release'").unwrap()).unwrap();
+        assert_eq!(load_goal(&path).unwrap().title, "ship stable release");
+        let _ = fs::remove_file(path);
     }
 
     #[test]

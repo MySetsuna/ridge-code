@@ -11,9 +11,9 @@
 - 批准依据:`批准`
 - 状态:`ACTIVE`
 - 版本:`v0.2.0`
-- 行为:`RidgeCode TUI 以清晰、科技感强且终端主题友好的界面呈现实际收到且允许展示的模型输出与最终回答；Answer 与实际 reasoning_content 分层呈现，不伪造隐藏推理；模型回复、调查结论、等待/执行状态与当前 Agent 活动须持续可见，长内容先展示摘要并可展开查看有界详情；文件读取与工具输出默认合并为可折叠摘要，展开时显示有界、按终端宽度换行的有效细节；支持有界、无外部解析依赖的行级 Markdown 展示（bold、code、header）与 ANSI 16 色语义角色；关键交互可发现、可操作，长任务期间保持响应并允许用户取消当前执行后接管输入；底部状态区明确区分输入 token 与输出 token；忙碌时待提交消息粘性显示于输入框上方，Enter 追加至队尾，Ctrl+Enter 立即推至队首且不打断当前模型回合。`
-- 边界:`范围限于 crates/agent/src/tui 及其直接交互/渲染依赖、展示状态模型、布局、事件处理、渲染与测试，以及按迭代门进行的 NotebookLM 架构/业界方案调研与本轮 Note 清理。不改变 langgraph 核心语义，不把具体 LLM/MCP SDK 耦合进 TUI，不牺牲安全门、确定性验证、跨平台终端兼容或数据完整性，不升级无关依赖；保留 maker/checker、权限门、危险命令拦截、输入排队/取消、事件驱动主环、Viewport::Inline、insert_before 原生 scrollback 与 ANSI 16 色主题适配方向；不覆盖 samples/config.json 与 test_codegraph.ps1。工具摘要须保留，工具详情默认折叠且有界；Markdown 仅作展示层解析。`
-- 验收:`通过 cargo fmt --all --check、cargo test --workspace、cargo clippy --workspace --all-targets -- -D warnings；TUI 纯逻辑测试覆盖 Markdown span、语义色角色、折叠/展开、状态迁移、窄终端布局、CJK/emoji 宽度、长行物理换行、Ctrl+R/Ctrl+O、输入/输出 token 分栏、Agent 活动状态、取消后接管与待提交队列预览/队首推送；证明静态提交文本无 ANSI 逃逸残留、文件读取/工具详情默认折叠且展开不越界、LiveTranscript 64 块上限有效；完成真实终端或可复现渲染验收，证明长输出按宽度换行不刷屏、模型回复/调查结论/等待/当前活动可见、摘要可展开、工具默认收起且可展开、待提交消息不遮挡当前输入，Enter/Ctrl+Enter 不打断当前回合，Ctrl-C 可交还输入控制，且单帧刷新无明显卡顿；NotebookLM 建议经 CodeGraph、当前代码与测试核验后方可落地。`
+- 行为:`RidgeCode TUI 以清晰、科技感强且终端主题友好的界面呈现实际收到且允许展示的模型输出与最终回答；Answer 与实际 reasoning_content 分层呈现，不伪造隐藏推理；模型回复、调查结论、等待/执行状态与当前 Agent 活动须持续可见，长内容先展示摘要并可通过显式入口进入全屏详情，以滚动查看完整源文本；文件读取与工具输出默认合并为可折叠摘要，展开时保留完整有效细节，详情按终端宽度换行并由视口控制可见行数；支持有界、无外部解析依赖的行级 Markdown 展示（bold、code、header）与 ANSI 16 色语义角色；关键交互可发现、可操作，长任务期间保持响应并允许用户取消当前执行后接管输入；底部状态区明确区分输入 token 与输出 token；忙碌时待提交消息粘性显示于输入框上方，Enter 追加至队尾，Ctrl+Enter 立即推至队首且不打断当前模型回合。`
+- 边界:`范围限于 crates/agent/src/tui 及其直接交互/渲染依赖、展示状态模型、布局、事件处理、渲染与测试，以及为展示完整实际观察而增加的展示事件保留接缝；不改变模型上下文的有界压缩、langgraph 核心语义，不把具体 LLM/MCP SDK 耦合进 TUI，不牺牲安全门、确定性验证、跨平台终端兼容或数据完整性，不升级无关依赖；保留 maker/checker、权限门、危险命令拦截、输入排队/取消、事件驱动主环、Viewport::Inline、insert_before 原生 scrollback 与 ANSI 16 色主题适配方向；不覆盖 samples/config.json 与 test_codegraph.ps1。工具摘要须保留，工具详情默认折叠；Markdown 仅作展示层解析，完整详情仅由用户主动打开并在有界视口中浏览。`
+- 验收:`通过 cargo fmt --all --check、cargo test --workspace、cargo clippy --workspace --all-targets -- -D warnings；TUI 纯逻辑测试覆盖 Markdown span、语义色角色、折叠/展开、状态迁移、窄终端布局、CJK/emoji 宽度、长行物理换行、完整回答与完整多行 Diff 滚动浏览、Ctrl+R/Ctrl+O、输入/输出 token 分栏、Agent 活动状态、取消后接管与待提交队列预览/队首推送；证明静态提交文本无 ANSI 逃逸残留、文件读取/工具详情默认折叠且展开可访问全部行、模型上下文仍有界、LiveTranscript 64 块上限有效；完成真实终端或可复现渲染验收，证明长输出按宽度换行不刷屏、模型回复/调查结论/等待/当前活动可见、摘要可展开为全屏详情并滚动至尾部、工具默认收起且可展开、待提交消息不遮挡当前输入，Enter/Ctrl+Enter 不打断当前回合，Ctrl-C 可交还输入控制，且单帧刷新无明显卡顿；NotebookLM 建议经 CodeGraph、当前代码与测试核验后方可落地。`
 - 追踪:`REQ → crates/agent/src/tui/*.rs 的状态/事件/渲染符号 → crates/agent/src/tui/tests.rs 与 workspace 质量闸；NLM 建议证据存于 .iteration/notebooklm-response.json；Note 清理以本轮迭代 ID、闭环证据与本地 archive 记录为准。
 
 ### REQ-20260802-02 · ReRelease 稳定包与 GitHub README
@@ -85,6 +85,27 @@
 - Boundary:`仅改动 RidgeCode commands 的声明/帮助/路由、TUI command palette 与 provider/model/effort 选择状态、必要配置/catalog 适配、相关单元测试、确定性离线 PTY E2E 与使用文档；不改变 langgraph BSP、安全门、危险命令拦截、provider/MCP 协议语义或无关视觉重构；测试 fixture 不联网、不使用真实密钥。`
 - Acceptance:`命令 inventory/路由/帮助覆盖全部公开 commands，覆盖 /login、/model、provider/model 搜索、两阶段 model→effort、取消/返回与错误状态；模型聚合与搜索覆盖多 provider、重复模型、空结果、加载失败、稳定排序与敏感信息不泄漏；PTY E2E 使用离线 fixture 证明 /help 能发现 /login，/login 可达，/model 展示多 provider 模型并可输入搜索，选 model 后才出现 effort 面板，Enter/Backspace/上下/取消均改变正确状态且无不可见 modal；通过 cargo fmt --all -- --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked、git diff --check 与现有质量阀。`
 - Traceability:`REQ → commands inventory/command router → provider/model catalog aggregation and TUI selection state → agent unit tests + deterministic PTY E2E → workspace quality gates.
+
+### REQ-20260812-GOAL-RUN-01 · Goal 与真实 Agent Run 绑定
+
+- Approval evidence:`用户明确回复：批准。另外，sonar已经接通`
+- Status:`ACTIVE`
+- Version:`v0.6.0`
+- Behavior:`在保留现有 ridgecode goal CLI 状态机与默认运行行为的前提下，增加显式 opt-in 的 goal-bound agent run。任务开始时写入 running/phase；确定性 approved 时写入 completed/evidence；StepLimit、timeout、cancel 或确定性失败时写入 blocked/failure_reason/next_step；resume 必须读取同一 goal 与最近一次有界 durable run facts，支持进程重启后继续，而不是只把 status 从 blocked 改回 active。`
+- Boundary:`范围限于 crates/agent/src/goal.rs、main.rs 的 CLI/headless run 接缝、必要的 run manifest/恢复适配、goal/运行状态测试、确定性本机 smoke 与最小文档；goal 数据位于用户 cwd 下 `.ridge/goal.json`，写入必须原子且有界；默认无 goal 时无额外 I/O。`
+- Non-goals:`不改变无 goal 的 CLI/TUI/headless 默认路径；不新增无界后台任务；不以模型自述判断完成；不改 langgraph BSP、provider/MCP/A2A 协议、安全门、危险命令拦截、maker-checker 或已有 Goal CLI 语义；不把 NotebookLM 输出写入运行时。`
+- Acceptance:`补充 start/progress/approved/StepLimit/timeout/cancel/failure 与重复执行保护测试；补充进程重启后 load/resume round-trip，证明 evidence/failure_reason/next_step 与 durable facts 有界且无敏感字段；完成无 key CLI/headless fixture smoke；通过 `cargo fmt --all -- --check`、`cargo test --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo build --workspace --locked`、`git diff --check`；Sonar quality gate 接通后必须纳入最终验证。`
+- Traceability:`REQ → goal/run binding symbols → state transition and persistence tests → restart/terminal smoke → workspace quality gates + Sonar → archived evidence.`
+
+### REQ-20260812-AGENT-TUI-FIX-01 · Agent 驾驭闭环、跨终端 TUI 输入、goal 命令与 scrollback 修复
+
+- Approval evidence:`批准`
+- Status:`ACTIVE`
+- Version:`v0.1.0`
+- Behavior:`agent 对只读探索设置可观测、有界的阶段推进与停滞检测；连续探索无进展时能确定性转入编写/澄清/阻塞路径，不因重复读文件无限循环至退出；工具调用、阶段、停滞原因和下一步对用户可见。TUI 将不同终端产生的 Backspace、Enter、鼠标与功能键序列统一归一化为稳定事件，PowerShell、Windows 传统控制台、Windows Terminal、常见 ANSI/VT 终端及可复现 PTY 中编辑、提交、取消、面板导航和鼠标操作一致可用。`/goal '需求'` 解析为完整 goal 标题并持久化，空参数、引号/空白、重复运行与错误状态有明确提示，不破坏既有 `/goal` 子命令。已提交历史输出通过 `Terminal::insert_before` 写入终端原生 scrollback；Live 视口只保留当前活动帧，历史可由终端滚动、选取、搜索回溯，不以反复 ratatui 重绘替代 scrollback。`
+- Boundary:`保留现有 langgraph BSP 语义、权限门、危险命令拦截、maker/checker、确定性 verify、MCP/provider/A2A 协议语义、安全边界、只读子 agent 约束、输入排队/取消语义、TUI Inline viewport 与终端主题；修复须兼容没有鼠标/VT 能力的终端并提供安全回退，不打印密钥、cookie 或原始敏感会话。goal 数据仍位于 cwd 下 `.ridge/goal.json`，写入须原子且有界；历史提交不得丢失、重复或被后续帧覆盖。`
+- Acceptance:`新增 agent 阶段转移、重复探索、无进展、写入触发、StepLimit/timeout/cancel 与诊断测试，证明探索预算、进展信号和写入路径均有界且无重复读文件死循环；新增按原始字节/事件构造的 Backspace(0x08/0x7f)、Enter(0x0a/0x0d/CSI/VT)、功能键、鼠标序列和 release/press 过滤测试，并完成可复现 Windows/PTY smoke；新增 `/goal '需求'`、带空白/引号、空参数、重复执行、持久化 round-trip 测试；新增 scrollback/Live 回归，证明提交历史进入 `insert_before` 原生 scrollback，后续刷新不覆盖/重复历史，Live 仅承载当前帧且历史可滚动回溯；通过 cargo fmt --all --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked、git diff --check，并运行现有 Sonar quality gate（如其入口已配置）。`
+- Traceability:`PENDING-REQ-20260812-AGENT-TUI-FIX-01 → agent phase/stall/progress symbols、TUI raw input/event normalization、goal command parser/route、scrollback commit boundary → 单元/PTY/终端回归测试 → workspace quality gates、无密钥 runtime smoke 与 Sonar 证据。
 ## 修订账本 (Revision Ledger)
 
 关闭的 Pending、历史修订与审批证据写入 `docs/archive/events-YYYY-MM.jsonl`；本文件仅保留当前 Active 条款。

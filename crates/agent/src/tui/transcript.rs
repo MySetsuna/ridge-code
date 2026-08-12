@@ -6,8 +6,6 @@ use super::{role_color, PresentationId, Role};
 
 const MAX_LIVE_BLOCKS: usize = 64;
 const MAX_LIVE_TEXT_CHARS: usize = 32_768;
-const MAX_INSPECT_DETAIL_CHARS: usize = 8_192;
-const MAX_TOOL_DETAIL_LINES: usize = 32;
 const MAX_READ_BATCH_PATHS: usize = 8;
 const MAX_READ_BATCH_PATH_CHARS: usize = 96;
 const TOOL_DETAIL_SCROLL_STEP: usize = 4;
@@ -195,7 +193,7 @@ impl ToolBlock {
             .into_iter()
             .map(|(text, color)| (super::render::sanitize_display_text(&text), color));
         let (summary, summary_color) = remaining.next()?;
-        let details = bound_tool_details(remaining.collect());
+        let details: Vec<(String, Color)> = remaining.collect();
         let read_batch =
             matches!(&phase, ToolPhase::Observation) && tool_name.as_deref() == Some("read_file");
         let read_call =
@@ -246,7 +244,6 @@ impl ToolBlock {
         details.push((self.summary.clone(), self.summary_color));
         details.append(&mut self.details);
         details.append(&mut incoming.details);
-        details = bound_tool_details(details);
         self.summary = incoming.summary;
         self.summary_color = incoming.summary_color;
         self.details = details;
@@ -260,7 +257,7 @@ impl ToolBlock {
     }
 
     /// Fold one completed read into the current batch while retaining every
-    /// file's bounded summary/detail payload in arrival order.
+    /// file's complete summary/detail payload in arrival order.
     fn merge_read_batch(&mut self, mut incoming: Self) {
         let count = self
             .read_batch_count
@@ -274,7 +271,7 @@ impl ToolBlock {
         details.append(&mut self.details);
         details.push((incoming.summary, incoming.summary_color));
         details.append(&mut incoming.details);
-        self.details = bound_tool_details(details);
+        self.details = details;
         self.collapsed_hint = tool_detail_hint(self.details.len());
         self.summary = read_batch_summary(count, &read_batch_paths, has_error);
         self.summary_color = if has_error {
@@ -557,35 +554,13 @@ fn read_batch_summary(count: usize, paths: &[String], has_error: bool) -> String
     summary
 }
 
-/// Keep a useful head and tail when a call/result pair or read batch exceeds
-/// the in-memory detail budget. The live row stays collapsed; expansion can
-/// still inspect both the beginning and completion/error tail without growth.
-fn bound_tool_details(mut details: Vec<(String, Color)>) -> Vec<(String, Color)> {
-    if details.len() <= MAX_TOOL_DETAIL_LINES {
-        return details;
-    }
-    let tail_len = (MAX_TOOL_DETAIL_LINES / 3).max(1);
-    let head_len = MAX_TOOL_DETAIL_LINES
-        .saturating_sub(tail_len)
-        .saturating_sub(1);
-    let tail_start = details.len().saturating_sub(tail_len);
-    let tail = details.split_off(tail_start);
-    details.truncate(head_len);
-    details.push((
-        format!(
-            "  … (+{} detail lines folded; full text in trace)",
-            tail_start.saturating_sub(head_len)
-        ),
-        role_color(Role::Muted),
-    ));
-    details.extend(tail);
-    details
-}
-
 #[derive(Clone, Debug)]
 struct AnswerBlock {
     id: u64,
     text: String,
+    /// Complete received answer retained for the explicit audit panel. `text`
+    /// remains a bounded live viewport source so streaming redraws stay cheap.
+    full_text: String,
     line_index: LineIndex,
     /// Byte offsets of lines whose trimmed content starts a fenced code block.
     /// Keeping these offsets moves fence scanning out of every live redraw.
@@ -600,6 +575,7 @@ struct AnswerBlock {
 struct ReasoningBlock {
     id: u64,
     text: String,
+    full_text: String,
     line_index: LineIndex,
 }
 
@@ -638,9 +614,9 @@ pub(crate) struct LiveLineAnchor {
     pub(crate) logical_line: usize,
 }
 
-/// Stable presentation row for the live-block inspector.  The execution
-/// graph never sees this projection; it is bounded so opening the inspector
-/// cannot turn a token redraw into an unbounded copy of the transcript.
+/// Stable presentation row for the live-block inspector. The execution graph
+/// never sees this projection; its source is complete, while each redraw only
+/// lays out the visible viewport.
 #[derive(Clone, Debug)]
 pub(crate) struct LiveBlockEntry {
     pub(crate) key: String,
@@ -696,6 +672,7 @@ impl LiveTranscript {
         self.preserve_hold_for_append(&text, starts_new_block);
         match self.blocks.back_mut() {
             Some(LiveBlock::Answer(current)) => {
+                current.full_text.push_str(&text);
                 append_answer_bounded(current, &mut self.answer_chars, &text)
             }
             _ => {
@@ -709,11 +686,13 @@ impl LiveTranscript {
                 let mut current = AnswerBlock {
                     id,
                     text: String::new(),
+                    full_text: String::new(),
                     line_index: LineIndex::default(),
                     fence_starts: Vec::new(),
                     last_line_start: 0,
                     has_markdown_syntax: false,
                 };
+                current.full_text.push_str(&text);
                 append_answer_bounded(&mut current, &mut self.answer_chars, &text);
                 self.blocks.push_back(LiveBlock::Answer(current));
                 self.reserve_stream_id(id);
@@ -744,19 +723,24 @@ impl LiveTranscript {
         let starts_new_block = !matches!(self.blocks.back(), Some(LiveBlock::Reasoning(_)));
         self.preserve_hold_for_append(&text, starts_new_block);
         match self.blocks.back_mut() {
-            Some(LiveBlock::Reasoning(current)) => append_bounded(
-                &mut current.text,
-                &mut current.line_index,
-                &mut self.reasoning_chars,
-                &text,
-            ),
+            Some(LiveBlock::Reasoning(current)) => {
+                current.full_text.push_str(&text);
+                append_bounded(
+                    &mut current.text,
+                    &mut current.line_index,
+                    &mut self.reasoning_chars,
+                    &text,
+                )
+            }
             _ => {
                 self.reasoning_chars = 0;
                 let mut current = ReasoningBlock {
                     id,
                     text: String::new(),
+                    full_text: String::new(),
                     line_index: LineIndex::default(),
                 };
+                current.full_text.push_str(&text);
                 append_bounded(
                     &mut current.text,
                     &mut current.line_index,
@@ -946,7 +930,7 @@ impl LiveTranscript {
         let mut reasoning = Vec::new();
         while let Some(block) = self.blocks.pop_front() {
             match block {
-                LiveBlock::Reasoning(block) => reasoning.push((block.id, block.text)),
+                LiveBlock::Reasoning(block) => reasoning.push((block.id, block.full_text)),
                 other => retained.push_back(other),
             }
         }
@@ -983,7 +967,7 @@ impl LiveTranscript {
         let mut answers = Vec::new();
         while let Some(block) = self.blocks.pop_front() {
             match block {
-                LiveBlock::Answer(block) => answers.push((block.id, block.text)),
+                LiveBlock::Answer(block) => answers.push((block.id, block.full_text)),
                 other => retained.push_back(other),
             }
         }
@@ -1103,8 +1087,8 @@ impl LiveTranscript {
     }
 
     /// Snapshot the current mixed stream for the modal inspector.  Newest
-    /// block appears first; large answer/reasoning bodies receive a bounded
-    /// head/tail preview while the live viewport remains the full display.
+    /// block appears first; detail values retain the complete received source
+    /// while the live viewport may use a cheaper bounded projection.
     pub(crate) fn inspector_rows(&self) -> Vec<LiveBlockEntry> {
         self.blocks
             .iter()
@@ -1115,20 +1099,20 @@ impl LiveTranscript {
                     key: format!(
                         "#{} 🤖 Answer · {} chars · p#{}",
                         index + 1,
-                        answer.text.chars().count(),
+                        answer.full_text.chars().count(),
                         answer.id
                     ),
-                    detail: inspector_detail(&answer.text),
+                    detail: answer.full_text.clone(),
                     focus: LiveBlockFocus::Answer(answer.id),
                 },
                 LiveBlock::Reasoning(text) => LiveBlockEntry {
                     key: format!(
                         "#{} 💭 Reasoning · {} chars · p#{}",
                         index + 1,
-                        text.text.chars().count(),
+                        text.full_text.chars().count(),
                         text.id
                     ),
-                    detail: inspector_detail(&text.text),
+                    detail: text.full_text.clone(),
                     focus: LiveBlockFocus::Reasoning(text.id),
                 },
                 LiveBlock::Tool(tool) => LiveBlockEntry {
@@ -1848,24 +1832,6 @@ impl LiveTranscript {
     }
 }
 
-fn inspector_detail(text: &str) -> String {
-    let count = text.chars().count();
-    if count <= MAX_INSPECT_DETAIL_CHARS {
-        return text.to_owned();
-    }
-    let half = MAX_INSPECT_DETAIL_CHARS / 2;
-    let head = text.chars().take(half).collect::<String>();
-    let tail = text
-        .chars()
-        .rev()
-        .take(half)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<String>();
-    format!("{head}\n… [{count} chars; middle omitted]\n{tail}")
-}
-
 fn append_bounded(
     target: &mut String,
     line_index: &mut LineIndex,
@@ -2336,12 +2302,11 @@ mod tests {
         assert!(rows[2].key.contains("Reasoning"));
         assert_eq!(rows[1].detail, "detail");
 
-        let long = "x".repeat(MAX_INSPECT_DETAIL_CHARS + 100);
+        let long = "x".repeat(8_292);
         let mut long_transcript = LiveTranscript::default();
         long_transcript.push_answer(&long);
         let detail = &long_transcript.inspector_rows()[0].detail;
-        assert!(detail.contains("middle omitted"));
-        assert!(detail.chars().count() < long.chars().count());
+        assert_eq!(detail, &long);
     }
 
     #[test]
@@ -2814,6 +2779,7 @@ mod tests {
         let answer = AnswerBlock {
             id: 0,
             text: text.clone(),
+            full_text: text.clone(),
             line_index,
             fence_starts: Vec::new(),
             last_line_start: 0,
@@ -2989,7 +2955,7 @@ mod tests {
         }
         assert!(transcript.blocks.len() <= MAX_LIVE_BLOCKS);
 
-        let lines: Vec<_> = (0..(MAX_TOOL_DETAIL_LINES + 8))
+        let lines: Vec<_> = (0..40)
             .map(|index| (format!("detail {index}"), Color::Gray))
             .collect();
         let mut tool = ToolBlock::from_lines(
@@ -2999,7 +2965,11 @@ mod tests {
         )
         .expect("tool");
         tool.toggle();
-        assert_eq!(tool.live_lines().len(), 1 + MAX_TOOL_DETAIL_LINES);
+        assert_eq!(tool.live_lines().len(), 41);
+        assert!(tool
+            .live_lines()
+            .iter()
+            .any(|line| line.text == "detail 39"));
     }
 
     #[test]

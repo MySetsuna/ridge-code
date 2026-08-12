@@ -1536,14 +1536,13 @@ fn handle_workspace_command(
     skills: &[agent::Skill],
     commands: &[agent::SlashCommand],
 ) -> bool {
-    if input == "/goal" || input.starts_with("/goal ") {
-        let args = input
+    if input == "/goal"
+        || input
             .strip_prefix("/goal")
-            .unwrap_or_default()
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        match agent::goal_command(&args) {
+            .is_some_and(|tail| tail.chars().next().is_some_and(char::is_whitespace))
+    {
+        let tail = input.strip_prefix("/goal").unwrap_or_default();
+        match agent::parse_goal_text(tail).and_then(|args| agent::goal_command(&args)) {
             Ok(text) => ui.note(text, Color::Cyan),
             Err(error) => ui.note(format!("goal error: {error}"), Color::Red),
         }

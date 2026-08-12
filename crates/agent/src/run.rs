@@ -239,7 +239,12 @@ pub(crate) async fn run_streamed(
                         if streaming {
                             eprintln!(); // 闭合逐字流式行
                         }
-                        for m in state.messages.iter().skip(printed) {
+                        let messages = if state.display_messages.len() == state.messages.len() {
+                            &state.display_messages
+                        } else {
+                            &state.messages
+                        };
+                        for m in messages.iter().skip(printed) {
                             // 已逐字流过的最终答案不再整段重打(思考是瞬态,不入 message、天然不重打)。
                             if streaming && m.contains("(final) ") {
                                 continue;
@@ -247,7 +252,7 @@ pub(crate) async fn run_streamed(
                             if tty { eprint!("\r\x1b[K"); }
                             eprintln!("{}", format_event(m));
                         }
-                        printed = state.messages.len();
+                        printed = messages.len();
                         streaming = false; // 超步收尾 → 下个超步 spinner 恢复
                         stream_mode = None;
                         // 任务清单有变化 → 渲染 [x]/[~]/[ ] 给用户看进度。
@@ -281,6 +286,7 @@ pub(crate) async fn run_streamed(
 pub(crate) fn node_label(node: &str) -> String {
     match node {
         "reason" => "reasoning",
+        "explore_handoff" => "action handoff",
         "act" => "running tools",
         "verify" => "verifying",
         "wrapup" => "wrapping up",

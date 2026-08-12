@@ -1005,7 +1005,7 @@ fn read_file_result_is_collapsed_but_expandable() {
 }
 
 #[test]
-fn long_tool_preview_keeps_both_file_ends_when_expanded() {
+fn long_tool_preview_keeps_all_file_lines_when_expanded() {
     let content = (0..24)
         .map(|index| format!("line {index}"))
         .collect::<Vec<_>>()
@@ -1018,8 +1018,8 @@ fn long_tool_preview_keeps_both_file_ends_when_expanded() {
         .join("\n");
     assert!(rendered.contains("line 0"));
     assert!(rendered.contains("line 23"));
-    assert!(rendered.contains("folded"));
-    assert!(!rendered.contains("line 12"));
+    assert!(rendered.contains("line 12"));
+    assert!(!rendered.contains("full text in trace"));
 }
 
 #[test]
@@ -1099,7 +1099,7 @@ fn consecutive_read_file_results_group_into_one_collapsed_batch() {
 }
 
 #[test]
-fn read_file_batch_preserves_detail_order_and_bound() {
+fn read_file_batch_preserves_detail_order_and_full_content() {
     let mut ui = Ui::default();
     for index in 0..4 {
         let path = format!("src/read-{index}.rs");
@@ -1134,8 +1134,8 @@ fn read_file_batch_preserves_detail_order_and_bound() {
     assert!(batch.summary().contains("+1 more"));
     let details = batch.details_text();
     assert!(
-        details.lines().count() <= 32,
-        "detail bound exceeded: {details}"
+        details.lines().count() >= 4 * 21,
+        "detail content lost: {details}"
     );
     assert!(
         details.contains("file 0 line 0"),
@@ -1145,6 +1145,13 @@ fn read_file_batch_preserves_detail_order_and_bound() {
         details.contains("file 3 line 19"),
         "detail tail lost: {details}"
     );
+    for index in 0..4 {
+        assert!(
+            details.contains(&format!("file {index} line 19")),
+            "detail file {index} tail lost: {details}"
+        );
+    }
+    assert!(!details.contains("detail lines folded"));
 }
 
 #[test]
@@ -1477,10 +1484,14 @@ fn live_inspector_detail_anchor_tracks_answer_and_thinking_focus() {
 }
 
 #[test]
-fn wide_live_inspector_keeps_block_list_and_detail_side_by_side() {
+fn wide_live_inspector_uses_full_screen_detail() {
     let mut ui = Ui::default();
     ui.push_chunk(provider::StreamChunk::Reasoning("plan".into()));
-    ui.push_chunk(provider::StreamChunk::Answer("answer detail".into()));
+    let answer = (0..120)
+        .map(|index| format!("answer detail line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    ui.push_chunk(provider::StreamChunk::Answer(answer));
     assert!(ui.open_live_history());
     let panel = ui.panel.as_mut().expect("live panel");
     assert!(panel.toggle_detail());
@@ -1508,16 +1519,32 @@ fn wide_live_inspector_keeps_block_list_and_detail_side_by_side() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(
-        divider_visible,
-        "wide inspector lost adaptive divider: {symbols}"
+        !divider_visible,
+        "full-screen detail still paints a list divider: {symbols}"
     );
     assert!(
         symbols.contains("ANSWER"),
         "answer detail anchor missing: {symbols}"
     );
     assert!(
-        symbols.contains("answer detail"),
+        symbols.contains("answer detail line 0"),
         "answer content missing: {symbols}"
+    );
+
+    panel.detail_scroll = 10_000;
+    terminal
+        .draw(|frame| draw_panel(frame, frame.area(), panel))
+        .expect("wide live tail draw");
+    let tail_symbols = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(
+        tail_symbols.contains("answer detail line 119"),
+        "full answer detail cannot scroll to tail: {tail_symbols}"
     );
 }
 
@@ -4387,7 +4414,7 @@ fn summarize_event_overviews_tools() {
     let r = summarize_event(r#"reason#1: tool_call read_file {"path":"src/x.rs"}"#);
     assert_eq!(r.len(), 1);
     assert!(r[0].0.contains("Read src/x.rs"), "{}", r[0].0);
-    // 读回执:摘要行只回执字数,内容进入可折叠的有界详情。
+    // 读回执:摘要行只回执字数,内容进入可折叠的完整详情。
     let a = summarize_event("act: read_file -> 一二三四五");
     assert!(a[0].0.contains("Read complete"), "{}", a[0].0);
     assert!(!a[0].0.contains("一二三"), "内容不应回显");
@@ -4427,6 +4454,15 @@ fn summarize_event_overviews_tools() {
         b[0].0
     );
 
+    let long_observation = "single-line observation ".to_owned() + &"z".repeat(500);
+    let long_observation_event = summarize_event(&format!("act: run_shell -> {long_observation}"));
+    assert!(
+        long_observation_event
+            .iter()
+            .any(|(line, _)| line.contains(&long_observation)),
+        "单行长观察必须在可展开详情中保留全文"
+    );
+
     // 批量编辑:折叠摘要显有界文件清单,详情沿用既有 ± 语义色,不读磁盘。
     let batch = summarize_event(
         r#"reason#4: tool_call apply_edits {"edits":[{"path":"src/a.rs","old_string":"a","new_string":"A"},{"path":"src/b.rs","old_string":"b","new_string":"B"},{"path":"src/c.rs","old_string":"c","new_string":"C"},{"path":"src/d.rs","old_string":"d","new_string":"D"}]}"#,
@@ -4434,14 +4470,48 @@ fn summarize_event_overviews_tools() {
     assert!(batch[0].0.contains("4 files / 4 edits"), "{batch:?}");
     assert!(batch[0].0.contains("src/a.rs"), "{batch:?}");
     assert!(batch[0].0.contains("src/c.rs"), "{batch:?}");
-    assert!(batch[0].0.contains("… +1 more"), "摘要路径须有界:{batch:?}");
-    assert!(!batch[0].0.contains("src/d.rs"), "摘要不应溢出:{batch:?}");
+    assert!(
+        batch[0].0.contains("… +1 more"),
+        "摘要仍可保持紧凑:{batch:?}"
+    );
+    assert!(
+        batch.iter().any(|(line, _)| line.contains("src/d.rs")),
+        "详情须含全部文件:{batch:?}"
+    );
     assert!(batch
         .iter()
         .any(|(line, color)| { line.starts_with("  - ") && *color == role_color(Role::Error) }));
     assert!(batch
         .iter()
         .any(|(line, color)| { line.starts_with("  + ") && *color == role_color(Role::Success) }));
+}
+
+#[test]
+fn long_diff_detail_keeps_all_lines_and_long_line_text() {
+    let long = "x".repeat(240);
+    let old = (0..20)
+        .map(|index| format!("old {index} {long}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let new = (0..20)
+        .map(|index| format!("new {index} {long}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let event = format!(
+        "reason#8: tool_call edit_file {}",
+        serde_json::json!({
+            "path": "src/large.rs",
+            "old_string": old,
+            "new_string": new
+        })
+    );
+    let detail = summarize_event(&event);
+    assert!(detail.iter().any(|(line, _)| line.contains("old 19")));
+    assert!(detail.iter().any(|(line, _)| line.contains("new 19")));
+    assert!(detail.iter().any(|(line, _)| line.ends_with(&long)));
+    assert!(!detail
+        .iter()
+        .any(|(line, _)| line == "  - …" || line == "  + …"));
 }
 
 #[test]
@@ -5309,6 +5379,37 @@ fn tool_history_detail_scroll_moves_around_search_anchor() {
 }
 
 #[test]
+fn open_detail_routes_page_keys_to_document_scroll() {
+    let mut ui = Ui::default();
+    let detail = (0..100)
+        .map(|index| format!("detail line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    ui.panel = Some(Panel::new(
+        PanelKind::AnswerHistory,
+        "answers".into(),
+        vec![PanelRow {
+            key: "answer".into(),
+            value: detail,
+            ctx: None,
+        }],
+    ));
+    ui.panel.as_mut().expect("answer panel").detail_open = true;
+
+    super::navigate_panel(&mut ui, PanelAction::PageDown);
+    assert!(
+        ui.panel.as_ref().expect("answer panel").detail_scroll > 0,
+        "PageDown should scroll the open full document"
+    );
+    super::navigate_panel(&mut ui, PanelAction::PageUp);
+    assert_eq!(
+        ui.panel.as_ref().expect("answer panel").detail_scroll,
+        0,
+        "PageUp should scroll the open full document back"
+    );
+}
+
+#[test]
 fn narrow_frame_retains_context_and_token_status() {
     let ui = Ui::default();
     let meta = ReplMeta {
@@ -5958,6 +6059,76 @@ fn terminal_event_router_separates_paste_and_resize() {
         ))),
         TerminalEventAction::Key(_)
     ));
+}
+
+#[test]
+fn terminal_input_normalizes_legacy_control_bytes_and_mouse() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut pressed = std::collections::HashSet::new();
+    for byte in ['\x08', '\x7f'] {
+        assert_eq!(
+            decide_key(
+                &mut pressed,
+                &KeyEvent::new(KeyCode::Char(byte), KeyModifiers::NONE),
+            )
+            .unwrap()
+            .code,
+            KeyCode::Backspace
+        );
+    }
+    let function_key = KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE);
+    assert_eq!(
+        decide_key(&mut pressed, &function_key).unwrap().code,
+        KeyCode::F(1)
+    );
+    assert!(decide_key(
+        &mut pressed,
+        &KeyEvent::new_with_kind(KeyCode::F(1), KeyModifiers::NONE, KeyEventKind::Release)
+    )
+    .is_none());
+    assert_eq!(
+        mouse_action(&MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }),
+        super::MouseAction::Scroll(1)
+    );
+    assert_eq!(
+        mouse_action(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        }),
+        super::MouseAction::Select { column: 4, row: 7 }
+    );
+    assert!(matches!(
+        terminal_event_action(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })),
+        TerminalEventAction::Mouse(_)
+    ));
+}
+
+#[test]
+fn input_action_accepts_legacy_backspace_and_enter_spellings() {
+    for code in [KeyCode::Char('\x08'), KeyCode::Char('\x7f')] {
+        assert_eq!(
+            input_action(&KeyEvent::new(code, KeyModifiers::NONE), false, false),
+            InputAction::Backspace
+        );
+    }
+    for code in [KeyCode::Char('\r'), KeyCode::Char('\n')] {
+        assert_eq!(
+            input_action(&KeyEvent::new(code, KeyModifiers::NONE), false, false),
+            InputAction::Submit
+        );
+    }
 }
 
 #[test]
@@ -9493,9 +9664,9 @@ fn reasoning_history_bounds_large_detail_without_changing_scrollback_commit() {
 
     let stored = &ui.reasoning_history.back().expect("reasoning history").text;
     assert!(stored.contains("THINK HEAD"));
-    assert!(stored.contains("middle omitted"));
+    assert!(!stored.contains("middle omitted"));
     assert!(stored.contains("TAIL reasoning conclusion"));
-    assert!(stored.chars().count() < body.chars().count());
+    assert_eq!(stored.chars().count(), body.chars().count());
     assert!(matches!(
         ui.commits.as_slice(),
         [CommitBlock::Reasoning { text, .. }] if text == &body
@@ -10157,25 +10328,26 @@ use super::{
     live_hold_toggle_action, live_markdown_line, live_markdown_spans_with_alert, live_page_rows,
     live_phase_anchor, live_phase_marker, live_rail, live_scroll_action,
     live_semantic_toggle_action, live_surface_title, live_tool_rail_role, login_panel,
-    mark_takeover_requested, markdown_lines, md_line_spans, models_panel, multiline_shortcut_label,
-    named_profile_name, panel_action, panel_attention_action, panel_enter, panel_filter,
-    panel_hint, panel_rect_for_kind, panel_title_role, panel_viewport_range, pending_queue_lines,
-    preset_by_id, preview_lines, queue_panel_toggle_action, reasoning_commit_lines,
-    reasoning_history_panel, render_status_template, render_todo_block, responsive_live_layout,
-    role_color, run_command, sanitize_display_text, sanitize_paste, selection_style,
-    semantic_focus_action, should_draw, splash_block, splash_frame, status_line_projection,
-    str_cells, stream_channel_badge, stream_tail, summarize_event, superstep_is_busy,
-    tail_display_cells, telemetry_surface, terminal_event_action, todo_progress, token_rate,
-    tool_detail_scroll_action, tool_focus_action, tool_history_panel, tool_preview, tools_panel,
-    top_chrome, unfinished_answer_reason, up_fallback_is_home, wrap_commit_lines, wrap_input,
-    wrap_live_spans, wrap_live_spans_tail, wrapped_rows, ActivityKind, ApprovalAction,
-    ApprovalRequest, CommandCatalog, CommandStats, CommitBlock, DetailLayoutCache, InputAction,
-    InputChromeArgs, InputState, LiveBlockFocus, LiveChannel, LiveFramePlan, LiveLineKind,
-    LiveOutputCache, LiveScrollAction, LiveTranscript, Panel, PanelAction, PanelItemsCache,
-    PanelKind, PanelRow, PanelRowAction, Popup, PresentationChannel, PresentationMetrics,
-    PresentationStatus, Role, StatusVars, TerminalEventAction, ToolBlock, ToolPhase, Ui, Vitals,
-    CHATGPT_MODEL_GROUP, CLAUDE_OAUTH_ROW, CODEX_OAUTH_ROW, MAX_ACTIVITY_HISTORY,
-    MAX_ANSWER_HISTORY, MAX_ANSWER_HISTORY_CHARS, MAX_PENDING_PREVIEW_CHARS,
-    MAX_PENDING_PREVIEW_ROWS, MAX_PRESENTATION_RECORDS, MAX_REASONING_HISTORY,
-    MAX_REASONING_HISTORY_CHARS, MAX_TOOL_HISTORY, SLASH_COMMANDS, SPLASH, SPLASH_TICKS,
+    mark_takeover_requested, markdown_lines, md_line_spans, models_panel, mouse_action,
+    multiline_shortcut_label, named_profile_name, panel_action, panel_attention_action,
+    panel_enter, panel_filter, panel_hint, panel_rect_for_kind, panel_title_role,
+    panel_viewport_range, pending_queue_lines, preset_by_id, preview_lines,
+    queue_panel_toggle_action, reasoning_commit_lines, reasoning_history_panel,
+    render_status_template, render_todo_block, responsive_live_layout, role_color, run_command,
+    sanitize_display_text, sanitize_paste, selection_style, semantic_focus_action, should_draw,
+    splash_block, splash_frame, status_line_projection, str_cells, stream_channel_badge,
+    stream_tail, summarize_event, superstep_is_busy, tail_display_cells, telemetry_surface,
+    terminal_event_action, todo_progress, token_rate, tool_detail_scroll_action, tool_focus_action,
+    tool_history_panel, tool_preview, tools_panel, top_chrome, unfinished_answer_reason,
+    up_fallback_is_home, wrap_commit_lines, wrap_input, wrap_live_spans, wrap_live_spans_tail,
+    wrapped_rows, ActivityKind, ApprovalAction, ApprovalRequest, CommandCatalog, CommandStats,
+    CommitBlock, DetailLayoutCache, InputAction, InputChromeArgs, InputState, LiveBlockFocus,
+    LiveChannel, LiveFramePlan, LiveLineKind, LiveOutputCache, LiveScrollAction, LiveTranscript,
+    Panel, PanelAction, PanelItemsCache, PanelKind, PanelRow, PanelRowAction, Popup,
+    PresentationChannel, PresentationMetrics, PresentationStatus, Role, StatusVars,
+    TerminalEventAction, ToolBlock, ToolPhase, Ui, Vitals, CHATGPT_MODEL_GROUP, CLAUDE_OAUTH_ROW,
+    CODEX_OAUTH_ROW, MAX_ACTIVITY_HISTORY, MAX_ANSWER_HISTORY, MAX_ANSWER_HISTORY_CHARS,
+    MAX_PENDING_PREVIEW_CHARS, MAX_PENDING_PREVIEW_ROWS, MAX_PRESENTATION_RECORDS,
+    MAX_REASONING_HISTORY, MAX_REASONING_HISTORY_CHARS, MAX_TOOL_HISTORY, SLASH_COMMANDS, SPLASH,
+    SPLASH_TICKS,
 };

@@ -6,7 +6,7 @@ use super::{fmt_ctx, ActivityEntry, AnswerEntry, LiveTranscript, ReasoningEntry,
 use crate::config_path;
 use agent::PROVIDER_PRESETS;
 
-const DETAIL_SCROLL_STEP: i16 = 4;
+const DETAIL_SCROLL_STEP: i32 = 4;
 
 /// 交互页类别:决定 Enter 动作与提示文案。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +73,7 @@ pub(crate) struct Panel {
     pub(crate) oauth_redirect_uri: Option<String>,
     pub(crate) detail_open: bool,
     /// Manual visual-row adjustment around an automatic search hit.
-    pub(crate) detail_scroll: i16,
+    pub(crate) detail_scroll: i32,
     /// Monotonic presentation identity for the current row/detail snapshot.
     /// Rebuilt live panels get a new identity; selection/query changes do not.
     pub(crate) content_revision: u64,
@@ -290,7 +290,7 @@ pub(crate) fn tools_panel(tools: &[String]) -> Panel {
     )
 }
 
-/// 已提交工具历史:保留原生 scrollback 不变,在模态预览窗按需展开有界详情。
+/// 已提交工具历史:保留原生 scrollback 不变,在模态预览窗按需展开完整详情。
 pub(crate) fn tool_history_panel(history: &std::collections::VecDeque<ToolBlock>) -> Panel {
     let rows = history
         .iter()
