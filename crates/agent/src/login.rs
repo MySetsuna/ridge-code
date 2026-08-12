@@ -1139,21 +1139,32 @@ mod tests {
         );
     }
 
-    fn with_env<T>(name: &str, value: &str, f: impl FnOnce() -> T) -> T {
+    fn with_envs<T>(values: &[(&str, &str)], f: impl FnOnce() -> T) -> T {
         let _env_guard = env_test_lock().blocking_lock();
-        let previous = std::env::var_os(name);
-        std::env::set_var(name, value);
+        let previous = values
+            .iter()
+            .map(|(name, _)| (*name, std::env::var_os(name)))
+            .collect::<Vec<_>>();
+        for (name, value) in values {
+            std::env::set_var(name, value);
+        }
         let result = f();
-        match previous {
-            Some(value) => std::env::set_var(name, value),
-            None => std::env::remove_var(name),
+        for (name, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
         }
         result
     }
 
     #[test]
     fn oauth_file_and_profile_registration_round_trip_without_plaintext_key() {
-        let root = std::env::temp_dir().join(format!("ridge-login-{}", std::process::id()));
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("ridge-login-{}-{nonce}", std::process::id()));
         let _ = std::fs::create_dir_all(&root);
         let oauth_file = root.join("oauth.json");
         let config_file = root.join("config.json");
@@ -1164,23 +1175,27 @@ mod tests {
             id_token: None,
             account_id: Some("account".into()),
         };
-        with_env("RIDGE_OAUTH", oauth_file.to_str().unwrap(), || {
-            let saved = save_oauth_token("openai", &token).unwrap();
-            assert_eq!(saved, oauth_file.to_string_lossy());
-            let text = std::fs::read_to_string(&oauth_file).unwrap();
-            assert_eq!(agent::oauth_get(&text, "openai").unwrap(), token);
-            assert_eq!(oauth_model_info(&Config::default()).unwrap().0, "openai");
-        });
-        with_env("RIDGE_CONFIG", config_file.to_str().unwrap(), || {
-            assert_eq!(
-                register_oauth_profile("anthropic").as_deref(),
-                Some("claude-max")
-            );
-            let cfg = Config::load(&config_file);
-            assert_eq!(cfg.providers.len(), 1);
-            assert_eq!(cfg.providers[0].use_oauth, Some(true));
-            assert!(cfg.providers[0].api_key.is_none());
-        });
+        with_envs(
+            &[
+                ("RIDGE_OAUTH", oauth_file.to_str().unwrap()),
+                ("RIDGE_CONFIG", config_file.to_str().unwrap()),
+            ],
+            || {
+                let saved = save_oauth_token("openai", &token).unwrap();
+                assert_eq!(saved, oauth_file.to_string_lossy());
+                let text = std::fs::read_to_string(&oauth_file).unwrap();
+                assert_eq!(agent::oauth_get(&text, "openai").unwrap(), token);
+                assert_eq!(oauth_model_info(&Config::default()).unwrap().0, "openai");
+                assert_eq!(
+                    register_oauth_profile("anthropic").as_deref(),
+                    Some("claude-max")
+                );
+                let cfg = Config::load(&config_file);
+                assert_eq!(cfg.providers.len(), 1);
+                assert_eq!(cfg.providers[0].use_oauth, Some(true));
+                assert!(cfg.providers[0].api_key.is_none());
+            },
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

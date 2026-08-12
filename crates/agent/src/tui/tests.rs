@@ -69,6 +69,7 @@ async fn extracted_key_handler_covers_priority_and_edit_paths() {
     let mut pending = None;
     let mut task = None;
     let mut task_started = None;
+    let last_task = None;
     let mut retry_count = 0;
     let mut pending_submit = None;
     let mut momentary_hold = false;
@@ -85,6 +86,7 @@ async fn extracted_key_handler_covers_priority_and_edit_paths() {
                 pending: &mut pending,
                 task: &mut task,
                 task_started: &mut task_started,
+                last_task: &last_task,
                 retry_count: &mut retry_count,
                 pending_submit: &mut pending_submit,
                 momentary_hold: &mut momentary_hold,
@@ -105,6 +107,7 @@ async fn extracted_key_handler_covers_priority_and_edit_paths() {
                 pending: &mut pending,
                 task: &mut task,
                 task_started: &mut task_started,
+                last_task: &last_task,
                 retry_count: &mut retry_count,
                 pending_submit: &mut pending_submit,
                 momentary_hold: &mut momentary_hold,

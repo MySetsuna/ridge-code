@@ -457,39 +457,14 @@ pub fn parse_goal_text(text: &str) -> Result<Vec<String>, GoalError> {
     let mut escaped = false;
     let mut token_started = false;
     for character in text.trim().chars() {
-        if escaped {
-            if !matches!(character, '\\' | '\'' | '"') && !character.is_whitespace() {
-                current.push('\\');
-            }
-            current.push(character);
-            token_started = true;
-            escaped = false;
-            continue;
-        }
-        if character == '\\' && quote != Some('\'') {
-            escaped = true;
-            token_started = true;
-            continue;
-        }
-        if let Some(open) = quote {
-            if character == open {
-                quote = None;
-            } else {
-                current.push(character);
-            }
-            token_started = true;
-        } else if matches!(character, '\'' | '"') {
-            quote = Some(character);
-            token_started = true;
-        } else if character.is_whitespace() {
-            if token_started {
-                words.push(std::mem::take(&mut current));
-                token_started = false;
-            }
-        } else {
-            current.push(character);
-            token_started = true;
-        }
+        parse_goal_character(
+            character,
+            &mut current,
+            &mut quote,
+            &mut escaped,
+            &mut token_started,
+            &mut words,
+        );
     }
     if escaped {
         current.push('\\');
@@ -504,6 +479,51 @@ pub fn parse_goal_text(text: &str) -> Result<Vec<String>, GoalError> {
         words.push(current);
     }
     Ok(normalize_goal_args(&words))
+}
+
+fn parse_goal_character(
+    character: char,
+    current: &mut String,
+    quote: &mut Option<char>,
+    escaped: &mut bool,
+    token_started: &mut bool,
+    words: &mut Vec<String>,
+) {
+    if *escaped {
+        if !matches!(character, '\\' | '\'' | '"') && !character.is_whitespace() {
+            current.push('\\');
+        }
+        current.push(character);
+        *token_started = true;
+        *escaped = false;
+        return;
+    }
+    if character == '\\' && *quote != Some('\'') {
+        *escaped = true;
+        *token_started = true;
+        return;
+    }
+    if let Some(open) = *quote {
+        if character == open {
+            *quote = None;
+        } else {
+            current.push(character);
+        }
+        *token_started = true;
+        return;
+    }
+    if matches!(character, '\'' | '"') {
+        *quote = Some(character);
+        *token_started = true;
+    } else if character.is_whitespace() {
+        if *token_started {
+            words.push(std::mem::take(current));
+            *token_started = false;
+        }
+    } else {
+        current.push(character);
+        *token_started = true;
+    }
 }
 
 fn normalize_goal_args(args: &[String]) -> Vec<String> {
@@ -616,7 +636,7 @@ fn unix_millis() -> u128 {
 }
 
 fn goal_usage() -> &'static str {
-    "ridgecode goal [status|create <title>|start|stop|advance <phase> <evidence> [--next <step>]|resume|complete <evidence>|block <reason> [--next <step>]|cancel [reason]]; TUI shorthand: /goal 'title'"
+    "ridgecode goal [status|create <title>|start|stop|advance <phase> <evidence> [--next <step>]|resume|complete <evidence>|block <reason> [--next <step>]|cancel [reason]]; run with `ridgecode goal run`; TUI shorthand: /goal 'title'"
 }
 
 #[cfg(not(windows))]
@@ -744,10 +764,14 @@ mod tests {
     }
 
     #[test]
-    fn shorthand_goal_text_accepts_quotes_and_persists_create_args() {
+    fn shorthand_goal_text_preserves_the_full_quoted_multi_word_payload() {
         assert_eq!(
             parse_goal_text("'修复终端输入并保留历史'").unwrap(),
             vec!["create", "修复终端输入并保留历史"]
+        );
+        assert_eq!(
+            parse_goal_text("\"ship   stable release\"").unwrap(),
+            vec!["create", "ship   stable release"]
         );
         assert_eq!(
             parse_goal_text("create \"ship stable\"").unwrap(),

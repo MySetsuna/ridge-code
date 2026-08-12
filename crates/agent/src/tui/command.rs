@@ -1541,7 +1541,7 @@ fn handle_workspace_command(
             .strip_prefix("/goal")
             .is_some_and(|tail| tail.chars().next().is_some_and(char::is_whitespace))
     {
-        let tail = input.strip_prefix("/goal").unwrap_or_default();
+        let tail = input.strip_prefix("/goal").unwrap_or_default().trim_start();
         match agent::parse_goal_text(tail).and_then(|args| agent::goal_command(&args)) {
             Ok(text) => ui.note(text, Color::Cyan),
             Err(error) => ui.note(format!("goal error: {error}"), Color::Red),

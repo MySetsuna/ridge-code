@@ -7,6 +7,7 @@ use crate::route::{choose_route, ModelProfile, RouteDecision, RouteRequest, Rout
 use provider::{CompletionRequest, LlmProvider, Message, Role, ToolCall, ToolSpec};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// 声明式技能(知识层):一份 `SKILL.md` = 某领域的知识/行为,注入 system prompt,
 /// 让 agent 做**编程以外**的事(做饭/日程/电商/调研)而不改 Rust 源码 —— 模块化框架的核心。
@@ -382,6 +383,17 @@ const READONLY_TOOLS: &[&str] = &["read_file", "search"];
 
 /// sub-agent 步数上限(只读检索)。旧值 8 对真实仓库的多文件侦察偏紧;提到 15 仍有界、恒只读故低风险。
 const SUBAGENT_MAX_STEPS: usize = 15;
+const DEFAULT_SUBAGENT_TIMEOUT_SECS: u64 = 45;
+const MAX_PARALLEL_SUBAGENTS: usize = 3;
+
+fn subagent_timeout() -> Duration {
+    std::env::var("RIDGE_SUBAGENT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .filter(|&seconds| seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(DEFAULT_SUBAGENT_TIMEOUT_SECS))
+}
 
 /// 按白名单裁出 sub-agent 可用的只读工具 spec。`allow=None` → 全部只读工具。
 fn readonly_tool_specs(allow: &Option<Vec<String>>) -> Vec<ToolSpec> {
@@ -535,6 +547,27 @@ async fn run_subagent_via_protocol(
     }
 }
 
+async fn run_subagent_bounded(
+    def: &Agent,
+    provider: Arc<dyn LlmProvider>,
+    task: &str,
+    correlation_id: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    match tokio::time::timeout(
+        timeout,
+        run_subagent_via_protocol(def, provider, task, correlation_id),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "sub-agent timed out after {}ms",
+            timeout.as_millis()
+        )),
+    }
+}
+
 /// Run a read-only sub-agent without exposing raw provider error payloads.
 pub async fn run_subagent(def: &Agent, provider: Arc<dyn LlmProvider>, task: &str) -> String {
     match run_subagent_attempt(def, provider, task).await {
@@ -576,38 +609,86 @@ pub(crate) fn dispatch_spec(agents: &Agents) -> Option<ToolSpec> {
     })
 }
 
+pub(crate) fn dispatch_batch_spec(agents: &Agents) -> Option<ToolSpec> {
+    if agents.defs.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = agents.defs.iter().map(|agent| agent.name.clone()).collect();
+    Some(ToolSpec {
+        name: "dispatch_agents".to_string(),
+        description: format!(
+            "并发派出 2-3 个相互独立的只读子任务,一次最多 {MAX_PARALLEL_SUBAGENTS} 个;每项只可 read_file/search,返回按输入顺序汇总。可用 agent: {}",
+            names.join(", ")
+        ),
+        schema: serde_json::json!({
+            "type":"object",
+            "properties":{
+                "tasks":{
+                    "type":"array",
+                    "minItems":2,
+                    "maxItems":MAX_PARALLEL_SUBAGENTS,
+                    "items":{
+                        "type":"object",
+                        "properties":{
+                            "agent":{"type":"string","enum":names},
+                            "task":{"type":"string","description":"具体只读子任务"}
+                        },
+                        "required":["agent","task"]
+                    }
+                }
+            },
+            "required":["tasks"]
+        }),
+    })
+}
+
 /// 执行 `dispatch_agent`:按任务特性选择可用 provider/model → 跑只读 sub-agent → 回结论与路由原因。
 pub(crate) async fn dispatch_obs(
     agents: &Agents,
     main: &Arc<dyn LlmProvider>,
     call: &ToolCall,
 ) -> String {
-    let name = call
-        .arguments
+    dispatch_one_obs(agents, main, &call.arguments, &call.id).await
+}
+
+async fn dispatch_one_obs(
+    agents: &Agents,
+    main: &Arc<dyn LlmProvider>,
+    arguments: &serde_json::Value,
+    correlation_id: &str,
+) -> String {
+    dispatch_one_obs_with_timeout(agents, main, arguments, correlation_id, subagent_timeout()).await
+}
+
+async fn dispatch_one_obs_with_timeout(
+    agents: &Agents,
+    main: &Arc<dyn LlmProvider>,
+    arguments: &serde_json::Value,
+    correlation_id: &str,
+    timeout: Duration,
+) -> String {
+    let name = arguments
         .get("agent")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let task = call
-        .arguments
-        .get("task")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let task = arguments.get("task").and_then(|v| v.as_str()).unwrap_or("");
     let Some(def) = agents.defs.iter().find(|a| a.name == name) else {
         return format!("没有名为 {name} 的 sub-agent(dispatch_agent 的 enum 里选)");
     };
     let request = RouteRequest::from_task(task, RouteRole::Subagent).with_overrides(
-        call.arguments.get("difficulty").and_then(|v| v.as_str()),
-        call.arguments.get("size").and_then(|v| v.as_str()),
-        call.arguments.get("kind").and_then(|v| v.as_str()),
-        call.arguments
+        arguments.get("difficulty").and_then(|v| v.as_str()),
+        arguments.get("size").and_then(|v| v.as_str()),
+        arguments.get("kind").and_then(|v| v.as_str()),
+        arguments
             .get("provider")
             .and_then(|v| v.as_str())
             .or(def.provider.as_deref()),
-        call.arguments.get("model").and_then(|v| v.as_str()),
+        arguments.get("model").and_then(|v| v.as_str()),
     );
     let routed = agents.select_provider(&request, main.clone());
     let mut decision = routed.decision;
-    let out = match run_subagent_via_protocol(def, routed.provider, task, &call.id).await {
+    let out = match run_subagent_bounded(def, routed.provider, task, correlation_id, timeout).await
+    {
         Ok(out) => out,
         Err(first_failure) if decision.selected.is_some() => {
             decision.used_fallback = true;
@@ -615,7 +696,15 @@ pub(crate) async fn dispatch_obs(
                 "{}; selected provider failed ({first_failure}), deterministic main-provider fallback",
                 decision.reason
             );
-            match run_subagent_via_protocol(def, main.clone(), task, &format!("{}:fallback", call.id)).await {
+            match run_subagent_bounded(
+                def,
+                main.clone(),
+                task,
+                &format!("{correlation_id}:fallback"),
+                timeout,
+            )
+            .await
+            {
                 Ok(out) => out,
                 Err(fallback_failure) => format!(
                     "[{} 出错: selected provider failed ({first_failure}); main-provider fallback failed ({fallback_failure})]",
@@ -631,18 +720,71 @@ pub(crate) async fn dispatch_obs(
     )
 }
 
+pub(crate) async fn dispatch_batch_obs(
+    agents: &Agents,
+    main: &Arc<dyn LlmProvider>,
+    call: &ToolCall,
+) -> String {
+    let Some(tasks) = call
+        .arguments
+        .get("tasks")
+        .and_then(|value| value.as_array())
+    else {
+        return "dispatch_agents requires a tasks array".to_string();
+    };
+    if tasks.len() < 2 || tasks.len() > MAX_PARALLEL_SUBAGENTS {
+        return format!(
+            "dispatch_agents requires 2-{} tasks, got {}",
+            MAX_PARALLEL_SUBAGENTS,
+            tasks.len()
+        );
+    }
+
+    let results = match tasks.as_slice() {
+        [first, second] => {
+            let first_id = format!("{}:0", call.id);
+            let second_id = format!("{}:1", call.id);
+            let (first, second) = tokio::join!(
+                dispatch_one_obs(agents, main, first, &first_id),
+                dispatch_one_obs(agents, main, second, &second_id),
+            );
+            vec![first, second]
+        }
+        [first, second, third] => {
+            let first_id = format!("{}:0", call.id);
+            let second_id = format!("{}:1", call.id);
+            let third_id = format!("{}:2", call.id);
+            let (first, second, third) = tokio::join!(
+                dispatch_one_obs(agents, main, first, &first_id),
+                dispatch_one_obs(agents, main, second, &second_id),
+                dispatch_one_obs(agents, main, third, &third_id),
+            );
+            vec![first, second, third]
+        }
+        _ => unreachable!("task count is bounded above"),
+    };
+    format!(
+        "parallel sub-agent wave ({}/{} completed)\n{}",
+        results.len(),
+        results.len(),
+        results.join("\n\n")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        builtin_agents, dispatch_obs, expand_command, load_commands, load_project_rules,
-        load_skills, parse_agent, parse_command_md, readonly_tool_specs, resolve_command, Agent,
-        AgentProvider, Agents, Skill,
+        builtin_agents, dispatch_batch_obs, dispatch_obs, dispatch_one_obs_with_timeout,
+        expand_command, load_commands, load_project_rules, load_skills, parse_agent,
+        parse_command_md, readonly_tool_specs, resolve_command, Agent, AgentProvider, Agents,
+        Skill,
     };
     use crate::brain::{build_system_prompt, BASE_SYSTEM};
     use crate::route::{RouteRequest, RouteRole};
     use provider::{CompletionRequest, LlmProvider, ToolCall};
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn parse_agent_reads_frontmatter_and_body() {
@@ -722,6 +864,82 @@ mod tests {
         );
         assert!(routed.decision.used_fallback);
         assert!(!routed.decision.reason.contains("api_key"));
+    }
+
+    fn test_agent(name: &str) -> Agent {
+        Agent {
+            name: name.into(),
+            description: "read files".into(),
+            provider: None,
+            tools: Some(vec!["search".into()]),
+            body: "inspect only".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_agent_timeout_returns_bounded_failure() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(
+            provider::ScriptedProvider::new(vec![provider::Completion {
+                text: "too late".into(),
+                ..Default::default()
+            }])
+            .with_delay(Duration::from_millis(50)),
+        );
+        let agents = Agents {
+            defs: vec![test_agent("explorer")],
+            providers: HashMap::new(),
+            route_candidates: Vec::new(),
+        };
+        let args = serde_json::json!({"agent":"explorer","task":"read README"});
+        let started = Instant::now();
+        let out = dispatch_one_obs_with_timeout(
+            &agents,
+            &provider,
+            &args,
+            "timeout-test",
+            Duration::from_millis(5),
+        )
+        .await;
+        assert!(started.elapsed() < Duration::from_millis(100), "{out}");
+        assert!(out.contains("timed out after 5ms"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_batch_runs_two_subagents_concurrently_and_preserves_slots() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(
+            provider::ScriptedProvider::new(vec![
+                provider::Completion {
+                    text: "first result".into(),
+                    ..Default::default()
+                },
+                provider::Completion {
+                    text: "second result".into(),
+                    ..Default::default()
+                },
+            ])
+            .with_delay(Duration::from_millis(40)),
+        );
+        let agents = Agents {
+            defs: vec![test_agent("explorer"), test_agent("reviewer")],
+            providers: HashMap::new(),
+            route_candidates: Vec::new(),
+        };
+        let call = ToolCall {
+            id: "batch-test".into(),
+            name: "dispatch_agents".into(),
+            arguments: serde_json::json!({
+                "tasks":[
+                    {"agent":"explorer","task":"inspect input"},
+                    {"agent":"reviewer","task":"inspect output"}
+                ]
+            }),
+        };
+        let started = Instant::now();
+        let out = dispatch_batch_obs(&agents, &provider, &call).await;
+        assert!(started.elapsed() < Duration::from_millis(100), "{out}");
+        assert!(out.contains("parallel sub-agent wave (2/2 completed)"));
+        assert!(out.contains("first result"), "{out}");
+        assert!(out.contains("second result"), "{out}");
     }
 
     #[tokio::test]

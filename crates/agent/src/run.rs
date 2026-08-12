@@ -2,14 +2,15 @@
 use crate::{save_session, session_path};
 use agent::scripted;
 use agent::{
-    agent_run_config, auto_signal_from_run, build_agent, build_llm_agent_full, default_tool,
-    expand_mentions, extract_signals_from_run, halt_reason, load_signal_block, null_token_bus,
-    render_todos, signal_extract_enabled, write_run, AgentState, AutoApprove, Color, McpTools,
-    RichOutput, Skill, Todo, TokenBus,
+    active_run_dir_for, agent_run_config, auto_signal_from_run, build_agent, build_llm_agent_full,
+    completion_blocked, default_tool, expand_mentions, extract_signals_from_run, halt_reason,
+    invoke_durable, load_signal_block, null_token_bus, render_todos, signal_extract_enabled,
+    write_run, AgentState, AutoApprove, Color, McpTools, RichOutput, Skill, Todo, TokenBus,
 };
 use langgraph::{CompiledGraph, StreamEvent};
 use provider::{LlmProvider, Message};
 use std::io::{IsTerminal, Write};
+use std::path::Path;
 use std::sync::Arc;
 
 /// 一次性任务:一律放行,跑完写 run 留痕 + 打印结果。
@@ -25,7 +26,11 @@ pub(crate) async fn run_once(
     agents: Arc<agent::Agents>,
     read_only: bool,
     every: Option<std::time::Duration>,
+    goal_path: Option<&Path>,
 ) -> anyhow::Result<()> {
+    if let Some(path) = goal_path {
+        begin_goal(path)?;
+    }
     let bus = null_token_bus();
     // opt-in 自动 signal 抽取器:建 app 前留一把 provider(Arc 克隆廉价),供 run 收尾提炼复利信号。
     let extractor = signal_extract_enabled().then(|| provider.clone());
@@ -52,21 +57,95 @@ pub(crate) async fn run_once(
         match run_streamed(&app, state, &bus).await {
             Ok(out) => {
                 let source = trace_and_report(&out);
+                finish_goal(goal_path, &out)?;
                 agent::fire_session_hooks("stop", &format!("steps={}", out.steps)); // iter-40
                 maybe_extract_signals(extractor.as_ref(), &out, &source).await;
+                if goal_path.is_some() {
+                    return Ok(());
+                }
             }
             // 触发器(常驻)模式下单轮出错不该掀翻整个循环;一次性模式仍向上抛(非零退出)。
             Err(e) if every.is_some() => {
+                block_goal(goal_path, &e.to_string())?;
                 agent::fire_session_hooks("stop", "error");
                 eprintln!("[ridgecode] error this round: {e}");
+                if goal_path.is_some() {
+                    return Ok(());
+                }
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                block_goal(goal_path, &e.to_string())?;
+                return Err(e);
+            }
         }
         match every {
             Some(dur) => tokio::time::sleep(dur).await,
             None => return Ok(()),
         }
     }
+}
+
+fn begin_goal(path: &Path) -> anyhow::Result<()> {
+    let goal = agent::load_goal(path)?;
+    if goal.status != agent::GoalStatus::Active {
+        return Err(anyhow::anyhow!(
+            "goal is {}; run `ridgecode goal resume` before goal run",
+            goal.status.as_str()
+        ));
+    }
+    if goal.running && agent::durable_run_is_live(&goal.title) {
+        return Err(anyhow::anyhow!(
+            "goal is already running; wait for its heartbeat to stop or recover the stale run"
+        ));
+    }
+    agent::update_goal(path, |goal| {
+        if !goal.running {
+            goal.start()?;
+        }
+        goal.advance("running", "agent run started", Some("execute and verify"))
+    })?;
+    Ok(())
+}
+
+fn finish_goal(path: Option<&Path>, out: &AgentState) -> anyhow::Result<()> {
+    let Some(path) = path else { return Ok(()) };
+    if out.approved && !completion_blocked(out) {
+        agent::update_goal(path, |goal| {
+            goal.complete(&format!(
+                "approved: steps={} tokens={} modified_files={}",
+                out.steps,
+                out.total_tokens,
+                out.modified_files.len()
+            ))
+        })?;
+    } else {
+        let reason = if out.approved {
+            format!(
+                "completion blocked: {} after {} steps",
+                if out.pending_call.is_some() {
+                    "pending tool call"
+                } else {
+                    "unfinished todo"
+                },
+                out.steps
+            )
+        } else {
+            format!("{} after {} steps", halt_reason(out).as_str(), out.steps)
+        };
+        block_goal(Some(path), &reason)?;
+    }
+    Ok(())
+}
+
+fn block_goal(path: Option<&Path>, reason: &str) -> anyhow::Result<()> {
+    let Some(path) = path else { return Ok(()) };
+    let goal = agent::load_goal(path)?;
+    if goal.status == agent::GoalStatus::Active {
+        agent::update_goal(path, |goal| {
+            goal.block(reason, Some("ridgecode goal resume && ridgecode goal run"))
+        })?;
+    }
+    Ok(())
 }
 
 /// 非 TTY(管道/CI/重定向):无 TUI、无斜杠命令。逐行读 stdin,每行当一个任务串行跑,跨行携带 history。
@@ -273,13 +352,22 @@ pub(crate) async fn run_streamed(
         }
     });
 
-    let out = app
-        .invoke_with(state, &agent_run_config(), None, Some(&tx))
-        .await?;
+    let result = invoke_durable(app, state, &agent_run_config(), Some(&tx)).await;
     drop(tx);
     *token_bus.lock().unwrap() = None; // 关闭 token 通道 → printer 收尾
     let _ = printer.await;
-    Ok(out)
+    match result {
+        Ok(out) => {
+            let status = if out.approved && !agent::completion_blocked(&out) {
+                "completed"
+            } else {
+                "stopped"
+            };
+            let _ = agent::write_run_progress(&out, active_run_dir_for(&out.task), status);
+            Ok(out)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// spinner 旁边显示的当前阶段。
@@ -345,7 +433,7 @@ pub(crate) async fn run_demo() -> anyhow::Result<()> {
 }
 
 pub(crate) fn print_report(out: &AgentState) {
-    let status = if out.approved {
+    let status = if out.approved && !agent::completion_blocked(out) {
         RichOutput::new()
             .with_color(Color::Green)
             .bold()
@@ -365,8 +453,15 @@ pub(crate) fn print_report(out: &AgentState) {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_event, node_label, print_report, run_artifacts_dir, run_demo, truncate};
-    use agent::AgentState;
+    use super::{
+        begin_goal, finish_goal, format_event, node_label, print_report, run_artifacts_dir,
+        run_demo, truncate,
+    };
+    use agent::{
+        create_goal, load_durable_checkpoint, update_goal, AgentState, DurableCheckpointer,
+        GoalStatus, Todo,
+    };
+    use langgraph::{Checkpoint, Checkpointer};
 
     #[test]
     fn format_event_colorizes_by_kind() {
@@ -407,5 +502,116 @@ mod tests {
     fn report_path_exposes_unapproved_status() {
         let out = AgentState::new("needs verification");
         print_report(&out);
+    }
+
+    #[test]
+    fn durable_checkpoint_round_trips_and_rejects_other_task() {
+        let dir = std::env::temp_dir().join("ridge_latest_checkpoint_test_1");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("checkpoint.json");
+        let writer = DurableCheckpointer::new(dir.clone());
+        let checkpoint = Checkpoint {
+            step: 7,
+            frontier: vec!["reason".to_string()],
+            state: AgentState::new("resume me"),
+        };
+        writer.save(checkpoint.clone());
+        let loaded = load_durable_checkpoint(&dir, "resume me").unwrap().unwrap();
+        assert_eq!(loaded.step, 7);
+        assert_eq!(loaded.frontier, vec!["reason"]);
+        assert!(load_durable_checkpoint(&dir, "different task")
+            .unwrap()
+            .is_none());
+        assert!(std::fs::metadata(&path).unwrap().len() > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn goal_run_lifecycle_blocks_then_resumes_and_completes() {
+        let path = std::env::temp_dir().join(format!(
+            "ridge_goal_run_lifecycle_{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        create_goal(&path, "ship durable iteration").unwrap();
+        let run_dir = agent::active_run_dir_for("ship durable iteration");
+        let _ = std::fs::remove_dir_all(&run_dir);
+
+        begin_goal(&path).unwrap();
+        let running = agent::load_goal(&path).unwrap();
+        assert_eq!(running.status, GoalStatus::Active);
+        assert!(running.running);
+        assert_eq!(running.phase, "running");
+        agent::write_run_progress(
+            &AgentState::new("ship durable iteration"),
+            &run_dir,
+            "running",
+        )
+        .unwrap();
+        assert!(begin_goal(&path).is_err(), "a live goal must not run twice");
+
+        finish_goal(Some(&path), &AgentState::new("not approved")).unwrap();
+        let blocked = agent::load_goal(&path).unwrap();
+        assert_eq!(blocked.status, GoalStatus::Blocked);
+        assert!(!blocked.running);
+        assert!(blocked.failure_reason.is_some());
+        assert!(blocked.next_step.is_some());
+
+        agent::write_run_progress(
+            &AgentState::new("ship durable iteration"),
+            &run_dir,
+            "interrupted",
+        )
+        .unwrap();
+        update_goal(&path, |goal| goal.resume()).unwrap();
+        begin_goal(&path).unwrap();
+        finish_goal(
+            Some(&path),
+            &AgentState {
+                approved: true,
+                ..AgentState::new("approved")
+            },
+        )
+        .unwrap();
+        let completed = agent::load_goal(&path).unwrap();
+        assert_eq!(completed.status, GoalStatus::Completed);
+        assert!(!completed.running);
+        assert_eq!(completed.phase, "completed");
+        assert!(completed
+            .evidence
+            .iter()
+            .any(|item| item.contains("approved")));
+        let _ = std::fs::remove_dir_all(run_dir);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn goal_run_lifecycle_does_not_complete_with_live_todo() {
+        let path = std::env::temp_dir().join(format!(
+            "ridge_goal_run_incomplete_{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        create_goal(&path, "ship incomplete work").unwrap();
+        begin_goal(&path).unwrap();
+        finish_goal(
+            Some(&path),
+            &AgentState {
+                approved: true,
+                todos: vec![Todo {
+                    content: "still pending".into(),
+                    status: "in_progress".into(),
+                }],
+                ..AgentState::new("ship incomplete work")
+            },
+        )
+        .unwrap();
+        let blocked = agent::load_goal(&path).unwrap();
+        assert_eq!(blocked.status, GoalStatus::Blocked);
+        assert!(blocked
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("unfinished todo")));
+        let _ = std::fs::remove_file(&path);
     }
 }

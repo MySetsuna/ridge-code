@@ -20,9 +20,9 @@ use ratatui::{
 };
 
 use agent::{
-    agent_run_config, build_llm_agent_full, est_tokens, expand_mentions, halt_reason,
-    null_token_bus, preset_by_id, AgentState, Approver, AutoApprove, HaltReason, McpTools, Skill,
-    TokenBus,
+    active_run_dir_for, agent_run_config, build_llm_agent_full, est_tokens, expand_mentions,
+    halt_reason, invoke_durable, mark_durable_cancelled, null_token_bus, preset_by_id, AgentState,
+    Approver, AutoApprove, HaltReason, McpTools, Skill, TokenBus,
 };
 use langgraph::StreamEvent;
 use provider::Message;
@@ -266,6 +266,7 @@ struct KeyEventContext<'a> {
     pending: &'a mut Option<ApprovalRequest>,
     task: &'a mut Option<tokio::task::JoinHandle<()>>,
     task_started: &'a mut Option<Instant>,
+    last_task: &'a Option<String>,
     retry_count: &'a mut usize,
     pending_submit: &'a mut Option<String>,
     momentary_hold: &'a mut bool,
@@ -323,32 +324,29 @@ async fn handle_key_event(
 
 fn handle_mouse_event(mouse: crossterm::event::MouseEvent, context: &mut KeyEventContext<'_>) {
     match mouse_action(&mouse) {
-        MouseAction::Scroll(delta) => {
-            if let Some(panel) = context.ui.panel.as_mut() {
-                if panel.detail_open {
-                    let _ = panel.scroll_detail(if delta > 0 { -1 } else { 1 });
-                } else if delta > 0 {
-                    panel.move_up();
-                } else {
-                    panel.move_down();
-                }
-                context.ui.sync_live_panel_focus();
-            } else {
-                let _ = context.ui.scroll_live(delta);
-            }
-        }
+        MouseAction::Scroll(delta) => handle_mouse_scroll(delta, context),
         MouseAction::Select { column, row } => select_panel_row_at(context.ui, column, row),
-        MouseAction::Close => {
-            if context
-                .ui
-                .panel
-                .as_ref()
-                .is_some_and(|panel| panel.editing.is_none())
-            {
-                context.ui.panel = None;
-            }
-        }
+        MouseAction::Close => close_panel(context.ui),
         MouseAction::Ignore => {}
+    }
+}
+
+fn handle_mouse_scroll(delta: i8, context: &mut KeyEventContext<'_>) {
+    if let Some(panel) = context.ui.panel.as_mut() {
+        scroll_panel(panel, delta);
+        context.ui.sync_live_panel_focus();
+    } else {
+        let _ = context.ui.scroll_live(delta);
+    }
+}
+
+fn scroll_panel(panel: &mut Panel, delta: i8) {
+    if panel.detail_open {
+        let _ = panel.scroll_detail(if delta > 0 { -1 } else { 1 });
+    } else if delta > 0 {
+        panel.move_up();
+    } else {
+        panel.move_down();
     }
 }
 
@@ -429,6 +427,9 @@ fn interrupt_task(
     clear_activity: bool,
 ) {
     mark_takeover_requested(context.ui);
+    if let Some(task) = context.last_task {
+        let _ = mark_durable_cancelled(active_run_dir_for(task), "cancelled by user takeover");
+    }
     handle.abort();
     *context.bus.lock().unwrap() = None;
     context.ui.busy = false;
@@ -1268,6 +1269,7 @@ async fn run_event_step(context: EventStepContext<'_>) -> anyhow::Result<EventSt
                     pending,
                     task,
                     task_started,
+                    last_task,
                     retry_count,
                     pending_submit,
                     momentary_hold,
@@ -1678,11 +1680,7 @@ fn handle_superstep_event(
         .map(|started| started.elapsed().as_secs())
         .unwrap_or(0);
     let answer_tokens = context.ui.stream_tokens;
-    let messages = if state.display_messages.len() == state.messages.len() {
-        &state.display_messages
-    } else {
-        &state.messages
-    };
+    let messages = visible_stream_messages(&state);
     for message in messages.iter().skip(*context.printed) {
         present_stream_message(
             message,
@@ -1701,6 +1699,14 @@ fn handle_superstep_event(
     context.ui.commit_live_tools();
     context.ui.clear_streams();
     context.ui.busy = superstep_is_busy(active);
+}
+
+fn visible_stream_messages(state: &AgentState) -> &[String] {
+    if state.display_messages.len() == state.messages.len() {
+        &state.display_messages
+    } else {
+        &state.messages
+    }
 }
 
 fn superstep_activity(active_label: &str, pending_call: Option<&provider::ToolCall>) -> String {
@@ -1814,12 +1820,13 @@ fn handle_successful_run(output: AgentState, context: &mut DoneEventContext<'_>)
     *context.session_tokens += output.total_tokens;
     *context.session_turns += 1;
     context.ui.todos = output.todos.clone();
+    let complete = output.approved && !agent::completion_blocked(&output);
     let reason = halt_reason(&output);
     context.ui.mark_task_outcome_with_reason(
-        output.approved,
-        (!output.approved).then_some(halt_reason_display(reason)),
+        complete,
+        (!complete).then_some(halt_reason_display(reason)),
     );
-    let (status, color) = if output.approved {
+    let (status, color) = if complete {
         ("鉁?approved".to_string(), Color::Green)
     } else {
         (
@@ -2171,8 +2178,7 @@ pub(super) async fn run(
         let tokens = token_tx.clone();
         tokio::spawn(async move {
             *bus.lock().unwrap() = Some(tokens);
-            let result = app
-                .invoke_with(state, &agent_run_config(), None, Some(&tx))
+            let result = invoke_durable(&app, state, &agent_run_config(), Some(&tx))
                 .await
                 .map_err(|e| e.to_string());
             *bus.lock().unwrap() = None;

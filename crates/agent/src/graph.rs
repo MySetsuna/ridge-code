@@ -8,10 +8,14 @@ use crate::exec::{
     builtin_tool_specs, durable_updates, execute_tool_call, is_error_observation, parse_todos,
 };
 use crate::guard::{is_mutating_tool, read_only_block};
-use crate::knowledge::{dispatch_obs, dispatch_spec, Agents, Skill};
+use crate::knowledge::{
+    dispatch_batch_obs, dispatch_batch_spec, dispatch_obs, dispatch_spec, Agents, Skill,
+};
 use crate::mcp_tools::McpTools;
 use crate::observe::{fetch_url_obs, preview_call, web_search_obs};
-use crate::state::{needs_approval, AgentState, Approver, AutoApprove, Patch};
+use crate::state::{
+    needs_approval, AgentState, Approver, AutoApprove, Patch, MAX_DISPATCH_BATCHES,
+};
 use langgraph::{CompiledGraph, GraphError, StateGraph};
 use provider::{CompletionRequest, LlmProvider, Message, Role, StreamChunk};
 use std::convert::Infallible;
@@ -235,6 +239,9 @@ fn build_tool_specs(mcp: &McpTools, agents: &Agents, read_only: bool) -> Vec<pro
     if let Some(dispatch) = dispatch_spec(agents) {
         specs.push(dispatch);
     }
+    if let Some(dispatch) = dispatch_batch_spec(agents) {
+        specs.push(dispatch);
+    }
     if !read_only {
         specs.extend(mcp.specs.clone());
     }
@@ -253,11 +260,12 @@ fn add_reason_node(
         let provider = provider.clone();
         let system = system.clone();
         let force_action = state.explore_handoff && !state.explore_action_used;
-        let tools = if force_action {
+        let candidate_tools = if force_action {
             handoff_tool_specs(&specs)
         } else {
             specs.clone()
         };
+        let tools = available_tool_specs(&candidate_tools, &state);
         let bus = token_bus.clone();
         async move {
             let mut messages = to_messages(&system, &state);
@@ -313,6 +321,20 @@ fn handoff_tool_specs(specs: &[provider::ToolSpec]) -> Vec<provider::ToolSpec> {
         .collect()
 }
 
+fn available_tool_specs(
+    specs: &[provider::ToolSpec],
+    state: &AgentState,
+) -> Vec<provider::ToolSpec> {
+    specs
+        .iter()
+        .filter(|spec| {
+            !(state.dispatch_wave_count() >= MAX_DISPATCH_BATCHES && spec.name == "dispatch_agents")
+                && !(state.codegraph_unavailable && spec.name.starts_with("codegraph__"))
+        })
+        .cloned()
+        .collect()
+}
+
 fn reason_patch(
     state: &AgentState,
     text: String,
@@ -361,7 +383,17 @@ fn add_act_node(graph: &mut StateGraph<AgentState>, context: ActContext) {
         async move {
             let patch = match state.pending_call.as_ref() {
                 Some(call) => {
-                    let observation = if state.explore_handoff && is_explore_tool(&call.name) {
+                    let observation = if state.dispatch_wave_count() >= MAX_DISPATCH_BATCHES
+                        && call.name == "dispatch_agents"
+                    {
+                        format!(
+                            "BLOCKED (dispatch budget): {}/{} dispatch waves used; continue the main task without another batch",
+                            state.dispatch_wave_count(), MAX_DISPATCH_BATCHES
+                        )
+                    } else if state.codegraph_unavailable && call.name.starts_with("codegraph__") {
+                        "BLOCKED (codegraph unavailable): use built-in read_file/search or act; do not retry CodeGraph"
+                            .to_string()
+                    } else if state.explore_handoff && is_explore_tool(&call.name) {
                         format!(
                             "BLOCKED (explore handoff): {} is read-only; choose an edit or verification action",
                             call.name
@@ -387,6 +419,9 @@ async fn execute_pending_call(call: &provider::ToolCall, context: &ActContext) -
     }
     if call.name == "dispatch_agent" {
         return dispatch_obs(&context.agents, &context.main_provider, call).await;
+    }
+    if call.name == "dispatch_agents" {
+        return dispatch_batch_obs(&context.agents, &context.main_provider, call).await;
     }
     if call.name == "web_search" {
         return web_search_obs(context.fetch.as_ref(), &context.net, call).await;
@@ -426,7 +461,8 @@ fn act_patch(state: &AgentState, call: &provider::ToolCall, observation: String)
         Patch::PendingCall(None),
     ];
     if state.explore_handoff {
-        patches.push(Patch::SetExploreActionUsed(true));
+        let action_used = !is_explore_tool(&call.name) && !is_error_observation(&observation);
+        patches.push(Patch::SetExploreActionUsed(action_used));
     }
     if state.explore_handoff && is_land_edit_tool(&call.name) && !is_error_observation(&observation)
     {
@@ -436,8 +472,27 @@ fn act_patch(state: &AgentState, call: &provider::ToolCall, observation: String)
     if call.name == "todo_write" {
         patches.push(Patch::SetTodos(parse_todos(call)));
     }
+    if call.name == "dispatch_agents" {
+        patches.push(Patch::SetDispatchBatches(
+            state
+                .dispatch_wave_count()
+                .saturating_add(1)
+                .min(MAX_DISPATCH_BATCHES),
+        ));
+    }
+    if call.name.starts_with("codegraph__") && codegraph_unavailable(&observation) {
+        patches.push(Patch::SetCodegraphUnavailable(true));
+    }
     patches.extend(durable_updates(call, &observation));
     Patch::Batch(patches)
+}
+
+fn codegraph_unavailable(observation: &str) -> bool {
+    let lower = observation.to_ascii_lowercase();
+    lower.contains("isn't indexed with codegraph")
+        || lower.contains("no .codegraph")
+        || lower.contains("codegraph cannot query")
+        || lower.contains("codegraph-mcp unavailable")
 }
 
 fn next_explore_streak(state: &AgentState, call: &provider::ToolCall, observation: &str) -> usize {
@@ -554,13 +609,13 @@ mod tests {
     use super::{call_mcp_with_timeout, halt_reason, is_error_observation, verify_route_llm};
     use crate::{
         build_agent, build_llm_agent, build_llm_agent_reviewed, build_llm_agent_with, default_tool,
-        resolve_mcp, scripted, AgentState, Brain, HaltReason, McpTools, Tool, MAX_EXPLORE,
-        MAX_STEPS,
+        resolve_mcp, scripted, AgentState, Brain, HaltReason, McpTools, Tool, MAX_DISPATCH_BATCHES,
+        MAX_EXPLORE, MAX_STEPS,
     };
     use langgraph::GraphState;
     use langgraph::RunConfig;
     use mcp::McpClient;
-    use provider::ToolCall;
+    use provider::{ToolCall, ToolSpec};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -580,6 +635,107 @@ mod tests {
         assert!(state.display_messages[0].contains("HEAD_MARK"));
         assert!(state.display_messages[0].contains("middle line\nmiddle line\nmiddle line"));
         assert!(state.display_messages[0].contains("TAIL_MARK"));
+    }
+
+    #[test]
+    fn explore_handoff_does_not_count_blocked_read_as_action() {
+        let call = ToolCall {
+            id: "blocked-read".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({"path": "src/lib.rs"}),
+        };
+        let mut state = AgentState::new("make a change");
+        state.explore_handoff = true;
+        state.explore_streak = MAX_EXPLORE;
+        state.apply(super::act_patch(
+            &state,
+            &call,
+            "BLOCKED (explore handoff): read_file is read-only; choose an edit or verification action"
+                .into(),
+        ));
+
+        assert!(state.explore_handoff);
+        assert!(!state.explore_action_used);
+    }
+
+    #[test]
+    fn explore_handoff_counts_successful_action_and_edit_clears_guard() {
+        let verify_call = ToolCall {
+            id: "verify".into(),
+            name: "run_shell".into(),
+            arguments: serde_json::json!({"cmd": "cargo test"}),
+        };
+        let mut verified = AgentState::new("verify");
+        verified.explore_handoff = true;
+        verified.apply(super::act_patch(
+            &verified,
+            &verify_call,
+            "exit 0: ok".into(),
+        ));
+        assert!(verified.explore_handoff);
+        assert!(verified.explore_action_used);
+
+        let edit_call = ToolCall {
+            id: "edit".into(),
+            name: "edit_file".into(),
+            arguments: serde_json::json!({}),
+        };
+        let mut edited = AgentState::new("edit");
+        edited.explore_handoff = true;
+        edited.apply(super::act_patch(
+            &edited,
+            &edit_call,
+            "edited 1 file".into(),
+        ));
+        assert!(!edited.explore_handoff);
+        assert!(!edited.explore_action_used);
+    }
+
+    #[test]
+    fn dispatch_batches_allow_multiple_waves_until_runtime_budget() {
+        let specs = vec![
+            ToolSpec {
+                name: "dispatch_agents".into(),
+                description: "batch".into(),
+                schema: serde_json::json!({}),
+            },
+            ToolSpec {
+                name: "read_file".into(),
+                description: "read".into(),
+                schema: serde_json::json!({}),
+            },
+        ];
+        let mut state = AgentState::new("inspect");
+        assert_eq!(super::available_tool_specs(&specs, &state).len(), 2);
+        state.dispatch_batches_used = 1;
+        assert_eq!(super::available_tool_specs(&specs, &state).len(), 2);
+        state.dispatch_batches_used = MAX_DISPATCH_BATCHES;
+        let available = super::available_tool_specs(&specs, &state);
+        assert_eq!(available.len(), 1);
+        assert_eq!(available[0].name, "read_file");
+    }
+
+    #[test]
+    fn dispatch_batch_attempt_consumes_one_wave_even_on_failure() {
+        let call = ToolCall {
+            id: "batch-1".into(),
+            name: "dispatch_agents".into(),
+            arguments: serde_json::json!({"tasks": []}),
+        };
+        let mut state = AgentState::new("inspect");
+        state.apply(super::act_patch(
+            &state,
+            &call,
+            "dispatch_agents requires 2-3 tasks, got 0".into(),
+        ));
+        assert_eq!(state.dispatch_wave_count(), 1);
+        state.dispatch_batches_used = MAX_DISPATCH_BATCHES;
+        state.apply(super::act_patch(
+            &state,
+            &call,
+            "BLOCKED (dispatch budget): 8/8 dispatch waves used".into(),
+        ));
+        assert_eq!(state.dispatch_wave_count(), MAX_DISPATCH_BATCHES);
     }
 
     #[tokio::test]

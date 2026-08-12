@@ -61,6 +61,7 @@ fn handle_meta_flags() -> bool {
              ridgecode \"task\"               one-shot task\n  \
              ridgecode --resume             resume the last session (continue after kill-9 / reopen)\n\n\
              ridgecode goal ...             persist and advance one long-running goal\n  \
+             ridgecode goal run             execute the active goal with durable recovery\n  \
              ridgecode a2a serve            serve a bounded agent peer over stdio JSON-RPC\n  \
              ridgecode a2a call ...         spawn a peer and complete one A2A task\n  \
              ridgecode a2a smoke             no-key cross-process A2A smoke\n  \
@@ -193,6 +194,7 @@ async fn run_cli() -> anyhow::Result<()> {
                 read_only,
                 every,
                 using_oauth,
+                goal_path: None,
             })
             .await
         }
@@ -218,6 +220,9 @@ async fn handle_special_command(raw: &[String]) -> Option<anyhow::Result<()>> {
             apply_config_proxy(&load_config());
             Some(run_login(&raw[1..]).await)
         }
+        "goal" if raw.get(1).map(String::as_str) == Some("run") => {
+            Some(run_goal_command(&raw[2..]).await)
+        }
         "goal" => Some(match agent::goal_command(&raw[1..]) {
             Ok(text) => {
                 println!("{text}");
@@ -228,6 +233,39 @@ async fn handle_special_command(raw: &[String]) -> Option<anyhow::Result<()>> {
         "a2a" => Some(run_a2a_command(&raw[1..]).await),
         _ => None,
     }
+}
+
+async fn run_goal_command(args: &[String]) -> anyhow::Result<()> {
+    if !args.is_empty() {
+        return Err(anyhow::anyhow!(
+            "goal run takes no arguments; use `ridgecode goal resume` after a blocked run"
+        ));
+    }
+    init_tracing();
+    let goal_path = agent::goal_path();
+    let goal = agent::load_goal(&goal_path)?;
+    let cfg = load_config();
+    apply_config_proxy(&cfg);
+    let auth = load_auth();
+    let effort = resolve_reasoning_effort(&cfg);
+    let configured_provider = real_provider(&cfg, &auth);
+    let using_oauth = configured_provider.is_none();
+    let provider = configured_provider
+        .or(resolve_claude_oauth_provider(&cfg, &effort).await)
+        .ok_or_else(|| anyhow::anyhow!("goal run requires a configured provider/API key"))?;
+    run_with_provider(ProviderRun {
+        cfg: &cfg,
+        auth: &auth,
+        provider,
+        task: Some(goal.title),
+        cli_skip_danger: cfg.skip_danger.unwrap_or(false),
+        resume: true,
+        read_only: false,
+        every: None,
+        using_oauth,
+        goal_path: Some(goal_path),
+    })
+    .await
 }
 
 async fn run_a2a_command(args: &[String]) -> anyhow::Result<()> {
@@ -426,12 +464,14 @@ async fn handle_a2a_task(
         incoming.from,
         incoming.correlation_id,
         AgentResponse {
-            status: if outcome.approved {
+            status: if agent::completion_blocked(&outcome) {
+                AgentStatus::Failed
+            } else if outcome.approved {
                 AgentStatus::Done
             } else {
                 AgentStatus::Failed
             },
-            approved: outcome.approved,
+            approved: outcome.approved && !agent::completion_blocked(&outcome),
             steps: outcome.steps,
             tokens: outcome.total_tokens,
             summary,
@@ -570,6 +610,7 @@ struct ProviderRun<'a> {
     read_only: bool,
     every: Option<std::time::Duration>,
     using_oauth: bool,
+    goal_path: Option<std::path::PathBuf>,
 }
 
 async fn run_with_provider(run: ProviderRun<'_>) -> anyhow::Result<()> {
@@ -583,6 +624,7 @@ async fn run_with_provider(run: ProviderRun<'_>) -> anyhow::Result<()> {
         read_only,
         every,
         using_oauth,
+        goal_path,
     } = run;
     let mcp = resolve_configured_mcp(cfg).await;
     let skills = load_configured_skills(cfg);
@@ -592,7 +634,15 @@ async fn run_with_provider(run: ProviderRun<'_>) -> anyhow::Result<()> {
     match task {
         Some(task) => {
             run_once(
-                provider, mcp, skills, &task, budget, agents, read_only, every,
+                provider,
+                mcp,
+                skills,
+                &task,
+                budget,
+                agents,
+                read_only,
+                every,
+                goal_path.as_deref(),
             )
             .await
         }

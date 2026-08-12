@@ -27,6 +27,8 @@ pub(crate) const BASE_SYSTEM: &str =
      otherwise report the supported answer. If a search/read adds no new fact, do not repeat it; \
      switch to the smallest next action or report the concrete blocker. Do not use a no-op tool call \
      merely to reset exploration counters. \
+     Completion contract: before claiming done, complete every todo item. Any pending/in_progress todo \
+     or pending tool call blocks the success gate. \
      Reply concisely: no filler or restating the task; when changing code, emit only the minimal \
      edit (unique-match replace / diff), not a full-file rewrite. When done, stop.";
 
@@ -115,7 +117,7 @@ pub(crate) fn explore_needs_handoff(s: &AgentState) -> bool {
 pub(crate) fn is_explore_tool(name: &str) -> bool {
     matches!(
         name,
-        "read_file" | "search" | "web_search" | "fetch_url" | "dispatch_agent"
+        "read_file" | "search" | "web_search" | "fetch_url" | "dispatch_agent" | "dispatch_agents"
     ) || name.starts_with("codegraph__")
 }
 
@@ -150,7 +152,7 @@ pub fn tool_output_failed(o: &str) -> bool {
 ///
 /// 编码任务仍严格卡 `exit 0`;只对「模型自己收尾且无客观失败」放行,兼顾通用性与 maker≠checker。
 pub(crate) fn verify_ok(s: &AgentState) -> bool {
-    if s.explore_handoff && !s.explore_action_used {
+    if completion_blocked(s) || (s.explore_handoff && !s.explore_action_used) {
         return false;
     }
     let out = s.tool_output.as_deref();
@@ -158,11 +160,22 @@ pub(crate) fn verify_ok(s: &AgentState) -> bool {
         || (s.last_action.as_deref() == Some("finish") && !out.is_some_and(tool_output_failed))
 }
 
+/// A run may only enter the successful terminal state after all durable work
+/// is settled. This is intentionally independent of model prose: a final
+/// answer while a todo or tool call remains live is an interrupted run.
+pub fn completion_blocked(s: &AgentState) -> bool {
+    s.pending_call.is_some() || s.todos.iter().any(|todo| todo.status.trim() != "completed")
+}
+
 /// Deterministic reason shown when the checker rejects a turn. Keep this
 /// derived from the same signals as [`verify_ok`] instead of trusting model
 /// prose, so users can distinguish a tool failure from an unverified finish.
 pub(crate) fn verify_failure_reason(s: &AgentState) -> &'static str {
-    if s.tool_output.as_deref().is_some_and(tool_output_failed) {
+    if s.pending_call.is_some() {
+        "pending tool call"
+    } else if s.todos.iter().any(|todo| todo.status.trim() != "completed") {
+        "unfinished todo"
+    } else if s.tool_output.as_deref().is_some_and(tool_output_failed) {
         "tool output failed"
     } else if s.last_action.as_deref() == Some("finish") {
         "finish lacked deterministic success signal"
@@ -174,11 +187,12 @@ pub(crate) fn verify_failure_reason(s: &AgentState) -> &'static str {
 /// 多层独立退出:到回合上限 / 超预算 / 无进展 / 侦察耗尽 / 熔断任一命中,循环都该停(loop engineering:停机是设计的一半)。
 /// 全是 O(1) 字段判定;上下文腐烂(需算压缩)不进此热路径,只在终态 [`halt_reason`] 里作诊断重标签。
 pub(crate) fn must_stop(s: &AgentState) -> bool {
-    s.steps >= MAX_STEPS
-        || over_budget(s)
-        || stalled(s)
-        || explore_exhausted(s)
-        || circuit_broken(s)
+    hard_stop(s) || explore_exhausted(s)
+}
+
+/// 停机硬闸；探索交接可暂时覆盖 `explore_exhausted`，但不能绕过这些上限。
+fn hard_stop(s: &AgentState) -> bool {
+    s.steps >= MAX_STEPS || over_budget(s) || stalled(s) || circuit_broken(s)
 }
 
 pub(crate) fn explore_handoff_patch(s: &AgentState) -> Patch {
@@ -197,8 +211,14 @@ pub(crate) fn reason_route(s: &AgentState) -> Vec<String> {
     if s.explore_handoff {
         return if s.pending_call.is_some() && !s.explore_action_used {
             vec!["act".to_string()]
-        } else {
+        } else if s.explore_action_used
+            || hard_stop(s)
+            || s.last_action.as_deref() == Some("finish")
+        {
             vec!["verify".to_string()]
+        } else {
+            // 交接节点只写控制事实；必须再跑一次 reason，让模型真正选择编辑、验证或明确阻塞。
+            vec!["reason".to_string()]
         };
     }
     if explore_needs_handoff(s) {
@@ -214,8 +234,12 @@ pub(crate) fn reason_route(s: &AgentState) -> Vec<String> {
 }
 
 pub(crate) fn act_route(s: &AgentState) -> Vec<String> {
-    if s.explore_handoff && s.explore_action_used {
-        vec!["verify".to_string()]
+    if s.explore_handoff {
+        if s.explore_action_used {
+            vec!["verify".to_string()]
+        } else {
+            vec!["reason".to_string()]
+        }
     } else if explore_needs_handoff(s) {
         vec!["explore_handoff".to_string()]
     } else {
@@ -226,7 +250,18 @@ pub(crate) fn act_route(s: &AgentState) -> Vec<String> {
 /// verify 之后的路由(**scripted 路径**):通过或需停机 → END,否则回 reason。
 /// (scripted 图无 `wrapup` 节点、大脑也不会写自然语言总结,故直接 END。)
 pub(crate) fn verify_route(s: &AgentState) -> Vec<String> {
-    if s.approved || (s.explore_handoff && s.explore_action_used) || must_stop(s) {
+    if must_stop(s) {
+        vec![END.to_string()]
+    } else if s.pending_call.is_some() {
+        vec!["act".to_string()]
+    } else if completion_blocked(s) {
+        vec!["reason".to_string()]
+    } else if s.approved
+        || (s.explore_handoff && s.explore_action_used)
+        || (s.explore_handoff
+            && !s.explore_action_used
+            && s.last_action.as_deref() == Some("finish"))
+    {
         vec![END.to_string()]
     } else {
         vec!["reason".to_string()]
@@ -243,10 +278,15 @@ pub(crate) fn verify_route(s: &AgentState) -> Vec<String> {
 /// 白烧 token 空转收尾。收 wrapup:出一段诚实交接后隐式 END,不成环、不伪装成功。
 /// (下面 `reason` 分支在真实图中不可达 —— verify 前必为 finish/must_stop —— 保留仅为函数完备与防御。)
 pub(crate) fn verify_route_llm(s: &AgentState) -> Vec<String> {
-    if s.approved {
+    if must_stop(s) {
+        vec!["wrapup".to_string()]
+    } else if s.pending_call.is_some() {
+        vec!["act".to_string()]
+    } else if completion_blocked(s) {
+        vec!["reason".to_string()]
+    } else if s.approved {
         vec![END.to_string()]
     } else if (s.explore_handoff && s.explore_action_used)
-        || must_stop(s)
         || s.last_action.as_deref() == Some("finish")
     {
         vec!["wrapup".to_string()]
@@ -374,11 +414,12 @@ pub(crate) async fn verify_node(s: AgentState) -> Result<Patch, Infallible> {
 #[cfg(test)]
 mod tests {
     use super::{
-        act_route, build_system_prompt, build_system_prompt_with_mode, explore_exhausted,
-        explore_handoff_patch, is_explore_tool, is_land_edit_tool, must_stop, reason_route,
-        tool_output_failed, verify_failure_reason, verify_node, AgentState, BASE_SYSTEM,
+        act_route, build_system_prompt, build_system_prompt_with_mode, completion_blocked,
+        explore_exhausted, explore_handoff_patch, is_explore_tool, is_land_edit_tool, must_stop,
+        reason_route, tool_output_failed, verify_failure_reason, verify_node, verify_route,
+        verify_route_llm, AgentState, BASE_SYSTEM,
     };
-    use crate::state::MAX_EXPLORE;
+    use crate::state::{Todo, MAX_EXPLORE};
     use langgraph::GraphState;
 
     /// 输出端省钱:BASE_SYSTEM 含 Lean-output 约束(简洁作答 + 只出最小编辑)。
@@ -475,6 +516,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn completion_gate_rejects_live_todos_and_pending_calls() {
+        let unfinished = AgentState {
+            last_action: Some("finish".into()),
+            todos: vec![Todo {
+                content: "write the report".into(),
+                status: "in_progress".into(),
+            }],
+            ..Default::default()
+        };
+        assert!(completion_blocked(&unfinished));
+        assert!(!super::verify_ok(&unfinished));
+        assert_eq!(verify_failure_reason(&unfinished), "unfinished todo");
+
+        let pending_call = AgentState {
+            last_action: Some("finish".into()),
+            pending_call: Some(provider::ToolCall {
+                id: "call-1".into(),
+                name: "run_shell".into(),
+                arguments: serde_json::json!({"command": "cargo test"}),
+            }),
+            ..Default::default()
+        };
+        assert!(completion_blocked(&pending_call));
+        assert!(!super::verify_ok(&pending_call));
+        assert_eq!(verify_failure_reason(&pending_call), "pending tool call");
+    }
+
+    #[test]
+    fn rejected_completion_routes_back_to_live_work() {
+        let todo = AgentState {
+            last_action: Some("finish".into()),
+            todos: vec![Todo {
+                content: "finish tests".into(),
+                status: "pending".into(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(verify_route(&todo), vec!["reason"]);
+        assert_eq!(verify_route_llm(&todo), vec!["reason"]);
+
+        let call = AgentState {
+            pending_call: Some(provider::ToolCall {
+                id: "call-2".into(),
+                name: "run_shell".into(),
+                arguments: serde_json::json!({"command": "cargo test"}),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(verify_route(&call), vec!["act"]);
+        assert_eq!(verify_route_llm(&call), vec!["act"]);
+    }
+
     #[tokio::test]
     async fn verify_failure_message_exposes_reason() {
         use langgraph::GraphState;
@@ -545,13 +639,18 @@ mod tests {
         handed.apply(explore_handoff_patch(&state));
         assert!(handed.explore_handoff);
         assert!(!handed.explore_action_used);
-        assert_eq!(reason_route(&handed), vec!["verify"]);
+        assert_eq!(reason_route(&handed), vec!["reason"]);
         handed.pending_call = Some(provider::ToolCall {
             id: "handoff".into(),
             name: "edit_file".into(),
             arguments: serde_json::json!({}),
         });
         assert_eq!(reason_route(&handed), vec!["act"]);
+        handed.pending_call = None;
+        handed.last_action = Some("tool".into());
+        assert_eq!(reason_route(&handed), vec!["reason"]);
+        handed.last_action = Some("finish".into());
+        assert_eq!(reason_route(&handed), vec!["verify"]);
         handed.explore_action_used = true;
         assert_eq!(act_route(&handed), vec!["verify"]);
     }

@@ -106,6 +106,16 @@
 - Boundary:`保留现有 langgraph BSP 语义、权限门、危险命令拦截、maker/checker、确定性 verify、MCP/provider/A2A 协议语义、安全边界、只读子 agent 约束、输入排队/取消语义、TUI Inline viewport 与终端主题；修复须兼容没有鼠标/VT 能力的终端并提供安全回退，不打印密钥、cookie 或原始敏感会话。goal 数据仍位于 cwd 下 `.ridge/goal.json`，写入须原子且有界；历史提交不得丢失、重复或被后续帧覆盖。`
 - Acceptance:`新增 agent 阶段转移、重复探索、无进展、写入触发、StepLimit/timeout/cancel 与诊断测试，证明探索预算、进展信号和写入路径均有界且无重复读文件死循环；新增按原始字节/事件构造的 Backspace(0x08/0x7f)、Enter(0x0a/0x0d/CSI/VT)、功能键、鼠标序列和 release/press 过滤测试，并完成可复现 Windows/PTY smoke；新增 `/goal '需求'`、带空白/引号、空参数、重复执行、持久化 round-trip 测试；新增 scrollback/Live 回归，证明提交历史进入 `insert_before` 原生 scrollback，后续刷新不覆盖/重复历史，Live 仅承载当前帧且历史可滚动回溯；通过 cargo fmt --all --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked、git diff --check，并运行现有 Sonar quality gate（如其入口已配置）。`
 - Traceability:`PENDING-REQ-20260812-AGENT-TUI-FIX-01 → agent phase/stall/progress symbols、TUI raw input/event normalization、goal command parser/route、scrollback commit boundary → 单元/PTY/终端回归测试 → workspace quality gates、无密钥 runtime smoke 与 Sonar 证据。
+
+### REQ-20260812-24H-AGENT-01 · 24 小时持续迭代驾驭闭环
+
+- Approval evidence:`批准`
+- Status:`ACTIVE`
+- Version:`v0.1.0`
+- Behavior:`RidgeCode 面向长达 24 小时的无人值守项目迭代，能从任务理解稳定进入计划、写入、验证与收敛；不得长期停留在思考/读文件阶段后退出。每轮必须有可观测阶段、心跳、进展事实、当前阻塞、下一动作与停止原因；写入失败、测试失败、provider/subagent 超时、进程重启、取消与上下文压缩后可恢复，不重复破坏性操作，不因单次失败丢失目标与已完成事实。任务完成须由确定性质量信号或明确阻塞收敛，不能只信模型自述。`
+- Boundary:`范围含 crates/agent 的运行状态/阶段路由、长任务循环、subagent/teammate 派发与取消/超时/重试、goal 持久化与恢复、durable state/进展信号、TUI/CLI 可观测性、相关单元/集成/PTY smoke 与本地长跑 harness；必要的 scripts 与文档。不升级 tag 或 Cargo 版本；不改变 langgraph BSP 语义、权限门、危险命令拦截、maker/checker、确定性 verify、MCP/provider/A2A 协议边界；不引入无界后台任务、静默无限重试、自动 push/release、密钥/cookie 上传或未经批准的第三方 SDK。`
+- Acceptance:`补充阶段转移/写入触发/重复探索/停滞/超时/取消/恢复/重启/上下文压缩/质量门测试；执行 bounded soak（至少覆盖多轮任务、provider/subagent 故障、进程重启与恢复）；通过 cargo fmt --all -- --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked、git diff --check；本机 release 包安装后以真实终端完成至少一项不同维度复杂写入任务，并保存脱敏证据。`
+- Traceability:`REQ → agent phase/route、dispatch/timeout/cancel、goal/signal/persistence、TUI activity/diagnostics → 单元/集成/PTY/soak tests → workspace quality gates → 本机 release smoke。`
 ## 修订账本 (Revision Ledger)
 
 关闭的 Pending、历史修订与审批证据写入 `docs/archive/events-YYYY-MM.jsonl`；本文件仅保留当前 Active 条款。

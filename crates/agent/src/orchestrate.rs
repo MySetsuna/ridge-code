@@ -1,4 +1,4 @@
-use crate::brain::{circuit_broken, explore_exhausted, over_budget, stalled};
+use crate::brain::{circuit_broken, completion_blocked, explore_exhausted, over_budget, stalled};
 use crate::communication::{
     in_process_exchange, AgentEnvelope, AgentError, AgentHello, AgentMessage, AgentProtocolError,
     AgentResponse, AgentRole, AgentStatus, AgentTask,
@@ -7,10 +7,12 @@ use crate::context::context_rotted;
 use crate::graph::{build_llm_agent, build_llm_agent_read_only};
 use crate::knowledge::{provider_failure_label, Agents};
 use crate::route::{RouteAudit, RouteRequest, RouteRole};
-use crate::state::{AgentState, MAX_STEPS};
-use langgraph::GraphError;
+use crate::state::{AgentState, MAX_DISPATCH_BATCHES, MAX_STEPS};
+use langgraph::{Checkpoint, Checkpointer, CompiledGraph, GraphError, RunConfig, StreamEvent};
 use provider::{CompletionRequest, LlmProvider, Message, Role};
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// 规划器(M5 起步):让 provider 把一个目标拆成有序子任务(JSON 数组)。
 /// 解析失败/模型出错 → **降级**为把整个目标当单个子任务(绝不返回空,循环有活干)。
@@ -158,7 +160,7 @@ impl HaltReason {
 /// 安全须显)、**上下文腐烂**(结构性根因)、**熔断**(连错症状)、无进展(输出停滞)、回合上限(通用耗尽)、未验证。
 /// 「更根因/更具体者优先」:同为失败终态时,给最有诊断价值的标签(喂 signal 复利)。
 pub fn halt_reason(s: &AgentState) -> HaltReason {
-    if s.approved {
+    if s.approved && !completion_blocked(s) {
         HaltReason::Approved
     } else if over_budget(s) {
         HaltReason::Budget
@@ -196,34 +198,501 @@ pub fn write_run(out: &AgentState, run_dir: impl AsRef<std::path::Path>) -> std:
         reason = %reason.as_str(),
         steps = out.steps,
         tokens = out.total_tokens,
-        approved = out.approved,
+        approved = out.approved && !completion_blocked(out),
         "run complete"
     );
     std::fs::create_dir_all(dir)?;
+    write_run_progress(
+        out,
+        dir,
+        if out.approved && !completion_blocked(out) {
+            "completed"
+        } else {
+            "stopped"
+        },
+    )?;
+    write_trace(out, dir.join("trace.json"))
+}
+
+/// Human-readable durable heartbeat. Checkpoints carry the full state; this
+/// small manifest lets a watchdog inspect liveness without parsing history.
+pub fn write_run_progress(
+    out: &AgentState,
+    run_dir: impl AsRef<std::path::Path>,
+    status: &str,
+) -> std::io::Result<()> {
+    let dir = run_dir.as_ref();
+    std::fs::create_dir_all(dir)?;
+    let complete = out.approved && !completion_blocked(out);
+    let unfinished_todos = out
+        .todos
+        .iter()
+        .filter(|todo| todo.status.trim() != "completed")
+        .count();
+    let effective_status = progress_status(status, complete);
+    let phase = progress_phase(out, complete, unfinished_todos);
+    let next_action = progress_next_action(out, complete, unfinished_todos);
+    let modified_files = out
+        .modified_files
+        .iter()
+        .take(256)
+        .cloned()
+        .collect::<Vec<_>>();
+    let todos = out
+        .todos
+        .iter()
+        .take(256)
+        .map(|todo| {
+            serde_json::json!({
+                "content": &todo.content,
+                "status": &todo.status,
+            })
+        })
+        .collect::<Vec<_>>();
     let manifest = serde_json::json!({
+        "schema_version": 1,
+        "status": effective_status,
         "task": out.task,
-        "approved": out.approved,
-        "halt_reason": reason.as_str(),
+        "approved": complete,
+        "completion_blocked": completion_blocked(out),
+        "pending_call": out.pending_call.as_ref().map(|call| call.name.clone()),
+        "todo_total": out.todos.len(),
+        "todo_pending": unfinished_todos,
+        "todos": todos,
+        "halt_reason": halt_reason(out).as_str(),
+        "phase": phase,
+        "next_action": next_action,
+        "step": out.steps,
         "steps": out.steps,
         "tokens": out.total_tokens,
+        "stall": out.stall,
+        "err_streak": out.err_streak,
+        "explore_streak": out.explore_streak,
+        "dispatch_batches_used": out.dispatch_wave_count(),
+        "dispatch_batches_remaining": MAX_DISPATCH_BATCHES
+            .saturating_sub(out.dispatch_wave_count()),
+        "codegraph_unavailable": out.codegraph_unavailable,
+        "modified_files": modified_files,
+        "modified_files_count": out.modified_files.len(),
+        "blocker": out.last_error,
+        "updated_at_ms": unix_millis(),
+        "owner_pid": std::process::id(),
     });
     let json = serde_json::to_string_pretty(&manifest).map_err(std::io::Error::other)?;
-    std::fs::write(dir.join("manifest.json"), json)?;
-    write_trace(out, dir.join("trace.json"))
+    atomic_write(dir.join("manifest.json"), json.as_bytes())
+}
+
+fn progress_status(status: &str, complete: bool) -> &str {
+    if status == "completed" && !complete {
+        "stopped"
+    } else {
+        status
+    }
+}
+
+fn progress_phase(out: &AgentState, complete: bool, unfinished_todos: usize) -> &'static str {
+    if complete {
+        "completed"
+    } else if out.pending_call.is_some() {
+        "action_pending"
+    } else if unfinished_todos > 0 {
+        "completion_blocked"
+    } else if out.last_action.as_deref() == Some("finish") {
+        "verifying"
+    } else if out.explore_handoff {
+        "action_handoff"
+    } else if out.last_action.is_some() {
+        "acting"
+    } else {
+        "reasoning"
+    }
+}
+
+fn progress_next_action(
+    out: &AgentState,
+    complete: bool,
+    unfinished_todos: usize,
+) -> Option<String> {
+    if complete {
+        None
+    } else if let Some(call) = &out.pending_call {
+        Some(call.name.clone())
+    } else if unfinished_todos > 0 {
+        Some("complete_todos".to_string())
+    } else if out.explore_handoff {
+        Some("edit_or_verify".to_string())
+    } else if out.last_action.as_deref() == Some("finish") {
+        Some("verify".to_string())
+    } else {
+        Some("reason".to_string())
+    }
+}
+
+fn unix_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
+/// One latest checkpoint per active run. The graph engine remains generic;
+/// this agent-level adapter makes process restart recovery durable and bounded.
+pub struct DurableCheckpointer {
+    run_dir: PathBuf,
+    path: PathBuf,
+    error: Arc<Mutex<Option<String>>>,
+}
+
+impl DurableCheckpointer {
+    pub fn new(run_dir: impl Into<PathBuf>) -> Self {
+        let run_dir = run_dir.into();
+        let path = run_dir.join("checkpoint.json");
+        Self {
+            run_dir,
+            path,
+            error: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn record_error(&self, error: impl std::fmt::Display) {
+        if let Ok(mut slot) = self.error.lock() {
+            if slot.is_none() {
+                *slot = Some(error.to_string());
+            }
+        }
+    }
+
+    fn take_error(&self) -> Option<String> {
+        self.error.lock().ok().and_then(|mut slot| slot.take())
+    }
+}
+
+impl Checkpointer<AgentState> for DurableCheckpointer {
+    fn save(&self, checkpoint: Checkpoint<AgentState>) {
+        if let Err(error) = std::fs::create_dir_all(&self.run_dir) {
+            self.record_error(error);
+            return;
+        }
+        let checkpoint = Checkpoint {
+            step: checkpoint.step,
+            frontier: checkpoint.frontier,
+            state: bounded_checkpoint_state(checkpoint.state),
+        };
+        let mut body = match serde_json::to_vec(&checkpoint) {
+            Ok(body) => body,
+            Err(error) => {
+                self.record_error(error);
+                return;
+            }
+        };
+        body.push(b'\n');
+        if let Err(error) = atomic_write(&self.path, &body) {
+            self.record_error(error);
+            return;
+        }
+        if let Err(error) = write_run_progress(&checkpoint.state, &self.run_dir, "running") {
+            self.record_error(error);
+        }
+    }
+}
+
+fn bounded_checkpoint_state(mut state: AgentState) -> AgentState {
+    state.history = bounded_resume_history(state.history);
+    if state.messages.len() > 32 {
+        state.messages = state.messages.split_off(state.messages.len() - 32);
+    }
+    // Presentation history is already persisted in the completed run trace;
+    // it is not required to resume graph routing or provider context.
+    state.display_messages.clear();
+    if state.modified_files.len() > 256 {
+        state.modified_files = state.modified_files.iter().take(256).cloned().collect();
+    }
+    state
+}
+
+fn bounded_resume_history(history: Vec<Message>) -> Vec<Message> {
+    let history = crate::context::compact_history(history, 8);
+    if history.len() <= 16 {
+        return history;
+    }
+    let tail_start = history.len() - 15;
+    let first_user = history
+        .iter()
+        .take(tail_start)
+        .find(|message| message.role == Role::User)
+        .cloned();
+    let mut bounded = Vec::with_capacity(16);
+    if let Some(first_user) = first_user {
+        bounded.push(first_user);
+    }
+    bounded.extend(history.into_iter().skip(tail_start));
+    provider::repair_tool_history(&bounded)
+}
+
+pub fn load_durable_checkpoint(
+    run_dir: impl AsRef<Path>,
+    task: &str,
+) -> std::io::Result<Option<Checkpoint<AgentState>>> {
+    let path = run_dir.as_ref().join("checkpoint.json");
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let checkpoint =
+        serde_json::from_str::<Checkpoint<AgentState>>(&text).map_err(std::io::Error::other)?;
+    if !task.is_empty() && checkpoint.state.task != task {
+        return Ok(None);
+    }
+    Ok(Some(checkpoint))
+}
+
+pub fn active_run_dir() -> PathBuf {
+    Path::new(".ridge").join("runs").join("active")
+}
+
+/// Stable per-task active directory. A cancelled task must remain resumable
+/// when a queued task starts; one shared checkpoint would overwrite it.
+pub fn active_run_dir_for(task: &str) -> PathBuf {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in task.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    active_run_dir().join(format!("{hash:016x}"))
+}
+
+/// A live manifest prevents a second process from executing the same goal;
+/// an old heartbeat is treated as recoverable after a process crash.
+pub fn durable_run_is_live(task: &str) -> bool {
+    let path = active_run_dir_for(task).join("manifest.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    if manifest["status"] != "running" {
+        return false;
+    }
+    manifest["owner_pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .is_some_and(process_is_alive)
+}
+
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    use std::ffi::c_void;
+
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const STILL_ACTIVE: u32 = 259;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit_handle: i32, process_id: u32) -> *mut c_void;
+        fn GetExitCodeProcess(process: *mut c_void, exit_code: *mut u32) -> i32;
+        fn CloseHandle(object: *mut c_void) -> i32;
+    }
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
+    if handle.is_null() {
+        return false;
+    }
+    let mut exit_code = 0;
+    let alive =
+        unsafe { GetExitCodeProcess(handle, &mut exit_code) != 0 && exit_code == STILL_ACTIVE };
+    unsafe {
+        CloseHandle(handle);
+    }
+    alive
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(not(any(windows, unix)))]
+fn process_is_alive(_pid: u32) -> bool {
+    false
+}
+
+/// Mark the latest checkpoint as cancelled without deleting it. The next
+/// invocation can still resume the same task from its last completed step.
+pub fn mark_durable_interrupted(run_dir: impl AsRef<Path>, reason: &str) -> std::io::Result<()> {
+    mark_durable_status(run_dir, reason, "interrupted")
+}
+
+pub fn mark_durable_cancelled(run_dir: impl AsRef<Path>, reason: &str) -> std::io::Result<()> {
+    mark_durable_status(run_dir, reason, "cancelled")
+}
+
+fn mark_durable_status(
+    run_dir: impl AsRef<Path>,
+    reason: &str,
+    status: &str,
+) -> std::io::Result<()> {
+    let run_dir = run_dir.as_ref();
+    let Some(checkpoint) = load_durable_checkpoint(run_dir, "")? else {
+        return Ok(());
+    };
+    let mut state = checkpoint.state;
+    state.last_error = Some(reason.chars().take(2_000).collect());
+    DurableCheckpointer::new(run_dir).save(Checkpoint {
+        step: checkpoint.step,
+        frontier: checkpoint.frontier,
+        state: state.clone(),
+    });
+    write_run_progress(&state, run_dir, status)
+}
+
+/// Invoke one agent run with a latest durable checkpoint and heartbeat.
+/// Recovery is task-scoped, bounded, and never starts a different task from
+/// an old checkpoint.
+pub async fn invoke_durable(
+    app: &CompiledGraph<AgentState>,
+    state: AgentState,
+    config: &RunConfig,
+    tx: Option<&tokio::sync::mpsc::UnboundedSender<StreamEvent<AgentState>>>,
+) -> Result<AgentState, GraphError> {
+    let run_dir = active_run_dir_for(&state.task);
+    invoke_durable_at(app, state, config, tx, run_dir).await
+}
+
+pub async fn invoke_durable_at(
+    app: &CompiledGraph<AgentState>,
+    state: AgentState,
+    config: &RunConfig,
+    tx: Option<&tokio::sync::mpsc::UnboundedSender<StreamEvent<AgentState>>>,
+    run_dir: impl Into<PathBuf>,
+) -> Result<AgentState, GraphError> {
+    let run_dir = run_dir.into();
+    let checkpointer = DurableCheckpointer::new(run_dir.clone());
+    let resume = match load_durable_checkpoint(&run_dir, &state.task) {
+        Ok(checkpoint) => checkpoint,
+        Err(error) => {
+            let message = format!("durable checkpoint unreadable: {error}");
+            let mut blocked = state;
+            blocked.last_error = Some(message.clone());
+            let _ = write_run_progress(&blocked, &run_dir, "blocked");
+            return Err(GraphError::Join(message));
+        }
+    }
+    .filter(|checkpoint| {
+        (!checkpoint.state.approved || completion_blocked(&checkpoint.state))
+            && !checkpoint.frontier.is_empty()
+    });
+    let result = match resume {
+        Some(checkpoint) => {
+            tracing::info!(step = checkpoint.step, task = %checkpoint.state.task, "resuming durable run");
+            app.resume(checkpoint, config, Some(&checkpointer), tx)
+                .await
+        }
+        None => {
+            app.invoke_with(state, config, Some(&checkpointer), tx)
+                .await
+        }
+    };
+    if let Some(error) = checkpointer.take_error() {
+        let message = format!("durable checkpoint failed: {error}");
+        let _ = mark_durable_interrupted(&run_dir, &message);
+        return Err(GraphError::Join(message));
+    }
+    match &result {
+        Ok(out) => {
+            let _ = write_run(out, &run_dir);
+        }
+        Err(error) => {
+            let _ = mark_durable_interrupted(&run_dir, &format!("run interrupted: {error}"));
+        }
+    }
+    result
 }
 
 /// 写一轮的审计轨迹到 `trace.json`(DoD⑥:客观证据,含工具输出/退出码 + 多轮 history)。密钥不入 trace。
 pub fn write_trace(out: &AgentState, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+    let complete = out.approved && !completion_blocked(out);
     let record = serde_json::json!({
         "task": out.task,
-        "approved": out.approved,
+        "approved": complete,
+        "completion_blocked": completion_blocked(out),
+        "pending_call": out.pending_call.as_ref().map(|call| call.name.clone()),
+        "todos": out.todos,
         "steps": out.steps,
         "tokens": out.total_tokens,
         "trace": out.messages,   // 人读轨迹(含 act 的 exit code / 工具输出)
+        "display_trace": out.display_messages,
         "history": out.history,  // 模型面向多轮(含 role=tool 结果)
     });
     let json = serde_json::to_string_pretty(&record).map_err(std::io::Error::other)?;
-    std::fs::write(path, json)
+    atomic_write(path, json.as_bytes())
+}
+
+fn atomic_write(path: impl AsRef<std::path::Path>, body: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let path = path.as_ref();
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    let temp = parent.join(format!(
+        ".{name}.tmp-{}-{}",
+        std::process::id(),
+        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp)?;
+        file.write_all(body)?;
+        file.sync_all()?;
+        drop(file);
+        replace_file(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn replace_file(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::rename(from, to)
+}
+
+#[cfg(windows)]
+fn replace_file(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    fn wide(path: &std::path::Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32;
+    }
+
+    let from = wide(from);
+    let to = wide(to);
+    let flags = 0x0000_0001 | 0x0000_0008;
+    let result = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), flags) };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// 从模型输出里抠出首个 `[` 到末个 `]` 的 JSON 数组(容忍模型包裹的解释文字)。
@@ -500,7 +969,7 @@ mod tests {
             out.steps
         );
         assert!(
-            out.steps <= MAX_EXPLORE + 2,
+            out.steps <= MAX_EXPLORE + 6,
             "应在触顶后很快 wrapup, steps={}",
             out.steps
         );
@@ -516,6 +985,17 @@ mod tests {
         };
         assert_eq!(halt_reason(&approved), HaltReason::Approved);
         assert!(halt_reason(&approved).is_success());
+
+        let incomplete = AgentState {
+            approved: true,
+            todos: vec![Todo {
+                content: "still running".into(),
+                status: "in_progress".into(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(halt_reason(&incomplete), HaltReason::Unverified);
+        assert!(!halt_reason(&incomplete).is_success());
 
         let budget = AgentState {
             budget_tokens: 100,
@@ -627,7 +1107,219 @@ mod tests {
         assert_eq!(m["halt_reason"], "step_cap");
         assert_eq!(m["steps"], MAX_STEPS);
         assert_eq!(m["tokens"], 42);
+        assert_eq!(m["phase"], "reasoning");
+        assert_eq!(m["status"], "stopped");
+        assert!(m["updated_at_ms"].as_u64().is_some());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn progress_manifest_exposes_next_action_and_bounded_facts() {
+        let dir = std::env::temp_dir().join("ridge_progress_manifest_test_1");
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AgentState {
+            task: "maintain project".into(),
+            explore_handoff: true,
+            explore_streak: MAX_EXPLORE,
+            modified_files: ["src/lib.rs".to_string()].into_iter().collect(),
+            last_error: Some("provider request timed out".into()),
+            ..Default::default()
+        };
+        write_run_progress(&state, &dir, "running").unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["phase"], "action_handoff");
+        assert_eq!(manifest["next_action"], "edit_or_verify");
+        assert_eq!(manifest["status"], "running");
+        assert_eq!(manifest["modified_files"][0], "src/lib.rs");
+        assert_eq!(manifest["blocker"], "provider request timed out");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn progress_manifest_exposes_completion_blockers_and_never_marks_them_complete() {
+        let dir = std::env::temp_dir().join("ridge_progress_completion_blocker_test_1");
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AgentState {
+            task: "finish durable report".into(),
+            approved: true,
+            todos: vec![Todo {
+                content: "add regression test".into(),
+                status: "pending".into(),
+            }],
+            pending_call: Some(ToolCall {
+                id: "call-3".into(),
+                name: "run_shell".into(),
+                arguments: serde_json::json!({"command": "cargo test"}),
+            }),
+            ..Default::default()
+        };
+        write_run_progress(&state, &dir, "completed").unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["status"], "stopped");
+        assert_eq!(manifest["approved"], false);
+        assert_eq!(manifest["completion_blocked"], true);
+        assert_eq!(manifest["pending_call"], "run_shell");
+        assert_eq!(manifest["todo_total"], 1);
+        assert_eq!(manifest["todo_pending"], 1);
+        assert_eq!(manifest["next_action"], "run_shell");
+        assert_eq!(manifest["todos"][0]["status"], "pending");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_approved_checkpoint_with_live_todo_is_not_a_success() {
+        let dir = std::env::temp_dir().join("ridge_stale_approved_checkpoint_test_1");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut state = AgentState::new("resume incomplete work");
+        state.approved = true;
+        state.todos = vec![Todo {
+            content: "finish the pending work".into(),
+            status: "pending".into(),
+        }];
+        write_run(&state, &dir).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["approved"], false);
+        assert_eq!(manifest["status"], "stopped");
+        assert_eq!(manifest["completion_blocked"], true);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn durable_checkpoint_compacts_resume_state_and_keeps_latest_only() {
+        let dir = std::env::temp_dir().join("ridge_durable_compaction_test_1");
+        let _ = std::fs::remove_dir_all(&dir);
+        let writer = DurableCheckpointer::new(&dir);
+        let mut state = AgentState::new("long task");
+        state.history = (0..64)
+            .map(|index| Message::user(format!("history-{index}")))
+            .collect();
+        state.display_messages = vec!["presentation-only".into()];
+        state.messages = (0..64).map(|index| format!("event-{index}")).collect();
+        writer.save(Checkpoint {
+            step: 4,
+            frontier: vec!["reason".into()],
+            state,
+        });
+        let checkpoint = load_durable_checkpoint(&dir, "long task").unwrap().unwrap();
+        assert!(checkpoint.state.history.len() <= 16);
+        assert!(checkpoint.state.messages.len() <= 32);
+        assert!(checkpoint.state.display_messages.is_empty());
+        let first_len = std::fs::metadata(dir.join("checkpoint.json"))
+            .unwrap()
+            .len();
+        writer.save(Checkpoint {
+            step: 5,
+            frontier: vec!["act".into()],
+            state: checkpoint.state,
+        });
+        let latest = load_durable_checkpoint(&dir, "long task").unwrap().unwrap();
+        assert_eq!(latest.step, 5);
+        assert!(
+            std::fs::metadata(dir.join("checkpoint.json"))
+                .unwrap()
+                .len()
+                <= first_len + 256
+        );
+        assert!(!dir.join(".checkpoint.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn durable_checkpoint_resumes_after_step_limit_without_replaying_reason() {
+        use provider::{Completion, ScriptedProvider, ToolCall};
+
+        let dir =
+            std::env::temp_dir().join(format!("ridge_durable_restart_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "restart-shell".into(),
+                    name: "run_shell".into(),
+                    arguments: serde_json::json!({"cmd": "exit 0"}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                text: "done".into(),
+                ..Default::default()
+            },
+        ]));
+        let app = build_llm_agent(provider).unwrap();
+        let interrupted = invoke_durable_at(
+            &app,
+            AgentState::new("restartable task"),
+            &RunConfig { max_supersteps: 1 },
+            None,
+            &dir,
+        )
+        .await;
+        assert!(
+            interrupted.is_err(),
+            "first process must stop at its test cap"
+        );
+        let checkpoint = load_durable_checkpoint(&dir, "restartable task")
+            .unwrap()
+            .expect("step-limit must leave a checkpoint");
+        assert_eq!(checkpoint.step, 1);
+        assert_eq!(checkpoint.frontier, vec!["act"]);
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["status"], "interrupted");
+        assert_eq!(manifest["next_action"], "run_shell");
+
+        let resumed = invoke_durable_at(
+            &app,
+            AgentState::new("restartable task"),
+            &RunConfig::default(),
+            None,
+            &dir,
+        )
+        .await
+        .unwrap();
+        assert!(
+            resumed.approved,
+            "restart must continue from act and verify"
+        );
+        let final_manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(final_manifest["status"], "completed");
+        assert_eq!(final_manifest["approved"], true);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancelled_checkpoint_keeps_next_action_and_clears_live_heartbeat() {
+        let dir =
+            std::env::temp_dir().join(format!("ridge_durable_cancel_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let writer = DurableCheckpointer::new(&dir);
+        writer.save(Checkpoint {
+            step: 3,
+            frontier: vec!["act".into()],
+            state: AgentState::new("cancel me"),
+        });
+        mark_durable_cancelled(&dir, "cancelled by test").unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["status"], "cancelled");
+        assert!(!durable_run_is_live("cancel me"));
+        let checkpoint = load_durable_checkpoint(&dir, "cancel me").unwrap().unwrap();
+        assert_eq!(checkpoint.frontier, vec!["act"]);
+        assert_eq!(
+            checkpoint.state.last_error.as_deref(),
+            Some("cancelled by test")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

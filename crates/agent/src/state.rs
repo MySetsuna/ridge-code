@@ -1,6 +1,9 @@
 use langgraph::{GraphState, RunConfig};
 use provider::{Message, ToolCall, Usage};
+use serde::de::{self, Deserializer, Visitor};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::fmt;
 
 /// 回合上限 —— **防跑飞的后备护栏**,非正常终止手段。真正的停机主力是:`approved`(目标达成)、
 /// 无进展检测(`stalled`,连 3 轮同输出即停)、连错熔断(`circuit_broken`,连 5 轮报错即停)。
@@ -9,6 +12,10 @@ use std::collections::BTreeSet;
 /// 卡死由 stall/circuit 早停兜底,故 2000 只有**持续有进展**的长任务才会触达。
 /// 注意:上限一抬,引擎超步上限须随之派生(见 [`agent_run_config`]),否则先撞引擎默认 100 超步的 `StepLimit`。
 pub const MAX_STEPS: usize = 2000;
+
+/// 一个运行最多允许多少个并行 dispatch wave。每 wave 仍可含 2–3 个 sub-agent；
+/// 这是防循环重试的运行级护栏，不是“一次运行只能派一批”。
+pub const MAX_DISPATCH_BATCHES: usize = 8;
 
 /// 本 agent 的运行参数:引擎超步上限据 [`MAX_STEPS`] **派生**(每 step ≈ 2 超步 reason+act,
 /// 加收尾余量 verify+wrapup)。使「跑多久」真正由 MAX_STEPS 决定,不被引擎默认 100 超步提前腰斩。
@@ -19,14 +26,14 @@ pub fn agent_run_config() -> RunConfig {
 }
 
 /// 一条任务清单项(像 Claude Code 的 TodoWrite):`status` ∈ `pending` / `in_progress` / `completed`。
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Todo {
     pub content: String,
     pub status: String,
 }
 
 /// agent 的共享状态。`messages` 是事件轨迹(reducer 追加),其余字段覆盖。
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AgentState {
     pub task: String,
     pub messages: Vec<String>,
@@ -60,6 +67,19 @@ pub struct AgentState {
     pub explore_streak: usize,
     pub explore_handoff: bool,
     pub explore_action_used: bool,
+    /// Number of batch-dispatch waves consumed in this run. A failed/denied
+    /// attempt still consumes one wave so a model cannot loop on the same
+    /// collaboration request forever.
+    #[serde(
+        default,
+        alias = "dispatch_agents_used",
+        deserialize_with = "deserialize_dispatch_batches"
+    )]
+    pub dispatch_batches_used: usize,
+    /// Session fact: the optional CodeGraph tool was unavailable, so the next
+    /// reasoning turn must use the built-in bounded search/read tools.
+    #[serde(default)]
+    pub codegraph_unavailable: bool,
     /// **模型面向**的多轮对话历史(system 之外的部分):user / assistant(可带 tool_calls)/ tool 结果。
     /// 这是发给 provider 的真身;REPL 跨轮携带它实现多轮上下文。
     pub history: Vec<Message>,
@@ -92,6 +112,12 @@ impl AgentState {
         self
     }
 
+    /// Number of dispatch waves consumed, including the pre-counter boolean
+    /// field used by checkpoints written during the migration to wave budgets.
+    pub fn dispatch_wave_count(&self) -> usize {
+        self.dispatch_batches_used
+    }
+
     /// 用已有对话历史续跑(REPL 多轮携带上下文)。
     pub fn with_history(mut self, history: Vec<Message>) -> Self {
         self.history = history;
@@ -103,6 +129,48 @@ impl AgentState {
         self.signal_block = block;
         self
     }
+}
+
+fn deserialize_dispatch_batches<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct DispatchBatchVisitor;
+
+    impl<'de> Visitor<'de> for DispatchBatchVisitor {
+        type Value = usize;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a dispatch wave count or legacy boolean")
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            usize::try_from(value).map_err(|_| E::custom("dispatch wave count overflows usize"))
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if value < 0 {
+                Err(E::custom("dispatch wave count cannot be negative"))
+            } else {
+                self.visit_u64(value as u64)
+            }
+        }
+
+        fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(usize::from(value))
+        }
+    }
+
+    deserializer.deserialize_any(DispatchBatchVisitor)
 }
 
 /// 节点产出的增量更新(delta)。`Batch` 让一个节点一次改多个字段。
@@ -122,6 +190,8 @@ pub enum Patch {
     SetExploreStreak(usize),
     SetExploreHandoff(bool),
     SetExploreActionUsed(bool),
+    SetDispatchBatches(usize),
+    SetCodegraphUnavailable(bool),
     PushHistory(Message),
     SetTodos(Vec<Todo>),
     RecordModified(String),
@@ -161,6 +231,8 @@ impl GraphState for AgentState {
             Patch::SetExploreStreak(n) => self.explore_streak = n,
             Patch::SetExploreHandoff(value) => self.explore_handoff = value,
             Patch::SetExploreActionUsed(value) => self.explore_action_used = value,
+            Patch::SetDispatchBatches(n) => self.dispatch_batches_used = n,
+            Patch::SetCodegraphUnavailable(value) => self.codegraph_unavailable = value,
             Patch::PushHistory(m) => self.history.push(m),
             Patch::SetTodos(t) => self.todos = t,
             Patch::RecordModified(p) => {
@@ -222,6 +294,17 @@ mod tests {
     use super::*;
     #[allow(unused_imports)]
     use crate::*;
+
+    #[test]
+    fn legacy_dispatch_boolean_checkpoint_migrates_to_one_wave() {
+        let mut value = serde_json::to_value(AgentState::new("resume")).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("dispatch_batches_used");
+        object.insert("dispatch_agents_used".into(), serde_json::Value::Bool(true));
+
+        let restored: AgentState = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.dispatch_wave_count(), 1);
+    }
 
     /// 只读工具(read_file / search / web_search / fetch_url)不走权限门;有副作用的走。
     #[test]

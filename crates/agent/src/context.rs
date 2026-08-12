@@ -1,4 +1,4 @@
-use crate::state::{AgentState, EXPLORE_NUDGE_AFTER};
+use crate::state::{AgentState, EXPLORE_NUDGE_AFTER, MAX_DISPATCH_BATCHES};
 use provider::{repair_tool_history, Message, Role};
 
 /// 把当前状态铺成给 provider 的消息序列:system(含注入的技能)+ **真实多轮 history**
@@ -91,7 +91,12 @@ pub(crate) fn context_rotted(s: &AgentState) -> bool {
 /// 体量 O(去重文件数 + 一条报错 + 可选一行 explore nudge),**不随步数膨胀**。
 pub(crate) fn durable_state_block(s: &AgentState) -> Option<String> {
     let explore_nudge = s.explore_streak >= EXPLORE_NUDGE_AFTER;
-    if s.modified_files.is_empty() && s.last_error.is_none() && !explore_nudge {
+    if s.modified_files.is_empty()
+        && s.last_error.is_none()
+        && !explore_nudge
+        && s.dispatch_wave_count() == 0
+        && !s.codegraph_unavailable
+    {
         return None;
     }
     let mut b = String::from("<durable_state>\n");
@@ -107,6 +112,18 @@ pub(crate) fn durable_state_block(s: &AgentState) -> Option<String> {
             "exploration_streak: {} (read/search calls since last write/edit; no durable change). Stop repeated exploration now. If an approved target is known, take the smallest action and verify it; in read-only mode, answer with supported facts; if blocked, state the concrete blocker. Do not make another read/search call merely to reset this counter.\n",
             s.explore_streak
         ));
+    }
+    if s.dispatch_wave_count() > 0 {
+        let remaining = MAX_DISPATCH_BATCHES.saturating_sub(s.dispatch_wave_count());
+        b.push_str(&format!(
+            "dispatch_batches: {}/{} used ({} remaining; each wave may run 2-3 sub-agents; do not repeat a failed wave without a concrete reason).\n",
+            s.dispatch_wave_count(), MAX_DISPATCH_BATCHES, remaining
+        ));
+    }
+    if s.codegraph_unavailable {
+        b.push_str(
+            "codegraph_unavailable: true (CodeGraph is not available for this workspace; use built-in read_file/search or the smallest safe action, and do not retry codegraph).\n",
+        );
     }
     b.push_str("</durable_state>");
     Some(b)
@@ -145,8 +162,8 @@ pub fn compact_history(history: Vec<Message>, keep: usize) -> Vec<Message> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bound_observation, compact_history, context_rotted, est_tokens, to_messages,
-        AUTO_COMPACT_KEEP, CONTEXT_ROT_TOKENS, OBS_CHAR_CAP,
+        bound_observation, compact_history, context_rotted, durable_state_block, est_tokens,
+        to_messages, AUTO_COMPACT_KEEP, CONTEXT_ROT_TOKENS, OBS_CHAR_CAP,
     };
     use crate::brain::{tool_output_failed, tool_output_ok};
     use crate::exec::is_error_observation;
@@ -381,5 +398,17 @@ mod tests {
             "首条保留消息不应是悬空 tool: {:?}",
             out[2]
         );
+    }
+
+    #[test]
+    fn durable_state_reports_dispatch_wave_budget_without_blocking_next_wave() {
+        let state = AgentState {
+            dispatch_batches_used: 2,
+            ..AgentState::new("inspect")
+        };
+        let block = durable_state_block(&state).expect("dispatch budget is durable state");
+        assert!(block.contains("dispatch_batches: 2/8 used"));
+        assert!(block.contains("6 remaining"));
+        assert!(block.contains("each wave may run 2-3 sub-agents"));
     }
 }

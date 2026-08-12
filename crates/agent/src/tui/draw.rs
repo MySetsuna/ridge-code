@@ -452,42 +452,57 @@ fn panel_compact_hint(panel: &Panel, width: u16) -> &'static str {
         return "select · Del remove · Ctrl+I · Esc";
     }
     if panel.detail_open && panel.supports_detail() {
-        if panel.kind == PanelKind::LiveHistory {
-            return if width >= 20 {
-                "^Space · Pg↕ · Esc"
-            } else {
-                "↕ · Enter · Esc"
-            };
-        }
-        return if width >= 25 {
-            "PgUp/PgDn scroll detail · Enter close · Esc close"
-        } else {
-            "Pg↕ scroll · Enter close · Esc"
-        };
+        return panel_detail_compact_hint(panel.kind, width);
     }
-    if matches!(
-        panel.kind,
+    if is_history_panel(panel.kind) {
+        return panel_history_compact_hint(width);
+    }
+    if panel.kind == PanelKind::LiveHistory {
+        return panel_live_compact_hint(width);
+    }
+    "↑↓ · Enter · Esc"
+}
+
+fn panel_detail_compact_hint(kind: PanelKind, width: u16) -> &'static str {
+    if kind == PanelKind::LiveHistory {
+        if width >= 20 {
+            "^Space · Pg↕ · Esc"
+        } else {
+            "↕ · Enter · Esc"
+        }
+    } else if width >= 25 {
+        "PgUp/PgDn scroll detail · Enter close · Esc close"
+    } else {
+        "Pg↕ scroll · Enter close · Esc"
+    }
+}
+
+fn is_history_panel(kind: PanelKind) -> bool {
+    matches!(
+        kind,
         PanelKind::Activity
             | PanelKind::ToolHistory
             | PanelKind::ReasoningHistory
             | PanelKind::AnswerHistory
-    ) {
-        return match width {
-            width if width >= 25 => "Enter expand · Esc close",
-            width if width >= 17 => "↕ · Enter↗ · Esc",
-            _ => "↕ Enter↗ · Esc",
-        };
+    )
+}
+
+fn panel_history_compact_hint(width: u16) -> &'static str {
+    match width {
+        width if width >= 25 => "Enter expand · Esc close",
+        width if width >= 17 => "↕ · Enter↗ · Esc",
+        _ => "↕ Enter↗ · Esc",
     }
-    if panel.kind == PanelKind::LiveHistory {
-        return match width {
-            width if width >= 24 => {
-                "^Space hold/follow · ↑↓ · Enter/Space · Del pending · Ctrl+Q · Esc"
-            }
-            width if width >= 17 => "^Space·Enter↗·Esc",
-            _ => "^Sp·Enter↗·Esc",
-        };
+}
+
+fn panel_live_compact_hint(width: u16) -> &'static str {
+    match width {
+        width if width >= 24 => {
+            "^Space hold/follow · ↑↓ · Enter/Space · Del pending · Ctrl+Q · Esc"
+        }
+        width if width >= 17 => "^Space·Enter↗·Esc",
+        _ => "^Sp·Enter↗·Esc",
     }
-    "↑↓ · Enter · Esc"
 }
 
 fn panel_width_hint(
