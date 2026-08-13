@@ -10,7 +10,7 @@ use agent::{
 use mcp::{McpClient, McpError, StdioTransport};
 use provider::{
     AnthropicProvider, Completion, LlmProvider, Message, OpenAiProvider, ScriptedProvider,
-    SwapProvider,
+    SwapProvider, ToolCall,
 };
 
 mod tui;
@@ -138,11 +138,25 @@ fn tui_fixture_provider(fallback: Arc<dyn LlmProvider>) -> Arc<dyn LlmProvider> 
             };
             Arc::new(provider)
         }
-        Some("complete") => Arc::new(ScriptedProvider::new(vec![Completion {
-            reasoning: "fixture reasoning: completed path remains inspectable".into(),
-            text: "fixture answer: final response reached scrollback".into(),
-            ..Default::default()
-        }])),
+        Some("complete") => Arc::new(ScriptedProvider::new(vec![
+            Completion {
+                reasoning: "fixture reasoning: completed path remains inspectable".into(),
+                tool_calls: vec![ToolCall {
+                    id: "fixture-diff".into(),
+                    name: "edit_file".into(),
+                    arguments: serde_json::json!({
+                        "path": "src/fixture.rs",
+                        "old_string": "fixture old line\nfixture old tail",
+                        "new_string": "fixture new line\nfixture new tail"
+                    }),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                text: "fixture answer: final response reached scrollback".into(),
+                ..Default::default()
+            },
+        ])),
         _ => fallback,
     }
 }

@@ -247,7 +247,7 @@ pub(crate) fn preview_lines(content: &str, _max: usize) -> Vec<(String, Color)> 
 
 /// edit_file 的 git-diff 式呈现:old 行 `-`(红)、new 行 `+`(绿),保留全部行与行内文字。
 pub(crate) fn diff_lines(old: &str, new: &str) -> Vec<(String, Color)> {
-    let (red, green) = (role_color(Role::Error), role_color(Role::Success));
+    let (red, green) = (role_color(Role::DiffDel), role_color(Role::DiffAdd));
     let mut out = Vec::new();
     out.extend(old.lines().map(|line| (format!("  - {line}"), red)));
     out.extend(new.lines().map(|line| (format!("  + {line}"), green)));

@@ -5163,17 +5163,20 @@ pub(crate) fn draw_with_cache(
             Line::default(),
         ];
         for l in req.detail.lines() {
-            let role = if l.starts_with('+') {
+            let trimmed = l.trim_start();
+            let role = if trimmed.starts_with("+ ") {
                 Role::DiffAdd
-            } else if l.starts_with('-') {
+            } else if trimmed.starts_with("- ") {
                 Role::DiffDel
             } else {
                 Role::Warn
             };
-            lines.push(Line::from(Span::styled(
-                l.to_owned(),
-                Style::default().fg(role_color(role)),
-            )));
+            let style = match role {
+                Role::DiffAdd => Style::default().fg(Color::Black).bg(role_color(role)),
+                Role::DiffDel => Style::default().fg(Color::White).bg(role_color(role)),
+                _ => Style::default().fg(role_color(role)),
+            };
+            lines.push(Line::from(Span::styled(l.to_owned(), style)));
         }
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(

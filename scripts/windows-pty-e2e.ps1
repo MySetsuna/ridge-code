@@ -456,7 +456,7 @@ $isolatedTrace = Join-Path $isolatedHome '.ridge\tui-trace.log'
 $isolatedVariables = @(
     'RIDGE_PROVIDER', 'RIDGE_MODEL', 'RIDGE_BASE_URL', 'RIDGE_API_KEY',
     'RIDGE_READ_ONLY', 'RIDGE_SKIP_PERMISSIONS', 'RIDGE_MCP', 'RIDGE_AUTH', 'RIDGE_OAUTH',
-    'RIDGE_KEYLOG', 'RIDGE_TUI_SNAPSHOT', 'RIDGE_FORCE_TUI', 'RIDGE_TUI_FIXTURE', 'RIDGE_TUI_TRACE', 'RIDGE_TUI_KITTY', 'RIDGE_TUI_INSPECT_ANSWER'
+    'RIDGE_KEYLOG', 'RIDGE_TUI_SNAPSHOT', 'RIDGE_FORCE_TUI', 'RIDGE_TUI_FIXTURE', 'RIDGE_TUI_TRACE', 'RIDGE_TUI_KITTY', 'RIDGE_TUI_INSPECT_ANSWER', 'RIDGE_TUI_MOUSE_CAPTURE'
 )
 $previousVariables = @{}
 foreach ($name in $isolatedVariables) {
@@ -480,6 +480,9 @@ try {
     $env:RIDGE_TUI_SNAPSHOT = $isolatedSnapshot
     $env:RIDGE_FORCE_TUI = '1'
     $env:RIDGE_TUI_TRACE = $isolatedTrace
+    # Native scrollback/selection is the acceptance path.  Isolate the opt-in
+    # application mouse-capture switch from the caller's process environment.
+    $env:RIDGE_TUI_MOUSE_CAPTURE = '0'
     if ($InspectAnswer) {
         $env:RIDGE_TUI_INSPECT_ANSWER = '1'
     }
@@ -490,6 +493,10 @@ try {
         $env:RIDGE_TUI_KITTY = '1'
     } elseif ($CompletionFixture) {
         $env:RIDGE_TUI_FIXTURE = 'complete'
+        # Completion fixture also emits a harmless edit_file call.  Its target
+        # path is absent, so PTY evidence covers tool details and +/- diff rows
+        # without mutating the repository.
+        $env:RIDGE_SKIP_PERMISSIONS = '1'
     } elseif ($CommandsFixture) {
         $env:RIDGE_TUI_FIXTURE = 'commands'
         $env:RIDGE_TUI_KITTY = '1'
@@ -985,7 +992,11 @@ try {
             ($probePlain -match 'fixtureanswerfinalresponsereachedscrollback')
     }
     $completionTextObserved = -not $completionMode -or ($completionReasoningObserved -and $completionAnswerObserved)
-    $completionEvidenceSatisfied = -not $completionMode -or ($completionTaskSent -and $completionObserved -and $completionTextObserved)
+    $diffPathObserved = ($plain -match 'src[\\/]fixture\.rs') -or ($probePlain -match 'srcfixture\.rs')
+    $diffRemovedObserved = ($plain -match 'fixture\s+old\s+line') -or ($probePlain -match 'fixtureoldline')
+    $diffAddedObserved = ($plain -match 'fixture\s+new\s+line') -or ($probePlain -match 'fixturenewline')
+    $diffEvidenceSatisfied = -not $completionMode -or ($diffPathObserved -and $diffRemovedObserved -and $diffAddedObserved)
+    $completionEvidenceSatisfied = -not $completionMode -or ($completionTaskSent -and $completionObserved -and $completionTextObserved -and $diffEvidenceSatisfied)
     $commandsHelpObserved = -not $commandsMode -or ($text.ToString() -match '(?i)/login')
     $commandsEvidenceSatisfied = -not $commandsMode -or (
         $commandsHelpObserved -and $commandsLoginObserved -and $commandsModelsObserved -and $commandsSearchObserved -and
@@ -1078,6 +1089,10 @@ try {
         completion_fixture_task_sent = $completionTaskSent
         completion_observed = $completionObserved
         completion_text_observed = $completionTextObserved
+        diff_path_observed = $diffPathObserved
+        diff_removed_observed = $diffRemovedObserved
+        diff_added_observed = $diffAddedObserved
+        diff_evidence_satisfied = $diffEvidenceSatisfied
         completion_evidence_satisfied = $completionEvidenceSatisfied
         commands_fixture_requested = $commandsMode
         commands_help_observed = $commandsHelpObserved

@@ -4453,12 +4453,12 @@ fn summarize_event_overviews_tools() {
         r#"reason#2: tool_call edit_file {"path":"a.rs","old_string":"let n=1;","new_string":"let n=2;"}"#,
     );
     assert!(e[0].0.contains("Edit a.rs"), "{}", e[0].0);
-    assert!(e
-        .iter()
-        .any(|(l, c)| l.starts_with("  - ") && l.contains("n=1") && *c == role_color(Role::Error)));
+    assert!(e.iter().any(|(l, c)| l.starts_with("  - ")
+        && l.contains("n=1")
+        && *c == role_color(Role::DiffDel)));
     assert!(e.iter().any(|(l, c)| l.starts_with("  + ")
         && l.contains("n=2")
-        && *c == role_color(Role::Success)));
+        && *c == role_color(Role::DiffAdd)));
     // 写:路径 + 内容预览行。
     let w = summarize_event(
         r#"reason#3: tool_call write_file {"path":"b.rs","contents":"line1\nline2"}"#,
@@ -9164,6 +9164,25 @@ fn static_scrollback_preserves_order_and_sanitizes_controls() {
     // independently while the buffer assertions above cover order and sanitization.
     assert_eq!(unicode_width::UnicodeWidthStr::width("你好 🚀"), 7);
     assert!(!symbols.contains('\x1b') && !symbols.contains("2J"));
+}
+
+#[test]
+fn static_diff_rows_use_red_and_green_backgrounds() {
+    let lines = super::colored_commit_lines(
+        vec![
+            ("  - removed line".into(), role_color(Role::DiffDel)),
+            ("  + added line".into(), role_color(Role::DiffAdd)),
+        ],
+        80,
+    );
+    assert!(lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .any(|span| span.style.bg == Some(role_color(Role::DiffDel))));
+    assert!(lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .any(|span| span.style.bg == Some(role_color(Role::DiffAdd))));
 }
 
 #[test]

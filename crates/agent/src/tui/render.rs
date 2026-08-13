@@ -1436,11 +1436,13 @@ pub(crate) fn colored_commit_lines(
         .collect::<Vec<_>>();
     let mut lines = vec![Line::default()];
     lines.extend(rows.into_iter().map(|(text, color)| {
+        // Diff rows carry a decorative `┆` rail in static tool output.  Keep
+        // the marker check because Success/Error use the same ANSI colors as
+        // DiffAdd/DiffDel; ordinary green/red tool rows must not get a diff
+        // background.
         let trimmed = text.trim_start();
-        let is_diff_add = color == role_color(Role::DiffAdd)
-            && (trimmed.starts_with("+ ") || trimmed.starts_with("│  + "));
-        let is_diff_del = color == role_color(Role::DiffDel)
-            && (trimmed.starts_with("- ") || trimmed.starts_with("│  - "));
+        let is_diff_add = color == role_color(Role::DiffAdd) && diff_line_marker(trimmed, '+');
+        let is_diff_del = color == role_color(Role::DiffDel) && diff_line_marker(trimmed, '-');
         let style = if is_diff_add {
             Style::default().fg(Color::Black).bg(color)
         } else if is_diff_del {
@@ -1451,6 +1453,12 @@ pub(crate) fn colored_commit_lines(
         Line::from(Span::styled(text, style))
     }));
     wrap_commit_lines(lines, width)
+}
+
+fn diff_line_marker(text: &str, marker: char) -> bool {
+    let text = text.strip_prefix('┆').map(str::trim_start).unwrap_or(text);
+    text.strip_prefix(marker)
+        .is_some_and(|rest| rest.starts_with(' '))
 }
 
 #[derive(Clone, Copy)]
