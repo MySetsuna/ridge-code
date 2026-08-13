@@ -138,25 +138,46 @@ fn tui_fixture_provider(fallback: Arc<dyn LlmProvider>) -> Arc<dyn LlmProvider> 
             };
             Arc::new(provider)
         }
-        Some("complete") => Arc::new(ScriptedProvider::new(vec![
-            Completion {
-                reasoning: "fixture reasoning: completed path remains inspectable".into(),
-                tool_calls: vec![ToolCall {
-                    id: "fixture-diff".into(),
-                    name: "edit_file".into(),
-                    arguments: serde_json::json!({
-                        "path": "src/fixture.rs",
-                        "old_string": "fixture old line\nfixture old tail",
-                        "new_string": "fixture new line\nfixture new tail"
-                    }),
-                }],
-                ..Default::default()
-            },
-            Completion {
-                text: "fixture answer: final response reached scrollback".into(),
-                ..Default::default()
-            },
-        ])),
+        Some("complete") => {
+            let reasoning = std::iter::once(
+                "fixture reasoning: completed path remains inspectable".to_owned(),
+            )
+            .chain((1..=24).map(|index| format!("fixture reasoning line {index:02}")))
+            .chain(std::iter::once(
+                "fixture reasoning tail marker 24".to_owned(),
+            ))
+            .collect::<Vec<_>>()
+            .join("\n");
+            let old_string = std::iter::once("fixture old line".to_owned())
+                .chain((1..=18).map(|index| format!("fixture old detail {index:02}")))
+                .chain(std::iter::once("fixture old tail marker".to_owned()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let new_string = std::iter::once("fixture new line".to_owned())
+                .chain((1..=18).map(|index| format!("fixture new detail {index:02}")))
+                .chain(std::iter::once("fixture new tail marker".to_owned()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Arc::new(ScriptedProvider::new(vec![
+                Completion {
+                    reasoning,
+                    tool_calls: vec![ToolCall {
+                        id: "fixture-diff".into(),
+                        name: "edit_file".into(),
+                        arguments: serde_json::json!({
+                            "path": "src/fixture.rs",
+                            "old_string": old_string,
+                            "new_string": new_string
+                        }),
+                    }],
+                    ..Default::default()
+                },
+                Completion {
+                    text: "fixture answer: final response reached scrollback".into(),
+                    ..Default::default()
+                },
+            ]))
+        }
         _ => fallback,
     }
 }

@@ -2366,7 +2366,7 @@ fn attention_shortcuts_explain_missing_history() {
 }
 
 #[test]
-fn plan_snapshot_uses_a_bounded_reasoning_activity_anchor() {
+fn plan_snapshot_uses_a_full_reasoning_activity_anchor() {
     let mut ui = Ui::default();
     ui.record_plan("[✓] inspect context\n[~] verify output\n[ ] publish result");
 
@@ -2403,6 +2403,25 @@ fn plan_snapshot_uses_a_bounded_reasoning_activity_anchor() {
         "plan body missing: {symbols}"
     );
     assert!(!symbols.contains('\x1b'));
+}
+
+#[test]
+fn plan_activity_detail_keeps_middle_content() {
+    let mut ui = Ui::default();
+    let body = format!(
+        "PLAN HEAD\n{}\nPLAN TAIL",
+        "PLAN MIDDLE MARKER ".repeat(MAX_REASONING_HISTORY_CHARS)
+    );
+    ui.record_plan(body.clone());
+
+    assert_eq!(
+        ui.activity_history.back().map(|entry| entry.text.as_str()),
+        Some(body.as_str())
+    );
+    assert!(matches!(
+        ui.commits.as_slice(),
+        [CommitBlock::Activity { text, .. }] if text == &body
+    ));
 }
 
 #[test]
@@ -9504,6 +9523,47 @@ fn reasoning_commit_renders_in_inline_scrollback() {
     assert!(reasoning_cell.modifier.contains(Modifier::ITALIC));
     assert!(ui.commits.is_empty());
     assert!(!symbols.contains('\x1b'));
+}
+
+#[test]
+fn reasoning_progress_scrollback_is_incremental_and_lossless() {
+    let mut ui = Ui::default();
+    ui.push_chunk(provider::StreamChunk::Reasoning("first\nsecond".into()));
+    ui.commit_live_reasoning_progress();
+    assert!(matches!(
+        ui.commits.as_slice(),
+        [CommitBlock::Reasoning { text, .. }] if text == "first\n"
+    ));
+    ui.commits.clear();
+
+    ui.push_chunk(provider::StreamChunk::Reasoning("\nthird".into()));
+    ui.commit_live_reasoning_progress();
+    assert!(matches!(
+        ui.commits.as_slice(),
+        [CommitBlock::Reasoning { text, .. }] if text == "second\n"
+    ));
+    ui.commits.clear();
+
+    ui.push_chunk(provider::StreamChunk::Reasoning("\ntail".into()));
+    ui.commit_live_reasoning_progress();
+    assert!(matches!(
+        ui.commits.as_slice(),
+        [CommitBlock::Reasoning { text, .. }] if text == "third\n"
+    ));
+    ui.commits.clear();
+
+    ui.push_chunk(provider::StreamChunk::Answer("answer arrived".into()));
+    ui.commit_live_reasoning_progress();
+    assert!(
+        ui.commits.is_empty(),
+        "answer must not fake reasoning output"
+    );
+
+    ui.commit_live_reasoning(4, 5);
+    assert!(matches!(
+        ui.commits.as_slice(),
+        [CommitBlock::Reasoning { text, .. }] if text == "tail"
+    ));
 }
 
 #[test]

@@ -958,6 +958,11 @@ try {
     # word across writes.  Keep a compact ASCII probe for fixture markers;
     # snapshot rows below remain the authoritative visible-frame evidence.
     $probePlain = [regex]::Replace($plain, '[^A-Za-z0-9]+', '').ToLowerInvariant()
+    # Main TUI must not enable mouse reporting: native terminal wheel/drag
+    # selection belongs to the host scrollback.  The fullscreen editor is an
+    # explicit opt-in path and is not exercised by this native-scroll probe.
+    $mouseCaptureEnableObserved = $text.ToString() -match '\x1B\[\?(?:1000|1002|1003|1006)h'
+    $nativeMousePathSatisfied = -not $mouseCaptureEnableObserved
     # A Windows raw Ctrl+Space byte commonly arrives as a press/release pair
     # in one ConPTY read.  The application correctly renders the momentary
     # HOLD frame, then returns to FOLLOW on release before the polling loop can
@@ -984,6 +989,13 @@ try {
             ($snapshotRows -match 'fixture\s*reasoning\s*:\s*completed\s*path') -or
             ($probePlain -match 'fixturereasoningcompletedpathremainsinspectable')
     }
+    $completionReasoningTailObserved = if ($stressFixtureRequested) {
+        ($plain -match 'STRESS_REASONING_END') -or ($probePlain -match 'stressreasoningend')
+    } else {
+        ($plain -match 'fixture\s+reasoning\s+tail\s+marker\s+24') -or
+            ($snapshotRows -match 'fixture\s+reasoning\s+tail\s+marker') -or
+            ($probePlain -match 'fixturereasoningtailmarker24')
+    }
     $completionAnswerObserved = if ($stressFixtureRequested) {
         ($plain -match 'STRESS_ANSWER_BEGIN') -or ($probePlain -match 'stressanswerbegin')
     } else {
@@ -995,8 +1007,16 @@ try {
     $diffPathObserved = ($plain -match 'src[\\/]fixture\.rs') -or ($probePlain -match 'srcfixture\.rs')
     $diffRemovedObserved = ($plain -match 'fixture\s+old\s+line') -or ($probePlain -match 'fixtureoldline')
     $diffAddedObserved = ($plain -match 'fixture\s+new\s+line') -or ($probePlain -match 'fixturenewline')
-    $diffEvidenceSatisfied = -not $completionMode -or ($diffPathObserved -and $diffRemovedObserved -and $diffAddedObserved)
-    $completionEvidenceSatisfied = -not $completionMode -or ($completionTaskSent -and $completionObserved -and $completionTextObserved -and $diffEvidenceSatisfied)
+    $diffRemovedTailObserved = ($plain -match 'fixture\s+old\s+tail\s+marker') -or ($probePlain -match 'fixtureoldtailmarker')
+    $diffAddedTailObserved = ($plain -match 'fixture\s+new\s+tail\s+marker') -or ($probePlain -match 'fixturenewtailmarker')
+    $diffEvidenceSatisfied = -not $completionMode -or (
+        $diffPathObserved -and $diffRemovedObserved -and $diffAddedObserved -and
+        $diffRemovedTailObserved -and $diffAddedTailObserved
+    )
+    $completionEvidenceSatisfied = -not $completionMode -or (
+        $completionTaskSent -and $completionObserved -and $completionTextObserved -and
+        $completionReasoningTailObserved -and $diffEvidenceSatisfied
+    )
     $commandsHelpObserved = -not $commandsMode -or ($text.ToString() -match '(?i)/login')
     $commandsEvidenceSatisfied = -not $commandsMode -or (
         $commandsHelpObserved -and $commandsLoginObserved -and $commandsModelsObserved -and $commandsSearchObserved -and
@@ -1020,7 +1040,7 @@ try {
     }
     $outputPrefixHex = (($rawOutput | Select-Object -First 64 | ForEach-Object { '{0:X2}' -f $_ }) -join '')
     [pscustomobject]@{
-        status = if ($crosstermEventsObserved -and $busyFixtureFrontObserved -and $queueEvidenceSatisfied -and $inspectEvidenceSatisfied -and $inspectQueueEvidenceSatisfied -and $reasoningEvidenceSatisfied -and $answerInspectEvidenceSatisfied -and $holdEvidenceSatisfied -and $resizeEvidenceSatisfied -and $completionEvidenceSatisfied -and $commandsEvidenceSatisfied -and $takeoverEvidenceSatisfied) { 'passed' } else { 'partial' }
+        status = if ($crosstermEventsObserved -and $nativeMousePathSatisfied -and $busyFixtureFrontObserved -and $queueEvidenceSatisfied -and $inspectEvidenceSatisfied -and $inspectQueueEvidenceSatisfied -and $reasoningEvidenceSatisfied -and $answerInspectEvidenceSatisfied -and $holdEvidenceSatisfied -and $resizeEvidenceSatisfied -and $completionEvidenceSatisfied -and $commandsEvidenceSatisfied -and $takeoverEvidenceSatisfied) { 'passed' } else { 'partial' }
         binary = $binaryPath
         pid = $session.ProcessId
         columns = $Columns
@@ -1033,7 +1053,10 @@ try {
         raw_output_path = if ($KeepDiagnostics) { $rawOutputPath } else { $null }
         output_has_ridge_marker = ($plain -match 'RIDGE|RidgeCode|ready')
         output_has_completion_reasoning = $completionReasoningObserved
+        output_has_completion_reasoning_tail = $completionReasoningTailObserved
         output_has_completion_answer = $completionAnswerObserved
+        mouse_capture_enable_observed = $mouseCaptureEnableObserved
+        native_mouse_path_satisfied = $nativeMousePathSatisfied
         snapshot_bytes = [Text.Encoding]::UTF8.GetByteCount($snapshotRaw)
         snapshot_render_us = $snapshotRenderUs
         snapshot_json_valid = ($null -ne $snapshotJson)
@@ -1092,6 +1115,8 @@ try {
         diff_path_observed = $diffPathObserved
         diff_removed_observed = $diffRemovedObserved
         diff_added_observed = $diffAddedObserved
+        diff_removed_tail_observed = $diffRemovedTailObserved
+        diff_added_tail_observed = $diffAddedTailObserved
         diff_evidence_satisfied = $diffEvidenceSatisfied
         completion_evidence_satisfied = $completionEvidenceSatisfied
         commands_fixture_requested = $commandsMode

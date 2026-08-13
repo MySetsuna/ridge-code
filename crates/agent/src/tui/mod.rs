@@ -155,10 +155,16 @@ impl TerminalGuard {
         let _ = execute!(stdout, event::EnableBracketedPaste);
         // Keep the terminal's native scrollback and text selection authoritative.
         // TUI mouse capture is opt-in for panel-only experiments; the default
-        // must leave wheel/drag events to Windows Terminal/conhost/PTY.
+        // must leave wheel/drag events to Windows Terminal/conhost/PTY.  An
+        // explicit disable also clears mouse-reporting inherited from a host
+        // pane, which otherwise makes the event loop consume native gestures.
         let mouse_capture_enabled =
-            mouse_capture_requested(std::env::var("RIDGE_TUI_MOUSE_CAPTURE").ok().as_deref())
-                && execute!(stdout, event::EnableMouseCapture).is_ok();
+            if mouse_capture_requested(std::env::var("RIDGE_TUI_MOUSE_CAPTURE").ok().as_deref()) {
+                execute!(stdout, event::EnableMouseCapture).is_ok()
+            } else {
+                let _ = execute!(stdout, event::DisableMouseCapture);
+                false
+            };
         // CSI u best-effort(iter-27):现代终端(Ghostty/WezTerm/iTerm2/kitty)得 Shift+Enter
         // 精确修饰键;不支持则静默降级(Alt+Enter / Ctrl+J 仍可换行)。同时请求
         // REPORT_EVENT_TYPES，让 Ctrl+Space 可实现按住审计、松开跟随；decide_key
@@ -357,6 +363,13 @@ async fn handle_key_event(
 }
 
 fn handle_mouse_event(mouse: crossterm::event::MouseEvent, context: &mut KeyEventContext<'_>) {
+    if !context
+        .guard
+        .as_deref()
+        .is_some_and(|guard| guard.mouse_capture_enabled)
+    {
+        return;
+    }
     match mouse_action(&mouse) {
         MouseAction::Scroll(delta) => handle_mouse_scroll(delta, context),
         MouseAction::Select { column, row } => select_panel_row_at(context.ui, column, row),
@@ -1784,6 +1797,7 @@ fn handle_token_chunk(
             None => break,
         }
     }
+    ui.commit_live_reasoning_progress();
 }
 
 fn set_token_activity(ui: &mut Ui, chunk: &provider::StreamChunk) {

@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::sync::mpsc;
 
@@ -72,7 +72,13 @@ pub(crate) enum CommitBlock {
     Tool(ToolBlock),
 }
 
+#[derive(Default)]
+pub(crate) struct StreamScrollbackCursor {
+    offsets: BTreeMap<PresentationId, usize>,
+}
+
 pub(crate) const MAX_REASONING_HISTORY: usize = 8;
+#[cfg(test)]
 pub(crate) const MAX_REASONING_HISTORY_CHARS: usize = 8_192;
 
 #[derive(Clone, Debug)]
@@ -102,24 +108,6 @@ pub(crate) struct AnswerEntry {
 pub(crate) struct PendingModelSelection {
     pub(crate) key: String,
     pub(crate) ctx: Option<u64>,
-}
-
-fn bound_history_text(text: &str, max_chars: usize) -> String {
-    let count = text.chars().count();
-    if count <= max_chars {
-        return text.to_owned();
-    }
-    let half = max_chars / 2;
-    let head = text.chars().take(half).collect::<String>();
-    let tail = text
-        .chars()
-        .rev()
-        .take(half)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<String>();
-    format!("{head}\n… [{count} chars; middle omitted]\n{tail}")
 }
 
 pub(crate) const MAX_ACTIVITY_HISTORY: usize = 12;
@@ -319,6 +307,9 @@ pub(crate) struct Ui {
     pub(crate) answer_history: VecDeque<AnswerEntry>,
     /// 有界语义桥: live、历史与静态投影共用 id/status/计量,不复制正文。
     pub(crate) presentation: PresentationLedger,
+    /// Completed reasoning lines already copied into native scrollback. The
+    /// cursor prevents an append-only terminal from receiving duplicate text.
+    pub(crate) reasoning_scrollback: StreamScrollbackCursor,
     pub(crate) todos: Vec<Todo>,
     pub(crate) scroll: u16,
     pub(crate) busy: bool,
@@ -551,6 +542,7 @@ impl Ui {
             }
         }
         self.transcript.clear_streams();
+        self.reasoning_scrollback = StreamScrollbackCursor::default();
         // Once real interaction starts, never let the idle splash animation
         // resume after a task finishes or is taken over.
         self.splash = SPLASH_TICKS;
@@ -609,11 +601,11 @@ impl Ui {
         }
     }
 
-    /// Keep the model's changing TODO snapshot in the same bounded audit
-    /// surface as other actionable boundaries. The execution graph still
-    /// owns the TODO values; this is only a sanitized, bounded projection.
+    /// Keep the model's changing TODO snapshot in the activity audit surface.
+    /// Entry count stays bounded; each retained entry keeps its complete body
+    /// so detail expansion never invents a middle omission.
     pub(crate) fn record_plan(&mut self, text: impl Into<String>) {
-        let text = bound_history_text(&text.into(), MAX_REASONING_HISTORY_CHARS);
+        let text = text.into();
         if !text.is_empty() {
             self.record_activity(ActivityKind::Plan, text);
         }
@@ -696,6 +688,25 @@ impl Ui {
         self.reconcile_presentation();
         self.refresh_live_history_panel();
     }
+
+    /// Move completed reasoning lines into the native terminal history while
+    /// the provider is still streaming. The live viewport remains the place
+    /// for the unfinished tail; no token-by-token terminal writes occur.
+    pub(crate) fn commit_live_reasoning_progress(&mut self) {
+        let deltas = self
+            .transcript
+            .complete_reasoning_deltas(&mut self.reasoning_scrollback.offsets);
+        for (id, end, delta) in deltas {
+            self.reasoning_scrollback.offsets.insert(id, end);
+            self.commits.push(CommitBlock::Reasoning {
+                id,
+                text: delta,
+                step: self.superstep,
+                elapsed_s: 0,
+                tokens: self.stream_tokens,
+            });
+        }
+    }
     pub(crate) fn push_tool(&mut self, tool: ToolBlock) {
         let id = self.presentation.allocate(
             PresentationChannel::Tool,
@@ -736,6 +747,13 @@ impl Ui {
         let tokens = self.stream_tokens;
         for (id, text) in self.transcript.drain_reasoning_with_ids() {
             if !text.is_empty() {
+                let committed = self
+                    .reasoning_scrollback
+                    .offsets
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(0)
+                    .min(text.len());
                 let history_text = text.clone();
                 if self.reasoning_history.len() == MAX_REASONING_HISTORY {
                     self.reasoning_history.pop_front();
@@ -758,15 +776,26 @@ impl Ui {
                         chars: text.chars().count(),
                     },
                 );
-                self.commits.push(CommitBlock::Reasoning {
-                    id,
-                    text,
-                    step,
-                    elapsed_s,
-                    tokens,
-                });
+                if committed == 0 {
+                    self.commits.push(CommitBlock::Reasoning {
+                        id,
+                        text,
+                        step,
+                        elapsed_s,
+                        tokens,
+                    });
+                } else if committed < text.len() {
+                    self.commits.push(CommitBlock::Reasoning {
+                        id,
+                        text: text[committed..].to_owned(),
+                        step,
+                        elapsed_s,
+                        tokens,
+                    });
+                }
             }
         }
+        self.reasoning_scrollback = StreamScrollbackCursor::default();
         self.refresh_reasoning_history_panel();
         self.refresh_live_history_panel();
     }

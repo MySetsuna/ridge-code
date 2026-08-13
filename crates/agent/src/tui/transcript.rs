@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use ratatui::style::Color;
 
@@ -1005,6 +1005,42 @@ impl LiveTranscript {
             }
             _ => None,
         }
+    }
+
+    /// Return the newly completed logical lines of the active stream.
+    ///
+    /// The live viewport deliberately keeps only a bounded tail, while
+    /// `full_text` is the complete source for the current model turn.  Native
+    /// terminal scrollback is append-only, so callers advance `offset` only
+    /// through a newline; an unfinished last line remains live until the
+    /// stream settles.
+    pub(crate) fn complete_reasoning_deltas(
+        &self,
+        offsets: &mut BTreeMap<PresentationId, usize>,
+    ) -> Vec<(PresentationId, usize, String)> {
+        offsets.retain(|id, _| {
+            self.blocks.iter().any(
+                |block| matches!(block, LiveBlock::Reasoning(reasoning) if reasoning.id == *id),
+            )
+        });
+        self.blocks
+            .iter()
+            .filter_map(|block| {
+                let LiveBlock::Reasoning(block) = block else {
+                    return None;
+                };
+                let start = offsets
+                    .get(&block.id)
+                    .copied()
+                    .unwrap_or(0)
+                    .min(block.full_text.len());
+                let end = block.full_text[start..]
+                    .rfind('\n')
+                    .map(|relative| start + relative + 1)
+                    .unwrap_or(start);
+                (end > start).then(|| (block.id, end, block.full_text[start..end].to_owned()))
+            })
+            .collect()
     }
 
     pub(crate) fn live_block_chars(&self, focus: LiveBlockFocus) -> Option<usize> {
