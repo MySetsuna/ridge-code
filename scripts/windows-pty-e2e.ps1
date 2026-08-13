@@ -962,7 +962,8 @@ try {
     # selection belongs to the host scrollback.  The fullscreen editor is an
     # explicit opt-in path and is not exercised by this native-scroll probe.
     $mouseCaptureEnableObserved = $text.ToString() -match '\x1B\[\?(?:1000|1002|1003|1006)h'
-    $nativeMousePathSatisfied = -not $mouseCaptureEnableObserved
+    $mouseCaptureDisableObserved = $text.ToString() -match '\x1B\[\?1006l\x1B\[\?1015l\x1B\[\?1003l\x1B\[\?1002l\x1B\[\?1000l'
+    $nativeMousePathSatisfied = -not $mouseCaptureEnableObserved -and $mouseCaptureDisableObserved
     # A Windows raw Ctrl+Space byte commonly arrives as a press/release pair
     # in one ConPTY read.  The application correctly renders the momentary
     # HOLD frame, then returns to FOLLOW on release before the polling loop can
@@ -1056,6 +1057,7 @@ try {
         output_has_completion_reasoning_tail = $completionReasoningTailObserved
         output_has_completion_answer = $completionAnswerObserved
         mouse_capture_enable_observed = $mouseCaptureEnableObserved
+        mouse_capture_disable_observed = $mouseCaptureDisableObserved
         native_mouse_path_satisfied = $nativeMousePathSatisfied
         snapshot_bytes = [Text.Encoding]::UTF8.GetByteCount($snapshotRaw)
         snapshot_render_us = $snapshotRenderUs

@@ -141,14 +141,200 @@ struct TerminalGuard {
     keyboard_enhancement_pushed: bool,
     mouse_capture_enabled: bool,
     base_mouse_capture_enabled: bool,
+    native_selection_guard: Option<native_input::NativeSelectionGuard>,
+}
+
+/// Keep native Windows console selection available while the TUI is running.
+///
+/// Crossterm's `DisableMouseCapture` is a no-op until its own capture command
+/// has initialized a process-global original mode.  A console launched with
+/// mouse input already enabled can therefore still have its mouse records
+/// consumed by `event::read`, even though RidgeCode never requested capture.
+#[cfg(windows)]
+mod native_input {
+    use std::ffi::c_void;
+
+    type Handle = *mut c_void;
+
+    const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
+    const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
+    const ENABLE_MOUSE_INPUT: u32 = 0x0010;
+    const ENABLE_QUICK_EDIT_MODE: u32 = 0x0040;
+    const ENABLE_EXTENDED_FLAGS: u32 = 0x0080;
+    const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+    const NOT_RAW_MODE_MASK: u32 = 0x0002 | 0x0004 | 0x0001;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(standard_handle: u32) -> Handle;
+        fn GetConsoleMode(handle: Handle, mode: *mut u32) -> i32;
+        fn SetConsoleMode(handle: Handle, mode: u32) -> i32;
+    }
+
+    pub(crate) struct NativeSelectionGuard {
+        handle: Handle,
+        original_mode: u32,
+    }
+
+    pub(crate) fn enter() -> Option<NativeSelectionGuard> {
+        let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        if handle.is_null() || handle == (-1isize as Handle) {
+            return None;
+        }
+
+        let mut original_mode = 0;
+        if unsafe { GetConsoleMode(handle, &mut original_mode) } == 0 {
+            // ConPTY and redirected stdin are not console handles. Their host
+            // owns selection/scrollback and needs no Win32 mode adjustment.
+            return None;
+        }
+
+        let host_mode =
+            (original_mode | ENABLE_EXTENDED_FLAGS | ENABLE_QUICK_EDIT_MODE) & !ENABLE_MOUSE_INPUT;
+        if host_mode != original_mode && unsafe { SetConsoleMode(handle, host_mode) } == 0 {
+            return None;
+        }
+
+        Some(NativeSelectionGuard {
+            handle,
+            original_mode,
+        })
+    }
+
+    pub(crate) fn ansi_supported() -> bool {
+        let handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+        if handle.is_null() || handle == (-1isize as Handle) {
+            // ConPTY output is a pipe and has no console mode; its host parses
+            // VT sequences, so ANSI mouse mode is the correct path.
+            return true;
+        }
+        let mut mode = 0;
+        if unsafe { GetConsoleMode(handle, &mut mode) == 0 } {
+            // ConPTY output is a pipe and has no console mode; its host parses
+            // VT sequences, so ANSI mouse mode is the correct path.
+            return true;
+        }
+        mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0
+    }
+
+    impl NativeSelectionGuard {
+        pub(crate) fn prepare_for_app(&mut self) {
+            let app_mode = self.original_mode & !NOT_RAW_MODE_MASK;
+            let _ = unsafe { SetConsoleMode(self.handle, app_mode) };
+        }
+
+        pub(crate) fn restore_for_host(&mut self) {
+            let host_mode = (self.original_mode | ENABLE_EXTENDED_FLAGS | ENABLE_QUICK_EDIT_MODE)
+                & !ENABLE_MOUSE_INPUT;
+            let _ = unsafe { SetConsoleMode(self.handle, host_mode) };
+        }
+    }
+
+    impl Drop for NativeSelectionGuard {
+        fn drop(&mut self) {
+            let _ = unsafe { SetConsoleMode(self.handle, self.original_mode) };
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{ENABLE_EXTENDED_FLAGS, ENABLE_MOUSE_INPUT, ENABLE_QUICK_EDIT_MODE};
+
+        #[test]
+        fn host_mode_disables_mouse_records_and_enables_quick_edit() {
+            let original = ENABLE_MOUSE_INPUT;
+            let host =
+                (original | ENABLE_EXTENDED_FLAGS | ENABLE_QUICK_EDIT_MODE) & !ENABLE_MOUSE_INPUT;
+            assert_eq!(host & ENABLE_MOUSE_INPUT, 0);
+            assert_ne!(host & ENABLE_QUICK_EDIT_MODE, 0);
+            assert_ne!(host & ENABLE_EXTENDED_FLAGS, 0);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod native_input {
+    pub(crate) struct NativeSelectionGuard;
+
+    pub(crate) fn enter() -> Option<NativeSelectionGuard> {
+        None
+    }
+
+    pub(crate) fn ansi_supported() -> bool {
+        false
+    }
+
+    impl NativeSelectionGuard {
+        pub(crate) fn prepare_for_app(&mut self) {}
+
+        pub(crate) fn restore_for_host(&mut self) {}
+    }
 }
 
 pub(crate) fn mouse_capture_requested(value: Option<&str>) -> bool {
     value == Some("1")
 }
 
+const DISABLE_MOUSE_REPORTING: &[u8] = b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+const ENABLE_MOUSE_REPORTING: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h";
+
+fn disable_terminal_mouse_reporting(stdout: &mut io::Stdout) -> io::Result<()> {
+    if !native_input::ansi_supported() {
+        return Ok(());
+    }
+    use std::io::Write;
+    // crossterm intentionally skips ANSI on Windows.  ConPTY hosts still
+    // understand these modes, so clear them explicitly before raw input
+    // starts; this keeps wheel/drag selection in the host terminal.
+    stdout.write_all(DISABLE_MOUSE_REPORTING)?;
+    stdout.flush()?;
+    Ok(())
+}
+
+fn enable_terminal_mouse_reporting(stdout: &mut io::Stdout) -> io::Result<()> {
+    if !native_input::ansi_supported() {
+        return Ok(());
+    }
+    use std::io::Write;
+    stdout.write_all(ENABLE_MOUSE_REPORTING)?;
+    stdout.flush()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod mouse_reporting_tests {
+    use super::{DISABLE_MOUSE_REPORTING, ENABLE_MOUSE_REPORTING};
+
+    #[test]
+    fn vt_mouse_contract_disables_and_enables_all_host_modes() {
+        for mode in [1000, 1002, 1003, 1006] {
+            let disabled = format!("?{mode}l");
+            let enabled = format!("?{mode}h");
+            assert!(
+                DISABLE_MOUSE_REPORTING
+                    .windows(disabled.len())
+                    .any(|window| window.ends_with(disabled.as_bytes())),
+                "missing VT mouse disable mode {mode}"
+            );
+            assert!(
+                ENABLE_MOUSE_REPORTING
+                    .windows(enabled.len())
+                    .any(|window| window.ends_with(enabled.as_bytes())),
+                "missing VT mouse enable mode {mode}"
+            );
+        }
+    }
+}
+
 impl TerminalGuard {
     fn enter() -> anyhow::Result<(Self, Term)> {
+        let base_mouse_capture_enabled =
+            mouse_capture_requested(std::env::var("RIDGE_TUI_MOUSE_CAPTURE").ok().as_deref());
+        // Save the pre-raw console mode.  The guard must outlive raw-mode
+        // teardown so Windows returns exactly to the caller's input settings.
+        let native_selection_guard = (!base_mouse_capture_enabled)
+            .then(native_input::enter)
+            .flatten();
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         // BPM best-effort(iter-24):旧 Windows conhost 不支持则静默退化为逐字粘贴,绝不阻 TUI 启动。
@@ -158,13 +344,18 @@ impl TerminalGuard {
         // must leave wheel/drag events to Windows Terminal/conhost/PTY.  An
         // explicit disable also clears mouse-reporting inherited from a host
         // pane, which otherwise makes the event loop consume native gestures.
-        let mouse_capture_enabled =
-            if mouse_capture_requested(std::env::var("RIDGE_TUI_MOUSE_CAPTURE").ok().as_deref()) {
-                execute!(stdout, event::EnableMouseCapture).is_ok()
-            } else {
-                let _ = execute!(stdout, event::DisableMouseCapture);
-                false
-            };
+        let mouse_capture_enabled = if base_mouse_capture_enabled {
+            let captured = enable_terminal_mouse_reporting(&mut stdout).is_ok()
+                && execute!(stdout, event::EnableMouseCapture).is_ok();
+            if captured {
+                let _ = enable_raw_mode();
+            }
+            captured
+        } else {
+            let _ = disable_terminal_mouse_reporting(&mut stdout);
+            let _ = execute!(stdout, event::DisableMouseCapture);
+            false
+        };
         // CSI u best-effort(iter-27):现代终端(Ghostty/WezTerm/iTerm2/kitty)得 Shift+Enter
         // 精确修饰键;不支持则静默降级(Alt+Enter / Ctrl+J 仍可换行)。同时请求
         // REPORT_EVENT_TYPES，让 Ctrl+Space 可实现按住审计、松开跟随；decide_key
@@ -200,7 +391,8 @@ impl TerminalGuard {
             Self {
                 keyboard_enhancement_pushed,
                 mouse_capture_enabled,
-                base_mouse_capture_enabled: mouse_capture_enabled,
+                base_mouse_capture_enabled,
+                native_selection_guard,
             },
             term,
         ))
@@ -208,16 +400,44 @@ impl TerminalGuard {
 
     fn set_editor_mouse_capture(&mut self, enabled: bool) {
         if enabled {
-            if !self.mouse_capture_enabled {
-                self.mouse_capture_enabled =
-                    execute!(io::stdout(), event::EnableMouseCapture).is_ok();
-            }
-        } else {
-            if self.mouse_capture_enabled && !self.base_mouse_capture_enabled {
-                let _ = execute!(io::stdout(), event::DisableMouseCapture);
-                self.mouse_capture_enabled = false;
-            }
+            self.enable_editor_mouse_capture();
+            return;
         }
+        self.disable_editor_mouse_capture();
+    }
+
+    fn enable_editor_mouse_capture(&mut self) {
+        if self.mouse_capture_enabled {
+            return;
+        }
+        // Release the host-selection mode before asking crossterm to consume
+        // mouse records for the fullscreen editor.
+        if let Some(guard) = self.native_selection_guard.as_mut() {
+            guard.prepare_for_app();
+        }
+        let mut stdout = io::stdout();
+        self.mouse_capture_enabled = disable_terminal_mouse_reporting(&mut stdout).is_ok()
+            && enable_terminal_mouse_reporting(&mut stdout).is_ok()
+            && execute!(stdout, event::EnableMouseCapture).is_ok();
+        if self.mouse_capture_enabled {
+            let _ = enable_raw_mode();
+        }
+    }
+
+    fn disable_editor_mouse_capture(&mut self) {
+        if self.mouse_capture_enabled && !self.base_mouse_capture_enabled {
+            let mut stdout = io::stdout();
+            let _ = disable_terminal_mouse_reporting(&mut stdout);
+            let _ = execute!(stdout, event::DisableMouseCapture);
+            self.mouse_capture_enabled = false;
+        }
+        if self.base_mouse_capture_enabled {
+            return;
+        }
+        if let Some(guard) = self.native_selection_guard.as_mut() {
+            guard.restore_for_host();
+        }
+        let _ = enable_raw_mode();
     }
 }
 impl Drop for TerminalGuard {
@@ -227,10 +447,14 @@ impl Drop for TerminalGuard {
             let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
         }
         if self.mouse_capture_enabled {
-            let _ = execute!(io::stdout(), event::DisableMouseCapture);
+            let mut stdout = io::stdout();
+            let _ = disable_terminal_mouse_reporting(&mut stdout);
+            let _ = execute!(stdout, event::DisableMouseCapture);
         }
         let _ = execute!(io::stdout(), event::DisableBracketedPaste);
         let _ = disable_raw_mode();
+        // `native_selection_guard` now drops and restores the exact pre-TUI
+        // mode, including any caller-owned Quick Edit setting.
     }
 }
 
