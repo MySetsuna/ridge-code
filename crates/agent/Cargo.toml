@@ -27,6 +27,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+arboard = { workspace = true }
+image = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }
 sha2 = { workspace = true }

@@ -367,16 +367,8 @@ impl ToolBlock {
             .join("\n")
     }
 
-    pub(crate) fn has_details(&self) -> bool {
-        !self.details.is_empty()
-    }
-
     pub(crate) fn collapsed_hint(&self) -> &str {
         &self.collapsed_hint
-    }
-
-    pub(crate) fn details_count(&self) -> usize {
-        self.details.len()
     }
 
     pub(crate) fn presentation_chars(&self) -> usize {
@@ -507,10 +499,11 @@ impl ToolBlock {
     }
 
     pub(crate) fn commit_lines(&self) -> Vec<(String, Color)> {
+        // Native scrollback is the complete audit record. Keep the compact
+        // summary marker, then append every detail row regardless of the live
+        // collapsed/expanded projection.
         let mut lines = vec![(self.summary.clone(), self.summary_color)];
-        if self.expanded {
-            lines.extend(self.details.iter().cloned());
-        }
+        lines.extend(self.details.iter().cloned());
         lines
     }
 }

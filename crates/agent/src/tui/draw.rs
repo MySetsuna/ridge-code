@@ -4249,7 +4249,10 @@ fn draw_bordered_input_surface(
     );
     frame.render_widget(
         Paragraph::new(Text::from(input_content)).block({
-            let (input_title, input_role) = input_chrome(input_chrome_args(ui, area.width));
+            let (mut input_title, input_role) = input_chrome(input_chrome_args(ui, area.width));
+            if ui.input.is_long() {
+                input_title.push_str(" · Ctrl+E edit");
+            }
             rounded_surface_block()
                 .border_style(Style::default().fg(role_color(if ui.busy {
                     input_role
@@ -5027,6 +5030,50 @@ fn draw_audit_overlays(
     }
 }
 
+/// Fullscreen draft editor. The draft remains the single source of truth;
+/// this surface only changes the viewport, so closing it cannot lose text.
+fn draw_input_editor(frame: &mut ratatui::Frame, area: Rect, ui: &Ui) {
+    if ui.input_editor_scroll.is_none() || area.width < 4 || area.height < 3 {
+        return;
+    }
+    let block = rounded_surface_block()
+        .title(" Input editor · Ctrl+E/Esc close · PgUp/PgDn/wheel scroll ")
+        .border_style(Style::default().fg(role_color(Role::Primary)));
+    let inner = block.inner(area);
+    let width = inner.width.max(1);
+    let total_rows = Paragraph::new(ui.input.buffer.as_str())
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+        .max(1);
+    let visible_rows = inner.height.max(1) as usize;
+    let max_scroll = total_rows.saturating_sub(visible_rows);
+    let scroll = ui
+        .input_editor_scroll
+        .unwrap_or_default()
+        .min(max_scroll.min(u16::MAX as usize) as u16);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(ui.input.buffer.as_str())
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0))
+            .block(block),
+        area,
+    );
+    let (_, cursor_row, cursor_col) = wrap_input(&ui.input.buffer, ui.input.cursor, width);
+    if cursor_row >= scroll && cursor_row < scroll.saturating_add(inner.height) {
+        frame.set_cursor_position(Position {
+            x: inner
+                .x
+                .saturating_add(cursor_col)
+                .min(inner.right().saturating_sub(1)),
+            y: inner
+                .y
+                .saturating_add(cursor_row.saturating_sub(scroll))
+                .min(inner.bottom().saturating_sub(1)),
+        });
+    }
+}
+
 /// Production draw entry point.  The cache lives outside `Ui`: execution and
 /// interaction state stay independent from render-only memoization.
 pub(crate) fn draw_with_cache(
@@ -5102,6 +5149,7 @@ pub(crate) fn draw_with_cache(
     }
     // 交互页模态(iter-35):居中覆视口,搜索框 + 过滤列表 + 提示。审批优先级更高,故在其前画。
     draw_audit_overlays(frame, area, ui, &mut live_cache.panel);
+    draw_input_editor(frame, area, ui);
     if let Some(req) = approval {
         // 审批模态覆整个 Live 视口;↑↓ 滚动看长 diff;diff 行按 +/- 语义着色(iter-28)。
         frame.render_widget(Clear, area);

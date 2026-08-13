@@ -1199,10 +1199,9 @@ fn answer_line_spans(
     (spans, next)
 }
 
-/// 呈现层折叠上限(iter-28):静态提交前超限留头 + 尾标,历史不刷屏。
-/// (内核 `bound_observation` 已在源头有界,此为第二道收敛。)
-pub(crate) const FOLD_MAX: usize = 20;
-
+/// Live/summary projection fold limit. Static scrollback never uses this
+/// presentation-only cap: users must be able to inspect every committed row.
+#[cfg(test)]
 pub(crate) fn fold_lines(text: &str, max: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     if lines.len() <= max {
@@ -1325,7 +1324,7 @@ pub(crate) fn activity_commit_lines(
     text: &str,
     width: u16,
 ) -> Vec<Line<'static>> {
-    let text = fold_lines(&sanitize_display_text(text), FOLD_MAX);
+    let text = sanitize_display_text(text);
     let prefix = format!("⟦{} #{sequence}⟧ ", kind.tag());
     let hint = "  [Ctrl+T activity]";
     let source_lines = text.lines().collect::<Vec<_>>();
@@ -1364,15 +1363,7 @@ pub(crate) fn activity_commit_lines(
 }
 
 pub(crate) fn static_tool_lines(tool: &ToolBlock, width: u16) -> Vec<(String, Color)> {
-    let mut lines = tool.commit_lines();
-    if tool.has_details() && lines.len() == 1 {
-        if let Some((summary, _)) = lines.first_mut() {
-            summary.push_str(&format!(
-                "  [folded · Ctrl+O details · {} rows]",
-                tool.details_count()
-            ));
-        }
-    }
+    let lines = tool.commit_lines();
     lines
         .into_iter()
         .enumerate()
@@ -1414,11 +1405,6 @@ pub(crate) fn commit_lines_with_answer_metrics(
     let text = sanitize_display_text(&text);
     // Answer/Diff details are user-controlled review surfaces: keep the full
     // source text here and let the terminal viewport/wrap provide navigation.
-    let text = if markdown {
-        text
-    } else {
-        fold_lines(&text, FOLD_MAX)
-    };
     let mut lines: Vec<Line> = vec![Line::default()];
     if markdown {
         lines.extend(answer_commit_lines_with_status_and_metrics(
@@ -1442,17 +1428,28 @@ pub(crate) fn colored_commit_lines(
     let rows = entries
         .into_iter()
         .flat_map(|(text, color)| {
-            let text = fold_lines(&sanitize_display_text(&text), FOLD_MAX);
+            let text = sanitize_display_text(&text);
             text.lines()
                 .map(move |line| (line.to_owned(), color))
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
     let mut lines = vec![Line::default()];
-    lines.extend(
-        rows.into_iter()
-            .map(|(text, color)| Line::from(Span::styled(text, Style::default().fg(color)))),
-    );
+    lines.extend(rows.into_iter().map(|(text, color)| {
+        let trimmed = text.trim_start();
+        let is_diff_add = color == role_color(Role::DiffAdd)
+            && (trimmed.starts_with("+ ") || trimmed.starts_with("│  + "));
+        let is_diff_del = color == role_color(Role::DiffDel)
+            && (trimmed.starts_with("- ") || trimmed.starts_with("│  - "));
+        let style = if is_diff_add {
+            Style::default().fg(Color::Black).bg(color)
+        } else if is_diff_del {
+            Style::default().fg(Color::White).bg(color)
+        } else {
+            Style::default().fg(color)
+        };
+        Line::from(Span::styled(text, style))
+    }));
     wrap_commit_lines(lines, width)
 }
 
@@ -1756,28 +1753,120 @@ pub(crate) fn wrap_commit_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Li
         .collect()
 }
 
-/// 启动 banner(iter-28):ASCII 安全字符(单格宽),经 `splash_frame` 列渐显 ≈1s。
+/// Monumental Roman RIDGECODE wordmark. The startup animation reveals this
+/// compact, heavyweight inscription instead of the former mixed-case banner.
 pub(crate) const SPLASH: &[&str] = &[
-    r"  ____  _     _            ____          _      ",
-    r" |  _ \(_) __| | __ _  ___/ ___|___   __| | ___ ",
-    r" | |_) | |/ _` |/ _` |/ _ \ |   / _ \ / _` |/ _ \",
-    r" |  _ <| | (_| | (_| |  __/ |__| (_) | (_| |  __/",
-    r" |_| \_\_|\__,_|\__, |\___|\____\___/ \__,_|\___|",
-    r"                |___/                            ",
+    r"██████▙ ███████ ██████▙ ▟█████▛ ███████ ▟██████ ▟█████▙ ██████▙ ███████",
+    r" ██  ██   ███    ██  ▜█ ██       ██      ██      ██   ██  ██  ▜█  ██    ",
+    r" ██  ██   ███    ██   █ ██  ▟██  ██ ▄    ██      ██   ██  ██   █  ██ ▄  ",
+    r" █████▛   ███    ██   █ ██   ██  █████   ██      ██   ██  ██   █  █████ ",
+    r" ██ ▜█    ███    ██  ▟█ ██  ▟██  ██      ██      ██   ██  ██  ▟█  ██    ",
+    r"███  ██ ███████ ██████▛ ▜█████▛ ███████ ▜██████ ▜█████▛ ██████▛ ███████",
 ];
-pub(crate) const SPLASH_TICKS: usize = 14;
+/// Short, smooth reveal; at the normal tick rate this completes in under a second.
+pub(crate) const SPLASH_TICKS: usize = 10;
 /// banner 最大行宽(用于居中与折行守卫)。
-pub(crate) const SPLASH_W: usize = 48;
+pub(crate) const SPLASH_W: usize = 71;
 
-/// 帧序列纯函数:第 `tick`/`total` 帧显示前 (maxw·tick/total) 列。首帧零字形,末帧全幅,单调渐显。
+/// Startup frames: the Roman inscription settles vertically, then a bright
+/// sweep crosses it while a paler, clockwise-leaning reflection materialises.
 pub(crate) fn splash_frame(tick: usize, total: usize) -> String {
-    let maxw = SPLASH.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    let cols = maxw * tick / total.max(1);
-    SPLASH
+    let total = total.max(1);
+    let phase = tick.min(total);
+    let settle_end = (total * 3 / 5).max(1);
+    let logo_w = SPLASH
         .iter()
-        .map(|l| l.chars().take(cols).collect::<String>())
-        .collect::<Vec<_>>()
-        .join("\n")
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut rows = splash_settle_rows(phase, settle_end);
+
+    if phase >= settle_end {
+        for (row, source) in rows.iter_mut().zip(SPLASH) {
+            *row = (*source).to_owned();
+        }
+        splash_apply_sweep(&mut rows, phase, settle_end, total, logo_w);
+        splash_add_reflection(&mut rows, phase, settle_end, total);
+    }
+
+    rows.join("\n")
+}
+
+fn splash_settle_rows(phase: usize, settle_end: usize) -> Vec<String> {
+    let mut rows = vec![String::new(); SPLASH.len() + 1 + SPLASH.len()];
+    // A short, smooth bottom-up settle replaces the old left-to-right wipe.
+    for (y, line) in SPLASH.iter().enumerate() {
+        let delay = SPLASH.len().saturating_sub(y + 1) / 2;
+        let local = phase.saturating_sub(delay).min(settle_end);
+        if local == 0 {
+            continue;
+        }
+        let lift = 2usize.saturating_sub(2 * local / settle_end);
+        let target = (y + lift).min(SPLASH.len() - 1);
+        rows[target] = line.to_string();
+    }
+    rows
+}
+
+fn splash_apply_sweep(
+    rows: &mut [String],
+    phase: usize,
+    settle_end: usize,
+    total: usize,
+    logo_w: usize,
+) {
+    if phase <= settle_end {
+        return;
+    }
+    let sweep_span = (total - settle_end).max(1);
+    let beam = logo_w * (phase - settle_end) / sweep_span;
+    for row in rows.iter_mut().take(SPLASH.len()) {
+        *row = row
+            .chars()
+            .enumerate()
+            .map(|(x, ch)| {
+                if ch != ' ' && x.abs_diff(beam) <= 2 {
+                    '▓'
+                } else {
+                    ch
+                }
+            })
+            .collect();
+    }
+}
+
+fn splash_add_reflection(rows: &mut [String], phase: usize, settle_end: usize, total: usize) {
+    let sweep_span = (total - settle_end).max(1);
+    let strength = phase - settle_end;
+    // Reflection appears with the sweep, already translucent (░/▒), and leans
+    // left more strongly toward the waterline's lower edge.
+    for ry in 0..SPLASH.len() {
+        let source = SPLASH[SPLASH.len() - 1 - ry];
+        let shade = if strength * 2 >= sweep_span + ry {
+            '▒'
+        } else {
+            '░'
+        };
+        let reflected: String = source
+            .chars()
+            .map(|ch| if ch == ' ' { ' ' } else { shade })
+            .collect();
+        // Decreasing inset down the reflection creates a leftward, clockwise
+        // rake without introducing a black placeholder.
+        let inset = (SPLASH.len() - 1 - ry) * 2;
+        rows[SPLASH.len() + 1 + ry] = format!("{}{}", " ".repeat(inset), reflected);
+    }
+}
+
+/// Width-aware startup frame. Narrow terminals get a truthful one-line badge
+/// instead of a wordmark that silently wraps past the viewport.
+pub(crate) fn splash_frame_for_width(tick: usize, total: usize, width: usize) -> String {
+    if width < SPLASH_W {
+        let label = "◆ RidgeCode";
+        let visible = label.chars().count() * tick.min(total) / total.max(1);
+        return label.chars().take(visible.max(1)).collect();
+    }
+    splash_frame(tick, total)
 }
 
 /// banner 在 `width` 内水平居中的左空白列数(纯函数)。

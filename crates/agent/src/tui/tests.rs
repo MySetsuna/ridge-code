@@ -1,11 +1,11 @@
 use super::{
-    edit_input, handle_device_oauth_event, handle_done_result, handle_input_action,
-    handle_key_event, handle_stream_event, handle_tick, handle_token_chunk, keylog_path,
-    log_key_event, note_initial_ui, poll_device_oauth, poll_model_catalog, poll_oauth_callback,
-    prepare_loop, process_pending_submit, reset_task_ui, run_event_loop, run_event_step,
-    session_input_history, superstep_activity, tui_approver, DoneEventContext, EventStepContext,
-    KeyEventContext, KeyEventResult, LoopPrepareContext, PendingSubmitContext, StartTask,
-    StreamEventContext, TuiLoopContext,
+    apply_clipboard_paste, edit_input, handle_device_oauth_event, handle_done_result,
+    handle_input_action, handle_key_event, handle_stream_event, handle_tick, handle_token_chunk,
+    keylog_path, log_key_event, note_initial_ui, poll_device_oauth, poll_model_catalog,
+    poll_oauth_callback, prepare_loop, process_pending_submit, reset_task_ui, run_event_loop,
+    run_event_step, session_input_history, superstep_activity, tui_approver, ClipboardPaste,
+    CommitBlock, DoneEventContext, EventStepContext, KeyEventContext, KeyEventResult,
+    LoopPrepareContext, PendingSubmitContext, StartTask, StreamEventContext, TuiLoopContext,
 };
 use crate::{DeviceOAuthEvent, ReplMeta};
 use ratatui::backend::CrosstermBackend;
@@ -93,6 +93,7 @@ async fn extracted_key_handler_covers_priority_and_edit_paths() {
                 last_ctrl_c: &mut last_ctrl_c,
                 pressed: &mut pressed,
                 keylog_path: &keylog_path,
+                guard: None,
             };
             handle_key_event($event, &mut context).await
         }};
@@ -114,6 +115,7 @@ async fn extracted_key_handler_covers_priority_and_edit_paths() {
                 last_ctrl_c: &mut last_ctrl_c,
                 pressed: &mut pressed,
                 keylog_path: &keylog_path,
+                guard: None,
             };
             handle_input_action($action, &mut context);
         }};
@@ -121,6 +123,27 @@ async fn extracted_key_handler_covers_priority_and_edit_paths() {
 
     assert_continue(dispatch!(Event::Paste("draft".into())));
     assert_continue(dispatch!(Event::Resize(80, 24)));
+    ui.input = InputState::default();
+    ui.input
+        .insert_str("line one\nline two\nline three\nline four\nline five\nline six");
+    assert_continue(dispatch!(key(KeyCode::Char('e'), KeyModifiers::CONTROL)));
+    assert!(ui.input_editor_scroll.is_some());
+    assert_continue(dispatch!(key(KeyCode::Char('v'), KeyModifiers::CONTROL)));
+    assert_continue(dispatch!(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    })));
+    assert_continue(dispatch!(key(KeyCode::PageDown, KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::Up, KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::Down, KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::Delete, KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::Backspace, KeyModifiers::NONE)));
+    assert_continue(dispatch!(key(KeyCode::Esc, KeyModifiers::NONE)));
+    assert!(ui.input_editor_scroll.is_none());
+    ui.input = InputState::default();
+    ui.input.insert_str("draft");
     assert_continue(dispatch!(key(KeyCode::Char('x'), KeyModifiers::NONE)));
     assert_continue(dispatch!(key(KeyCode::Backspace, KeyModifiers::NONE)));
     assert_continue(dispatch!(key(KeyCode::Left, KeyModifiers::NONE)));
@@ -194,6 +217,7 @@ async fn extracted_key_handler_covers_priority_and_edit_paths() {
     assert_continue(dispatch!(key(KeyCode::Esc, KeyModifiers::NONE)));
 
     action!(InputAction::Insert('/'));
+    action!(InputAction::Delete);
     action!(InputAction::PopupOpen);
     ui.popup = Some(Popup {
         items: vec!["/help".into(), "/model".into()],
@@ -341,7 +365,7 @@ async fn extracted_event_step_covers_stream_approval_done_and_tick_branches() {
     let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
     let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut tick = tokio::time::interval(Duration::from_secs(3600));
-    let terminal = test_crossterm_terminal();
+    let mut terminal = test_crossterm_terminal();
     let mut animation_due = false;
 
     macro_rules! step {
@@ -373,7 +397,8 @@ async fn extracted_event_step_covers_stream_approval_done_and_tick_branches() {
                 approval_rx: &mut approval_rx,
                 done_rx: &mut done_rx,
                 tick: &mut tick,
-                terminal: &terminal,
+                terminal: &mut terminal,
+                guard: None,
                 animation_due: &mut animation_due,
             })
             .await
@@ -666,6 +691,7 @@ async fn extracted_event_loop_exits_after_takeover_signal() {
         history: Vec::new(),
         meta: test_meta(),
         terminal,
+        guard: None,
         ui: Ui::default(),
         live_cache: LiveOutputCache::default(),
         model_catalog_rx: None,
@@ -4526,7 +4552,7 @@ fn empty_tool_observation_is_explicit_across_projections() {
 
     let block = tool_preview(message).expect("empty observation should remain inspectable");
     assert!(block.summary().contains("no output"));
-    assert!(!block.has_details());
+    assert_eq!(block.details_text(), "no output");
     assert_eq!(block.details_text(), "no output");
     assert_eq!(block.commit_lines().len(), 1);
 
@@ -6116,6 +6142,58 @@ fn terminal_input_normalizes_legacy_control_bytes_and_mouse() {
         })),
         TerminalEventAction::Mouse(_)
     ));
+}
+
+#[test]
+fn fullscreen_editor_shortcut_is_reserved_for_long_input_and_editable() {
+    assert_eq!(
+        input_action(
+            &KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+            false,
+            false
+        ),
+        InputAction::OpenInputEditor
+    );
+    let mut input = InputState::default();
+    input.insert_str("line one\nline two\nline three\nline four\nline five");
+    assert!(input.is_long());
+    input.cursor = input.buffer.chars().count();
+    input.delete();
+    assert!(input.buffer.ends_with("line five"));
+    input.backspace();
+    assert!(input.buffer.ends_with("line fiv"));
+}
+
+#[test]
+fn clipboard_paste_projection_keeps_text_and_image_placeholders() {
+    let mut ui = Ui::default();
+    apply_clipboard_paste(&mut ui, ClipboardPaste::Text("a\n b".into()));
+    assert_eq!(ui.input.buffer, "a\n b");
+
+    let path = std::path::PathBuf::from(".ridge/pasted-images/image9.png");
+    apply_clipboard_paste(
+        &mut ui,
+        ClipboardPaste::Image {
+            placeholder: "[image9] [3 lines]".into(),
+            path: path.clone(),
+        },
+    );
+    assert!(ui.input.buffer.contains("[image9] [3 lines]"));
+    assert!(ui
+        .commits
+        .iter()
+        .any(|commit| matches!(commit, CommitBlock::Text { text, .. } if text.contains("image9"))));
+}
+
+#[test]
+fn resize_event_is_redraw_and_mouse_capture_is_opt_in() {
+    assert!(matches!(
+        terminal_event_action(Event::Resize(120, 40)),
+        TerminalEventAction::Redraw
+    ));
+    assert!(!mouse_capture_requested(None));
+    assert!(!mouse_capture_requested(Some("0")));
+    assert!(mouse_capture_requested(Some("1")));
 }
 
 #[test]
@@ -8606,6 +8684,58 @@ fn full_tui_frame_survives_narrow_cjk_and_escape_text() {
 }
 
 #[test]
+fn fullscreen_input_editor_renders_complete_draft_and_cursor() {
+    let mut ui = Ui::default();
+    ui.input.insert_str(
+        &(1..=8)
+            .map(|line| format!("line {line}: complete draft body"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    ui.input_editor_scroll = Some(0);
+    ui.input.cursor = ui.input.buffer.chars().count();
+    let meta = test_meta();
+    let vitals = Vitals {
+        step: 1,
+        elapsed_s: 0,
+        task_tokens: 0,
+        rate: 0,
+        ctx_used: 0,
+        queued: 0,
+    };
+    let mut terminal =
+        Terminal::new(ratatui::backend::TestBackend::new(60, 16)).expect("editor terminal");
+    terminal
+        .draw(|frame| draw(frame, &ui, &meta, 0, &vitals, None))
+        .expect("editor draw");
+    let first = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(
+        first.contains("Input editor"),
+        "editor title missing: {first}"
+    );
+    assert!(first.contains("line 1"), "draft head missing: {first}");
+
+    ui.input_editor_scroll = Some(6);
+    terminal
+        .draw(|frame| draw(frame, &ui, &meta, 0, &vitals, None))
+        .expect("scrolled editor draw");
+    let tail = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(tail.contains("line 8"), "draft tail missing: {tail}");
+}
+
+#[test]
 fn responsive_panel_chrome_keeps_actions_visible_in_narrow_frames() {
     let mut tools = Panel::new(
         PanelKind::Tools,
@@ -9122,7 +9252,7 @@ fn tool_commit_keeps_summary_and_details_together() {
 }
 
 #[test]
-fn tool_history_is_collapsed_and_expandable_after_static_commit() {
+fn static_tool_commit_keeps_complete_details_while_live_view_stays_collapsed() {
     let mut ui = Ui::default();
     ui.push_tool(
         ToolBlock::from_lines_with_phase(
@@ -9156,11 +9286,7 @@ fn tool_history_is_collapsed_and_expandable_after_static_commit() {
         .collect::<String>();
     assert!(static_symbols.contains("tool summary"));
     assert!(static_symbols.contains("O tool summary"));
-    assert!(static_symbols.contains("folded"));
-    assert!(static_symbols.contains("Ctrl+O"));
-    assert!(static_symbols.contains("details"));
-    assert!(static_symbols.contains("1 rows"));
-    assert!(!static_symbols.contains("detail one"));
+    assert!(static_symbols.contains("detail one"));
     assert!(ui.toggle_details_or_history());
 
     let mut meta = ReplMeta {
@@ -9874,20 +10000,23 @@ fn fold_lines_caps_output() {
     assert!(folded.contains("+10 lines folded"));
 }
 
-/// iter-28:启动帧序列 —— 首帧零字形、末帧全幅、宽度单调不减。
+/// Startup animation contract: it begins empty, settles the complete Roman
+/// RIDGECODE wordmark, then introduces both the sweep and pale reflection.
 #[test]
-fn splash_reveals_monotonically() {
-    assert!(splash_frame(0, SPLASH_TICKS).chars().all(|c| c == '\n'));
-    assert_eq!(splash_frame(SPLASH_TICKS, SPLASH_TICKS), SPLASH.join("\n"));
-    let mut prev = 0;
-    for t in 0..=SPLASH_TICKS {
-        let glyphs = splash_frame(t, SPLASH_TICKS)
-            .chars()
-            .filter(|c| *c != '\n')
-            .count();
-        assert!(glyphs >= prev);
-        prev = glyphs;
+fn splash_reveals_then_reflects() {
+    let first = splash_frame(0, SPLASH_TICKS);
+    assert!(first.chars().all(|c| c == '\n'));
+
+    let settle_tick = SPLASH_TICKS * 3 / 5;
+    let settled = splash_frame(settle_tick, SPLASH_TICKS);
+    for line in SPLASH {
+        assert!(settled.contains(line));
     }
+
+    let final_frame = splash_frame(SPLASH_TICKS, SPLASH_TICKS);
+    assert!(final_frame.contains('▓')); // moving light remains visible
+    assert!(final_frame.contains('▒')); // coloured/translucent reflection
+    assert_eq!(final_frame.lines().count(), SPLASH.len() * 2 + 1);
 }
 
 /// iter-36:落定 banner 防「标识乱了」—— 宽则居中艺术字(每行 ≤ width 不折)+ tagline,窄则紧凑单行。
@@ -9901,11 +10030,22 @@ fn splash_block_guards_width() {
             "banner 行不得超宽致折行: {line:?}"
         );
     }
-    assert!(wide.iter().any(|l| l.contains('_'))); // ASCII 艺术字仍在
+    assert!(wide.iter().any(|l| l.contains('█'))); // Roman block wordmark remains
     let narrow = splash_block(10);
     assert_eq!(narrow.len(), 1); // 退化单行
     assert!(narrow[0].chars().count() <= 12); // 极窄也不折
     assert!(!has_cjk(&narrow[0]));
+}
+
+#[test]
+fn splash_animation_adapts_to_narrow_width_without_wrapping() {
+    let frame = splash_frame_for_width(SPLASH_TICKS / 2, SPLASH_TICKS, 24);
+    assert_eq!(frame.lines().count(), 1);
+    assert!(frame.chars().count() <= 12);
+    assert_eq!(
+        splash_frame_for_width(SPLASH_TICKS, SPLASH_TICKS, 24),
+        "◆ RidgeCode"
+    );
 }
 
 /// iter-36:所有交互页标题为英文(全局显示英化)。
@@ -10305,7 +10445,9 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use agent::{est_tokens, AgentState, Config, HaltReason, Todo, PROVIDER_PRESETS};
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -10332,22 +10474,22 @@ use super::{
     live_phase_anchor, live_phase_marker, live_rail, live_scroll_action,
     live_semantic_toggle_action, live_surface_title, live_tool_rail_role, login_panel,
     mark_takeover_requested, markdown_lines, md_line_spans, models_panel, mouse_action,
-    multiline_shortcut_label, named_profile_name, panel_action, panel_attention_action,
-    panel_enter, panel_filter, panel_hint, panel_rect_for_kind, panel_title_role,
-    panel_viewport_range, pending_queue_lines, preset_by_id, preview_lines,
+    mouse_capture_requested, multiline_shortcut_label, named_profile_name, panel_action,
+    panel_attention_action, panel_enter, panel_filter, panel_hint, panel_rect_for_kind,
+    panel_title_role, panel_viewport_range, pending_queue_lines, preset_by_id, preview_lines,
     queue_panel_toggle_action, reasoning_commit_lines, reasoning_history_panel,
     render_status_template, render_todo_block, responsive_live_layout, role_color, run_command,
     sanitize_display_text, sanitize_paste, selection_style, semantic_focus_action, should_draw,
-    splash_block, splash_frame, status_line_projection, str_cells, stream_channel_badge,
-    stream_tail, summarize_event, superstep_is_busy, tail_display_cells, telemetry_surface,
-    terminal_event_action, todo_progress, token_rate, tool_detail_scroll_action, tool_focus_action,
-    tool_history_panel, tool_preview, tools_panel, top_chrome, unfinished_answer_reason,
-    up_fallback_is_home, wrap_commit_lines, wrap_input, wrap_live_spans, wrap_live_spans_tail,
-    wrapped_rows, ActivityKind, ApprovalAction, ApprovalRequest, CommandCatalog, CommandStats,
-    CommitBlock, DetailLayoutCache, InputAction, InputChromeArgs, InputState, LiveBlockFocus,
-    LiveChannel, LiveFramePlan, LiveLineKind, LiveOutputCache, LiveScrollAction, LiveTranscript,
-    Panel, PanelAction, PanelItemsCache, PanelKind, PanelRow, PanelRowAction, Popup,
-    PresentationChannel, PresentationMetrics, PresentationStatus, Role, StatusVars,
+    splash_block, splash_frame, splash_frame_for_width, status_line_projection, str_cells,
+    stream_channel_badge, stream_tail, summarize_event, superstep_is_busy, tail_display_cells,
+    telemetry_surface, terminal_event_action, todo_progress, token_rate, tool_detail_scroll_action,
+    tool_focus_action, tool_history_panel, tool_preview, tools_panel, top_chrome,
+    unfinished_answer_reason, up_fallback_is_home, wrap_commit_lines, wrap_input, wrap_live_spans,
+    wrap_live_spans_tail, wrapped_rows, ActivityKind, ApprovalAction, ApprovalRequest,
+    CommandCatalog, CommandStats, DetailLayoutCache, InputAction, InputChromeArgs, InputState,
+    LiveBlockFocus, LiveChannel, LiveFramePlan, LiveLineKind, LiveOutputCache, LiveScrollAction,
+    LiveTranscript, Panel, PanelAction, PanelItemsCache, PanelKind, PanelRow, PanelRowAction,
+    Popup, PresentationChannel, PresentationMetrics, PresentationStatus, Role, StatusVars,
     TerminalEventAction, ToolBlock, ToolPhase, Ui, Vitals, CHATGPT_MODEL_GROUP, CLAUDE_OAUTH_ROW,
     CODEX_OAUTH_ROW, MAX_ACTIVITY_HISTORY, MAX_ANSWER_HISTORY, MAX_ANSWER_HISTORY_CHARS,
     MAX_PENDING_PREVIEW_CHARS, MAX_PENDING_PREVIEW_ROWS, MAX_PRESENTATION_RECORDS,

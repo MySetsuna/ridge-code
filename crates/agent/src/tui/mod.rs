@@ -140,14 +140,25 @@ fn unfinished_answer_reason(result: &Result<AgentState, String>) -> Option<&'sta
 struct TerminalGuard {
     keyboard_enhancement_pushed: bool,
     mouse_capture_enabled: bool,
+    base_mouse_capture_enabled: bool,
 }
+
+pub(crate) fn mouse_capture_requested(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
 impl TerminalGuard {
     fn enter() -> anyhow::Result<(Self, Term)> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         // BPM best-effort(iter-24):旧 Windows conhost 不支持则静默退化为逐字粘贴,绝不阻 TUI 启动。
         let _ = execute!(stdout, event::EnableBracketedPaste);
-        let mouse_capture_enabled = execute!(stdout, event::EnableMouseCapture).is_ok();
+        // Keep the terminal's native scrollback and text selection authoritative.
+        // TUI mouse capture is opt-in for panel-only experiments; the default
+        // must leave wheel/drag events to Windows Terminal/conhost/PTY.
+        let mouse_capture_enabled =
+            mouse_capture_requested(std::env::var("RIDGE_TUI_MOUSE_CAPTURE").ok().as_deref())
+                && execute!(stdout, event::EnableMouseCapture).is_ok();
         // CSI u best-effort(iter-27):现代终端(Ghostty/WezTerm/iTerm2/kitty)得 Shift+Enter
         // 精确修饰键;不支持则静默降级(Alt+Enter / Ctrl+J 仍可换行)。同时请求
         // REPORT_EVENT_TYPES，让 Ctrl+Space 可实现按住审计、松开跟随；decide_key
@@ -183,9 +194,24 @@ impl TerminalGuard {
             Self {
                 keyboard_enhancement_pushed,
                 mouse_capture_enabled,
+                base_mouse_capture_enabled: mouse_capture_enabled,
             },
             term,
         ))
+    }
+
+    fn set_editor_mouse_capture(&mut self, enabled: bool) {
+        if enabled {
+            if !self.mouse_capture_enabled {
+                self.mouse_capture_enabled =
+                    execute!(io::stdout(), event::EnableMouseCapture).is_ok();
+            }
+        } else {
+            if self.mouse_capture_enabled && !self.base_mouse_capture_enabled {
+                let _ = execute!(io::stdout(), event::DisableMouseCapture);
+                self.mouse_capture_enabled = false;
+            }
+        }
     }
 }
 impl Drop for TerminalGuard {
@@ -204,6 +230,7 @@ impl Drop for TerminalGuard {
 
 // === 子模块(iter-52 按职责拆分,均为 tui 私有)===
 mod app;
+mod clipboard;
 mod command;
 mod draw;
 mod eventfmt;
@@ -217,6 +244,7 @@ mod tests;
 mod transcript;
 
 pub(crate) use app::*;
+pub(crate) use clipboard::*;
 pub(crate) use command::*;
 pub(crate) use draw::*;
 pub(crate) use eventfmt::*;
@@ -273,6 +301,7 @@ struct KeyEventContext<'a> {
     last_ctrl_c: &'a mut Option<Instant>,
     pressed: &'a mut std::collections::HashSet<KeyCode>,
     keylog_path: &'a Option<std::path::PathBuf>,
+    guard: Option<&'a mut TerminalGuard>,
 }
 
 async fn handle_key_event(
@@ -283,6 +312,7 @@ async fn handle_key_event(
     let key = match terminal_event_action(event) {
         TerminalEventAction::Paste(text) => {
             apply_paste(context.ui, &text);
+            sync_input_editor_scroll(context.ui);
             return Ok(KeyEventResult::Continue);
         }
         TerminalEventAction::Mouse(mouse) => {
@@ -306,6 +336,10 @@ async fn handle_key_event(
         return handle_ctrl_c(context);
     }
     if handle_approval_key(&key, context) {
+        return Ok(KeyEventResult::Continue);
+    }
+    if context.ui.input_editor_scroll.is_some() {
+        handle_input_editor_key(&key, context);
         return Ok(KeyEventResult::Continue);
     }
     if handle_global_key(&key, context) {
@@ -332,6 +366,14 @@ fn handle_mouse_event(mouse: crossterm::event::MouseEvent, context: &mut KeyEven
 }
 
 fn handle_mouse_scroll(delta: i8, context: &mut KeyEventContext<'_>) {
+    if let Some(scroll) = context.ui.input_editor_scroll.as_mut() {
+        if delta > 0 {
+            *scroll = scroll.saturating_sub(4);
+        } else {
+            *scroll = scroll.saturating_add(4);
+        }
+        return;
+    }
     if let Some(panel) = context.ui.panel.as_mut() {
         scroll_panel(panel, delta);
         context.ui.sync_live_panel_focus();
@@ -851,6 +893,71 @@ fn handle_input_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) {
     handle_input_action(action, context);
 }
 
+fn handle_input_editor_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) {
+    if input_editor_close_requested(key) {
+        context.ui.input_editor_scroll = None;
+        set_editor_mouse_capture(context, false);
+        return;
+    }
+    if input_editor_paste_requested(key) {
+        handle_input_action(InputAction::PasteClipboard, context);
+        return;
+    }
+    if key.modifiers.is_empty() {
+        match key.code {
+            KeyCode::PageUp => {
+                if let Some(scroll) = context.ui.input_editor_scroll.as_mut() {
+                    *scroll = scroll.saturating_sub(8);
+                }
+                return;
+            }
+            KeyCode::PageDown => {
+                if let Some(scroll) = context.ui.input_editor_scroll.as_mut() {
+                    *scroll = scroll.saturating_add(8);
+                }
+                return;
+            }
+            _ => {}
+        }
+    }
+    let action = match key.code {
+        KeyCode::Enter => InputAction::NewLine,
+        KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'j' => {
+            InputAction::NewLine
+        }
+        KeyCode::Char(c) => InputAction::Insert(c),
+        KeyCode::Backspace => InputAction::Backspace,
+        KeyCode::Delete => InputAction::Delete,
+        KeyCode::Left => InputAction::Left,
+        KeyCode::Right => InputAction::Right,
+        KeyCode::Home => InputAction::Home,
+        KeyCode::End => InputAction::End,
+        KeyCode::Up => {
+            let _ = context.ui.input.move_up();
+            sync_input_editor_scroll(context.ui);
+            return;
+        }
+        KeyCode::Down => {
+            let _ = context.ui.input.move_down();
+            sync_input_editor_scroll(context.ui);
+            return;
+        }
+        _ => return,
+    };
+    edit_input(action, context.ui);
+    sync_input_editor_scroll(context.ui);
+}
+
+fn input_editor_close_requested(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Esc
+        || (key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('e' | 'E')))
+}
+
+fn input_editor_paste_requested(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('v' | 'V'))
+}
+
 fn handle_input_action(action: InputAction, context: &mut KeyEventContext<'_>) {
     match action {
         InputAction::Interrupt => {
@@ -861,6 +968,7 @@ fn handle_input_action(action: InputAction, context: &mut KeyEventContext<'_>) {
         }
         InputAction::Insert(_)
         | InputAction::Backspace
+        | InputAction::Delete
         | InputAction::Left
         | InputAction::Right
         | InputAction::Home
@@ -886,7 +994,51 @@ fn handle_input_action(action: InputAction, context: &mut KeyEventContext<'_>) {
                 context.ui.note("no live blocks to search", Color::Gray);
             }
         }
+        InputAction::OpenInputEditor => {
+            if context.ui.input.is_long() {
+                context.ui.popup = None;
+                context.ui.input_editor_scroll = Some(0);
+                set_editor_mouse_capture(context, true);
+                sync_input_editor_scroll(context.ui);
+            } else {
+                context.ui.note(
+                    "fullscreen editor opens for long or multiline input",
+                    Color::Gray,
+                );
+            }
+        }
+        InputAction::PasteClipboard => match read_clipboard() {
+            Ok(paste) => apply_clipboard_paste(context.ui, paste),
+            Err(error) => context.ui.note(
+                format!("clipboard paste unavailable: {error}"),
+                Color::Yellow,
+            ),
+        },
         InputAction::Ignore => {}
+    }
+}
+
+fn apply_clipboard_paste(ui: &mut Ui, paste: ClipboardPaste) {
+    match paste {
+        ClipboardPaste::Text(text) => {
+            apply_paste(ui, &text);
+            sync_input_editor_scroll(ui);
+        }
+        ClipboardPaste::Image { placeholder, path } => {
+            ui.popup = None;
+            ui.input.insert_str(&placeholder);
+            ui.note(
+                format!("pasted {placeholder} · saved {}", path.display()),
+                Color::Gray,
+            );
+            sync_input_editor_scroll(ui);
+        }
+    }
+}
+
+fn set_editor_mouse_capture(context: &mut KeyEventContext<'_>, enabled: bool) {
+    if let Some(guard) = context.guard.as_deref_mut() {
+        guard.set_editor_mouse_capture(enabled);
     }
 }
 
@@ -898,6 +1050,10 @@ fn edit_input(action: InputAction, ui: &mut Ui) {
         }
         InputAction::Backspace => {
             ui.input.backspace();
+            ui.popup = build_popup(&ui.input);
+        }
+        InputAction::Delete => {
+            ui.input.delete();
             ui.popup = build_popup(&ui.input);
         }
         InputAction::Left => ui.input.left(),
@@ -920,6 +1076,20 @@ fn edit_input(action: InputAction, ui: &mut Ui) {
         }
         InputAction::CursorDownOrHistory => cursor_down_or_history(ui),
         _ => {}
+    }
+}
+
+fn sync_input_editor_scroll(ui: &mut Ui) {
+    let Some(scroll) = ui.input_editor_scroll.as_mut() else {
+        return;
+    };
+    let (width, height) = crossterm::terminal::size().unwrap_or((80, 24));
+    let (_, cursor_row, _) = wrap_input(&ui.input.buffer, ui.input.cursor, width.saturating_sub(2));
+    let visible = height.saturating_sub(2).max(1);
+    if cursor_row < *scroll {
+        *scroll = cursor_row;
+    } else if cursor_row >= scroll.saturating_add(visible) {
+        *scroll = cursor_row.saturating_sub(visible.saturating_sub(1));
     }
 }
 
@@ -1221,7 +1391,8 @@ struct EventStepContext<'a> {
     approval_rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<ApprovalRequest>,
     done_rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<Result<AgentState, String>>,
     tick: &'a mut tokio::time::Interval,
-    terminal: &'a Term,
+    terminal: &'a mut Term,
+    guard: Option<&'a mut TerminalGuard>,
     animation_due: &'a mut bool,
 }
 
@@ -1254,11 +1425,21 @@ async fn run_event_step(context: EventStepContext<'_>) -> anyhow::Result<EventSt
         done_rx,
         tick,
         terminal,
+        guard,
         animation_due,
     } = context;
     let dirty = tokio::select! {
         biased;
         Some(event) = key_rx.recv() => {
+            let resized = matches!(&event, Event::Resize(_, _));
+            if resized {
+                // `draw` also autoresizes, but doing it at the event boundary
+                // clears the inline viewport before the next frame and keeps
+                // native scrollback aligned with the new terminal width.
+                let _ = terminal.autoresize();
+                sync_input_editor_scroll(ui);
+                refresh_splash_for_width(ui, terminal);
+            }
             let result = handle_key_event(
                 event,
                 &mut KeyEventContext {
@@ -1276,6 +1457,7 @@ async fn run_event_step(context: EventStepContext<'_>) -> anyhow::Result<EventSt
                     last_ctrl_c,
                     pressed,
                     keylog_path,
+                    guard,
                 },
             ).await?;
             if matches!(result, KeyEventResult::Exit) {
@@ -1917,11 +2099,25 @@ fn handle_tick(
         ui.clear_streams();
     } else {
         ui.transcript.set_splash(indent(
-            &splash_frame(ui.splash, SPLASH_TICKS),
+            &splash_frame_for_width(ui.splash, SPLASH_TICKS, width),
             splash_pad(width),
         ));
     }
     true
+}
+
+fn refresh_splash_for_width(ui: &mut Ui, terminal: &Term) {
+    if ui.splash >= SPLASH_TICKS || ui.busy {
+        return;
+    }
+    let width = terminal
+        .size()
+        .map(|size| size.width as usize)
+        .unwrap_or(80);
+    ui.transcript.set_splash(indent(
+        &splash_frame_for_width(ui.splash, SPLASH_TICKS, width),
+        splash_pad(width),
+    ));
 }
 
 struct TuiLoopContext {
@@ -1932,6 +2128,7 @@ struct TuiLoopContext {
     history: Vec<Message>,
     meta: ReplMeta,
     terminal: Term,
+    guard: Option<TerminalGuard>,
     ui: Ui,
     live_cache: LiveOutputCache,
     model_catalog_rx: Option<tokio::sync::oneshot::Receiver<(ModelCatalog, u32)>>,
@@ -1970,6 +2167,7 @@ async fn run_event_loop(context: TuiLoopContext) -> anyhow::Result<()> {
         mut history,
         mut meta,
         mut terminal,
+        mut guard,
         mut ui,
         mut live_cache,
         mut model_catalog_rx,
@@ -2055,7 +2253,8 @@ async fn run_event_loop(context: TuiLoopContext) -> anyhow::Result<()> {
             approval_rx: &mut approval_rx,
             done_rx: &mut done_rx,
             tick: &mut tick,
-            terminal: &terminal,
+            terminal: &mut terminal,
+            guard: guard.as_mut(),
             animation_due: &mut animation_due,
         })
         .await?;
@@ -2105,7 +2304,7 @@ pub(super) async fn run(
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent<AgentState>>();
     let (token_tx, token_rx) = tokio::sync::mpsc::unbounded_channel::<provider::StreamChunk>();
     let (done_tx, done_rx) = tokio::sync::mpsc::unbounded_channel::<Result<AgentState, String>>();
-    let (_guard, terminal) = TerminalGuard::enter()?;
+    let (guard, terminal) = TerminalGuard::enter()?;
     tui_trace("terminal.ready");
     let live_cache = LiveOutputCache::default();
     let mut ui = Ui {
@@ -2205,6 +2404,7 @@ pub(super) async fn run(
         history,
         meta,
         terminal,
+        guard: Some(guard),
         ui,
         live_cache,
         model_catalog_rx,

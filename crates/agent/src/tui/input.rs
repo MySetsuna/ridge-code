@@ -55,6 +55,7 @@ pub(crate) enum InputAction {
     Right,
     Home,
     End,
+    Delete,
     NewLine,
     Submit,
     /// busy 时提交 → 入队(iter-33),当前任务毕自动接跑。
@@ -68,6 +69,8 @@ pub(crate) enum InputAction {
     ToggleActivity,
     /// Open the non-blocking live audit/search surface without mutating input.
     OpenLiveSearch,
+    OpenInputEditor,
+    PasteClipboard,
     CursorUpOrHistory,
     CursorDownOrHistory,
     PopupOpen,
@@ -273,12 +276,19 @@ fn normal_input_action(key: &KeyEvent, code: KeyCode, busy: bool) -> InputAction
             InputAction::NewLine
         }
         KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => InputAction::NewLine,
+        KeyCode::Char('e' | 'E') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            InputAction::OpenInputEditor
+        }
+        KeyCode::Char('v' | 'V') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            InputAction::PasteClipboard
+        }
         // busy 时 Enter → 入队(iter-33),空闲 → 立即提交。
         KeyCode::Enter if busy => InputAction::Queue,
         KeyCode::Enter => InputAction::Submit,
         KeyCode::Tab => InputAction::PopupOpen,
         KeyCode::Char(c) => InputAction::Insert(c),
         KeyCode::Backspace => InputAction::Backspace,
+        KeyCode::Delete => InputAction::Delete,
         KeyCode::Left => InputAction::Left,
         KeyCode::Right => InputAction::Right,
         KeyCode::Home => InputAction::Home,
@@ -556,6 +566,12 @@ impl InputState {
             self.cursor -= 1;
         }
     }
+    pub(crate) fn delete(&mut self) {
+        if self.cursor < self.buffer.chars().count() {
+            let b = self.byte_at(self.cursor);
+            self.buffer.remove(b);
+        }
+    }
     pub(crate) fn left(&mut self) {
         self.cursor = self.cursor.saturating_sub(1);
     }
@@ -593,6 +609,9 @@ impl InputState {
     }
     pub(crate) fn rows(&self) -> usize {
         self.buffer.chars().filter(|c| *c == '\n').count() + 1
+    }
+    pub(crate) fn is_long(&self) -> bool {
+        self.rows() > 4 || self.buffer.chars().count() > 240
     }
     pub(crate) fn line_len(&self, row: usize) -> usize {
         self.buffer

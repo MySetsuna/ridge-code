@@ -302,6 +302,8 @@ pub(crate) struct Ui {
     pub(crate) input: InputState,
     /// 补全浮窗(iter-27):Some = 浮窗开(键位模态优先级:审批 > 浮窗 > 输入)。
     pub(crate) popup: Option<Popup>,
+    /// Fullscreen draft editor; `Some(scroll)` owns only the modal viewport.
+    pub(crate) input_editor_scroll: Option<u16>,
     /// 待静态提交队列(iter-26):`note` 只入队,主环 drain 经 `insert_before` 写进终端原生历史。
     /// 队列是瞬态的(每圈清空),无需环形上限 —— 有界性由「提交即出队」保证。
     pub(crate) commits: Vec<CommitBlock>,
@@ -1290,6 +1292,16 @@ impl Ui {
 pub(crate) fn apply_paste(ui: &mut Ui, text: &str) {
     ui.popup = None;
     ui.input.insert_str(text);
+    if ui.input.is_long() {
+        ui.note(
+            format!(
+                "pasted long text ({} lines, {} chars) · Ctrl+E fullscreen editor",
+                ui.input.rows(),
+                ui.input.buffer.chars().count()
+            ),
+            Color::Gray,
+        );
+    }
 }
 
 pub(crate) fn flush_commits<B: Backend>(terminal: &mut Terminal<B>, ui: &mut Ui) -> io::Result<()> {
