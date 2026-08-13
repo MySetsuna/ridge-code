@@ -633,9 +633,16 @@ fn mcp_secret_name(value: &str) -> bool {
 
 pub(crate) fn mcp_panel(statuses: &[agent::McpServerStatus]) -> Panel {
     let cfg = Config::load(config_path());
+    mcp_panel_with_configs(&cfg.mcp, &agent::host_mcp_servers(), statuses)
+}
+
+pub(crate) fn mcp_panel_with_configs(
+    configured: &[agent::McpServerCfg],
+    host_configured: &[agent::McpServerCfg],
+    statuses: &[agent::McpServerStatus],
+) -> Panel {
     let mut names = std::collections::BTreeSet::new();
-    let mut rows: Vec<PanelRow> = cfg
-        .mcp
+    let mut rows: Vec<PanelRow> = configured
         .iter()
         .map(|m| {
             names.insert(m.name.clone());
@@ -655,6 +662,20 @@ pub(crate) fn mcp_panel(statuses: &[agent::McpServerStatus]) -> Panel {
             }
         })
         .collect();
+    for m in host_configured {
+        if names.contains(&m.name) {
+            continue;
+        }
+        names.insert(m.name.clone());
+        rows.push(PanelRow {
+            key: m.name.clone(),
+            value: format!(
+                "{} · host configured · not started by RidgeCode",
+                mcp_command_label(&m.cmd, &m.args)
+            ),
+            ctx: None,
+        });
+    }
     for status in statuses
         .iter()
         .filter(|status| !names.contains(&status.name))
@@ -672,7 +693,7 @@ pub(crate) fn mcp_panel(statuses: &[agent::McpServerStatus]) -> Panel {
     }
     Panel::new(
         PanelKind::Mcp,
-        "MCP servers · runtime status (read-only) · type to filter · Esc close".into(),
+        "MCP servers · RidgeCode + host config · runtime status (read-only) · type to filter · Esc close".into(),
         rows,
     )
 }

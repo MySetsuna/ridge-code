@@ -18,9 +18,10 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal, TerminalOptions, Viewport};
 
 use agent::{
-    active_run_dir_for, agent_run_config, build_llm_agent_full, est_tokens, expand_mentions,
-    halt_reason, invoke_durable, mark_durable_cancelled, null_token_bus, preset_by_id, AgentState,
-    Approver, AutoApprove, HaltReason, McpTools, Skill, TokenBus,
+    active_run_dir_for, agent_run_config, build_llm_agent_full_with_steer, clear_steer, est_tokens,
+    expand_mentions, halt_reason, invoke_durable, mark_durable_cancelled, null_steer_bus,
+    null_token_bus, preset_by_id, push_steer, take_steer, AgentState, Approver, AutoApprove,
+    HaltReason, McpTools, Skill, SteerBus, TokenBus,
 };
 use langgraph::StreamEvent;
 use provider::Message;
@@ -550,6 +551,7 @@ struct KeyEventContext<'a> {
     meta: &'a mut ReplMeta,
     swap: &'a Arc<SwapProvider>,
     bus: &'a TokenBus,
+    steer_bus: &'a SteerBus,
     pending: &'a mut Option<ApprovalRequest>,
     task: &'a mut Option<tokio::task::JoinHandle<()>>,
     task_started: &'a mut Option<Instant>,
@@ -742,6 +744,7 @@ fn interrupt_task(
     }
     handle.abort();
     *context.bus.lock().unwrap() = None;
+    clear_steer(context.steer_bus);
     context.ui.busy = false;
     context.ui.waiting = false;
     let elapsed = context
@@ -1310,8 +1313,14 @@ fn handle_input_action(action: InputAction, context: &mut KeyEventContext<'_>) {
         | InputAction::PopupAccept
         | InputAction::PopupSubmit
         | InputAction::PopupClose => handle_popup_action(action, context),
-        InputAction::Submit | InputAction::Queue | InputAction::PushNow => {
-            handle_submission_action(action, context.ui, context.pending_submit)
+        InputAction::Submit | InputAction::Queue | InputAction::PushNow | InputAction::Steer => {
+            handle_submission_action(
+                action,
+                context.ui,
+                context.pending_submit,
+                context.task.is_some(),
+                context.steer_bus,
+            )
         }
         InputAction::ToggleDetails
         | InputAction::ToggleReasoning
@@ -1463,16 +1472,52 @@ fn handle_popup_action(action: InputAction, context: &mut KeyEventContext<'_>) {
 }
 
 fn submit_or_queue_input(input: String, context: &mut KeyEventContext<'_>) {
-    if context.ui.busy {
+    let explicit_steer = steer_text(&input);
+    if input == "/steer" {
+        context
+            .ui
+            .note("usage: /steer <guidance>", role_color(Role::Muted));
+        context.ui.input.insert_str(&input);
+    } else if let Some(guidance) = explicit_steer {
+        if context.task.is_some() {
+            send_steer(context.ui, context.steer_bus, guidance);
+        } else {
+            context
+                .ui
+                .note("/steer requires an active task", role_color(Role::Warn));
+            context.ui.input.insert_str(&input);
+        }
+    } else if context.ui.busy {
         queue_input(context.ui, input);
     } else {
         *context.pending_submit = Some(input);
     }
 }
 
-fn handle_submission_action(action: InputAction, ui: &mut Ui, pending_submit: &mut Option<String>) {
+fn handle_submission_action(
+    action: InputAction,
+    ui: &mut Ui,
+    pending_submit: &mut Option<String>,
+    active_task: bool,
+    steer_bus: &SteerBus,
+) {
     let input = ui.input.take().trim().to_owned();
     if input.is_empty() {
+        return;
+    }
+    let explicit_steer = steer_text(&input);
+    if matches!(action, InputAction::Steer) || explicit_steer.is_some() || input == "/steer" {
+        if input == "/steer" {
+            ui.note("usage: /steer <guidance>", role_color(Role::Muted));
+            ui.input.insert_str(&input);
+        } else if active_task {
+            send_steer(ui, steer_bus, explicit_steer.unwrap_or(&input));
+        } else if explicit_steer.is_some() {
+            ui.note("/steer requires an active task", role_color(Role::Warn));
+            ui.input.insert_str(&input);
+        } else {
+            *pending_submit = Some(input);
+        }
         return;
     }
     match action {
@@ -1480,6 +1525,27 @@ fn handle_submission_action(action: InputAction, ui: &mut Ui, pending_submit: &m
         InputAction::Queue => queue_input(ui, input),
         InputAction::PushNow => push_queue_front(ui, input),
         _ => {}
+    }
+}
+
+fn steer_text(input: &str) -> Option<&str> {
+    input
+        .strip_prefix("/steer")
+        .filter(|tail| tail.chars().next().is_some_and(char::is_whitespace))
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
+fn send_steer(ui: &mut Ui, steer_bus: &SteerBus, guidance: &str) {
+    match push_steer(steer_bus, guidance.to_owned()) {
+        Ok(pending) => {
+            ui.record_activity(ActivityKind::Queue, "steer sent to current task");
+            ui.note(
+                format!("steer sent · current turn continues · {pending} guidance pending"),
+                role_color(Role::Primary),
+            );
+        }
+        Err(error) => ui.note(format!("steer not sent: {error}"), role_color(Role::Warn)),
     }
 }
 
@@ -1712,6 +1778,7 @@ struct EventStepContext<'a> {
     meta: &'a mut ReplMeta,
     swap: &'a Arc<SwapProvider>,
     bus: &'a TokenBus,
+    steer_bus: &'a SteerBus,
     pending: &'a mut Option<ApprovalRequest>,
     task: &'a mut Option<tokio::task::JoinHandle<()>>,
     task_started: &'a mut Option<Instant>,
@@ -1745,6 +1812,7 @@ async fn run_event_step(context: EventStepContext<'_>) -> anyhow::Result<EventSt
         meta,
         swap,
         bus,
+        steer_bus,
         pending,
         task,
         task_started,
@@ -1789,6 +1857,7 @@ async fn run_event_step(context: EventStepContext<'_>) -> anyhow::Result<EventSt
                     meta,
                     swap,
                     bus,
+                    steer_bus,
                     pending,
                     task,
                     task_started,
@@ -1849,6 +1918,7 @@ async fn run_event_step(context: EventStepContext<'_>) -> anyhow::Result<EventSt
                     session_tokens,
                     session_turns,
                     start_task: start_task.as_ref(),
+                    steer_bus,
                 },
             );
             true
@@ -2288,6 +2358,7 @@ struct DoneEventContext<'a> {
     session_tokens: &'a mut usize,
     session_turns: &'a mut usize,
     start_task: &'a dyn Fn(&str, &[Message]) -> tokio::task::JoinHandle<()>,
+    steer_bus: &'a SteerBus,
 }
 
 fn handle_done_result(result: Result<AgentState, String>, context: &mut DoneEventContext<'_>) {
@@ -2302,6 +2373,29 @@ fn handle_done_result(result: Result<AgentState, String>, context: &mut DoneEven
     match result {
         Ok(output) => handle_successful_run(output, context),
         Err(error) => handle_failed_run(error, context),
+    }
+    schedule_next_after_done(context);
+}
+
+fn schedule_next_after_done(context: &mut DoneEventContext<'_>) {
+    if context.task.is_some() {
+        return;
+    }
+    let guidance = take_steer(context.steer_bus);
+    if !guidance.is_empty() {
+        if let Some(existing) = context.pending_submit.take() {
+            context.ui.queued.push_front(existing);
+        }
+        for message in guidance.into_iter().rev() {
+            context.ui.queued.push_front(message);
+        }
+        *context.pending_submit = context.ui.queued.pop_front();
+        context.ui.refresh_queue_panel();
+        context.ui.note(
+            "steer arrived at turn boundary · continuing as follow-up",
+            role_color(Role::Primary),
+        );
+        return;
     }
     if context.pending_submit.is_none() {
         *context.pending_submit = context.ui.queued.pop_front();
@@ -2486,6 +2580,7 @@ struct TuiLoopContext {
     key_rx: tokio::sync::mpsc::UnboundedReceiver<Event>,
     tick: tokio::time::Interval,
     bus: TokenBus,
+    steer_bus: SteerBus,
     start_task: StartTask,
     keylog_path: Option<std::path::PathBuf>,
     pending: Option<ApprovalRequest>,
@@ -2525,6 +2620,7 @@ async fn run_event_loop(context: TuiLoopContext) -> anyhow::Result<()> {
         mut key_rx,
         mut tick,
         bus,
+        steer_bus,
         start_task,
         keylog_path,
         mut pending,
@@ -2578,6 +2674,7 @@ async fn run_event_loop(context: TuiLoopContext) -> anyhow::Result<()> {
             meta: &mut meta,
             swap: &swap,
             bus: &bus,
+            steer_bus: &steer_bus,
             pending: &mut pending,
             task: &mut task,
             task_started: &mut task_started,
@@ -2642,7 +2739,8 @@ pub(super) async fn run(
     let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
     let approver = tui_approver(skip_danger, approval_tx);
     let bus = null_token_bus();
-    let app = Arc::new(build_llm_agent_full(
+    let steer_bus = null_steer_bus();
+    let app = Arc::new(build_llm_agent_full_with_steer(
         swap.clone(),
         mcp,
         approver,
@@ -2650,6 +2748,7 @@ pub(super) async fn run(
         bus.clone(),
         agents.clone(),
         read_only,
+        steer_bus.clone(),
     )?);
     tui_trace("agent.ready");
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent<AgentState>>();
@@ -2767,6 +2866,7 @@ pub(super) async fn run(
         key_rx,
         tick,
         bus,
+        steer_bus,
         start_task,
         keylog_path,
         pending,

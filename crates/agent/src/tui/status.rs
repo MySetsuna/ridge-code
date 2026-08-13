@@ -714,7 +714,7 @@ fn busy_input_chrome_text(args: &InputChromeArgs, hints: &InputChromeHints) -> S
 
 fn busy_wide_tools_chrome(queued: usize, hints: &InputChromeHints) -> String {
     format!(
-        " Queue [{queued}]{reasoning_suffix}{answer_suffix}{toggle_separator}{toggle_hint}{focus_hint}{inspect_hint} · Ctrl+T activity · Enter queue · Ctrl+Enter front · Ctrl+C takeover{scroll_hint}{live_hint}",
+        " Queue [{queued}]{reasoning_suffix}{answer_suffix}{toggle_separator}{toggle_hint}{focus_hint}{inspect_hint} · Ctrl+T activity · Enter queue · Ctrl+Enter front · Ctrl+C takeover{scroll_hint}{live_hint} · Ctrl+Shift+Enter steer",
         reasoning_suffix = hints.reasoning_suffix,
         answer_suffix = hints.answer_suffix,
         toggle_separator = hints.toggle_separator,
@@ -753,7 +753,7 @@ fn busy_tools_chrome(
 
 fn busy_wide_busy_chrome(queued: usize, hints: &InputChromeHints) -> String {
     format!(
-        " Queue [{queued}] · Ctrl+Enter front · Ctrl+C takeover · Enter{reasoning_suffix}{answer_suffix}{toggle_separator}{toggle}{inspect}{live} · Ctrl+T activity",
+        " Queue [{queued}] · Ctrl+Enter front · Ctrl+C takeover · Enter{reasoning_suffix}{answer_suffix}{toggle_separator}{toggle}{inspect}{live} · Ctrl+T activity · Ctrl+Shift+Enter steer",
         reasoning_suffix = hints.reasoning_suffix,
         answer_suffix = hints.answer_suffix,
         toggle_separator = hints.toggle_separator,
@@ -785,7 +785,7 @@ fn busy_compact_tools_chrome(
 
 fn busy_compact_chrome(queued: usize, hints: &InputChromeHints) -> String {
     format!(
-        " Queue [{queued}] · Enter queue · Ctrl+Enter front · Ctrl+C takeover{reasoning_suffix}{answer_suffix}{inspect}{live} ",
+        " Queue [{queued}] · Enter queue · Ctrl+Enter front · Ctrl+C takeover{reasoning_suffix}{answer_suffix}{inspect}{live} · Ctrl+Shift+Enter steer ",
         reasoning_suffix = hints.reasoning_suffix,
         answer_suffix = hints.answer_suffix,
         inspect = hints.inspect,

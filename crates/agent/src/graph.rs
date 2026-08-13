@@ -18,6 +18,7 @@ use crate::state::{
 };
 use langgraph::{CompiledGraph, GraphError, StateGraph};
 use provider::{CompletionRequest, LlmProvider, Message, Role, StreamChunk};
+use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +35,64 @@ pub type TokenBus = Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSend
 /// 一个「永不流式」的空总线(测试 / 非交互装配用)。
 pub fn null_token_bus() -> TokenBus {
     Arc::new(std::sync::Mutex::new(None))
+}
+
+/// Guidance sent while a TUI task is running. The active graph consumes it at
+/// the next reasoning boundary, so the in-flight provider request is never
+/// cancelled or mutated underneath the model.
+pub type SteerBus = Arc<std::sync::Mutex<VecDeque<String>>>;
+
+pub const MAX_STEER_MESSAGES: usize = 32;
+pub const MAX_STEER_CHARS: usize = 32_768;
+const MAX_STEER_BUFFER_MESSAGES: usize = MAX_STEER_MESSAGES * 2;
+
+pub fn null_steer_bus() -> SteerBus {
+    Arc::new(std::sync::Mutex::new(VecDeque::new()))
+}
+
+pub fn push_steer(bus: &SteerBus, text: impl Into<String>) -> Result<usize, String> {
+    let text = text.into().trim().to_owned();
+    if text.is_empty() {
+        return Err("steer message is empty".into());
+    }
+    if text.chars().count() > MAX_STEER_CHARS {
+        return Err(format!(
+            "steer message exceeds {MAX_STEER_CHARS} characters"
+        ));
+    }
+    let mut queue = bus.lock().unwrap();
+    if queue.len() >= MAX_STEER_MESSAGES {
+        return Err(format!(
+            "steer queue is full ({MAX_STEER_MESSAGES} messages)"
+        ));
+    }
+    queue.push_back(text);
+    Ok(queue.len())
+}
+
+pub fn take_steer(bus: &SteerBus) -> Vec<String> {
+    bus.lock().unwrap().drain(..).collect()
+}
+
+pub fn requeue_steer(bus: &SteerBus, messages: Vec<String>) {
+    let mut queue = bus.lock().unwrap();
+    for message in messages.into_iter().rev() {
+        if queue.len() < MAX_STEER_BUFFER_MESSAGES {
+            queue.push_front(message);
+        }
+    }
+}
+
+pub fn clear_steer(bus: &SteerBus) {
+    bus.lock().unwrap().clear();
+}
+
+pub fn pending_steer(bus: &SteerBus) -> usize {
+    bus.lock().unwrap().len()
+}
+
+fn steer_message(text: &str) -> String {
+    format!("<user_steer>\n{text}\n</user_steer>")
 }
 
 const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 180;
@@ -98,6 +157,7 @@ pub fn build_llm_agent_read_only(
         null_token_bus(),
         Arc::new(Agents::default()),
         true,
+        null_steer_bus(),
     )
 }
 
@@ -114,6 +174,7 @@ pub fn build_llm_agent_with(
         null_token_bus(),
         Arc::new(Agents::default()),
         false,
+        null_steer_bus(),
     )
 }
 
@@ -134,6 +195,7 @@ pub fn build_llm_agent_reviewed(
         null_token_bus(),
         Arc::new(Agents::default()),
         false,
+        null_steer_bus(),
     )
 }
 
@@ -152,6 +214,7 @@ pub fn build_llm_agent_gated(
         null_token_bus(),
         Arc::new(Agents::default()),
         false,
+        null_steer_bus(),
     )
 }
 
@@ -167,8 +230,33 @@ pub fn build_llm_agent_full(
     agents: Arc<Agents>,
     read_only: bool,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
+    build_llm_agent_full_with_steer(
+        provider,
+        mcp,
+        approver,
+        skills,
+        token_bus,
+        agents,
+        read_only,
+        null_steer_bus(),
+    )
+}
+
+/// Full graph variant used by the TUI. `steer_bus` is shared with the input
+/// loop and is consumed only when `reason` prepares a provider request.
+#[allow(clippy::too_many_arguments)]
+pub fn build_llm_agent_full_with_steer(
+    provider: Arc<dyn LlmProvider>,
+    mcp: McpTools,
+    approver: Arc<dyn Approver>,
+    skills: Vec<Skill>,
+    token_bus: TokenBus,
+    agents: Arc<Agents>,
+    read_only: bool,
+    steer_bus: SteerBus,
+) -> Result<CompiledGraph<AgentState>, GraphError> {
     build_core(
-        provider, mcp, None, approver, skills, token_bus, agents, read_only,
+        provider, mcp, None, approver, skills, token_bus, agents, read_only, steer_bus,
     )
 }
 
@@ -185,6 +273,7 @@ fn build_core(
     token_bus: TokenBus,
     agents: Arc<Agents>,
     read_only: bool,
+    steer_bus: SteerBus,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
     graph_trace("build.begin");
     let specs = build_tool_specs(&mcp, &agents, read_only);
@@ -198,6 +287,7 @@ fn build_core(
         system.clone(),
         specs,
         token_bus,
+        steer_bus,
     );
     graph.add_node("explore_handoff", |state: AgentState| async move {
         Ok::<_, Infallible>(explore_handoff_patch(&state))
@@ -255,6 +345,7 @@ fn add_reason_node(
     system: Arc<String>,
     specs: Vec<provider::ToolSpec>,
     token_bus: TokenBus,
+    steer_bus: SteerBus,
 ) {
     graph.add_node("reason", move |state: AgentState| {
         let provider = provider.clone();
@@ -267,8 +358,13 @@ fn add_reason_node(
         };
         let tools = available_tool_specs(&candidate_tools, &state);
         let bus = token_bus.clone();
+        let steer_bus = steer_bus.clone();
         async move {
             let mut messages = to_messages(&system, &state);
+            let guidance = take_steer(&steer_bus);
+            for text in &guidance {
+                messages.push(Message::user(steer_message(text)));
+            }
             if force_action {
                 messages.push(Message::new(
                     Role::System,
@@ -289,7 +385,13 @@ fn add_reason_node(
                 msgs = request.messages.len(),
                 "llm request"
             );
-            let completion = provider.complete_streaming(&request, &on_token).await?;
+            let completion = match provider.complete_streaming(&request, &on_token).await {
+                Ok(completion) => completion,
+                Err(error) => {
+                    requeue_steer(&steer_bus, guidance);
+                    return Err(error);
+                }
+            };
             let usage = completion.usage.clone();
             let tokens = usage.total() as usize;
             tracing::debug!(
@@ -303,6 +405,7 @@ fn add_reason_node(
                 completion.text,
                 completion.tool_calls.into_iter().next(),
                 usage,
+                guidance,
             ))
         }
     });
@@ -340,30 +443,41 @@ fn reason_patch(
     text: String,
     call: Option<provider::ToolCall>,
     usage: provider::Usage,
+    guidance: Vec<String>,
 ) -> Patch {
+    let mut patches = vec![Patch::BumpStep, Patch::AddUsage(usage)];
+    // Keep guidance before the assistant/tool-call pair. This preserves the
+    // provider message protocol when the next graph node appends tool output.
+    patches.extend(
+        guidance
+            .iter()
+            .map(|message| Patch::PushHistory(Message::user(steer_message(message)))),
+    );
     match call {
-        Some(call) => Patch::Batch(vec![
-            Patch::BumpStep,
-            Patch::AddUsage(usage),
-            Patch::Message(format!(
+        Some(call) => {
+            patches.push(Patch::Message(format!(
                 "reason#{}: tool_call {} {}",
                 state.steps + 1,
                 call.name,
                 call.arguments
-            )),
-            Patch::PushHistory(Message::assistant(text).with_tool_calls(vec![call.clone()])),
-            Patch::PendingCall(Some(call)),
-            Patch::Action(Some("tool".to_string())),
-        ]),
-        None => Patch::Batch(vec![
-            Patch::BumpStep,
-            Patch::AddUsage(usage),
-            Patch::Message(format!("reason#{}: (final) {text}", state.steps + 1)),
-            Patch::PushHistory(Message::assistant(text)),
-            Patch::PendingCall(None),
-            Patch::Action(Some("finish".to_string())),
-        ]),
+            )));
+            patches.push(Patch::PushHistory(
+                Message::assistant(text).with_tool_calls(vec![call.clone()]),
+            ));
+            patches.push(Patch::PendingCall(Some(call)));
+            patches.push(Patch::Action(Some("tool".to_string())));
+        }
+        None => {
+            patches.push(Patch::Message(format!(
+                "reason#{}: (final) {text}",
+                state.steps + 1
+            )));
+            patches.push(Patch::PushHistory(Message::assistant(text)));
+            patches.push(Patch::PendingCall(None));
+            patches.push(Patch::Action(Some("finish".to_string())));
+        }
     }
+    Patch::Batch(patches)
 }
 
 #[derive(Clone)]
@@ -606,18 +720,123 @@ fn review_request(s: &AgentState) -> CompletionRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::{call_mcp_with_timeout, halt_reason, is_error_observation, verify_route_llm};
+    use super::{
+        call_mcp_with_timeout, halt_reason, is_error_observation, pending_steer, push_steer,
+        reason_patch, requeue_steer, take_steer, verify_route_llm, MAX_STEER_CHARS,
+        MAX_STEER_MESSAGES,
+    };
     use crate::{
-        build_agent, build_llm_agent, build_llm_agent_reviewed, build_llm_agent_with, default_tool,
-        resolve_mcp, scripted, AgentState, Brain, HaltReason, McpTools, Tool, MAX_DISPATCH_BATCHES,
-        MAX_EXPLORE, MAX_STEPS,
+        build_agent, build_llm_agent, build_llm_agent_full_with_steer, build_llm_agent_reviewed,
+        build_llm_agent_with, default_tool, resolve_mcp, scripted, AgentState, AutoApprove, Brain,
+        HaltReason, McpTools, Tool, MAX_DISPATCH_BATCHES, MAX_EXPLORE, MAX_STEPS,
     };
     use langgraph::GraphState;
     use langgraph::RunConfig;
     use mcp::McpClient;
-    use provider::{ToolCall, ToolSpec};
+    use provider::{Completion, CompletionRequest, LlmProvider, ProviderError, ToolCall, ToolSpec};
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[derive(Clone, Default)]
+    struct RecordingProvider {
+        request: Arc<std::sync::Mutex<Option<CompletionRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for RecordingProvider {
+        async fn complete(&self, request: &CompletionRequest) -> Result<Completion, ProviderError> {
+            *self.request.lock().unwrap() = Some(request.clone());
+            Ok(Completion {
+                text: "done".into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn active_graph_includes_steer_in_provider_request() {
+        let bus = super::null_steer_bus();
+        push_steer(&bus, "keep the change minimal").unwrap();
+        let provider = RecordingProvider::default();
+        let request = provider.request.clone();
+        let app = build_llm_agent_full_with_steer(
+            Arc::new(provider),
+            McpTools::empty(),
+            Arc::new(AutoApprove),
+            Vec::new(),
+            super::null_token_bus(),
+            Arc::new(crate::Agents::default()),
+            false,
+            bus,
+        )
+        .unwrap();
+        let output = app
+            .invoke(AgentState::new("make the requested change"))
+            .await
+            .unwrap();
+        let request = request
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("reason should call provider");
+        assert!(request
+            .messages
+            .iter()
+            .any(|message| message.content.contains("keep the change minimal")));
+        assert!(output
+            .history
+            .iter()
+            .any(|message| message.content.contains("keep the change minimal")));
+    }
+
+    #[test]
+    fn steer_is_bounded_and_persisted_before_tool_call() {
+        let bus = super::null_steer_bus();
+        assert_eq!(push_steer(&bus, "focus on the failing test").unwrap(), 1);
+        assert_eq!(pending_steer(&bus), 1);
+        let guidance = take_steer(&bus);
+        let state = AgentState::new("make the fix");
+        let call = ToolCall {
+            id: "call-1".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({"path": "README.md"}),
+        };
+        let mut patched = state.clone();
+        patched.apply(reason_patch(
+            &state,
+            "I will inspect it".into(),
+            Some(call),
+            provider::Usage::default(),
+            guidance,
+        ));
+        assert_eq!(patched.history[1].role, provider::Role::User);
+        assert!(patched.history[1].content.contains("failing test"));
+        assert_eq!(patched.history[2].role, provider::Role::Assistant);
+        assert!(push_steer(&bus, "").is_err());
+        assert!(push_steer(&bus, "x".repeat(MAX_STEER_CHARS + 1)).is_err());
+        for index in 0..MAX_STEER_MESSAGES {
+            push_steer(&bus, format!("guide-{index}")).unwrap();
+        }
+        assert!(push_steer(&bus, "overflow").is_err());
+    }
+
+    #[test]
+    fn steer_requeue_preserves_order_after_provider_failure() {
+        let bus = super::null_steer_bus();
+        push_steer(&bus, "first guidance").unwrap();
+        push_steer(&bus, "second guidance").unwrap();
+        let taken = take_steer(&bus);
+        push_steer(&bus, "new guidance while request was in flight").unwrap();
+        requeue_steer(&bus, taken);
+        assert_eq!(
+            take_steer(&bus),
+            vec![
+                "first guidance",
+                "second guidance",
+                "new guidance while request was in flight"
+            ]
+        );
+    }
 
     #[test]
     fn display_stream_keeps_full_observation_while_model_stream_stays_bounded() {

@@ -1,11 +1,12 @@
 use super::{
     apply_clipboard_paste, edit_input, handle_device_oauth_event, handle_done_result,
-    handle_input_action, handle_key_event, handle_stream_event, handle_tick, handle_token_chunk,
-    keylog_path, log_key_event, note_initial_ui, poll_device_oauth, poll_model_catalog,
-    poll_oauth_callback, prepare_loop, process_pending_submit, reset_task_ui, run_event_loop,
-    run_event_step, session_input_history, superstep_activity, tui_approver, ClipboardPaste,
-    CommitBlock, DoneEventContext, EventStepContext, KeyEventContext, KeyEventResult,
-    LoopPrepareContext, PendingSubmitContext, StartTask, StreamEventContext, TuiLoopContext,
+    handle_input_action, handle_key_event, handle_stream_event, handle_submission_action,
+    handle_tick, handle_token_chunk, keylog_path, log_key_event, note_initial_ui,
+    poll_device_oauth, poll_model_catalog, poll_oauth_callback, prepare_loop,
+    process_pending_submit, reset_task_ui, run_event_loop, run_event_step, session_input_history,
+    superstep_activity, tui_approver, ClipboardPaste, CommitBlock, DoneEventContext,
+    EventStepContext, KeyEventContext, KeyEventResult, LoopPrepareContext, PendingSubmitContext,
+    StartTask, StreamEventContext, TuiLoopContext,
 };
 use crate::{DeviceOAuthEvent, ReplMeta};
 use ratatui::backend::CrosstermBackend;
@@ -39,6 +40,37 @@ fn mcp_panel_redacts_secret_arguments() {
         "server --token <redacted> --api-key=<redacted> --header=<redacted> --workspace ridge"
     );
     assert!(!label.contains("secret"));
+}
+
+#[test]
+fn mcp_panel_merges_ridge_and_host_configured_servers() {
+    let ridge = vec![agent::McpServerCfg {
+        name: "ridge".into(),
+        cmd: "ridge-mcp.exe".into(),
+        args: Vec::new(),
+    }];
+    let host = vec![
+        agent::McpServerCfg {
+            name: "notebooklm-mcp".into(),
+            cmd: "notebooklm-mcp.exe".into(),
+            args: Vec::new(),
+        },
+        agent::McpServerCfg {
+            name: "ridge".into(),
+            cmd: "duplicate.exe".into(),
+            args: Vec::new(),
+        },
+    ];
+    let panel = super::panel::mcp_panel_with_configs(&ridge, &host, &[]);
+    assert_eq!(panel.rows.len(), 2);
+    assert!(panel.rows.iter().any(|row| row.key == "ridge"));
+    let host_row = panel
+        .rows
+        .iter()
+        .find(|row| row.key == "notebooklm-mcp")
+        .expect("host MCP should be visible");
+    assert!(host_row.value.contains("host configured"));
+    assert!(host_row.value.contains("not started by RidgeCode"));
 }
 
 #[tokio::test]
@@ -124,6 +156,7 @@ async fn extracted_key_handler_covers_priority_and_edit_paths() {
     let mut meta = test_meta();
     let swap = test_swap();
     let bus = agent::null_token_bus();
+    let steer_bus = agent::null_steer_bus();
     let mut pending = None;
     let mut task = None;
     let mut task_started = None;
@@ -141,6 +174,7 @@ async fn extracted_key_handler_covers_priority_and_edit_paths() {
                 meta: &mut meta,
                 swap: &swap,
                 bus: &bus,
+                steer_bus: &steer_bus,
                 pending: &mut pending,
                 task: &mut task,
                 task_started: &mut task_started,
@@ -163,6 +197,7 @@ async fn extracted_key_handler_covers_priority_and_edit_paths() {
                 meta: &mut meta,
                 swap: &swap,
                 bus: &bus,
+                steer_bus: &steer_bus,
                 pending: &mut pending,
                 task: &mut task,
                 task_started: &mut task_started,
@@ -401,6 +436,7 @@ async fn extracted_event_step_covers_stream_approval_done_and_tick_branches() {
     let mut meta = test_meta();
     let swap = test_swap();
     let bus = agent::null_token_bus();
+    let steer_bus = agent::null_steer_bus();
     let mut pending = None;
     let mut task = None;
     let mut task_started = None;
@@ -433,6 +469,7 @@ async fn extracted_event_step_covers_stream_approval_done_and_tick_branches() {
                 meta: &mut meta,
                 swap: &swap,
                 bus: &bus,
+                steer_bus: &steer_bus,
                 pending: &mut pending,
                 task: &mut task,
                 task_started: &mut task_started,
@@ -759,6 +796,7 @@ async fn extracted_event_loop_exits_after_takeover_signal() {
         key_rx,
         tick: tokio::time::interval(Duration::from_secs(3600)),
         bus: agent::null_token_bus(),
+        steer_bus: agent::null_steer_bus(),
         start_task: Box::new(|_, _| tokio::spawn(async {})),
         keylog_path: None,
         pending: None,
@@ -852,6 +890,7 @@ async fn extracted_done_handler_records_non_retryable_failure() {
     let last_task = None;
     let mut session_tokens = 0;
     let mut session_turns = 0;
+    let steer_bus = agent::null_steer_bus();
     let start_task: StartTask = Box::new(|_, _| panic!("non-retryable error must not retry"));
     handle_done_result(
         Err("invalid request".into()),
@@ -869,6 +908,7 @@ async fn extracted_done_handler_records_non_retryable_failure() {
             session_tokens: &mut session_tokens,
             session_turns: &mut session_turns,
             start_task: &start_task,
+            steer_bus: &steer_bus,
         },
     );
     assert!(!ui.busy);
@@ -909,6 +949,7 @@ async fn extracted_done_handler_records_non_retryable_failure() {
             session_tokens: &mut session_tokens,
             session_turns: &mut session_turns,
             start_task: &start_task,
+            steer_bus: &steer_bus,
         },
     );
     assert_eq!(ui.phase, "completed");
@@ -937,6 +978,7 @@ async fn extracted_done_handler_records_non_retryable_failure() {
             session_tokens: &mut session_tokens,
             session_turns: &mut session_turns,
             start_task: &start_task,
+            steer_bus: &steer_bus,
         },
     );
     assert_eq!(ui.phase, "stopped");
@@ -966,6 +1008,7 @@ async fn extracted_done_handler_records_non_retryable_failure() {
             session_tokens: &mut session_tokens,
             session_turns: &mut session_turns,
             start_task: &retry_start,
+            steer_bus: &steer_bus,
         },
     );
     assert_eq!(retry_count, 1);
@@ -994,6 +1037,7 @@ async fn extracted_done_handler_records_non_retryable_failure() {
             session_tokens: &mut session_tokens,
             session_turns: &mut session_turns,
             start_task: &retry_start,
+            steer_bus: &steer_bus,
         },
     );
     assert_eq!(exhausted_retries, 0);
@@ -6420,6 +6464,14 @@ fn input_action_routes_keys() {
         ),
         InputAction::PushNow
     );
+    assert_eq!(
+        input_action(
+            &KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::SHIFT,),
+            true,
+            false,
+        ),
+        InputAction::Steer
+    );
     let active_frontier = vec!["verify".to_owned()];
     assert!(superstep_is_busy(&active_frontier));
     assert_eq!(
@@ -6806,6 +6858,22 @@ fn input_action_routes_keys() {
         ),
         InputAction::Ignore
     );
+}
+
+#[test]
+fn busy_steer_sends_to_active_bus_without_queueing_or_submitting() {
+    let mut ui = Ui {
+        busy: true,
+        ..Ui::default()
+    };
+    ui.input.insert_str("focus on the failing test");
+    let bus = agent::null_steer_bus();
+    let mut pending_submit = None;
+    handle_submission_action(InputAction::Steer, &mut ui, &mut pending_submit, true, &bus);
+    assert!(pending_submit.is_none());
+    assert!(ui.queued.is_empty());
+    assert_eq!(agent::take_steer(&bus), vec!["focus on the failing test"]);
+    assert!(ui.busy);
 }
 
 #[test]

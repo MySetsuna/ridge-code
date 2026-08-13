@@ -15,6 +15,49 @@ use provider::{
 };
 
 mod tui;
+mod console_encoding {
+    #[cfg(windows)]
+    type CodePage = u32;
+
+    #[cfg(windows)]
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetConsoleOutputCP() -> CodePage;
+        fn SetConsoleOutputCP(code_page: CodePage) -> i32;
+    }
+
+    pub(crate) struct Guard {
+        #[cfg(windows)]
+        previous: Option<CodePage>,
+    }
+
+    impl Guard {
+        pub(crate) fn enter() -> Self {
+            #[cfg(windows)]
+            {
+                let previous = unsafe { GetConsoleOutputCP() };
+                let previous = (previous != 0).then_some(previous);
+                if previous.is_some_and(|code_page| code_page != 65001) {
+                    let _ = unsafe { SetConsoleOutputCP(65001) };
+                }
+                Self { previous }
+            }
+            #[cfg(not(windows))]
+            {
+                Self {}
+            }
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            #[cfg(windows)]
+            if let Some(previous) = self.previous {
+                let _ = unsafe { SetConsoleOutputCP(previous) };
+            }
+        }
+    }
+}
 pub(crate) use login::{
     now_epoch, oauth_defaults, oauth_model_info, oauth_path, register_oauth_profile,
     resolve_claude_oauth_provider, run_login, save_oauth_token, start_device_oauth,
@@ -189,6 +232,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_cli() -> anyhow::Result<()> {
+    let _console_encoding = console_encoding::Guard::enter();
     if handle_meta_flags() {
         return Ok(());
     }

@@ -7,3 +7,4 @@ license.workspace = true
 
 [dependencies]
 # std-only:M1 先跑通物理闭环,沙箱/超时留到 harness 阶段再上依赖。
+encoding_rs = { workspace = true }

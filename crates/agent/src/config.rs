@@ -194,6 +194,64 @@ impl Config {
     }
 }
 
+/// MCP servers declared by the host Codex installation. RidgeCode only uses
+/// these entries for `/mcp` visibility; it never starts them implicitly.
+pub fn host_mcp_servers() -> Vec<McpServerCfg> {
+    let home = std::env::var("CODEX_HOME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("USERPROFILE")
+                .ok()
+                .map(|value| format!("{value}/.codex"))
+        });
+    let Some(home) = home else { return Vec::new() };
+    let path = std::path::Path::new(&home).join("config.toml");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    parse_host_mcp_toml(&text)
+}
+
+fn parse_host_mcp_toml(text: &str) -> Vec<McpServerCfg> {
+    let Ok(root) = text.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    let Some(servers) = root.get("mcp_servers").and_then(toml::Value::as_table) else {
+        return Vec::new();
+    };
+    servers
+        .iter()
+        .filter_map(|(name, value)| {
+            let entry = value.as_table()?;
+            let cmd = entry
+                .get("command")
+                .or_else(|| entry.get("cmd"))
+                .and_then(toml::Value::as_str)?
+                .trim();
+            if cmd.is_empty() {
+                return None;
+            }
+            let args = entry
+                .get("args")
+                .and_then(toml::Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(toml::Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(McpServerCfg {
+                name: name.clone(),
+                cmd: cmd.to_owned(),
+                args,
+            })
+        })
+        .collect()
+}
+
 /// 交互中可 `/config set` 持久化的标量键白名单。
 /// **不含** `mcp`(结构化,直接编辑文件)与任何密钥(密钥只走 `RIDGE_API_KEY` env)。
 pub const CONFIG_KEYS: &[&str] = &[
@@ -375,6 +433,25 @@ mod tests {
         assert!(cfg.provider.is_none() && cfg.mcp.is_empty());
         let missing = Config::load("C:/no/such/ridge-config-xyz.json");
         assert!(missing.mcp.is_empty());
+    }
+
+    #[test]
+    fn host_mcp_toml_lists_commands_without_starting_them() {
+        let servers = parse_host_mcp_toml(
+            r#"
+            [mcp_servers.notebooklm]
+            command = "notebooklm-mcp"
+
+            [mcp_servers.codegraph]
+            cmd = "codegraph"
+            args = ["serve", "--mcp"]
+            "#,
+        );
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name, "codegraph");
+        assert_eq!(servers[0].args, vec!["serve", "--mcp"]);
+        assert_eq!(servers[1].name, "notebooklm");
+        assert_eq!(servers[1].cmd, "notebooklm-mcp");
     }
 
     /// `/config set` 的纯文本变换:改标量键、保留 `mcp`、类型归一、拒绝未知键 —— 且回写能被再解析。

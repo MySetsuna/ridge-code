@@ -190,7 +190,7 @@ ChatGPT/Codex 启动时会用 OAuth 账号目录校验当前模型；若配置�
 - 顶部状态条显示当前阶段及该阶段已持续时间（`+ms`/`+s`）；Ctrl+T 或 `/activity` 打开最近 5 个真实 Agent 活动，最新阶段置顶，窄终端自动折行。
 - 宽屏顶部以低饱和 `⟦SYS›THK›TLS›CHK›SUM›ANS⟧` breadcrumb 显示最近观测相位；`THK` 表示调查/思考，`ANS` 表示回答，`TLS` 表示工具，`CHK` 表示验证，`SUM` 表示结论收束，`WAIT` 表示等待；窄屏保留当前阶段与等待/工具目标，并以 `⏭N` 标出队首待执行数，Ctrl+T 可展开完整活动链。
 - Live Answer/Reasoning 默认跟随最新尾部；`Alt+PageUp/PageDown` 暂停并检视较早/较新内容，`Alt+End` 回到最新尾部。检视状态会在顶栏显示。
-- 长任务中可继续编辑输入；任务忙时按 Enter 会排队，输入框上方显示 `⏭ next` 与有界 FIFO 预览；Ctrl+Enter 将消息插入队首且不打断当前模型思考，当前任务结束后继续执行。
+- 长任务中可继续编辑输入；任务忙时按 Enter 会排队，输入框上方显示 `⏭ next` 与有界 FIFO 预览；Ctrl+Enter 将消息插入队首且不打断当前模型思考，当前任务结束后继续执行。`Ctrl+Shift+Enter` 或 `/steer <guidance>` 将引导送入当前 agent 的下一次推理请求；不打断当前 provider 回合，若回合已到边界则自动作为 follow-up 继续。
 
 ### 输入与快捷键
 
@@ -207,6 +207,7 @@ ChatGPT/Codex 启动时会用 OAuth 账号目录校验当前模型；若配置�
 | Ctrl+Q | 打开/关闭待执行队列面板 |
 | Ctrl+Space | 支持释放事件的终端：按住进入 HOLD、松开回到 FOLLOW；旧终端按键切换，不暂停模型任务 |
 | Ctrl+Enter | 忙时将当前输入插入队首，不打断当前任务 |
+| Ctrl+Shift+Enter | 忙时将当前输入作为引导发送给当前 agent |
 | Alt+↑/↓ | 选择 live 工具焦点 |
 | Alt+PageUp/PageDown | 优先滚动工具详情；否则检视 Live Answer/Reasoning 或 Tool History 详情 |
 | Alt+End | Live Answer/Reasoning 回到最新尾部 |
@@ -222,7 +223,7 @@ ChatGPT/Codex 启动时会用 OAuth 账号目录校验当前模型；若配置�
 
 ### 队列干预与接管
 
-任务忙时，普通 `Enter` 将当前输入追加到 FIFO；`Ctrl+Enter` 直接插入队首，均不打断当前模型思考。输入框上方持续显示队首与有界预览。Live Inspector 也显示 pending 行：选中后 `Delete` 可直接移除；`Ctrl+Q` 或 `/queue` 切到完整队列，`Ctrl+I` 可从队列返回 Inspector。删除只作用于尚未执行的队列，不影响当前回合。面板可实时观察队列变化，模型仍继续输出。
+任务忙时，普通 `Enter` 将当前输入追加到 FIFO；`Ctrl+Enter` 直接插入队首，均不打断当前模型思考。`Ctrl+Shift+Enter` 或 `/steer <guidance>` 直接引导当前 agent，消息不丢、不启动独立任务。输入框上方持续显示队首与有界预览。Live Inspector 也显示 pending 行：选中后 `Delete` 可直接移除；`Ctrl+Q` 或 `/queue` 切到完整队列，`Ctrl+I` 可从队列返回 Inspector。删除只作用于尚未执行的队列，不影响当前回合。面板可实时观察队列变化，模型仍继续输出。
 
 实时状态位于顶部活动条与底部状态条：阶段、阶段耗时、工具/思考/回答通道、输入/输出 token、速率、上下文占用、effort 与队列深度均分开显示。长回答与工具输出按终端宽度换行；文件读取默认折叠为一个工具块，`Ctrl+O` 展开当前工具详情，详情保留首尾并折叠中段，`Alt+↑/↓` 切换工具，`Alt+PageUp/PageDown` 查看详情，`/history` 搜索已完成工具记录。`Ctrl+I`/`Alt+I` 或 `/inspect` 检视当前 Answer/Reasoning/Tool 混合块，Enter/Space 展开选中块而不打断模型。`Ctrl+R` 或 `/reasoning` 搜索最近 8 段已完成 reasoning，Enter 展开全文，Alt+PageUp/PageDown 滚动详情。支持释放事件的终端中，`Ctrl+Space` 按住将实时视口置为 `HOLD`，松开回到 `FOLLOW`；不支持释放事件的终端保留原有按键切换。任何情况下都不打断模型。`Ctrl+C` 第一次请求接管并保留输入，2 秒内第二次才退出。
 
@@ -292,6 +293,7 @@ $env:RIDGE_TUI_SNAPSHOT = "$pwd\ridgecode-frame.json"
 | /reasoning | 检索最近 8 段已完成 reasoning；↑↓ 选择、Enter 展开 |
 | /inspect | 检视当前流式 Answer/Reasoning/Tool 与 pending；↑↓ 选择、Enter/Space 展开、Delete 删除待执行项 |
 | /queue | 查看 FIFO 队列；↑↓ 选择，Delete/Ctrl+Backspace 删除待执行项 |
+| /steer <guidance> | 忙时向当前 agent 发送不打断当前回合的引导 |
 | /history | 搜索已完成工具调用；Enter 展开详情 |
 | /model | 打开跨 provider 模型选择器 |
 | /model <name> | 沿用当前 provider 热切换模型 |
@@ -406,6 +408,8 @@ $env:RIDGE_TUI_SNAPSHOT = "$pwd\ridgecode-frame.json"
 ~~~
 
 每个 server 通过 stdio 启动、初始化并列出工具；工具暴露为 <server>__<tool>。单个 server 启动或握手失败只跳过该 server，不阻塞其余工具。兼容旧式单 server 环境变量：RIDGE_MCP_CMD 与可选的 RIDGE_MCP_NAME。
+
+`/mcp` 还会只读列出宿主 `CODEX_HOME/config.toml` 中的 `mcp_servers`；这些宿主条目标记为 `host configured`，不会由 RidgeCode 隐式启动。RidgeCode 自己的 `~/.ridge/config.json` MCP 仍按配置启动并显示 configured/started/initialized/tools listed/failed 生命周期。
 
 Ridge 桌面协作总线可直接接入已安装的 `ridge-mcp` companion；它负责发现当前 `ridge-kernel` 端点并转发 stdio MCP，不把临时端口/token 写进配置：
 
@@ -537,6 +541,7 @@ read_file、search、web_search、fetch_url、todo_write、signal_write 与 disp
 | RIDGE_COMMANDS_DIR | 自定义命令目录 | ~/.ridge/commands |
 | RIDGE_AGENTS_DIR | sub-agent 目录 | ~/.ridge/agents |
 | RIDGE_MCP_CMD / RIDGE_MCP_NAME | 兼容旧 MCP 单 server | 优先使用 config mcp 数组 |
+| RIDGE_OUTPUT_ENCODING | 非 UTF-8 文件/命令输出的显式编码标签 | 省略时按 BOM、UTF-8、Windows 系统代码页自动识别；例 `gbk`、`big5`、`shift_jis` |
 | RIDGE_SKIP_PERMISSIONS | 默认跳过普通审批 | 1/true 开启 |
 | RIDGE_READ_ONLY | 默认只读模式 | 1/true 开启 |
 | RIDGE_EXTRACT_SIGNALS | 任务结束后额外抽取跨会话信号 | 默认关闭，避免额外 token |

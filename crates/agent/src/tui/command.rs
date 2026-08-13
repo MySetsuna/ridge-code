@@ -1226,7 +1226,7 @@ pub(crate) async fn run_command(
 ) -> anyhow::Result<bool> {
     if input == "/help" {
         ui.note(
-            "/exit /model /provider /config /effort /find [query] /goal [status|create|start|advance|resume|complete|block|cancel] /activity /inspect /transcript /audit /reasoning /answer /answers /queue /tools /history /login /agent /mcp /skills /commands; /provider opens the model catalog; /answer opens the latest full answer; /answers opens the searchable answer archive; Enter queues while busy; Ctrl+Enter front-queues without interrupting; Ctrl+F opens non-blocking live search; Ctrl+Q opens the queue and Delete removes a pending item; Ctrl+I/Alt+I inspects live blocks in Transcript Audit; Ctrl+A opens the latest full answer; Ctrl+R toggles live reasoning or opens Reasoning history; Ctrl+O toggles live tool details or opens Tool history; Ctrl+T opens recent Agent activity; Ctrl-C hands input back.",
+            "/exit /model /provider /config /effort /find [query] /goal [status|create|start|advance|resume|complete|block|cancel] /activity /inspect /transcript /audit /reasoning /answer /answers /queue /steer <guidance> /tools /history /login /agent /mcp /skills /commands; /provider opens the model catalog; /answer opens the latest full answer; /answers opens the searchable answer archive; Enter queues while busy; Ctrl+Enter front-queues without interrupting; Ctrl+Shift+Enter or /steer sends guidance to the active agent without interrupting; Ctrl+F opens non-blocking live search; Ctrl+Q opens the queue and Delete removes a pending item; Ctrl+I/Alt+I inspects live blocks in Transcript Audit; Ctrl+A opens the latest full answer; Ctrl+R toggles live reasoning or opens Reasoning history; Ctrl+O toggles live tool details or opens Tool history; Ctrl+T opens recent Agent activity; Ctrl-C hands input back.",
             role_color(Role::Muted),
         );
         return Ok(false);
@@ -1633,8 +1633,9 @@ fn show_agent_panel(ui: &mut Ui, agents: &agent::Agents) {
 
 fn show_mcp_panel(ui: &mut Ui) {
     let cfg = Config::load(config_path());
-    if cfg.mcp.is_empty() && ui.mcp_statuses.is_empty() {
-        ui.note("no MCP servers configured. Add them under \"mcp\": [ ... ] in ~/.ridge/config.json (each: name + cmd [+ args]).", role_color(Role::Muted));
+    let host_mcp = agent::host_mcp_servers();
+    if cfg.mcp.is_empty() && host_mcp.is_empty() && ui.mcp_statuses.is_empty() {
+        ui.note("no MCP servers configured. Add them under \"mcp\": [ ... ] in ~/.ridge/config.json, or configure a host mcp_servers entry.", role_color(Role::Muted));
     } else {
         ui.panel = Some(mcp_panel(&ui.mcp_statuses));
     }

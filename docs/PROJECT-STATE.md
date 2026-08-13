@@ -1,4 +1,4 @@
-# RidgeCode PROJECT-STATE(2026-08-14 · iter-50)
+# RidgeCode PROJECT-STATE(2026-08-14 · iter-52)
 
 > 本文是 NotebookLM 中**唯一**的 RidgeCode 来源,每轮迭代覆盖式更新并替换。
 > 结构:A. 项目定位与北极星(稳定段)→ B. 近期迭代与验证证据 → C. 能力对照与差距 → D. 开放问题与请 NotebookLM 定夺的问题 → E. 已落地架构详情(codegraph 生成的代码事实全文)。
@@ -17,6 +17,12 @@ RidgeCode 是一个**模块化、跨领域可扩展的通用 agent 框架**(单�
 **已锁定决策(不变量,改码前须知)**:maker≠checker;reducer 显式;引擎零 LLM;外置能力走 MCP/SKILL 不进内核;provider 边界(第三方 SDK 包在 trait 后);一切注入块有界截断;危险命令拦截不可绕过、sub-agent 恒只读;注入块有序稳态利 prompt 缓存。内核 token 节约四判据已收束:历史有界自动压缩 / 静态底噪极小 / Lean 输出 / durable-state 事实驱动。
 
 ## B. 近期迭代与验证证据
+
+- **iter-52 · Codex 式 live steer**：忙碌任务支持 `Ctrl+Shift+Enter` 或 `/steer <guidance>` 将引导写入有界 `SteerBus`；不取消当前 provider 回合，`reason` 在下一次请求前消费，provider 失败回队，回合边界自动 follow-up，中断清空。新增队列上限与 history 顺序回归，保留 Enter 队尾、Ctrl+Enter 队首的既有语义。
+- **本轮验证**：图层 steer 注入/回队/边界、TUI 发送与真实 Windows PTY busy/queue/resize 回归通过；workspace 全量质量门、release 刷新和本机安装待本轮收尾。
+
+- **iter-51 · MCP 可见性与跨编码输出**：修复 `/mcp` 只看 RidgeCode 自有 JSON 配置、漏列宿主已安装 MCP 的缺口；只读解析 `CODEX_HOME/config.toml` 的 `mcp_servers` 并与 RidgeCode runtime 状态合并展示，不隐式启动宿主服务，命令参数继续脱敏。文件读取与 shell/直执行输出统一走 BOM/UTF-8/UTF-16/系统 legacy code page 解码，支持 `RIDGE_OUTPUT_ENCODING` 显式覆盖；Windows 控制台输出切 UTF-8 后恢复原 code page。
+- **本轮验证**：编码解码、宿主 MCP TOML、`/mcp` 合并/失败展示回归通过；workspace 全量质量门与 release 安装复核待本轮收尾。
 
 - **iter-50 · TUI 控制感与正文收束**：已批准并落地主题/goal/队列/读取展示切片。`Role→role_color` 改用与 `splash_base`/`splash_foreground_tone` 同源的 olive/violet/blue/ice RGB 主题；`/goal <title>`（含 `/goal create <title>`）一次原子写入 running goal，回显原始输入并把目标送入当前执行环，成功/失败/中断/TUI 退出分别收敛为 complete/blocked。Queue 面板 `Enter` 编辑选中消息、`Ctrl+Enter` 置前发送、`Delete` 移除，均保留当前回合；提交、队列状态与 scrollback 只显示标签/计数，显式编辑才恢复正文。`read_file` 的用户侧摘要/详情仅确认读取与路径，完整 observation 仍留 provider/model context。
 - **本轮验证**：`cargo test --workspace --locked` 全绿（agent 176、TUI 389、其余 workspace/doctest 全绿）；`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo build --workspace --locked`、`cargo fmt --all -- --check`、`git diff --check` 全绿。Windows PTY completion + answer/diff + resize 通过；Busy + queue/front + live inspector/remove/attention return + resize 通过；启动动画 RGB、原生 scrollback、退出路径均取证。已有三轮 bounded correct soak 与 goal/restart/durable/dispatch 回归继续有效。本轮未升版本/tag，Sonar 已接通但本次未重新触发远端 gate。
@@ -201,11 +207,11 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 ## 最近完成与当前 diff
 
 - 最近完成：MCP 运行态可观测性切片；不升版本、不改 MCP 协议、不改变失败降级。
-- 当前 diff：`crates/agent/src/main.rs`、`mcp_tools.rs`、TUI 状态/命令/面板及回归测试；`.iteration/` 为本轮治理运行态，保留既有用户改动。
+- 当前 diff：MCP/编码修复与 `crates/agent/src/graph.rs`、TUI steer 输入/状态/主环及回归测试；`.iteration/` 为本轮治理运行态，保留既有用户改动。
 
 ## 验证状态
 
-- 本轮：`requirements_intake.py build`、`requirements_gate.py assert-task-executable`、`iteration_gate.py`、`cargo fmt --all -- --check`、`cargo test --workspace --locked --no-fail-fast`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo build --workspace --locked`、`git diff --check` 均通过；workspace 测试含 agent 175/lib + ridgecode 383/bin、其余 crate 与 doc tests。Sonar scanner 可用但本 shell 未设置 `SONAR_TOKEN`，故未伪称本轮 Sonar 扫描通过；既有 Sonar 接通证据仍保留。
+- 本轮：requirements intake/gate、preflight、`cargo fmt --all -- --check`、`cargo test --workspace --locked --no-fail-fast -- --test-threads=1`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo build --workspace --release --locked`、`git diff --check` 均通过；agent lib 180、ridgecode TUI 391、eval 1、langgraph 9、mcp 2、provider 54、tools 20，另有 doctest 全绿。release 二进制 Windows PTY busy/queue/Inspector/resize smoke 通过。Sonar scanner 可用但本 shell 未设置 `SONAR_TOKEN`，故不宣称本轮 Sonar 扫描通过；既有 Sonar 接通证据保留。
 
 ## 当前失败信号与风险
 

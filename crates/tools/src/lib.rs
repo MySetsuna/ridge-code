@@ -40,7 +40,54 @@ pub fn read_file(path: impl AsRef<Path>) -> io::Result<String> {
             names.join("\n")
         ));
     }
-    std::fs::read_to_string(path)
+    Ok(decode_bytes(&std::fs::read(path)?))
+}
+
+/// Decode bytes from files and child processes without assuming UTF-8.
+///
+/// UTF-8 is preferred when valid; BOMs select UTF-8/UTF-16; Windows legacy
+/// output falls back to GBK (the common CP936 code page). `RIDGE_OUTPUT_ENCODING`
+/// can override the fallback with any label understood by `encoding_rs`.
+pub fn decode_bytes(bytes: &[u8]) -> String {
+    let explicit = std::env::var("RIDGE_OUTPUT_ENCODING").ok();
+    decode_bytes_with_encoding(bytes, explicit.as_deref())
+}
+
+/// Decode with an optional explicit label; kept separate so callers and tests
+/// can choose a code page without mutating process-global environment state.
+pub fn decode_bytes_with_encoding(bytes: &[u8], explicit: Option<&str>) -> String {
+    if let Some((encoding, _)) = encoding_rs::Encoding::for_bom(bytes) {
+        return encoding.decode(bytes).0.into_owned();
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_owned();
+    }
+    let fallback = explicit
+        .and_then(|label| encoding_rs::Encoding::for_label(label.trim().as_bytes()))
+        .unwrap_or_else(system_legacy_encoding);
+    fallback.decode(bytes).0.into_owned()
+}
+
+#[cfg(windows)]
+fn system_legacy_encoding() -> &'static encoding_rs::Encoding {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetOEMCP() -> u32;
+    }
+
+    match unsafe { GetOEMCP() } {
+        65001 => encoding_rs::UTF_8,
+        932 => encoding_rs::SHIFT_JIS,
+        936 => encoding_rs::GBK,
+        950 => encoding_rs::BIG5,
+        1252 => encoding_rs::WINDOWS_1252,
+        _ => encoding_rs::GBK,
+    }
+}
+
+#[cfg(not(windows))]
+fn system_legacy_encoding() -> &'static encoding_rs::Encoding {
+    encoding_rs::WINDOWS_1252
 }
 
 /// 整文件写入(覆盖)。父目录不存在会报错 —— 调用方自己保证目录。
@@ -512,8 +559,8 @@ fn run_command_with_timeout(mut command: Command, timeout: Duration) -> io::Resu
         } else {
             status.code().unwrap_or(-1)
         },
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        stdout: decode_bytes(&stdout),
+        stderr: decode_bytes(&stderr),
     })
 }
 
@@ -569,9 +616,10 @@ fn terminate_process_tree(child: &mut std::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_edits, available_shells, default_shell, edit_file, edits_diff, glob_match,
-        is_dangerous_command, jail_path, read_file, read_file_range, run_shell, run_shell_in,
-        run_shell_in_with_timeout, search, write_file, Edit,
+        apply_edits, available_shells, decode_bytes, decode_bytes_with_encoding, default_shell,
+        edit_file, edits_diff, glob_match, is_dangerous_command, jail_path, read_file,
+        read_file_range, run_shell, run_shell_in, run_shell_in_with_timeout, search, write_file,
+        Edit,
     };
     use std::path::Path;
     use std::time::{Duration, Instant};
@@ -602,6 +650,22 @@ mod tests {
         let out = run_shell("echo ridge").unwrap();
         assert_eq!(out.code, 0);
         assert!(out.stdout.contains("ridge"));
+    }
+
+    #[test]
+    fn decode_bytes_prefers_utf8_and_removes_bom() {
+        assert_eq!(decode_bytes("中文 · 🚀".as_bytes()), "中文 · 🚀");
+        assert_eq!(
+            decode_bytes(b"\xEF\xBB\xBF\xE4\xB8\xAD\xE6\x96\x87"),
+            "中文"
+        );
+        assert_eq!(decode_bytes(b"\xFF\xFE\x2D\x00\x2D\x4E"), "-中");
+    }
+
+    #[test]
+    fn decode_bytes_honors_explicit_encoding_override() {
+        let (encoded, _, _) = encoding_rs::GBK.encode("中文");
+        assert_eq!(decode_bytes_with_encoding(&encoded, Some("gbk")), "中文");
     }
 
     #[test]

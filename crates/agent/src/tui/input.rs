@@ -62,6 +62,8 @@ pub(crate) enum InputAction {
     Queue,
     /// busy 时把输入插到队首，当前任务完成后立即推进。
     PushNow,
+    /// Send guidance to the active agent without interrupting its current turn.
+    Steer,
     Interrupt,
     ToggleDetails,
     ToggleReasoning,
@@ -229,6 +231,9 @@ pub(crate) fn input_action(key: &KeyEvent, busy: bool, popup_open: bool) -> Inpu
         return action;
     }
     if busy && key.modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Enter {
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
+            return InputAction::Steer;
+        }
         return InputAction::PushNow;
     }
     normal_input_action(key, code, busy)
@@ -722,6 +727,7 @@ pub(crate) const SLASH_COMMANDS: &[&str] = &[
     "/reasoning",
     "/reset",
     "/skills",
+    "/steer",
     "/tools",
 ];
 

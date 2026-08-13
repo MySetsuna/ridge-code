@@ -35,6 +35,8 @@ unicode-segmentation = "1.13"
 # 非「内核精简铁律」所指的外置可装能力(RAG/AST/tiktoken 那类走 MCP/SKILL);OAuth 是内核 auth 特性,无法做成 skill。
 sha2 = "0.10"
 getrandom = "0.2"
+encoding_rs = "0.8"
+toml = "0.8"
 
 # 发布档:面向「独立分发的单二进制」优化 —— 更小、更快、去符号。
 # 注意:**不设** panic = "abort" —— TUI 靠 `TerminalGuard` 的 Drop 在 panic 时恢复终端
