@@ -1,9 +1,16 @@
 {
   "schema_version": 1,
-  "intake_id": "INTAKE-20260810-A2A-01",
+  "intake_id": "INTAKE-20260814-NEXT-01",
   "classification": "active",
-  "summary": "按用户明确授权，基于 Ridge 笔记本通信重构证据实现 RidgeCode 的 bounded agent-to-agent、多协议通信接缝与可验证运行闭环。",
-  "requirement_ids": ["REQ-20260810-A2A-01"],
+  "summary": "推进并批准下个迭代：执行真实终端/scrollback 验收与 bounded 24h soak，验证长任务写入、故障、重启恢复和确定性收敛；仅修复代码证据证明的缺口。",
+  "requirement_ids": [
+    "REQ-20260801-01",
+    "REQ-20260803-01",
+    "REQ-20260812-GOAL-RUN-01",
+    "REQ-20260812-AGENT-TUI-FIX-01",
+    "REQ-20260812-24H-AGENT-01",
+    "REQ-20260810-OPEN-VISION-01"
+  ],
   "pending_ids": [],
   "approval_reasons": [],
   "open_questions": [],

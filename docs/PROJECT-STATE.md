@@ -1,4 +1,4 @@
-# RidgeCode PROJECT-STATE(2026-07-23 · iter-48)
+# RidgeCode PROJECT-STATE(2026-08-14 · iter-50)
 
 > 本文是 NotebookLM 中**唯一**的 RidgeCode 来源,每轮迭代覆盖式更新并替换。
 > 结构:A. 项目定位与北极星(稳定段)→ B. 近期迭代与验证证据 → C. 能力对照与差距 → D. 开放问题与请 NotebookLM 定夺的问题 → E. 已落地架构详情(codegraph 生成的代码事实全文)。
@@ -17,6 +17,9 @@ RidgeCode 是一个**模块化、跨领域可扩展的通用 agent 框架**(单�
 **已锁定决策(不变量,改码前须知)**:maker≠checker;reducer 显式;引擎零 LLM;外置能力走 MCP/SKILL 不进内核;provider 边界(第三方 SDK 包在 trait 后);一切注入块有界截断;危险命令拦截不可绕过、sub-agent 恒只读;注入块有序稳态利 prompt 缓存。内核 token 节约四判据已收束:历史有界自动压缩 / 静态底噪极小 / Lean 输出 / durable-state 事实驱动。
 
 ## B. 近期迭代与验证证据
+
+- **iter-50 · TUI 控制感与正文收束**：已批准并落地主题/goal/队列/读取展示切片。`Role→role_color` 改用与 `splash_base`/`splash_foreground_tone` 同源的 olive/violet/blue/ice RGB 主题；`/goal <title>`（含 `/goal create <title>`）一次原子写入 running goal，回显原始输入并把目标送入当前执行环，成功/失败/中断/TUI 退出分别收敛为 complete/blocked。Queue 面板 `Enter` 编辑选中消息、`Ctrl+Enter` 置前发送、`Delete` 移除，均保留当前回合；提交、队列状态与 scrollback 只显示标签/计数，显式编辑才恢复正文。`read_file` 的用户侧摘要/详情仅确认读取与路径，完整 observation 仍留 provider/model context。
+- **本轮验证**：`cargo test --workspace --locked` 全绿（agent 176、TUI 389、其余 workspace/doctest 全绿）；`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo build --workspace --locked`、`cargo fmt --all -- --check`、`git diff --check` 全绿。Windows PTY completion + answer/diff + resize 通过；Busy + queue/front + live inspector/remove/attention return + resize 通过；启动动画 RGB、原生 scrollback、退出路径均取证。已有三轮 bounded correct soak 与 goal/restart/durable/dispatch 回归继续有效。本轮未升版本/tag，Sonar 已接通但本次未重新触发远端 gate。
 
 - **iter-43**:OAuth(PKCE)订阅登录 `ridgecode login --claude` 端到端 —— 接 Claude Pro/Max 订阅(非 API key)。纯核 `provider::oauth`(Pkce S256 / authorize_url / exchange_code / refresh / needs_refresh,HTTP 走 HttpClient 接缝离线可测);凭据独立 `~/.ridge/oauth.json`(0600);启动 key 全无时自动回退订阅凭据,过期自动刷新。
 - **iter-44**:tracing 可观测埋点核心闭环(execute_tool_call / reason LLM 调用 / write_run)。
@@ -171,7 +174,14 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 
 ## 当前迭代目标
 
-- 执行 `REQ-20260801-01`：重构 TUI 展示与交互，使实际模型输出/回答清晰可读，工具调用默认折叠且可显式展开，并保持终端适配、性能与既有安全语义。
+- 按 Active Requirements 与用户已直接批准的审计结论推进：保留完整模型/工具/Diff 详情入口、Goal/run、dispatch wave budget、provider/model 两阶段选择等已落地能力；修复真实 MCP 失败状态不可见问题，不重复建设已有能力。
+
+## 全项目逻辑审计结论（2026-08-13 · iter-49）
+
+- CodeGraph 已逐模块复核 langgraph BSP/checkpoint、agent reason/act/verify、goal/run durable facts、MCP/A2A、route/provider/model、dispatch_agents、TUI 输入/scrollback/Answer/Tool/Diff/detail 与 quality gate；代码事实优先，NotebookLM 只用于候选排序。
+- 已确认无需重复改造：Goal-bound run 已由 `run.rs::begin_goal/finish_goal` 与 durable run manifest 接通；`/answer`/`/answers`、Tool/Reasoning history 与宽度感知 detail viewport 已保留完整正文；`dispatch_agents` 已有运行级 wave budget；`/provider` 已合并为 model catalog 入口且独立 effort 阶段；A2A/MCP 协议边界与 24h durable 状态已有实现和回归覆盖。
+- 本轮真实缺口：MCP spawn/initialize/tools-list 失败只写日志并从 TUI 视野消失。已补 `McpServerStatus` 生命周期轨迹（`configured → started → initialized → tools listed / failed`），`/mcp` 显示脱敏失败原因；工具路由与单 server 失败降级语义保持不变。
+- 已直接批准的后续验证项：真实 Windows PTY 的原生 scrollback/复制/搜索物理证据、24h bounded soak（多轮写入、故障、重启恢复）；二者在证据不足前不做猜测性 UI/协议重构。
 
 ## 已验证代码事实
 
@@ -190,17 +200,17 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 
 ## 最近完成与当前 diff
 
-- 最近完成:`REQ-20260801-01` v0.2.0 需求晋级、执行 intake 与首个 Markdown 提交增量。
-- 当前 diff:`samples/config.json` 用户已有修改；`.iteration/` 与需求治理文档为本轮运行态；TUI app/render/mod/tests 已有本轮实现与测试变更。
+- 最近完成：MCP 运行态可观测性切片；不升版本、不改 MCP 协议、不改变失败降级。
+- 当前 diff：`crates/agent/src/main.rs`、`mcp_tools.rs`、TUI 状态/命令/面板及回归测试；`.iteration/` 为本轮治理运行态，保留既有用户改动。
 
 ## 验证状态
 
-- 历史记录（2026-08-01）：`requirements_gate.py assert-task-executable`、`preflight.py --strict`、Rust 质量命令均 exit 0；当前闸门结果以下方“本轮验证”为准。
+- 本轮：`requirements_intake.py build`、`requirements_gate.py assert-task-executable`、`iteration_gate.py`、`cargo fmt --all -- --check`、`cargo test --workspace --locked --no-fail-fast`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo build --workspace --locked`、`git diff --check` 均通过；workspace 测试含 agent 175/lib + ridgecode 383/bin、其余 crate 与 doc tests。Sonar scanner 可用但本 shell 未设置 `SONAR_TOKEN`，故未伪称本轮 Sonar 扫描通过；既有 Sonar 接通证据仍保留。
 
 ## 当前失败信号与风险
 
-- 失败信号:`state_snapshot.py build` 首次因旧 PROJECT-STATE 缺少本工作流章节而失败，补齐后已通过。
-- 风险:深研任务仍 `in_progress` 且报告为空；TestBackend 已覆盖窄终端折行与 CJK/emoji 宽度，真实 PTY 长任务帧延迟、复制/搜索仍待验收。
+- 失败信号：本轮未发现代码/测试失败；NotebookLM 历史判断与当前代码不一致处已以 CodeGraph/测试纠正。
+- 风险：真实 Windows PTY 的长任务帧延迟、复制/搜索仍缺自动化物理证据；24h soak 仍需覆盖 provider/subagent 故障、重启与恢复。两项均不以模型自述替代验收。
 
 ## 架构边界
 
@@ -350,7 +360,8 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 
 ## 下一项已批准工作
 
-- `/history`、reasoning 动态钳位、Live 语义侧轨、Reasoning→Tool→Answer connector、失败工具 rail、Answer context anchor、focused detail rail、fenced language badge、`Ctrl+R` reasoning inspection view、宽度自适应输入提示与展开/收起状态提示、busy 工具焦点提示、静态 reasoning 层次样式、busy chrome 观测 step 已落地；下一项先做真实 PTY/原生 scrollback 物理一致性验收，保持不引入批处理/原始日志，深研完成后仍须导入逐条回核。
+- 本轮已批准并落地：MCP 运行态状态与脱敏错误 `/mcp` 展示。
+- 下一迭代验证优先级：①真实 PTY/native scrollback 物理一致性；②bounded 24h soak 与重启恢复；③若证据发现具体缺口，再按最小切片修复。已落地 Goal/full-content/dispatch/model-provider 能力不再重复立项。
 
 ## 本轮 delta
 

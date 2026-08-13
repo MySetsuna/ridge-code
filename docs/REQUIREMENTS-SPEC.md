@@ -11,9 +11,9 @@
 - 批准依据:`批准`
 - 状态:`ACTIVE`
 - 版本:`v0.2.0`
-- 行为:`RidgeCode TUI 以清晰、科技感强且终端主题友好的界面呈现实际收到且允许展示的模型输出与最终回答；Answer 与实际 reasoning_content 分层呈现，不伪造隐藏推理；模型回复、调查结论、等待/执行状态与当前 Agent 活动须持续可见，长内容先展示摘要并可通过显式入口进入全屏详情，以滚动查看完整源文本；文件读取与工具输出默认合并为可折叠摘要，展开时保留完整有效细节，详情按终端宽度换行并由视口控制可见行数；支持有界、无外部解析依赖的行级 Markdown 展示（bold、code、header）与 ANSI 16 色语义角色；关键交互可发现、可操作，长任务期间保持响应并允许用户取消当前执行后接管输入；底部状态区明确区分输入 token 与输出 token；忙碌时待提交消息粘性显示于输入框上方，Enter 追加至队尾，Ctrl+Enter 立即推至队首且不打断当前模型回合。`
-- 边界:`范围限于 crates/agent/src/tui 及其直接交互/渲染依赖、展示状态模型、布局、事件处理、渲染与测试，以及为展示完整实际观察而增加的展示事件保留接缝；不改变模型上下文的有界压缩、langgraph 核心语义，不把具体 LLM/MCP SDK 耦合进 TUI，不牺牲安全门、确定性验证、跨平台终端兼容或数据完整性，不升级无关依赖；保留 maker/checker、权限门、危险命令拦截、输入排队/取消、事件驱动主环、Viewport::Inline、insert_before 原生 scrollback 与 ANSI 16 色主题适配方向；不覆盖 samples/config.json 与 test_codegraph.ps1。工具摘要须保留，工具详情默认折叠；Markdown 仅作展示层解析，完整详情仅由用户主动打开并在有界视口中浏览。`
-- 验收:`通过 cargo fmt --all --check、cargo test --workspace、cargo clippy --workspace --all-targets -- -D warnings；TUI 纯逻辑测试覆盖 Markdown span、语义色角色、折叠/展开、状态迁移、窄终端布局、CJK/emoji 宽度、长行物理换行、完整回答与完整多行 Diff 滚动浏览、Ctrl+R/Ctrl+O、输入/输出 token 分栏、Agent 活动状态、取消后接管与待提交队列预览/队首推送；证明静态提交文本无 ANSI 逃逸残留、文件读取/工具详情默认折叠且展开可访问全部行、模型上下文仍有界、LiveTranscript 64 块上限有效；完成真实终端或可复现渲染验收，证明长输出按宽度换行不刷屏、模型回复/调查结论/等待/当前活动可见、摘要可展开为全屏详情并滚动至尾部、工具默认收起且可展开、待提交消息不遮挡当前输入，Enter/Ctrl+Enter 不打断当前回合，Ctrl-C 可交还输入控制，且单帧刷新无明显卡顿；NotebookLM 建议经 CodeGraph、当前代码与测试核验后方可落地。`
+- 行为:`RidgeCode TUI 以清晰、科技感强且终端主题友好的界面呈现实际收到且允许展示的模型输出与最终回答；Answer 与实际 reasoning_content 分层呈现，不伪造隐藏推理；模型回复、调查结论、等待/执行状态与当前 Agent 活动须持续可见，长内容先展示摘要并可通过显式入口进入全屏详情，以滚动查看完整源文本；普通工具输出默认合并为可折叠摘要，展开时保留完整有效细节；read_file 为用户侧隐私/控制例外，仅确认已读取/失败与文件路径，不在摘要、详情或 scrollback 列出文件正文，完整 observation 仍留在 provider/model context；详情按终端宽度换行并由视口控制可见行数；支持有界、无外部解析依赖的行级 Markdown 展示（bold、code、header）与主题色语义角色；关键交互可发现、可操作，长任务期间保持响应并允许用户取消当前执行后接管输入；底部状态区明确区分输入 token 与输出 token；忙碌时待提交消息粘性显示于输入框上方，Enter 追加至队尾，Ctrl+Enter 立即推至队首且不打断当前模型回合。`
+- 边界:`范围限于 crates/agent/src/tui 及其直接交互/渲染依赖、展示状态模型、布局、事件处理、渲染与测试，以及为展示完整实际观察而增加的展示事件保留接缝；不改变模型上下文的有界压缩、langgraph 核心语义，不把具体 LLM/MCP SDK 耦合进 TUI，不牺牲安全门、确定性验证、跨平台终端兼容或数据完整性，不升级无关依赖；保留 maker/checker、权限门、危险命令拦截、输入排队/取消、事件驱动主环、Viewport::Inline、insert_before 原生 scrollback 与开场动画主题色语义适配方向；不覆盖 samples/config.json 与 test_codegraph.ps1。工具摘要须保留，工具详情默认折叠；Markdown 仅作展示层解析，完整详情仅由用户主动打开并在有界视口中浏览。`
+- 验收:`通过 cargo fmt --all --check、cargo test --workspace、cargo clippy --workspace --all-targets -- -D warnings；TUI 纯逻辑测试覆盖 Markdown span、语义色角色、折叠/展开、状态迁移、窄终端布局、CJK/emoji 宽度、长行物理换行、完整回答与完整多行 Diff 滚动浏览、Ctrl+R/Ctrl+O、输入/输出 token 分栏、Agent 活动状态、取消后接管与待提交队列预览/队首推送；证明静态提交文本无 ANSI 逃逸残留、read_file 仅显示路径/完成确认且正文不出现在任何用户侧投影、普通工具详情默认折叠且展开可访问全部行、模型上下文仍有界、LiveTranscript 64 块上限有效；完成真实终端或可复现渲染验收，证明长输出按宽度换行不刷屏、模型回复/调查结论/等待/当前活动可见、摘要可展开为全屏详情并滚动至尾部、工具默认收起且可展开、待提交消息不遮挡当前输入，Enter/Ctrl+Enter 不打断当前回合，Ctrl-C 可交还输入控制，且单帧刷新无明显卡顿；NotebookLM 建议经 CodeGraph、当前代码与测试核验后方可落地。`
 - 追踪:`REQ → crates/agent/src/tui/*.rs 的状态/事件/渲染符号 → crates/agent/src/tui/tests.rs 与 workspace 质量闸；NLM 建议证据存于 .iteration/notebooklm-response.json；Note 清理以本轮迭代 ID、闭环证据与本地 archive 记录为准。
 
 ### REQ-20260802-02 · ReRelease 稳定包与 GitHub README
@@ -116,6 +116,16 @@
 - Boundary:`范围含 crates/agent 的运行状态/阶段路由、长任务循环、subagent/teammate 派发与取消/超时/重试、goal 持久化与恢复、durable state/进展信号、TUI/CLI 可观测性、相关单元/集成/PTY smoke 与本地长跑 harness；必要的 scripts 与文档。不升级 tag 或 Cargo 版本；不改变 langgraph BSP 语义、权限门、危险命令拦截、maker/checker、确定性 verify、MCP/provider/A2A 协议边界；不引入无界后台任务、静默无限重试、自动 push/release、密钥/cookie 上传或未经批准的第三方 SDK。`
 - Acceptance:`补充阶段转移/写入触发/重复探索/停滞/超时/取消/恢复/重启/上下文压缩/质量门测试；执行 bounded soak（至少覆盖多轮任务、provider/subagent 故障、进程重启与恢复）；通过 cargo fmt --all -- --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked、git diff --check；本机 release 包安装后以真实终端完成至少一项不同维度复杂写入任务，并保存脱敏证据。`
 - Traceability:`REQ → agent phase/route、dispatch/timeout/cancel、goal/signal/persistence、TUI activity/diagnostics → 单元/集成/PTY/soak tests → workspace quality gates → 本机 release smoke。`
+
+### REQ-20260814-TUI-CONTROL-01 · TUI 主题、目标启动、队列控制与正文收束
+
+- Approval evidence:`用户明确批准当前迭代`
+- Status:`ACTIVE`
+- Version:`v0.1.0`
+- Behavior:`TUI 语义色与开场动画共享 RidgeCode olive/violet/blue/ice 主题；交互式 /goal 设置目标时显示用户原始输入并立即进入执行；队列面板支持选择后 Enter 编辑、Ctrl+Enter 置前发送、Delete 移除，均不打断当前回合；普通提交、队列状态与文件读取只显示任务标签/计数或已读取文件路径，文件/任务正文不进入状态或 scrollback；显式编辑时才将完整排队消息恢复到输入框，provider/model context 仍保留完整 read observation。`
+- Boundary:`范围限于 crates/agent/src/tui、goal 接缝及直接测试/文档；不改变模型上下文、权限门、确定性 verify、队列 FIFO/取消和终端 scrollback 基础语义，不升级版本/tag。`
+- Acceptance:`角色色、/goal running 持久化与原始输入回显、队列编辑/置前/不打断、read_file 路径摘要且正文不泄露、窄端/resize/真实 PTY 通过；workspace tests、clippy、build、fmt/diff 与既有 bounded soak 通过。`
+- Traceability:`REQ → tui/render.rs、goal.rs、tui/command.rs、tui/mod.rs、tui/panel.rs、tui/eventfmt.rs、tui/transcript.rs → 单元/PTY/soak evidence。`
 ## 修订账本 (Revision Ledger)
 
 关闭的 Pending、历史修订与审批证据写入 `docs/archive/events-YYYY-MM.jsonl`；本文件仅保留当前 Active 条款。

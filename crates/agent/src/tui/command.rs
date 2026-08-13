@@ -1,11 +1,6 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-
-use agent::{
-    apply_login, auth_upsert, compact_history, resolve_top_level_key, Config, PROVIDER_PRESETS,
-};
-use provider::{AnthropicProvider, Message, SwapProvider};
-use ratatui::style::Color;
 
 use crate::{
     auth_path, config_path, load_auth, make_provider, now_epoch, oauth_defaults, oauth_path,
@@ -13,13 +8,17 @@ use crate::{
     session_path, start_device_oauth, start_local_callback, verify_provider_key,
     LocalOAuthCallback, ReplMeta,
 };
+use agent::{
+    apply_login, auth_upsert, compact_history, resolve_top_level_key, Config, PROVIDER_PRESETS,
+};
+use provider::{AnthropicProvider, Message, SwapProvider};
 
 use super::{
     agent_panel, config_panel, effort_panel, login_panel, mcp_panel, models_panel, skills_panel,
-    tools_panel, ModelCatalog, PanelKind, PendingModelSelection, Ui, CLAUDE_OAUTH_ROW,
+    tools_panel, ModelCatalog, PanelKind, PendingModelSelection, Role, Ui, CLAUDE_OAUTH_ROW,
     CODEX_OAUTH_ROW, DEFAULT_STATUS_BAR,
 };
-use crate::tui;
+use crate::tui::{self, role_color};
 use agent::preset_by_id;
 #[cfg(test)]
 use provider::ScriptedProvider;
@@ -112,7 +111,7 @@ fn persist_default_selection(ui: &mut Ui, provider: &str, model: &str, base_url:
         Err(error) => {
             ui.note(
                 format!("model switched, but default selection was not saved: {error}"),
-                Color::Yellow,
+                role_color(Role::Warn),
             );
             return;
         }
@@ -126,7 +125,7 @@ fn persist_default_selection(ui: &mut Ui, provider: &str, model: &str, base_url:
     if let Err(error) = result {
         ui.note(
             format!("model switched, but default selection was not saved: {error}"),
-            Color::Yellow,
+            role_color(Role::Warn),
         );
     }
 }
@@ -421,14 +420,17 @@ pub(crate) async fn login_apply_verified(
                         "✓ connected to {} ({n} models) · now active (model {})",
                         preset.label, preset.default_model
                     ),
-                    Color::Green,
+                    role_color(Role::Success),
                 );
             }
-            Err(e) => ui.note(format!("verified but write failed: {e}"), Color::Red),
+            Err(e) => ui.note(
+                format!("verified but write failed: {e}"),
+                role_color(Role::Error),
+            ),
         },
         Err(e) => ui.note(
             format!("✗ could not connect to {}: {e}", preset.label),
-            Color::Red,
+            role_color(Role::Error),
         ),
     }
 }
@@ -465,7 +467,7 @@ fn prepare_oauth_callback(
                 format!(
                     "OAuth localhost callback unavailable: {error}. Switching to device auth; browser will open automatically."
                 ),
-                Color::Yellow,
+                role_color(Role::Warn),
             );
             Err(())
         }
@@ -474,7 +476,7 @@ fn prepare_oauth_callback(
                 format!(
                     "OAuth local callback unavailable: {error}. Manual callback paste remains available."
                 ),
-                Color::Yellow,
+                role_color(Role::Warn),
             );
             Ok(None)
         }
@@ -515,7 +517,7 @@ fn finish_oauth_start(
     };
     ui.note(
         format!("{} OAuth:\n{lead}\n{url}\n{hint}", ocfg.provider),
-        Color::Cyan,
+        role_color(Role::Info),
     );
 }
 
@@ -563,20 +565,23 @@ pub(crate) async fn apply_oauth_code(
     if verifier.is_empty() || expected_state.is_empty() {
         ui.note(
             "OAuth session expired; select the oauth row again",
-            Color::Yellow,
+            role_color(Role::Warn),
         );
         return;
     }
     let input = code.trim();
     if input.is_empty() {
-        ui.note("paste a non-empty code", Color::Yellow);
+        ui.note("paste a non-empty code", role_color(Role::Warn));
         return;
     }
     // 贴的是整个回调 URL(openai 流)→ 纯核提取 code;否则按 code / code#state 原样交换。
     let code_and_state = match provider::oauth::parse_authorization_input(input, &expected_state) {
         Ok(value) => value,
         Err(e) => {
-            ui.note(format!("invalid OAuth callback: {e}"), Color::Yellow);
+            ui.note(
+                format!("invalid OAuth callback: {e}"),
+                role_color(Role::Warn),
+            );
             return;
         }
     };
@@ -589,7 +594,7 @@ pub(crate) async fn apply_oauth_code(
     ui.oauth_callback.take();
     ui.note(
         format!("exchanging {} OAuth code...", ocfg.provider),
-        Color::Gray,
+        role_color(Role::Muted),
     );
     let http = provider::http::ReqwestClient::new();
     match provider::oauth::exchange_code_with_redirect(
@@ -605,7 +610,7 @@ pub(crate) async fn apply_oauth_code(
         Ok(token) => apply_oauth_token(ocfg, token, meta, swap, ui),
         Err(e) => ui.note(
             format!("{} OAuth exchange failed: {e}", ocfg.provider),
-            Color::Red,
+            role_color(Role::Error),
         ),
     }
 }
@@ -671,12 +676,12 @@ pub(crate) fn apply_oauth_token(
                     "✓ {} OAuth connected · credential saved to {path}",
                     ocfg.provider
                 ),
-                Color::Green,
+                role_color(Role::Success),
             );
         }
         Err(e) => ui.note(
             format!("OAuth token received but save failed: {e}"),
-            Color::Red,
+            role_color(Role::Error),
         ),
     }
 }
@@ -707,7 +712,7 @@ fn apply_effort(swap: &Arc<SwapProvider>, meta: &ReplMeta, value: &str, ui: &mut
                 "invalid effort; choose one of: {}",
                 provider::REASONING_EFFORTS.join(", ")
             ),
-            Color::Yellow,
+            role_color(Role::Warn),
         );
         return false;
     };
@@ -716,7 +721,7 @@ fn apply_effort(swap: &Arc<SwapProvider>, meta: &ReplMeta, value: &str, ui: &mut
     if let Err(error) = persist_config("effort", &effort) {
         ui.note(
             format!("effort applied, but save failed: {error}"),
-            Color::Yellow,
+            role_color(Role::Warn),
         );
     }
 
@@ -736,7 +741,10 @@ fn apply_effort(swap: &Arc<SwapProvider>, meta: &ReplMeta, value: &str, ui: &mut
             ));
         }
     }
-    ui.note(format!("reasoning effort={effort}"), Color::Green);
+    ui.note(
+        format!("reasoning effort={effort}"),
+        role_color(Role::Success),
+    );
     true
 }
 
@@ -759,7 +767,7 @@ pub(crate) fn swap_model(swap: &Arc<SwapProvider>, meta: &mut ReplMeta, model: &
             ));
             meta.model = model.to_string();
             persist_default_selection(ui, &meta.provider, model, &meta.base_url);
-            ui.note(format!("switched model={model}"), Color::Green);
+            ui.note(format!("switched model={model}"), role_color(Role::Success));
             return;
         }
     }
@@ -770,11 +778,11 @@ pub(crate) fn swap_model(swap: &Arc<SwapProvider>, meta: &mut ReplMeta, model: &
             swap.swap(make_provider(&meta.provider, model, &meta.base_url, key));
             meta.model = model.to_string();
             persist_default_selection(ui, &meta.provider, model, &meta.base_url);
-            ui.note(format!("switched model={model}"), Color::Green);
+            ui.note(format!("switched model={model}"), role_color(Role::Success));
         }
         None => ui.note(
             "no API key resolved (set RIDGE_API_KEY or api_key at config.json top level); cannot switch model",
-            Color::Red,
+            role_color(Role::Error),
         ),
     }
 }
@@ -803,7 +811,7 @@ pub(crate) fn switch_provider(
                     if token.needs_refresh(now_epoch()) {
                         ui.note(
                             "subscription token near expiry; restart ridgecode to auto-refresh if calls fail",
-                            Color::Yellow,
+                            role_color(Role::Warn),
                         );
                     }
                     let base_url = if p.kind == "openai" {
@@ -824,14 +832,17 @@ pub(crate) fn switch_provider(
                     meta.base_url = base_url;
                     persist_default_selection(ui, &meta.provider, &meta.model, &meta.base_url);
                     refresh_provider_label(meta);
-                    ui.note(format!("switched provider {name} (oauth)"), Color::Green);
+                    ui.note(
+                        format!("switched provider {name} (oauth)"),
+                        role_color(Role::Success),
+                    );
                 }
                 None => ui.note(
                     format!(
                         "no oauth credential for {} ({}); run: ridgecode login --claude / --codex",
                         p.name, p.kind
                     ),
-                    Color::Red,
+                    role_color(Role::Error),
                 ),
             }
         }
@@ -843,17 +854,20 @@ pub(crate) fn switch_provider(
                 meta.base_url = p.base_url;
                 persist_default_selection(ui, &meta.provider, &meta.model, &meta.base_url);
                 refresh_provider_label(meta);
-                ui.note(format!("switched provider {name}"), Color::Green);
+                ui.note(
+                    format!("switched provider {name}"),
+                    role_color(Role::Success),
+                );
             }
             None => ui.note(
                 format!(
                     "no key for {} ({}); run: ridgecode login",
                     p.name, p.key_env
                 ),
-                Color::Red,
+                role_color(Role::Error),
             ),
         },
-        None => ui.note(format!("no such provider: {name}"), Color::Red),
+        None => ui.note(format!("no such provider: {name}"), role_color(Role::Error)),
     }
 }
 
@@ -1004,11 +1018,11 @@ fn panel_enter_config_edit(
     match persist_config(&key, &value) {
         Ok(_) => {
             apply_config_live(&key, &value, meta, swap, ui);
-            ui.note(format!("saved {key}={value}"), Color::Green);
+            ui.note(format!("saved {key}={value}"), role_color(Role::Success));
             ui.panel = Some(config_panel());
         }
         Err(error) => {
-            ui.note(format!("write failed: {error}"), Color::Red);
+            ui.note(format!("write failed: {error}"), role_color(Role::Error));
             if let Some(panel) = ui.panel.as_mut() {
                 panel.editing = None;
             }
@@ -1079,7 +1093,7 @@ fn panel_enter_chatgpt(
     let Some(token) = openai_oauth_token() else {
         ui.note(
             "no ChatGPT OAuth credential; run /login --codex first",
-            Color::Red,
+            role_color(Role::Error),
         );
         return;
     };
@@ -1103,7 +1117,7 @@ fn panel_enter_chatgpt(
     }
     ui.note(
         format!("switched to {CHATGPT_MODEL_GROUP} / {model}"),
-        Color::Green,
+        role_color(Role::Success),
     );
 }
 
@@ -1122,12 +1136,18 @@ fn panel_enter_other_provider(
         .into_iter()
         .find(|profile| profile.name == provider_name)
     else {
-        ui.note(format!("no key for provider {provider_name}"), Color::Red);
+        ui.note(
+            format!("no key for provider {provider_name}"),
+            role_color(Role::Error),
+        );
         return;
     };
     if profile.use_oauth == Some(true) && profile.kind == "openai" {
         let Some(token) = openai_oauth_token() else {
-            ui.note(format!("no key for provider {provider_name}"), Color::Red);
+            ui.note(
+                format!("no key for provider {provider_name}"),
+                role_color(Role::Error),
+            );
             return;
         };
         let base_url = std::env::var("RIDGE_CHATGPT_BASE_URL")
@@ -1145,7 +1165,10 @@ fn panel_enter_other_provider(
         meta.base_url = base_url;
     } else {
         let Some(key) = profile.resolve_key_with(&auth) else {
-            ui.note(format!("no key for provider {provider_name}"), Color::Red);
+            ui.note(
+                format!("no key for provider {provider_name}"),
+                role_color(Role::Error),
+            );
             return;
         };
         swap.swap(make_provider(&profile.kind, model, &profile.base_url, key));
@@ -1160,7 +1183,7 @@ fn panel_enter_other_provider(
     }
     ui.note(
         format!("switched to {provider_name} / {model}"),
-        Color::Green,
+        role_color(Role::Success),
     );
 }
 
@@ -1204,7 +1227,7 @@ pub(crate) async fn run_command(
     if input == "/help" {
         ui.note(
             "/exit /model /provider /config /effort /find [query] /goal [status|create|start|advance|resume|complete|block|cancel] /activity /inspect /transcript /audit /reasoning /answer /answers /queue /tools /history /login /agent /mcp /skills /commands; /provider opens the model catalog; /answer opens the latest full answer; /answers opens the searchable answer archive; Enter queues while busy; Ctrl+Enter front-queues without interrupting; Ctrl+F opens non-blocking live search; Ctrl+Q opens the queue and Delete removes a pending item; Ctrl+I/Alt+I inspects live blocks in Transcript Audit; Ctrl+A opens the latest full answer; Ctrl+R toggles live reasoning or opens Reasoning history; Ctrl+O toggles live tool details or opens Tool history; Ctrl+T opens recent Agent activity; Ctrl-C hands input back.",
-            Color::Gray,
+            role_color(Role::Muted),
         );
         return Ok(false);
     }
@@ -1259,37 +1282,37 @@ fn handle_panel_navigation(input: &str, ui: &mut Ui, meta: &ReplMeta) -> bool {
 
 fn show_live_history(ui: &mut Ui) {
     if !ui.open_live_history() {
-        ui.note("no live blocks to inspect", Color::Gray);
+        ui.note("no live blocks to inspect", role_color(Role::Muted));
     }
 }
 
 fn show_live_search(ui: &mut Ui, query: &str) {
     if !ui.open_live_search(query) {
-        ui.note("no live blocks to search", Color::Gray);
+        ui.note("no live blocks to search", role_color(Role::Muted));
     }
 }
 
 fn show_reasoning_history(ui: &mut Ui) {
     if !ui.open_reasoning_history() {
-        ui.note("no completed reasoning history", Color::Gray);
+        ui.note("no completed reasoning history", role_color(Role::Muted));
     }
 }
 
 fn show_answer_history(ui: &mut Ui) {
     if !ui.open_answer_history() {
-        ui.note("no recoverable answer history", Color::Gray);
+        ui.note("no recoverable answer history", role_color(Role::Muted));
     }
 }
 
 fn show_latest_answer(ui: &mut Ui) {
     if !ui.open_latest_answer() {
-        ui.note("no recoverable answer history", Color::Gray);
+        ui.note("no recoverable answer history", role_color(Role::Muted));
     }
 }
 
 fn show_tool_history(ui: &mut Ui) {
     if !ui.open_tool_history() {
-        ui.note("no completed tool history", Color::Gray);
+        ui.note("no completed tool history", role_color(Role::Muted));
     }
 }
 
@@ -1307,12 +1330,12 @@ fn handle_context_navigation(
             ui.answer_history.clear();
             ui.panel = None;
             save_session(&session_path(), history);
-            ui.note("context cleared", Color::Yellow);
+            ui.note("context cleared", role_color(Role::Warn));
         }
         "/compact" => compact_context(ui, history),
         "/cost" => ui.note(
             format!("session total: {tokens} tokens · {turns} tasks"),
-            Color::Gray,
+            role_color(Role::Muted),
         ),
         _ => return false,
     }
@@ -1324,7 +1347,7 @@ fn compact_context(ui: &mut Ui, history: &mut Vec<Message>) {
     *history = compact_history(std::mem::take(history), 4);
     ui.note(
         format!("context compacted: {before} → {} messages", history.len()),
-        Color::Yellow,
+        role_color(Role::Warn),
     );
 }
 
@@ -1357,14 +1380,14 @@ fn show_model_catalog(ui: &mut Ui, meta: &mut ReplMeta) -> bool {
     let Some(grouped) = ui.model_catalog.as_ref() else {
         ui.note(
             "model catalog is still loading; try /model again shortly",
-            Color::Yellow,
+            role_color(Role::Warn),
         );
         return true;
     };
     if grouped.is_empty() {
         ui.note(
             "no models returned (providers unreachable or authentication failed)",
-            Color::Yellow,
+            role_color(Role::Warn),
         );
         return true;
     }
@@ -1398,17 +1421,24 @@ fn handle_security_command(input: &str, ui: &mut Ui) -> bool {
             } else {
                 "jailbreak: OFF (writes limited to cwd subtree). Enable: /jailbreak on —— top status bar turns red when on"
             };
-            ui.note(message, if on { Color::Red } else { Color::Gray });
+            ui.note(
+                message,
+                if on {
+                    role_color(Role::Error)
+                } else {
+                    role_color(Role::Muted)
+                },
+            );
         }
         "/jailbreak on" => {
             agent::set_allow_jailbreak(true);
-            ui.note("⚠ jailbreak ON: can write outside cwd subtree (disaster commands / protected paths / read-only still hard-blocked). Session only; to persist: /config set allow_jailbreak true", Color::Red);
+            ui.note("⚠ jailbreak ON: can write outside cwd subtree (disaster commands / protected paths / read-only still hard-blocked). Session only; to persist: /config set allow_jailbreak true", role_color(Role::Error));
         }
         "/jailbreak off" => {
             agent::set_allow_jailbreak(false);
             ui.note(
                 "jailbreak OFF: writes limited back to cwd subtree",
-                Color::Green,
+                role_color(Role::Success),
             );
         }
         "/config" => ui.panel = Some(config_panel()),
@@ -1424,12 +1454,12 @@ fn persist_config_command(input: &str, ui: &mut Ui) -> bool {
         match persist_config(parts[2], parts[3]) {
             Ok(path) => ui.note(
                 format!("wrote {path}; takes effect next start"),
-                Color::Green,
+                role_color(Role::Success),
             ),
-            Err(error) => ui.note(format!("write failed: {error}"), Color::Red),
+            Err(error) => ui.note(format!("write failed: {error}"), role_color(Role::Error)),
         }
     } else {
-        ui.note("usage: /config set <key> <value>", Color::Yellow);
+        ui.note("usage: /config set <key> <value>", role_color(Role::Warn));
     }
     true
 }
@@ -1461,13 +1491,13 @@ fn add_provider_command(input: &str, ui: &mut Ui) {
             let text = std::fs::read_to_string(&path).unwrap_or_default();
             match agent::config_add_provider(&text, &profile) {
                 Ok(output) => match std::fs::write(&path, output) {
-                    Ok(_) => ui.note(format!("added provider \"{}\" → {} (switch: /provider use {}; set the API key in env var {})", profile.name, path, profile.name, profile.key_env), Color::Green),
-                    Err(error) => ui.note(format!("failed to write config: {error}"), Color::Red),
+                    Ok(_) => ui.note(format!("added provider \"{}\" → {} (switch: /provider use {}; set the API key in env var {})", profile.name, path, profile.name, profile.key_env), role_color(Role::Success)),
+                    Err(error) => ui.note(format!("failed to write config: {error}"), role_color(Role::Error)),
                 },
-                Err(error) => ui.note(format!("config transform failed: {error}"), Color::Red),
+                Err(error) => ui.note(format!("config transform failed: {error}"), role_color(Role::Error)),
             }
         }
-        Err(error) => ui.note(error, Color::Yellow),
+        Err(error) => ui.note(error, role_color(Role::Warn)),
     }
 }
 
@@ -1494,7 +1524,7 @@ async fn handle_login_command(
 
 fn show_login_list(ui: &mut Ui) {
     let ids: Vec<&str> = PROVIDER_PRESETS.iter().map(|preset| preset.id).collect();
-    ui.note(format!("built-in providers: {}\nOAuth: claude-oauth (/login --claude) · codex-oauth (/login --codex)\n端口受限时执行: ridgecode login --codex --device-auth\ninteractive: /login  ·  quick: /login <id> <API_KEY> (verified; key → ~/.ridge/auth.json, not config)", ids.join(", ")), Color::Gray);
+    ui.note(format!("built-in providers: {}\nOAuth: claude-oauth (/login --claude) · codex-oauth (/login --codex)\n端口受限时执行: ridgecode login --codex --device-auth\ninteractive: /login  ·  quick: /login <id> <API_KEY> (verified; key → ~/.ridge/auth.json, not config)", ids.join(", ")), role_color(Role::Muted));
 }
 
 fn begin_login_oauth(ui: &mut Ui, provider: &provider::oauth::OAuthConfig, row_id: &str) {
@@ -1519,12 +1549,12 @@ async fn login_command(input: &str, ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc
             Some(preset) => login_apply_verified(preset, key, meta, swap, ui).await,
             None => ui.note(
                 format!("unknown provider \"{id}\"; see /login list"),
-                Color::Yellow,
+                role_color(Role::Warn),
             ),
         },
         _ => ui.note(
             "usage: /login <id> <API_KEY>, or just /login to pick interactively",
-            Color::Yellow,
+            role_color(Role::Warn),
         ),
     }
 }
@@ -1536,15 +1566,33 @@ fn handle_workspace_command(
     skills: &[agent::Skill],
     commands: &[agent::SlashCommand],
 ) -> bool {
+    handle_workspace_command_at(input, ui, agents, skills, commands, agent::goal_path())
+}
+
+fn handle_workspace_command_at(
+    input: &str,
+    ui: &mut Ui,
+    agents: &agent::Agents,
+    skills: &[agent::Skill],
+    commands: &[agent::SlashCommand],
+    goal_path: PathBuf,
+) -> bool {
     if input == "/goal"
         || input
             .strip_prefix("/goal")
             .is_some_and(|tail| tail.chars().next().is_some_and(char::is_whitespace))
     {
         let tail = input.strip_prefix("/goal").unwrap_or_default().trim_start();
-        match agent::parse_goal_text(tail).and_then(|args| agent::goal_command(&args)) {
-            Ok(text) => ui.note(text, Color::Cyan),
-            Err(error) => ui.note(format!("goal error: {error}"), Color::Red),
+        match agent::parse_goal_text(tail) {
+            Ok(args) if args.first().map(String::as_str) == Some("create") => {
+                let title = args[1..].join(" ");
+                start_interactive_goal(ui, input, &title, goal_path);
+            }
+            Ok(args) => match agent::goal_command_at(&goal_path, &args) {
+                Ok(text) => ui.note(text, role_color(Role::Info)),
+                Err(error) => ui.note(format!("goal error: {error}"), role_color(Role::Error)),
+            },
+            Err(error) => ui.note(format!("goal error: {error}"), role_color(Role::Error)),
         }
         return true;
     }
@@ -1558,9 +1606,26 @@ fn handle_workspace_command(
     true
 }
 
+fn start_interactive_goal(ui: &mut Ui, input: &str, title: &str, path: PathBuf) {
+    match agent::create_and_start_goal(&path, title) {
+        Ok(goal) => {
+            ui.active_goal_path = Some(path);
+            ui.run_task = Some(goal.title.clone());
+            ui.note(
+                format!(
+                    "goal input: {input}\n{}\nstarting goal execution",
+                    agent::render_goal(&goal)
+                ),
+                role_color(Role::Command),
+            );
+        }
+        Err(error) => ui.note(format!("goal error: {error}"), role_color(Role::Error)),
+    }
+}
+
 fn show_agent_panel(ui: &mut Ui, agents: &agent::Agents) {
     if agents.defs.is_empty() {
-        ui.note("no sub-agents available", Color::Gray);
+        ui.note("no sub-agents available", role_color(Role::Muted));
     } else {
         ui.panel = Some(agent_panel(&agents.defs));
     }
@@ -1568,16 +1633,16 @@ fn show_agent_panel(ui: &mut Ui, agents: &agent::Agents) {
 
 fn show_mcp_panel(ui: &mut Ui) {
     let cfg = Config::load(config_path());
-    if cfg.mcp.is_empty() {
-        ui.note("no MCP servers configured. Add them under \"mcp\": [ ... ] in ~/.ridge/config.json (each: name + cmd [+ args]).", Color::Gray);
+    if cfg.mcp.is_empty() && ui.mcp_statuses.is_empty() {
+        ui.note("no MCP servers configured. Add them under \"mcp\": [ ... ] in ~/.ridge/config.json (each: name + cmd [+ args]).", role_color(Role::Muted));
     } else {
-        ui.panel = Some(mcp_panel());
+        ui.panel = Some(mcp_panel(&ui.mcp_statuses));
     }
 }
 
 fn show_skills_panel(ui: &mut Ui, skills: &[agent::Skill]) {
     if skills.is_empty() {
-        ui.note("no skills loaded. Add ~/.ridge/skills/<name>/SKILL.md (frontmatter name/description + body); loaded skills are injected into the system prompt.", Color::Gray);
+        ui.note("no skills loaded. Add ~/.ridge/skills/<name>/SKILL.md (frontmatter name/description + body); loaded skills are injected into the system prompt.", role_color(Role::Muted));
     } else {
         ui.panel = Some(skills_panel(skills));
     }
@@ -1585,7 +1650,7 @@ fn show_skills_panel(ui: &mut Ui, skills: &[agent::Skill]) {
 
 fn show_commands(ui: &mut Ui, commands: &[agent::SlashCommand]) {
     if commands.is_empty() {
-        ui.note("no custom commands. Add ~/.ridge/commands/<name>.md (body = prompt, $ARGS = args); skills also appear here.", Color::Gray);
+        ui.note("no custom commands. Add ~/.ridge/commands/<name>.md (body = prompt, $ARGS = args); skills also appear here.", role_color(Role::Muted));
         return;
     }
     let lines = commands
@@ -1600,7 +1665,7 @@ fn show_commands(ui: &mut Ui, commands: &[agent::SlashCommand]) {
         .collect::<Vec<_>>();
     ui.note(
         format!("commands ({}):\n{}", commands.len(), lines.join("\n")),
-        Color::Gray,
+        role_color(Role::Muted),
     );
 }
 
@@ -1614,7 +1679,7 @@ fn handle_custom_command(input: &str, ui: &mut Ui, commands: &[agent::SlashComma
         Some(command) => ui.run_task = Some(agent::expand_command(&command.body, args.trim())),
         None => ui.note(
             format!("unknown command: {input} (/help · /commands)"),
-            Color::Yellow,
+            role_color(Role::Warn),
         ),
     }
     true
@@ -1634,6 +1699,61 @@ mod tests {
             status_bar: "{provider} {model}".into(),
             ctx_window: tui::DEFAULT_CTX_WINDOW,
         }
+    }
+
+    #[test]
+    fn interactive_goal_command_echoes_input_and_starts_task() {
+        let path = std::env::temp_dir().join(format!(
+            "ridge-tui-goal-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let mut ui = Ui::default();
+        let input = "/goal ship the queued task";
+        start_interactive_goal(&mut ui, input, "ship the queued task", path.clone());
+        assert_eq!(ui.run_task.as_deref(), Some("ship the queued task"));
+        assert_eq!(ui.active_goal_path.as_ref(), Some(&path));
+        assert!(ui.commits.iter().any(|commit| matches!(
+            commit,
+            crate::tui::CommitBlock::Text { text, .. } if text.contains(input)
+        )));
+        assert_eq!(agent::load_goal(&path).expect("goal").phase, "running");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn workspace_goal_route_echoes_original_input_and_starts_execution() {
+        let path = std::env::temp_dir().join(format!(
+            "ridge-tui-goal-route-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let mut ui = Ui::default();
+        let agents = agent::Agents::default();
+        let skills = Vec::new();
+        let commands = Vec::new();
+        let input = "/goal \"ship the routed task\"";
+        assert!(handle_workspace_command_at(
+            input,
+            &mut ui,
+            &agents,
+            &skills,
+            &commands,
+            path.clone(),
+        ));
+        assert_eq!(ui.run_task.as_deref(), Some("ship the routed task"));
+        assert_eq!(agent::load_goal(&path).expect("goal").phase, "running");
+        assert!(ui.commits.iter().any(|commit| matches!(
+            commit,
+            crate::tui::CommitBlock::Text { text, .. } if text.contains(input)
+        )));
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

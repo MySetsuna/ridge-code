@@ -345,6 +345,24 @@ pub fn create_goal(path: impl AsRef<Path>, title: &str) -> Result<Goal, GoalErro
     Ok(goal)
 }
 
+/// Create a goal from an interactive command and put it into the running
+/// state in one durable write sequence.
+pub fn create_and_start_goal(path: impl AsRef<Path>, title: &str) -> Result<Goal, GoalError> {
+    let path = path.as_ref();
+    if path.exists() {
+        return Err(GoalError::AlreadyExists(path.to_path_buf()));
+    }
+    let mut goal = Goal::new(title)?;
+    goal.start()?;
+    goal.advance(
+        "running",
+        "goal set from interactive user input",
+        Some("execute and verify"),
+    )?;
+    save_goal(path, &goal)?;
+    Ok(goal)
+}
+
 pub fn update_goal<F>(path: impl AsRef<Path>, update: F) -> Result<Goal, GoalError>
 where
     F: FnOnce(&mut Goal) -> Result<(), GoalError>,
@@ -784,6 +802,17 @@ mod tests {
         let path = temp_path("shorthand");
         goal_command_at(&path, &parse_goal_text("'ship stable release'").unwrap()).unwrap();
         assert_eq!(load_goal(&path).unwrap().title, "ship stable release");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn interactive_goal_creation_starts_and_persists_running_state() {
+        let path = temp_path("interactive-start");
+        let goal = create_and_start_goal(&path, "ship from tui").unwrap();
+        assert_eq!(goal.phase, "running");
+        assert!(goal.running);
+        assert_eq!(load_goal(&path).unwrap().title, "ship from tui");
+        assert!(load_goal(&path).unwrap().running);
         let _ = fs::remove_file(path);
     }
 

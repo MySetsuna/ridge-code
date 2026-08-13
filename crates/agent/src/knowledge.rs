@@ -554,12 +554,20 @@ async fn run_subagent_bounded(
     correlation_id: &str,
     timeout: Duration,
 ) -> Result<String, String> {
+    let started = std::time::Instant::now();
     match tokio::time::timeout(
         timeout,
         run_subagent_via_protocol(def, provider, task, correlation_id),
     )
     .await
     {
+        // Tokio's timeout may observe an already-ready inner future first when
+        // both deadlines wake in one scheduler turn. Re-check elapsed time so
+        // a late provider result cannot escape the bounded dispatch contract.
+        Ok(_) if started.elapsed() >= timeout => Err(format!(
+            "sub-agent timed out after {}ms",
+            timeout.as_millis()
+        )),
         Ok(result) => result,
         Err(_) => Err(format!(
             "sub-agent timed out after {}ms",
@@ -783,8 +791,50 @@ mod tests {
     use crate::route::{RouteRequest, RouteRole};
     use provider::{CompletionRequest, LlmProvider, ToolCall};
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    struct HangingProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for HangingProvider {
+        async fn complete(
+            &self,
+            _req: &CompletionRequest,
+        ) -> Result<provider::Completion, provider::ProviderError> {
+            std::future::pending::<Result<provider::Completion, provider::ProviderError>>().await
+        }
+    }
+
+    struct BarrierProvider {
+        barrier: Arc<tokio::sync::Barrier>,
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for BarrierProvider {
+        async fn complete(
+            &self,
+            _req: &CompletionRequest,
+        ) -> Result<provider::Completion, provider::ProviderError> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            self.barrier.wait().await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(provider::Completion {
+                text: if call == 0 {
+                    "first result".into()
+                } else {
+                    "second result".into()
+                },
+                ..Default::default()
+            })
+        }
+    }
 
     #[test]
     fn parse_agent_reads_frontmatter_and_body() {
@@ -878,13 +928,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_agent_timeout_returns_bounded_failure() {
-        let provider: Arc<dyn LlmProvider> = Arc::new(
-            provider::ScriptedProvider::new(vec![provider::Completion {
-                text: "too late".into(),
-                ..Default::default()
-            }])
-            .with_delay(Duration::from_millis(50)),
-        );
+        let provider: Arc<dyn LlmProvider> = Arc::new(HangingProvider);
         let agents = Agents {
             defs: vec![test_agent("explorer")],
             providers: HashMap::new(),
@@ -900,25 +944,21 @@ mod tests {
             Duration::from_millis(5),
         )
         .await;
-        assert!(started.elapsed() < Duration::from_millis(100), "{out}");
+        assert!(started.elapsed() < Duration::from_secs(1), "{out}");
         assert!(out.contains("timed out after 5ms"), "{out}");
     }
 
     #[tokio::test]
     async fn dispatch_batch_runs_two_subagents_concurrently_and_preserves_slots() {
-        let provider: Arc<dyn LlmProvider> = Arc::new(
-            provider::ScriptedProvider::new(vec![
-                provider::Completion {
-                    text: "first result".into(),
-                    ..Default::default()
-                },
-                provider::Completion {
-                    text: "second result".into(),
-                    ..Default::default()
-                },
-            ])
-            .with_delay(Duration::from_millis(40)),
-        );
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn LlmProvider> = Arc::new(BarrierProvider {
+            barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            active,
+            max_active: max_active.clone(),
+            calls,
+        });
         let agents = Agents {
             defs: vec![test_agent("explorer"), test_agent("reviewer")],
             providers: HashMap::new(),
@@ -936,7 +976,8 @@ mod tests {
         };
         let started = Instant::now();
         let out = dispatch_batch_obs(&agents, &provider, &call).await;
-        assert!(started.elapsed() < Duration::from_millis(100), "{out}");
+        assert!(started.elapsed() < Duration::from_secs(1), "{out}");
+        assert_eq!(max_active.load(Ordering::SeqCst), 2);
         assert!(out.contains("parallel sub-agent wave (2/2 completed)"));
         assert!(out.contains("first result"), "{out}");
         assert!(out.contains("second result"), "{out}");

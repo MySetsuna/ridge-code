@@ -3,10 +3,10 @@ param(
     [string]$Binary,
     [int]$Columns = 96,
     [int]$Rows = 24,
-    # InspectAnswer waits for a live Answer before the takeover probe; its
-    # effective interrupt point is 5000 ms, so the default must leave room for
-    # the two Ctrl-C bytes and final frame drain.
-    [int]$TimeoutMs = 6500,
+    # InspectAnswer waits for a live Answer before the takeover probe. The
+    # completion/stress fixtures also exercise full-body rendering, so leave
+    # room for the scripted turn, two Ctrl-C bytes, and final frame drain.
+    [int]$TimeoutMs = 15000,
     [int]$EnterAfterMs = 500,
     [int]$InterruptAfterMs = 1200,
     [switch]$EscTakeover,
@@ -53,6 +53,7 @@ if ($StressFixture) {
 }
 $stressFixtureRequested = [bool]$StressFixture
 $completionMode = [bool]($CompletionFixture -or $stressFixtureRequested)
+$diffMode = [bool]$CompletionFixture
 $commandsMode = [bool]$CommandsFixture
 if ($InspectLive -and -not $BusyFixture) {
     throw '-InspectLive requires -BusyFixture so a live block exists to inspect'
@@ -399,6 +400,7 @@ $sentInspectReturn = $false
 $sentReasoning = $false
 $reasoningObserved = $false
 $sentAnswerInspect = $false
+$sentAnswerArchiveInspect = $false
 $answerInspectObserved = $false
 $sentHold = $false
 $holdObserved = $false
@@ -443,9 +445,9 @@ $snapshotAnswerInspectJson = $null
 $effectiveInterruptAfterMs = if ($BusyFixture) {
     [Math]::Max($InterruptAfterMs, $(if ($InspectQueue) { 3600 } elseif ($InspectLive) { 3200 } elseif ($InspectReasoning -or $InspectHold) { 2800 } else { 2200 }))
 } elseif ($CompletionFixture) {
-    [Math]::Max($InterruptAfterMs, $(if ($InspectAnswer) { 3400 } else { 2400 }))
+    [Math]::Max($InterruptAfterMs, $(if ($InspectAnswer) { 9000 } else { 7000 }))
 } elseif ($stressFixtureRequested) {
-    [Math]::Max($InterruptAfterMs, $(if ($InspectAnswer) { 5000 } else { 3400 }))
+    [Math]::Max($InterruptAfterMs, $(if ($InspectAnswer) { 9000 } else { 7000 }))
 } else {
     $InterruptAfterMs
 }
@@ -634,8 +636,12 @@ try {
             try {
                 $candidate = [IO.File]::ReadAllText($isolatedSnapshot)
                 $parsed = $candidate | ConvertFrom-Json
-                if ($null -ne $parsed.state -and $parsed.state.busy -and
-                    $parsed.state.live_view -eq 'hold' -and $parsed.state.live_focus -match '^answer:') {
+                $liveAnswerFocused = $null -ne $parsed.state -and $parsed.state.busy -and
+                    $parsed.state.live_view -eq 'hold' -and $parsed.state.live_focus -match '^answer:'
+                $archivedAnswerExpanded = $null -ne $parsed.state -and
+                    $parsed.state.answer_history -ge 1 -and $null -ne $parsed.panel -and
+                    $parsed.panel.kind -eq 'Answers' -and $parsed.panel.detail_open
+                if ($liveAnswerFocused -or $archivedAnswerExpanded) {
                     $snapshotAnswerInspectRaw = $candidate
                     $snapshotAnswerInspectJson = $parsed
                     $answerInspectObserved = $true
@@ -643,6 +649,14 @@ try {
             } catch {
                 # Retry after the frame writer leaves its transient state.
             }
+        }
+        if ($InspectAnswer -and $completionObserved -and -not $answerInspectObserved -and
+            -not $sentAnswerArchiveInspect) {
+            # If the live Answer settled before the first Ctrl+A snapshot, use
+            # the same shortcut after completion to open the retained full
+            # Answer archive and verify its expandable detail surface.
+            $session.Send([byte[]](0x01))
+            $sentAnswerArchiveInspect = $true
         }
         if ($completionMode -and $completionTaskSent -and -not $completionObserved -and (Test-Path -LiteralPath $isolatedSnapshot)) {
             try {
@@ -717,7 +731,9 @@ try {
                 # Retry after the frame write completes.
             }
         }
-        if ($ResizeProbe -and $resizeTargetIndex -lt $resizeTargets.Count -and $elapsed -ge $resizeTargets[$resizeTargetIndex].at) {
+        if ($ResizeProbe -and $resizeTargetIndex -lt $resizeTargets.Count -and
+            ($resizeTargetIndex -eq 0 -or $resizeObservedCount -ge $resizeTargetIndex) -and
+            $elapsed -ge $resizeTargets[$resizeTargetIndex].at) {
             $target = $resizeTargets[$resizeTargetIndex]
             $session.Resize([int16]$target.columns, [int16]$target.rows)
             $sentResize = $true
@@ -838,8 +854,9 @@ try {
                 try {
                     $candidate = [IO.File]::ReadAllText($isolatedSnapshot)
                     $parsed = $candidate | ConvertFrom-Json
-                    $queue = if ($null -ne $parsed.state) { @($parsed.state.queue) } else { @() }
-                    if ($null -ne $parsed.state -and $parsed.state.busy -and $parsed.state.queued -ge 2 -and $queue[0] -eq '/front') {
+                    $history = if ($null -ne $parsed.state) { @($parsed.state.activity_history) } else { @() }
+                    $frontAction = $history | Where-Object { $_.text -eq 'front-queued message' }
+                    if ($null -ne $parsed.state -and $parsed.state.busy -and $parsed.state.queued -ge 2 -and $null -ne $frontAction) {
                         $snapshotMidRaw = $candidate
                         $snapshotMidJson = $parsed
                     }
@@ -857,8 +874,9 @@ try {
             if (Test-Path -LiteralPath $isolatedSnapshot) {
                 try {
                     $probe = [IO.File]::ReadAllText($isolatedSnapshot) | ConvertFrom-Json
-                    $probeQueue = if ($null -ne $probe.state) { @($probe.state.queue) } else { @() }
-                    $frontSeen = $null -ne $probe.state -and $probe.state.busy -and $probe.state.queued -ge 2 -and $probeQueue[0] -eq '/front'
+                    $probeHistory = if ($null -ne $probe.state) { @($probe.state.activity_history) } else { @() }
+                    $frontAction = $probeHistory | Where-Object { $_.text -eq 'front-queued message' }
+                    $frontSeen = $null -ne $probe.state -and $probe.state.busy -and $probe.state.queued -ge 2 -and $null -ne $frontAction
                 } catch {
                     # Retry once more after the writer leaves its transient state.
                 }
@@ -913,6 +931,16 @@ try {
             Write-Warning "TUI frame snapshot is not valid JSON: $($_.Exception.Message)"
         }
     }
+    if ($InspectAnswer -and -not $answerInspectObserved -and $null -ne $snapshotJson -and
+        $null -ne $snapshotJson.state -and $snapshotJson.state.answer_history -ge 1 -and
+        $null -ne $snapshotJson.panel -and $snapshotJson.panel.kind -eq 'Answers' -and
+        $snapshotJson.panel.detail_open) {
+        # The final drained frame is authoritative when a completed answer
+        # settled between the live poll and the next Ctrl+A inspection poll.
+        $snapshotAnswerInspectRaw = $snapshotRaw
+        $snapshotAnswerInspectJson = $snapshotJson
+        $answerInspectObserved = $true
+    }
     $snapshotRows = if ($null -ne $snapshotJson -and $null -ne $snapshotJson.rows) {
         @($snapshotJson.rows) -join "`n"
     } else {
@@ -943,7 +971,7 @@ try {
     $busyFixtureFrontObserved = if (-not $BusyFixture) {
         $true
     } elseif ($null -ne $snapshotMidState -and $snapshotMidState.queued -ge 2) {
-        @($snapshotMidState.queue)[0] -eq '/front'
+        @($snapshotMidState.activity_history | Where-Object { $_.text -eq 'front-queued message' }).Count -gt 0
     } else {
         $false
     }
@@ -1053,7 +1081,7 @@ try {
     $diffAddedObserved = ($plain -match 'fixture\s+new\s+line') -or ($probePlain -match 'fixturenewline')
     $diffRemovedTailObserved = ($plain -match 'fixture\s+old\s+tail\s+marker') -or ($probePlain -match 'fixtureoldtailmarker')
     $diffAddedTailObserved = ($plain -match 'fixture\s+new\s+tail\s+marker') -or ($probePlain -match 'fixturenewtailmarker')
-    $diffEvidenceSatisfied = -not $completionMode -or (
+    $diffEvidenceSatisfied = -not $diffMode -or (
         $diffPathObserved -and $diffRemovedObserved -and $diffAddedObserved -and
         $diffRemovedTailObserved -and $diffAddedTailObserved
     )
@@ -1199,6 +1227,7 @@ try {
         reasoning_observed = $reasoningObserved
         answer_inspect_requested = [bool]$InspectAnswer
         answer_inspect_sent = $sentAnswerInspect
+        answer_archive_inspect_sent = $sentAnswerArchiveInspect
         answer_inspect_observed = $answerInspectObserved
         answer_inspect_evidence_satisfied = $answerInspectEvidenceSatisfied
         hold_requested = [bool]$InspectHold

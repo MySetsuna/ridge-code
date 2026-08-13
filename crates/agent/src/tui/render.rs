@@ -274,8 +274,8 @@ pub(crate) fn render_todo_block(todos: &[Todo]) -> String {
 
 // ───────────────────────── 视觉与反馈(iter-28)─────────────────────────
 
-/// 语义化色角色(iter-28):界面色一律经角色取 **ANSI 16 具名色**,零 RGB 硬编码 ——
-/// 尊重用户终端主题(浅色/高对比/透明背景下不悲剧)。
+/// 语义化色角色：与启动动画共用 RidgeCode 的 olive → violet → blue → ice
+/// 主题，避免启动画面与 TUI 像两个产品。颜色集中于此，正文渲染不各自发明色值。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Role {
     /// 品牌/焦点:提示符、状态行徽标、浮窗高亮、流式游标。
@@ -303,24 +303,31 @@ pub(crate) enum Role {
     DiffDel,
 }
 
+// Exact highlight/base tones used by `splash_base` and
+// `splash_foreground_tone`, plus dark derivatives for chrome and muted text.
+pub(crate) const THEME_OLIVE: Color = Color::Rgb(205, 180, 92);
+pub(crate) const THEME_VIOLET: Color = Color::Rgb(112, 62, 196);
+pub(crate) const THEME_BLUE: Color = Color::Rgb(40, 148, 244);
+pub(crate) const THEME_ICE: Color = Color::Rgb(225, 235, 255);
+pub(crate) const THEME_BORDER: Color = Color::Rgb(64, 45, 104);
+pub(crate) const THEME_MUTED: Color = Color::Rgb(128, 112, 158);
+
 pub(crate) fn role_color(r: Role) -> Color {
     match r {
-        // Calm base palette: neutral text carries the screen; cyan is the
-        // single product/focus accent. Warning colors remain exceptional.
-        Role::Primary => Color::Cyan,
-        Role::Command => Color::White,
-        Role::Answer => Color::White,
-        Role::Reasoning => Color::LightBlue,
-        Role::Info => Color::Gray,
-        Role::Success => Color::Green,
-        Role::Error => Color::Red,
-        Role::Warn => Color::Yellow,
-        Role::Border => Color::DarkGray,
-        Role::Muted => Color::DarkGray,
-        Role::Metric => Color::White,
-        Role::Label => Color::DarkGray,
-        Role::DiffAdd => Color::Green,
-        Role::DiffDel => Color::Red,
+        Role::Primary => THEME_BLUE,
+        Role::Command => THEME_OLIVE,
+        Role::Answer => THEME_ICE,
+        Role::Reasoning => THEME_VIOLET,
+        Role::Info => THEME_BLUE,
+        Role::Success => THEME_OLIVE,
+        Role::Error => THEME_VIOLET,
+        Role::Warn => THEME_OLIVE,
+        Role::Border => THEME_BORDER,
+        Role::Muted => THEME_MUTED,
+        Role::Metric => THEME_ICE,
+        Role::Label => THEME_MUTED,
+        Role::DiffAdd => THEME_OLIVE,
+        Role::DiffDel => THEME_VIOLET,
     }
 }
 
@@ -336,7 +343,7 @@ pub(crate) fn telemetry_surface() -> Style {
 pub(crate) fn selection_style() -> Style {
     Style::default()
         .fg(role_color(Role::Primary))
-        .bg(Color::DarkGray)
+        .bg(Color::Rgb(48, 35, 78))
         .add_modifier(Modifier::BOLD)
 }
 

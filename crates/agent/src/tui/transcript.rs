@@ -240,12 +240,27 @@ impl ToolBlock {
     fn merge_observation(&mut self, mut incoming: Self) {
         let mut read_batch_paths = std::mem::take(&mut self.read_batch_paths);
         read_batch_paths.extend(incoming.read_batch_paths);
+        let is_read = self.tool_name.as_deref() == Some("read_file")
+            && incoming.tool_name.as_deref() == Some("read_file");
+        let read_path = read_batch_paths.first().cloned();
         let mut details = Vec::with_capacity(self.details.len() + incoming.details.len() + 1);
-        details.push((self.summary.clone(), self.summary_color));
-        details.append(&mut self.details);
-        details.append(&mut incoming.details);
-        self.summary = incoming.summary;
-        self.summary_color = incoming.summary_color;
+        if is_read {
+            let failed = incoming.read_batch_error;
+            let marker = if failed { '✗' } else { '✓' };
+            let label = if failed { "Read failed" } else { "Read" };
+            self.summary = read_path
+                .map(|path| format!("  {marker} {label} {path}"))
+                .unwrap_or_else(|| format!("  {marker} {label}"));
+            self.summary_color = incoming.summary_color;
+            // Do not put the file body in any user-facing projection. The
+            // execution history remains complete in the provider message.
+        } else {
+            details.push((self.summary.clone(), self.summary_color));
+            details.append(&mut self.details);
+            details.append(&mut incoming.details);
+            self.summary = incoming.summary;
+            self.summary_color = incoming.summary_color;
+        }
         self.details = details;
         self.collapsed_hint = tool_detail_hint(self.details.len());
         self.phase = ToolPhase::Observation;
@@ -256,9 +271,9 @@ impl ToolBlock {
         self.detail_scroll = 0;
     }
 
-    /// Fold one completed read into the current batch while retaining every
-    /// file's complete summary/detail payload in arrival order.
-    fn merge_read_batch(&mut self, mut incoming: Self) {
+    /// Fold one completed read into the current batch while retaining file
+    /// paths in arrival order; file bodies stay in model context only.
+    fn merge_read_batch(&mut self, incoming: Self) {
         let count = self
             .read_batch_count
             .saturating_add(incoming.read_batch_count);
@@ -266,11 +281,10 @@ impl ToolBlock {
         let mut read_batch_paths = std::mem::take(&mut self.read_batch_paths);
         read_batch_paths.extend(incoming.read_batch_paths);
         let read_batch_paths = bound_read_batch_paths(read_batch_paths);
-        let mut details = Vec::with_capacity(self.details.len() + incoming.details.len() + 2);
-        details.push((self.summary.clone(), self.summary_color));
-        details.append(&mut self.details);
-        details.push((incoming.summary, incoming.summary_color));
-        details.append(&mut incoming.details);
+        let mut details = Vec::with_capacity(read_batch_paths.len());
+        for path in &read_batch_paths {
+            details.push((format!("  ✓ Read {path}"), self.summary_color));
+        }
         self.details = details;
         self.collapsed_hint = tool_detail_hint(self.details.len());
         self.summary = read_batch_summary(count, &read_batch_paths, has_error);
@@ -355,7 +369,11 @@ impl ToolBlock {
     pub(crate) fn details_text(&self) -> String {
         if self.details.is_empty() {
             return if matches!(self.phase, ToolPhase::Observation) {
-                "no output".to_owned()
+                if self.tool_name.as_deref() == Some("read_file") {
+                    "file contents hidden from TUI".to_owned()
+                } else {
+                    "no output".to_owned()
+                }
             } else {
                 String::new()
             };

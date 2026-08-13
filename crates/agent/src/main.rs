@@ -2,10 +2,11 @@ use std::io::IsTerminal;
 use std::sync::Arc;
 
 use agent::{
-    auth_parse, builtin_tool_specs, load_commands, load_skills, request_once, resolve_mcp,
-    serve_agent, AgentEnvelope, AgentHello, AgentMessage, AgentProtocolError, AgentResponse,
-    AgentRole, AgentStatus, AgentTask, AgentTransport, AuthenticatedAgentTransport, Config,
-    JsonRpcAgentTransport, McpTools, Skill, SlashCommand,
+    auth_parse, builtin_tool_specs, load_commands, load_skills, mcp_error_summary, request_once,
+    resolve_mcp_with_statuses, serve_agent, AgentEnvelope, AgentHello, AgentMessage,
+    AgentProtocolError, AgentResponse, AgentRole, AgentStatus, AgentTask, AgentTransport,
+    AuthenticatedAgentTransport, Config, JsonRpcAgentTransport, McpServerState, McpServerStatus,
+    McpTools, Skill, SlashCommand,
 };
 use mcp::{McpClient, McpError, StdioTransport};
 use provider::{
@@ -1084,29 +1085,60 @@ fn spawn_mcp_transport(cmd: &str, args: &[String]) -> Result<StdioTransport, Mcp
 
 async fn resolve_configured_mcp(cfg: &Config) -> McpTools {
     let mut clients = Vec::new();
+    let mut statuses: Vec<McpServerStatus> = cfg
+        .mcp
+        .iter()
+        .map(|server| McpServerStatus::configured(server.name.clone()))
+        .collect();
     // config 声明的多 server。
     for m in &cfg.mcp {
         match spawn_mcp_transport(&m.cmd, &m.args) {
             Ok(t) => clients.push(Arc::new(McpClient::new(m.name.clone(), Box::new(t)))),
-            Err(e) => eprintln!("[ridgecode] MCP startup failed {} ({}): {e}", m.name, m.cmd),
+            Err(e) => {
+                if let Some(status) = statuses.iter_mut().find(|status| status.name == m.name) {
+                    status.failed(format!("startup failed: {}", mcp_error_summary(&e)));
+                }
+                eprintln!(
+                    "[ridgecode] MCP startup failed {}: {}",
+                    m.name,
+                    mcp_error_summary(&e)
+                );
+            }
         }
     }
     // 兼容旧 env 单 server。
     if let Ok(cmd) = std::env::var("RIDGE_MCP_CMD") {
         if !cmd.is_empty() {
             let name = std::env::var("RIDGE_MCP_NAME").unwrap_or_else(|_| "mcp".to_string());
+            statuses.push(McpServerStatus::configured(name.clone()));
             match spawn_mcp_transport(&cmd, &[]) {
                 Ok(t) => clients.push(Arc::new(McpClient::new(name, Box::new(t)))),
-                Err(e) => eprintln!("[ridgecode] MCP startup failed {cmd}: {e}"),
+                Err(e) => {
+                    if let Some(status) = statuses.last_mut() {
+                        status.failed(format!("startup failed: {}", mcp_error_summary(&e)));
+                    }
+                    eprintln!(
+                        "[ridgecode] MCP startup failed {}: {}",
+                        statuses
+                            .last()
+                            .map(|status| status.name.as_str())
+                            .unwrap_or("mcp"),
+                        mcp_error_summary(&e)
+                    );
+                }
             }
         }
     }
-    if clients.is_empty() {
-        return McpTools::empty();
+    let configured = statuses.len();
+    let tools = resolve_mcp_with_statuses(clients, statuses).await;
+    let ready = tools
+        .statuses()
+        .iter()
+        .filter(|status| status.state == McpServerState::ToolsListed)
+        .count();
+    if configured > 0 {
+        eprintln!("[ridgecode] MCP servers: {ready}/{configured} ready");
     }
-    let n = clients.len();
-    let tools = resolve_mcp(clients).await;
-    eprintln!("[ridgecode] connected {n} MCP server(s)");
     tools
 }
 

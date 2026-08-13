@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "iteration": "iter-50",
+  "requirement_ids": [
+    "REQ-20260814-TUI-CONTROL-01",
+    "REQ-20260812-24H-AGENT-01"
+  ],
+  "version": "0.5.19",
+  "version_bump": false,
+  "status": "implemented_and_verified",
+  "quality": {
+    "fmt": "passed",
+    "diff_check": "passed",
+    "workspace_tests": "passed",
+    "workspace_clippy": "passed",
+    "workspace_build": "passed",
+    "iteration_gate": "passed",
+    "state_snapshot": "passed"
+  },
+  "test_counts": {
+    "agent_library": 176,
+    "ridgecode_tui": 389,
+    "eval": 1,
+    "langgraph": 9,
+    "mcp": 2,
+    "provider": 54,
+    "tools": 18
+  },
+  "pty": [
+    {
+      "fixture": "completion",
+      "status": "passed",
+      "startup_animation": "passed",
+      "answer_inspector": "passed",
+      "diff_evidence": "passed",
+      "resize": "passed",
+      "native_scrollback": "passed",
+      "diagnostics": "C:\\Users\\12867\\AppData\\Local\\Temp\\ridgecode-pty-47828-home\\.ridge"
+    },
+    {
+      "fixture": "busy_queue_live_inspector",
+      "status": "passed",
+      "startup_animation": "passed",
+      "queue_front": "passed",
+      "live_inspector": "passed",
+      "queue_remove": "passed",
+      "attention_return": "passed",
+      "resize": "passed",
+      "diagnostics": "C:\\Users\\12867\\AppData\\Local\\Temp\\ridgecode-pty-24904-home\\.ridge"
+    }
+  ],
+  "soak": {
+    "bounded_correct_rounds": 3,
+    "evidence_glob": ".iteration/soak-correct-round-*.log",
+    "coverage": [
+      "writes",
+      "provider_and_subagent_failure",
+      "restart_recovery",
+      "cancellation",
+      "durable_checkpoint",
+      "goal_lifecycle"
+    ]
+  },
+  "sonar": "configured; remote gate not rerun in this iteration",
+  "notes": [
+    "TUI read_file success and failure projections confirm outcome/path only; provider/model context retains the full observation.",
+    "Queue labels and diagnostics do not expose queued task bodies; explicit edit is the only queue-body recovery path.",
+    "Queue edit and send-now behavior covered by deterministic TUI regression tests; current turn remains active.",
+    "No commit, push, release, tag, or version change performed in this iteration."
+  ]
+}

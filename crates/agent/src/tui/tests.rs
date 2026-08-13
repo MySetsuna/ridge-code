@@ -23,6 +23,64 @@ fn test_meta() -> ReplMeta {
     }
 }
 
+#[test]
+fn mcp_panel_redacts_secret_arguments() {
+    let args = vec![
+        "--token".into(),
+        "secret-token".into(),
+        "--api-key=another-secret".into(),
+        "--header=Authorization: Bearer header-secret".into(),
+        "--workspace".into(),
+        "ridge".into(),
+    ];
+    let label = super::panel::mcp_command_label("server", &args);
+    assert_eq!(
+        label,
+        "server --token <redacted> --api-key=<redacted> --header=<redacted> --workspace ridge"
+    );
+    assert!(!label.contains("secret"));
+}
+
+#[tokio::test]
+async fn mcp_command_shows_runtime_failure_instead_of_only_config() {
+    let mut ui = super::Ui::default();
+    let mut status = agent::McpServerStatus::configured("runtime-failed");
+    status.failed("startup failed: transport error");
+    ui.mcp_statuses = vec![status];
+    let mut history = Vec::new();
+    let mut meta = test_meta();
+    let swap = test_swap();
+    let agents = agent::Agents::default();
+    let commands = Vec::new();
+    let skills = Vec::new();
+    let catalog = super::CommandCatalog {
+        agents: &agents,
+        commands: &commands,
+        skills: &skills,
+    };
+
+    assert!(!super::run_command(
+        "/mcp",
+        &mut ui,
+        &mut history,
+        &mut meta,
+        &swap,
+        &catalog,
+        super::CommandStats {
+            tokens: 0,
+            turns: 0,
+        },
+    )
+    .await
+    .unwrap());
+    let panel = ui.panel.expect("/mcp should open the runtime panel");
+    assert!(panel
+        .rows
+        .iter()
+        .any(|row| row.key == "runtime-failed"
+            && row.value.contains("startup failed: transport error")));
+}
+
 fn test_swap() -> Arc<provider::SwapProvider> {
     Arc::new(provider::SwapProvider::new(Arc::new(
         provider::ScriptedProvider::new(Vec::new()),
@@ -724,8 +782,8 @@ async fn extracted_event_loop_exits_after_takeover_signal() {
 
 #[test]
 fn event_colours_are_semantic() {
-    assert_eq!(event_color("verify: PASS"), Color::Green);
-    assert_eq!(event_color("act: run_shell"), Color::Yellow);
+    assert_eq!(event_color("verify: PASS"), role_color(Role::Success));
+    assert_eq!(event_color("act: run_shell"), role_color(Role::Warn));
     assert_eq!(event_color("(final) done"), role_color(Role::Answer));
 }
 
@@ -1012,16 +1070,14 @@ fn extracted_helpers_cover_task_reset_oauth_and_idle_polling() {
 }
 
 #[test]
-fn read_file_result_is_collapsed_but_expandable() {
+fn read_file_result_only_confirms_completion() {
     let message = "act: read_file -> first line\nsecond line\nthird line";
     let block = tool_preview(message).expect("read result should be a tool block");
     let compact = block.live_lines();
+    assert!(compact.iter().any(|line| line.text == "  ✓ File read"));
     assert!(compact
         .iter()
-        .any(|line| line.text.contains("Read complete")));
-    assert!(compact
-        .iter()
-        .any(|line| line.text.contains("Ctrl+O details")));
+        .all(|line| !line.text.contains("Ctrl+O details")));
     assert!(!compact.iter().any(|line| line.text == "second line"));
 
     let mut expanded = block;
@@ -1029,25 +1085,36 @@ fn read_file_result_is_collapsed_but_expandable() {
     assert!(expanded
         .live_lines()
         .iter()
-        .any(|line| line.text.contains("second line")));
+        .all(|line| !line.text.contains("second line")));
 }
 
 #[test]
-fn long_tool_preview_keeps_all_file_lines_when_expanded() {
+fn failed_read_file_result_only_confirms_failure() {
+    let message = "act: read_file -> read error: secret file body\nsecond private line";
+    let block = tool_preview(message).expect("failed read result should be a tool block");
+    let lines = block.live_lines();
+    assert!(lines.iter().any(|line| line.text == "  ✗ File read failed"));
+    assert!(lines
+        .iter()
+        .all(|line| !line.text.contains("secret file body")));
+    assert!(lines
+        .iter()
+        .all(|line| !line.text.contains("second private line")));
+}
+
+#[test]
+fn long_tool_preview_does_not_expose_file_lines_in_tui() {
     let content = (0..24)
         .map(|index| format!("line {index}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let preview = preview_lines(&content, 12);
-    let rendered = preview
+    let block = tool_preview(&format!("act: read_file -> {content}"))
+        .expect("read result should remain inspectable");
+    assert_eq!(block.live_lines().len(), 1);
+    assert!(block
+        .live_lines()
         .iter()
-        .map(|(line, _)| line.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(rendered.contains("line 0"));
-    assert!(rendered.contains("line 23"));
-    assert!(rendered.contains("line 12"));
-    assert!(!rendered.contains("full text in trace"));
+        .all(|line| !line.text.contains("line 23")));
 }
 
 #[test]
@@ -1067,21 +1134,40 @@ fn read_file_call_and_result_share_one_collapsed_tool_block() {
         1,
         "call/result must collapse to one tool block"
     );
-    assert!(compact
-        .iter()
-        .any(|line| line.text.contains("Read complete")));
+    assert!(compact.iter().any(|line| line.text == "  ✓ Read src/x.rs"));
     assert!(!compact.iter().any(|line| line.text == "second line"));
 
     assert!(ui.toggle_details());
     let expanded = ui.transcript.visible_lines(8);
-    assert!(expanded
-        .iter()
-        .any(|line| line.text.contains("Read src/x.rs")));
-    assert!(expanded
+    assert!(expanded.iter().any(|line| line.text == "  ✓ Read src/x.rs"));
+    assert!(!expanded
         .iter()
         .any(|line| line.text.contains("second line")));
     ui.commit_live_tools();
     assert_eq!(ui.tool_history.len(), 1);
+}
+
+#[test]
+fn failed_read_file_call_and_result_preserve_failure_marker_without_body() {
+    let call = r#"reason#1: tool_call read_file {"path":"src/secret.rs"}"#;
+    let result = "act: read_file -> read error: private source line\nsecond private line";
+    let mut ui = Ui::default();
+    ui.push_tool(tool_preview(call).expect("read call"));
+    ui.push_tool(tool_preview(result).expect("failed read result"));
+
+    let lines = ui.transcript.visible_lines(8);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.text == "  ✗ Read failed src/secret.rs"),
+        "unexpected lines: {lines:?}"
+    );
+    assert!(lines
+        .iter()
+        .all(|line| !line.text.contains("private source line")));
+    assert!(lines
+        .iter()
+        .all(|line| !line.text.contains("second private line")));
 }
 
 #[test]
@@ -1105,29 +1191,17 @@ fn consecutive_read_file_results_group_into_one_collapsed_batch() {
         "adjacent reads should occupy one row: {compact:?}"
     );
     assert!(summaries[0].text.contains("Read batch · 2 files"));
-    assert!(compact
-        .iter()
-        .any(|line| line.text.contains("Ctrl+O details")));
     assert!(!compact.iter().any(|line| line.text.contains("next line")));
-
     assert!(ui.toggle_details());
     let expanded = ui.transcript.visible_lines(16);
     assert!(expanded
         .iter()
-        .any(|line| line.text.contains("Read src/alpha.rs")));
-    assert!(expanded
-        .iter()
-        .any(|line| line.text.contains("Read src/beta.rs")));
-    assert!(expanded
-        .iter()
-        .any(|line| line.text.contains("next line 1")));
-    assert!(expanded
-        .iter()
-        .any(|line| line.text.contains("next line 2")));
+        .any(|line| line.text.contains("Read batch · 2 files")));
+    assert!(!expanded.iter().any(|line| line.text.contains("next line")));
 }
 
 #[test]
-fn read_file_batch_preserves_detail_order_and_full_content() {
+fn read_file_batch_preserves_path_order_without_exposing_content() {
     let mut ui = Ui::default();
     for index in 0..4 {
         let path = format!("src/read-{index}.rs");
@@ -1161,25 +1235,10 @@ fn read_file_batch_preserves_detail_order_and_full_content() {
     );
     assert!(batch.summary().contains("+1 more"));
     let details = batch.details_text();
-    assert!(
-        details.lines().count() >= 4 * 21,
-        "detail content lost: {details}"
-    );
-    assert!(
-        details.contains("file 0 line 0"),
-        "detail head lost: {details}"
-    );
-    assert!(
-        details.contains("file 3 line 19"),
-        "detail tail lost: {details}"
-    );
     for index in 0..4 {
-        assert!(
-            details.contains(&format!("file {index} line 19")),
-            "detail file {index} tail lost: {details}"
-        );
+        assert!(details.contains(&format!("Read src/read-{index}.rs")));
+        assert!(!details.contains(&format!("file {index} line 0")));
     }
-    assert!(!details.contains("detail lines folded"));
 }
 
 #[test]
@@ -1226,7 +1285,7 @@ fn read_file_batch_does_not_cross_other_tools() {
     assert_eq!(
         summaries
             .iter()
-            .filter(|line| line.contains("Read complete"))
+            .filter(|line| line.starts_with("  ✓ Read "))
             .count(),
         2
     );
@@ -2136,7 +2195,7 @@ fn queue_panel_exposes_fifo_and_removes_only_pending_intent() {
     assert_eq!(panel.selected_index(), Some(0));
     assert_eq!(
         panel.selected().map(|row| row.value.as_str()),
-        Some("first pending request")
+        Some("queued message")
     );
 
     assert_eq!(
@@ -2150,9 +2209,44 @@ fn queue_panel_exposes_fifo_and_removes_only_pending_intent() {
             .as_ref()
             .and_then(|panel| panel.selected())
             .map(|row| row.value.as_str()),
-        Some("second pending request")
+        Some("queued message")
     );
     assert!(ui.toggle_queue_panel());
+    assert!(ui.panel.is_none());
+}
+
+#[test]
+fn queue_panel_edit_loads_full_message_without_leaking_it_to_notes() {
+    let mut ui = Ui::default();
+    ui.queued.push_back("full queued request body".into());
+    ui.open_queue_panel();
+    edit_queue_selection(&mut ui);
+    assert_eq!(ui.input.buffer, "full queued request body");
+    assert!(ui.queued.is_empty());
+    assert!(ui.panel.is_none());
+    assert!(ui.commits.iter().all(
+        |commit| !matches!(commit, CommitBlock::Text { text, .. } if text.contains("full queued"))
+    ));
+}
+
+#[test]
+fn queue_panel_send_now_sets_pending_without_interrupting_current_turn() {
+    let mut ui = Ui {
+        busy: true,
+        ..Ui::default()
+    };
+    ui.queued.push_back("first queued request".into());
+    ui.queued.push_back("second queued request".into());
+    ui.open_queue_panel();
+    ui.panel.as_mut().expect("queue panel").move_down();
+    let mut pending = None;
+    send_queue_selection_now(&mut ui, &mut pending);
+    assert_eq!(pending.as_deref(), Some("second queued request"));
+    assert_eq!(
+        ui.queued.front().map(String::as_str),
+        Some("first queued request")
+    );
+    assert!(ui.busy);
     assert!(ui.panel.is_none());
 }
 
@@ -4175,7 +4269,7 @@ fn narrow_live_matrix_keeps_state_and_takeover_signals_observable() {
         queued.input.insert_str("draft");
         let queued_text = rendered(&queued, width, height, None);
         assert!(
-            queued_text.contains("priority") || queued_text.contains("Q:"),
+            queued_text.contains("queued message") || queued_text.contains("Q:"),
             "queue affordance hidden at {width}x{height}: {queued_text}"
         );
     }
@@ -4461,11 +4555,11 @@ fn summarize_event_overviews_tools() {
     let r = summarize_event(r#"reason#1: tool_call read_file {"path":"src/x.rs"}"#);
     assert_eq!(r.len(), 1);
     assert!(r[0].0.contains("Read src/x.rs"), "{}", r[0].0);
-    // 读回执:摘要行只回执字数,内容进入可折叠的完整详情。
+    // 读回执:只显示已读取，不回显正文。
     let a = summarize_event("act: read_file -> 一二三四五");
-    assert!(a[0].0.contains("Read complete"), "{}", a[0].0);
+    assert!(a[0].0 == "  ✓ File read", "{}", a[0].0);
     assert!(!a[0].0.contains("一二三"), "内容不应回显");
-    assert!(a.iter().any(|(line, _)| line.contains("一二三")));
+    assert!(a.iter().all(|(line, _)| !line.contains("一二三")));
     // 改:git-diff 式 ± 行,红减绿增。
     let e = summarize_event(
         r#"reason#2: tool_call edit_file {"path":"a.rs","old_string":"let n=1;","new_string":"let n=2;"}"#,
@@ -5806,6 +5900,10 @@ fn panel_action_routes_keys() {
     assert_eq!(panel_action(&press(KeyCode::Home)), PanelAction::First);
     assert_eq!(panel_action(&press(KeyCode::End)), PanelAction::Last);
     assert_eq!(panel_action(&press(KeyCode::Enter)), PanelAction::Enter);
+    assert_eq!(
+        panel_action(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)),
+        PanelAction::SendNow
+    );
     assert_eq!(panel_action(&press(KeyCode::Esc)), PanelAction::Esc);
     assert_eq!(panel_action(&press(KeyCode::Delete)), PanelAction::Remove);
     assert_eq!(
@@ -6880,16 +6978,14 @@ fn pending_queue_preview_wraps_and_remains_bounded() {
             .collect::<String>()
     };
     assert!(text(&lines[0]).contains("next"));
-    assert!(lines.iter().any(|line| text(line).contains("first")));
+    assert!(lines.iter().any(|line| text(line).contains("next")));
     assert!(lines.iter().all(|line| str_cells(&text(line)) <= 24));
 }
 
 #[test]
 fn pending_queue_preview_bounds_large_pasted_message() {
-    let queue = std::collections::VecDeque::from([format!(
-        "head of pending paste {}",
-        "x".repeat(MAX_PENDING_PREVIEW_CHARS * 8)
-    )]);
+    let queue =
+        std::collections::VecDeque::from([format!("head of pending paste {}", "x".repeat(16_384))]);
     let lines = pending_queue_lines(&queue, 24);
     let text = lines
         .iter()
@@ -6901,8 +6997,8 @@ fn pending_queue_preview_bounds_large_pasted_message() {
         })
         .collect::<Vec<_>>();
     assert!(lines.len() <= MAX_PENDING_PREVIEW_ROWS);
-    assert!(text.iter().any(|line| line.contains("head of pending")));
-    assert!(text.iter().any(|line| line.contains("more queued text")));
+    assert!(text.iter().any(|line| line.contains("next")));
+    assert!(text.iter().all(|line| !line.contains("head of pending")));
     assert!(text.iter().all(|line| str_cells(line) <= 24));
 }
 
@@ -6945,7 +7041,7 @@ fn pending_queue_stays_visible_in_short_live_frame() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(
-        symbols.contains("keep this pending") || symbols.contains("keep this"),
+        symbols.contains("next queued") || symbols.contains("next"),
         "queued intent hidden in short frame: {symbols}"
     );
 }
@@ -6991,7 +7087,7 @@ fn pending_queue_stays_above_wrapped_draft_and_cursor_tail() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(
-        symbols.contains("keep this pending"),
+        symbols.contains("next queued") || symbols.contains("next"),
         "queued intent hidden behind wrapped draft: {symbols}"
     );
     assert!(
@@ -7409,7 +7505,7 @@ fn ultra_low_height_pending_queue_stays_visible_above_or_with_draft() {
             );
         } else {
             assert!(
-                symbols.contains("queued intent"),
+                symbols.contains("queued message"),
                 "queue preview lost at {height}: {symbols}"
             );
         }
@@ -7737,22 +7833,16 @@ fn commit_queue_drains_in_order() {
     assert!(ui.commits.is_empty());
 }
 
-/// iter-28:色角色映射 —— ANSI 16 具名色,语义正确。
+/// Splash-derived RGB theme is shared by semantic TUI roles.
 #[test]
-fn role_colors_are_ansi16() {
-    assert_eq!(role_color(Role::Success), Color::Green);
-    assert_eq!(role_color(Role::Error), Color::Red);
-    assert_eq!(role_color(Role::DiffAdd), Color::Green);
-    assert_eq!(role_color(Role::DiffDel), Color::Red);
-    assert_eq!(role_color(Role::Primary), Color::Cyan);
-    assert_eq!(role_color(Role::Reasoning), Color::LightBlue);
-    assert_eq!(role_color(Role::Border), Color::DarkGray);
-    assert_eq!(role_color(Role::Command), Color::White);
-    assert_eq!(role_color(Role::Answer), Color::White);
-    assert_eq!(role_color(Role::Info), Color::Gray);
-    assert_eq!(role_color(Role::Muted), Color::DarkGray);
-    assert_eq!(role_color(Role::Metric), Color::White);
-    assert_eq!(role_color(Role::Label), Color::DarkGray);
+fn role_colors_share_splash_theme() {
+    assert_eq!(role_color(Role::Success), THEME_OLIVE);
+    assert_eq!(role_color(Role::DiffAdd), THEME_OLIVE);
+    assert_eq!(role_color(Role::Reasoning), THEME_VIOLET);
+    assert_eq!(role_color(Role::Primary), THEME_BLUE);
+    assert_eq!(role_color(Role::Answer), THEME_ICE);
+    assert_eq!(role_color(Role::Border), THEME_BORDER);
+    assert_eq!(role_color(Role::Muted), THEME_MUTED);
 }
 
 #[test]
@@ -7855,7 +7945,7 @@ fn markdown_alert_edges_form_a_bounded_static_container() {
 fn selection_style_is_quiet_focus() {
     let style = selection_style();
     assert_eq!(style.fg, Some(role_color(Role::Primary)));
-    assert_eq!(style.bg, Some(Color::DarkGray));
+    assert_eq!(style.bg, Some(Color::Rgb(48, 35, 78)));
     assert!(style.add_modifier.contains(Modifier::BOLD));
 }
 
@@ -10038,7 +10128,8 @@ fn live_inspector_exposes_pending_fifo_and_switches_attention_surfaces() {
         .rows
         .iter()
         .any(|row| row.key.contains("pending · next")));
-    panel.query = "second pending".into();
+    panel.sel = 2;
+    panel.query.clear();
     panel.retype();
     assert_eq!(panel.selected_action(), PanelRowAction::RemoveQueued(1));
 
@@ -10524,6 +10615,7 @@ use ratatui::{
     Terminal, TerminalOptions, Viewport,
 };
 
+use super::render::{THEME_BLUE, THEME_BORDER, THEME_ICE, THEME_MUTED, THEME_OLIVE, THEME_VIOLET};
 use super::{
     active_reasoning_tail_role, activity_commit_lines, activity_panel, agent_panel,
     answer_commit_lines, answer_commit_lines_with_status,
@@ -10532,34 +10624,34 @@ use super::{
     build_popup, can_start_task, char_cells, clip_display_cells, commit_height,
     compact_activity_item, compact_status_line, config_panel, context_pressure_role, ctx_percent,
     current_word, decide_key, detail_match_scroll, detail_scroll_position, draw, draw_panel,
-    draw_with_cache, effort_panel, event_color, fence_language, fence_without_language,
-    filter_prefix, flush_commits, fmt_busy_bar, fmt_busy_phase, fmt_busy_signal, fmt_ctx,
-    fmt_progress_diagnostic, fmt_reasoning_meta, fold_lines, format_event_plain,
-    halt_reason_display, halt_reason_guidance, inline_height_cap, input_action, input_chrome,
-    input_height, is_final_event, is_second_ctrl_c, live_code_rail, live_empty_state_for_test,
-    live_history_panel_with_queue, live_history_toggle_action, live_hold_release_action,
-    live_hold_toggle_action, live_markdown_line, live_markdown_spans_with_alert, live_page_rows,
-    live_phase_anchor, live_phase_marker, live_rail, live_scroll_action,
-    live_semantic_toggle_action, live_surface_title, live_tool_rail_role, login_panel,
-    mark_takeover_requested, markdown_lines, md_line_spans, models_panel, mouse_action,
-    mouse_capture_requested, multiline_shortcut_label, named_profile_name, panel_action,
-    panel_attention_action, panel_enter, panel_filter, panel_hint, panel_rect_for_kind,
-    panel_title_role, panel_viewport_range, pending_queue_lines, preset_by_id, preview_lines,
-    queue_panel_toggle_action, reasoning_commit_lines, reasoning_history_panel,
+    draw_with_cache, edit_queue_selection, effort_panel, event_color, fence_language,
+    fence_without_language, filter_prefix, flush_commits, fmt_busy_bar, fmt_busy_phase,
+    fmt_busy_signal, fmt_ctx, fmt_progress_diagnostic, fmt_reasoning_meta, fold_lines,
+    format_event_plain, halt_reason_display, halt_reason_guidance, inline_height_cap, input_action,
+    input_chrome, input_height, is_final_event, is_second_ctrl_c, live_code_rail,
+    live_empty_state_for_test, live_history_panel_with_queue, live_history_toggle_action,
+    live_hold_release_action, live_hold_toggle_action, live_markdown_line,
+    live_markdown_spans_with_alert, live_page_rows, live_phase_anchor, live_phase_marker,
+    live_rail, live_scroll_action, live_semantic_toggle_action, live_surface_title,
+    live_tool_rail_role, login_panel, mark_takeover_requested, markdown_lines, md_line_spans,
+    models_panel, mouse_action, mouse_capture_requested, multiline_shortcut_label,
+    named_profile_name, panel_action, panel_attention_action, panel_enter, panel_filter,
+    panel_hint, panel_rect_for_kind, panel_title_role, panel_viewport_range, pending_queue_lines,
+    preset_by_id, queue_panel_toggle_action, reasoning_commit_lines, reasoning_history_panel,
     render_status_template, render_todo_block, responsive_live_layout, role_color, run_command,
-    sanitize_display_text, sanitize_paste, selection_style, semantic_focus_action, should_draw,
-    splash_canvas, status_line_projection, str_cells, stream_channel_badge, stream_tail,
-    summarize_event, superstep_is_busy, tail_display_cells, telemetry_surface,
-    terminal_event_action, todo_progress, token_rate, tool_detail_scroll_action, tool_focus_action,
-    tool_history_panel, tool_preview, tools_panel, top_chrome, unfinished_answer_reason,
-    up_fallback_is_home, wrap_commit_lines, wrap_input, wrap_live_spans, wrap_live_spans_tail,
-    wrapped_rows, ActivityKind, ApprovalAction, ApprovalRequest, CommandCatalog, CommandStats,
-    DetailLayoutCache, InputAction, InputChromeArgs, InputState, LiveBlockFocus, LiveChannel,
-    LiveFramePlan, LiveLineKind, LiveOutputCache, LiveScrollAction, LiveTranscript, Panel,
-    PanelAction, PanelItemsCache, PanelKind, PanelRow, PanelRowAction, Popup, PresentationChannel,
-    PresentationMetrics, PresentationStatus, Role, StatusVars, TerminalEventAction, ToolBlock,
-    ToolPhase, Ui, Vitals, CHATGPT_MODEL_GROUP, CLAUDE_OAUTH_ROW, CODEX_OAUTH_ROW,
-    MAX_ACTIVITY_HISTORY, MAX_ANSWER_HISTORY, MAX_ANSWER_HISTORY_CHARS, MAX_PENDING_PREVIEW_CHARS,
+    sanitize_display_text, sanitize_paste, selection_style, semantic_focus_action,
+    send_queue_selection_now, should_draw, splash_canvas, status_line_projection, str_cells,
+    stream_channel_badge, stream_tail, summarize_event, superstep_is_busy, tail_display_cells,
+    telemetry_surface, terminal_event_action, todo_progress, token_rate, tool_detail_scroll_action,
+    tool_focus_action, tool_history_panel, tool_preview, tools_panel, top_chrome,
+    unfinished_answer_reason, up_fallback_is_home, wrap_commit_lines, wrap_input, wrap_live_spans,
+    wrap_live_spans_tail, wrapped_rows, ActivityKind, ApprovalAction, ApprovalRequest,
+    CommandCatalog, CommandStats, DetailLayoutCache, InputAction, InputChromeArgs, InputState,
+    LiveBlockFocus, LiveChannel, LiveFramePlan, LiveLineKind, LiveOutputCache, LiveScrollAction,
+    LiveTranscript, Panel, PanelAction, PanelItemsCache, PanelKind, PanelRow, PanelRowAction,
+    Popup, PresentationChannel, PresentationMetrics, PresentationStatus, Role, StatusVars,
+    TerminalEventAction, ToolBlock, ToolPhase, Ui, Vitals, CHATGPT_MODEL_GROUP, CLAUDE_OAUTH_ROW,
+    CODEX_OAUTH_ROW, MAX_ACTIVITY_HISTORY, MAX_ANSWER_HISTORY, MAX_ANSWER_HISTORY_CHARS,
     MAX_PENDING_PREVIEW_ROWS, MAX_PRESENTATION_RECORDS, MAX_REASONING_HISTORY,
     MAX_REASONING_HISTORY_CHARS, MAX_TOOL_HISTORY, SLASH_COMMANDS, SPLASH, SPLASH_DURATION_SECS,
     SPLASH_FPS, SPLASH_H, SPLASH_TICKS, SPLASH_W,

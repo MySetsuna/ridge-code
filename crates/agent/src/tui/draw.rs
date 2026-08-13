@@ -204,7 +204,10 @@ fn snapshot_payload(buffer: &Buffer, render_us: u128, ui: &Ui, vitals: &Vitals) 
             }),
             "live_trace": phase_trace_label(&ui.transcript).unwrap_or_default(),
             "queued": vitals.queued,
-            "queue": ui.queued.iter().take(4).cloned().collect::<Vec<_>>(),
+            // Diagnostics must not become a side channel for task bodies.
+            // Keep only stable queue affordances; explicit edit remains the
+            // sole path that restores a queued message to the input buffer.
+            "queue": snapshot_queue_labels(&ui.queued),
             "input_tokens": ui.input_tokens,
             "output_tokens": ui.output_tokens,
             "stream_tokens": ui.stream_tokens,
@@ -254,6 +257,21 @@ fn snapshot_payload(buffer: &Buffer, render_us: u128, ui: &Ui, vitals: &Vitals) 
         "styled_rows": snapshot_styled_rows(buffer),
     })
     .to_string()
+}
+
+fn snapshot_queue_labels(queue: &std::collections::VecDeque<String>) -> Vec<String> {
+    queue
+        .iter()
+        .enumerate()
+        .take(4)
+        .map(|(index, _)| {
+            if index == 0 {
+                "next queued message".to_owned()
+            } else {
+                format!("queued message #{}", index + 1)
+            }
+        })
+        .collect()
 }
 
 /// Opt-in frame capture for terminal hosts that cannot expose their cell buffer.
@@ -775,7 +793,6 @@ pub(crate) fn compact_activity_item(row: &PanelRow, width: u16) -> String {
 }
 
 pub(crate) const MAX_PENDING_PREVIEW_ROWS: usize = 3;
-pub(crate) const MAX_PENDING_PREVIEW_CHARS: usize = 2_048;
 
 /// 输入框上方的有界待推送预览；队列仍由主环拥有，渲染只借用并做 cell 折行。
 pub(crate) fn pending_queue_lines(
@@ -786,104 +803,31 @@ pub(crate) fn pending_queue_lines(
         return Vec::new();
     }
     let mut lines = Vec::new();
-    // Reserve the last row for an overflow affordance even for one huge
-    // pasted intent.  Previously a single message could fill the cap and the
-    // appended affordance silently made a three-row preview become four.
+    // Reserve the last row for an overflow affordance. Queue bodies stay out
+    // of the live surface; explicit edit is the only path that reveals one.
     let preview_rows = MAX_PENDING_PREVIEW_ROWS.saturating_sub(1).max(1);
-    let mut shown_messages = 0usize;
-    let mut truncated = false;
-    for (index, message) in queue.iter().enumerate() {
-        let preview = pending_message_preview(message, index, width, preview_rows);
-        truncated |= append_pending_preview(&mut lines, preview.lines, preview_rows);
-        if preview.shown {
-            shown_messages += 1;
-        }
-        truncated |= preview.clipped;
-        if truncated {
-            break;
-        }
-    }
-    if truncated {
-        let omitted = queue.len().saturating_sub(shown_messages);
-        let overflow = if omitted > 0 {
-            format!("… +{omitted} pending · Ctrl+Enter push now")
+    let shown = queue.len().min(preview_rows);
+    for index in 0..shown {
+        let (label, role) = if index == 0 {
+            ("⏭ next queued message", Role::Primary)
         } else {
-            "… more queued text · Ctrl+Enter push now".to_owned()
+            ("⏳ queued message", Role::Muted)
         };
         lines.push(Line::from(Span::styled(
-            clip_display_cells(&overflow, width),
+            clip_display_cells(label, width),
+            Style::default().fg(role_color(role)),
+        )));
+    }
+    if queue.len() > shown {
+        lines.push(Line::from(Span::styled(
+            clip_display_cells(
+                &format!("… +{} queued messages", queue.len() - shown),
+                width,
+            ),
             Style::default().fg(role_color(Role::Muted)),
         )));
     }
     lines
-}
-
-fn append_pending_preview(
-    lines: &mut Vec<Line<'static>>,
-    preview: Vec<Line<'static>>,
-    max_rows: usize,
-) -> bool {
-    for line in preview {
-        if lines.len() == max_rows {
-            return true;
-        }
-        lines.push(line);
-    }
-    false
-}
-
-struct PendingMessagePreview {
-    lines: Vec<Line<'static>>,
-    shown: bool,
-    clipped: bool,
-}
-
-fn pending_message_preview(
-    message: &str,
-    index: usize,
-    width: u16,
-    preview_rows: usize,
-) -> PendingMessagePreview {
-    let prefix = if index == 0 {
-        "⏭ next ".to_owned()
-    } else {
-        format!("⏳ [{}] ", index + 1)
-    };
-    let body_width = width.saturating_sub(str_cells(&prefix) as u16).max(1);
-    let preview_char_limit = (body_width as usize)
-        .saturating_mul(preview_rows)
-        .saturating_add(1)
-        .min(MAX_PENDING_PREVIEW_CHARS);
-    let preview = message.chars().take(preview_char_limit).collect::<String>();
-    let clipped = message.chars().nth(preview_char_limit).is_some();
-    let lines = wrap_input(&preview, preview.chars().count(), body_width)
-        .0
-        .into_iter()
-        .enumerate()
-        .take(preview_rows)
-        .map(|(row, text)| {
-            let lead = if row == 0 {
-                prefix.clone()
-            } else {
-                " ".repeat(str_cells(&prefix))
-            };
-            Line::from(Span::styled(
-                format!("{lead}{text}"),
-                Style::default()
-                    .fg(role_color(Role::Primary))
-                    .add_modifier(if row == 0 {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::DIM
-                    }),
-            ))
-        })
-        .collect::<Vec<_>>();
-    PendingMessagePreview {
-        shown: !lines.is_empty(),
-        lines,
-        clipped,
-    }
 }
 
 /// A compact, low-saturation breadcrumb of observed phases.  It is a
@@ -4198,11 +4142,8 @@ fn compact_input_lines(
     width: u16,
 ) -> Vec<Line<'static>> {
     let mut content = Vec::with_capacity(visible_input_lines.len() + 1);
-    if let Some(message) = pending_message {
-        content.push(Line::from(clip_display_cells(
-            &format!("⏭ {message}"),
-            width,
-        )));
+    if pending_message.is_some() {
+        content.push(Line::from(clip_display_cells("⏭ queued message", width)));
     }
     content.extend(visible_input_lines.iter().enumerate().map(|(index, line)| {
         if index == 0 && !queue_prefix.is_empty() {
@@ -5369,6 +5310,8 @@ mod snapshot_tests {
         assert_eq!(value["panel"]["selected"], "⏭ next");
         assert_eq!(value["panel"]["visible_rows"], 1);
         assert_eq!(value["state"]["live_view"], "follow");
+        assert_eq!(value["state"]["queue"][0], "next queued message");
+        assert!(!snapshot_payload(&buffer, 11, &ui, &vitals).contains("first pending request"));
     }
 
     #[test]

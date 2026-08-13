@@ -118,20 +118,30 @@ fn summarize_tool_call(m: &str, info: Color) -> Option<Vec<(String, Color)>> {
 fn summarize_observation(m: &str) -> Option<Vec<(String, Color)>> {
     let rest = m.strip_prefix("act: ")?;
     let (name, obs) = rest.split_once(" -> ")?;
+    if name == "read_file" {
+        // Keep both successful and failed reads on the same privacy boundary:
+        // the model/provider retains the observation, while the TUI confirms
+        // only the operation outcome and never renders its body.
+        let failed = tool_output_failed(obs);
+        let marker = if failed { "✗" } else { "✓" };
+        let label = if failed {
+            "File read failed"
+        } else {
+            "File read"
+        };
+        let color = if failed {
+            role_color(Role::Error)
+        } else {
+            role_color(Role::Success)
+        };
+        return Some(vec![(format!("  {marker} {label}"), color)]);
+    }
     if tool_output_failed(obs) {
         return Some(format_failed_observation(name, obs));
     }
     let ok = role_color(Role::Success);
     if obs.trim().is_empty() {
         return Some(vec![(format!("  ✓ {name}: no output"), ok)]);
-    }
-    if name == "read_file" {
-        let mut out = vec![(
-            format!("  ✓ Read complete ({} chars)", obs.chars().count()),
-            ok,
-        )];
-        out.extend(preview_lines(obs, 12));
-        return Some(out);
     }
     let head = clip(obs.lines().next().unwrap_or(""), 200);
     let mut out = vec![(format!("  ✓ {name}: {head}"), ok)];

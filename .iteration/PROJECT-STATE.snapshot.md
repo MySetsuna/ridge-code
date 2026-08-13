@@ -1,4 +1,4 @@
-# RidgeCode PROJECT-STATE(2026-07-23 · iter-48)
+# RidgeCode PROJECT-STATE(2026-08-14 · iter-50)
 
 > 本文是 NotebookLM 中**唯一**的 RidgeCode 来源,每轮迭代覆盖式更新并替换。
 > 结构:A. 项目定位与北极星(稳定段)→ B. 近期迭代与验证证据 → C. 能力对照与差距 → D. 开放问题与请 NotebookLM 定夺的问题 → E. 已落地架构详情(codegraph 生成的代码事实全文)。
@@ -17,6 +17,9 @@ RidgeCode 是一个**模块化、跨领域可扩展的通用 agent 框架**(单�
 **已锁定决策(不变量,改码前须知)**:maker≠checker;reducer 显式;引擎零 LLM;外置能力走 MCP/SKILL 不进内核;provider 边界(第三方 SDK 包在 trait 后);一切注入块有界截断;危险命令拦截不可绕过、sub-agent 恒只读;注入块有序稳态利 prompt 缓存。内核 token 节约四判据已收束:历史有界自动压缩 / 静态底噪极小 / Lean 输出 / durable-state 事实驱动。
 
 ## B. 近期迭代与验证证据
+
+- **iter-50 · TUI 控制感与正文收束**：已批准并落地主题/goal/队列/读取展示切片。`Role→role_color` 改用与 `splash_base`/`splash_foreground_tone` 同源的 olive/violet/blue/ice RGB 主题；`/goal <title>`（含 `/goal create <title>`）一次原子写入 running goal，回显原始输入并把目标送入当前执行环，成功/失败/中断/TUI 退出分别收敛为 complete/blocked。Queue 面板 `Enter` 编辑选中消息、`Ctrl+Enter` 置前发送、`Delete` 移除，均保留当前回合；提交、队列状态与 scrollback 只显示标签/计数，显式编辑才恢复正文。`read_file` 的用户侧摘要/详情仅确认读取与路径，完整 observation 仍留 provider/model context。
+- **本轮验证**：`cargo test --workspace --locked` 全绿（agent 176、TUI 389、其余 workspace/doctest 全绿）；`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo build --workspace --locked`、`cargo fmt --all -- --check`、`git diff --check` 全绿。Windows PTY completion + answer/diff + resize 通过；Busy + queue/front + live inspector/remove/attention return + resize 通过；启动动画 RGB、原生 scrollback、退出路径均取证。已有三轮 bounded correct soak 与 goal/restart/durable/dispatch 回归继续有效。本轮未升版本/tag，Sonar 已接通但本次未重新触发远端 gate。
 
 - **iter-43**:OAuth(PKCE)订阅登录 `ridgecode login --claude` 端到端 —— 接 Claude Pro/Max 订阅(非 API key)。纯核 `provider::oauth`(Pkce S256 / authorize_url / exchange_code / refresh / needs_refresh,HTTP 走 HttpClient 接缝离线可测);凭据独立 `~/.ridge/oauth.json`(0600);启动 key 全无时自动回退订阅凭据,过期自动刷新。
 - **iter-44**:tracing 可观测埋点核心闭环(execute_tool_call / reason LLM 调用 / write_run)。
@@ -171,7 +174,14 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 
 ## 当前迭代目标
 
-- 执行 `REQ-20260801-01`：重构 TUI 展示与交互，使实际模型输出/回答清晰可读，工具调用默认折叠且可显式展开，并保持终端适配、性能与既有安全语义。
+- 按 Active Requirements 与用户已直接批准的审计结论推进：保留完整模型/工具/Diff 详情入口、Goal/run、dispatch wave budget、provider/model 两阶段选择等已落地能力；修复真实 MCP 失败状态不可见问题，不重复建设已有能力。
+
+## 全项目逻辑审计结论（2026-08-13 · iter-49）
+
+- CodeGraph 已逐模块复核 langgraph BSP/checkpoint、agent reason/act/verify、goal/run durable facts、MCP/A2A、route/provider/model、dispatch_agents、TUI 输入/scrollback/Answer/Tool/Diff/detail 与 quality gate；代码事实优先，NotebookLM 只用于候选排序。
+- 已确认无需重复改造：Goal-bound run 已由 `run.rs::begin_goal/finish_goal` 与 durable run manifest 接通；`/answer`/`/answers`、Tool/Reasoning history 与宽度感知 detail viewport 已保留完整正文；`dispatch_agents` 已有运行级 wave budget；`/provider` 已合并为 model catalog 入口且独立 effort 阶段；A2A/MCP 协议边界与 24h durable 状态已有实现和回归覆盖。
+- 本轮真实缺口：MCP spawn/initialize/tools-list 失败只写日志并从 TUI 视野消失。已补 `McpServerStatus` 生命周期轨迹（`configured → started → initialized → tools listed / failed`），`/mcp` 显示脱敏失败原因；工具路由与单 server 失败降级语义保持不变。
+- 已直接批准的后续验证项：真实 Windows PTY 的原生 scrollback/复制/搜索物理证据、24h bounded soak（多轮写入、故障、重启恢复）；二者在证据不足前不做猜测性 UI/协议重构。
 
 ## 已验证代码事实
 
@@ -190,17 +200,17 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 
 ## 最近完成与当前 diff
 
-- 最近完成:`REQ-20260801-01` v0.2.0 需求晋级、执行 intake 与首个 Markdown 提交增量。
-- 当前 diff:`samples/config.json` 用户已有修改；`.iteration/` 与需求治理文档为本轮运行态；TUI app/render/mod/tests 已有本轮实现与测试变更。
+- 最近完成：MCP 运行态可观测性切片；不升版本、不改 MCP 协议、不改变失败降级。
+- 当前 diff：`crates/agent/src/main.rs`、`mcp_tools.rs`、TUI 状态/命令/面板及回归测试；`.iteration/` 为本轮治理运行态，保留既有用户改动。
 
 ## 验证状态
 
-- 历史记录（2026-08-01）：`requirements_gate.py assert-task-executable`、`preflight.py --strict`、Rust 质量命令均 exit 0；当前闸门结果以下方“本轮验证”为准。
+- 本轮：`requirements_intake.py build`、`requirements_gate.py assert-task-executable`、`iteration_gate.py`、`cargo fmt --all -- --check`、`cargo test --workspace --locked --no-fail-fast`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo build --workspace --locked`、`git diff --check` 均通过；workspace 测试含 agent 175/lib + ridgecode 383/bin、其余 crate 与 doc tests。Sonar scanner 可用但本 shell 未设置 `SONAR_TOKEN`，故未伪称本轮 Sonar 扫描通过；既有 Sonar 接通证据仍保留。
 
 ## 当前失败信号与风险
 
-- 失败信号:`state_snapshot.py build` 首次因旧 PROJECT-STATE 缺少本工作流章节而失败，补齐后已通过。
-- 风险:深研任务仍 `in_progress` 且报告为空；TestBackend 已覆盖窄终端折行与 CJK/emoji 宽度，真实 PTY 长任务帧延迟、复制/搜索仍待验收。
+- 失败信号：本轮未发现代码/测试失败；NotebookLM 历史判断与当前代码不一致处已以 CodeGraph/测试纠正。
+- 风险：真实 Windows PTY 的长任务帧延迟、复制/搜索仍缺自动化物理证据；24h soak 仍需覆盖 provider/subagent 故障、重启与恢复。两项均不以模型自述替代验收。
 
 ## 架构边界
 
@@ -350,7 +360,8 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 
 ## 下一项已批准工作
 
-- `/history`、reasoning 动态钳位、Live 语义侧轨、Reasoning→Tool→Answer connector、失败工具 rail、Answer context anchor、focused detail rail、fenced language badge、`Ctrl+R` reasoning inspection view、宽度自适应输入提示与展开/收起状态提示、busy 工具焦点提示、静态 reasoning 层次样式、busy chrome 观测 step 已落地；下一项先做真实 PTY/原生 scrollback 物理一致性验收，保持不引入批处理/原始日志，深研完成后仍须导入逐条回核。
+- 本轮已批准并落地：MCP 运行态状态与脱敏错误 `/mcp` 展示。
+- 下一迭代验证优先级：①真实 PTY/native scrollback 物理一致性；②bounded 24h soak 与重启恢复；③若证据发现具体缺口，再按最小切片修复。已落地 Goal/full-content/dispatch/model-provider 能力不再重复立项。
 
 ## 本轮 delta
 
@@ -788,16 +799,31 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - 文本、围栏状态、折叠、工具协议、键位与 `insert_before` scrollback 语义不变；新增静态历史颜色回归，agent 99、TUI 121 及 workspace 测试、clippy、fmt、diff 检查通过。
 - `c01d526` 已推送 `origin/main`；v0.5.0 ReRelease 已覆盖，ZIP 大小 `3011947`，SHA-256 为 `b8bbb398e6e6bcf1f22b276c6b7862c17b7ff39c02584ac3bbdf761a2107eaed`，归档含 `ridgecode.exe`、`README.md`、`install.ps1`。
 
+## Open Vision 七切片落地（2026-08-11）
+
+- `REQ-20260810-OPEN-VISION-01` 已批准并保持不变；七类方向登记于 `docs/OPEN-VISION-SLICES.md`。
+- `crates/agent/src/open_vision.rs` 提供密钥绑定安全审计、治理元数据、Unicode 能力探测/安全回退、图谱推理投影、离线 store-and-forward/federated outbox、有界 Web/PWA 事件流/接管、推理树哈希链离线审计；所有边界均有容量、身份、父节点或载荷校验。
+- `communication.rs` 将治理元数据随 `AgentEnvelope` 传输，并在 exchange 前执行 `authorize_governance`；既有 HMAC、时钟窗口、nonce replay、只读能力协商仍为硬门。
+- 本轮统一 `scripts/quality-gate.ps1` exit 0：workspace tests（agent lib 151、ridgecode 357、其余套件全绿）、fmt、clippy `-D warnings`、build、`cargo llvm-cov --fail-under-lines 80` 与本机 Sonar quality gate 全通过；Sonar API 复核 coverage `85.2%`、new coverage `80.0%`、bugs/vulnerabilities/code_smells/issues `0`、duplication `0.9%`。无密钥 `ridgecode --version` 与离线 demo smoke exit 0；requirements/preflight/iteration gate 均通过。
+
+## 历史集成审计（2026-08-11）
+
+- `ridge-mcp` 适配已按 MCP 边界落地：`Config.mcp`/`RIDGE_MCP_CMD` → `StdioTransport` → `McpClient` → `resolve_mcp`；真实安装的 `ridge-mcp.exe` 经 `stdio_mcp_chain` 完成 `initialize`、`tools/list`、`tools/call`，`ridge_get_team_profile` 返回非空结果。未新增专用 Ridge MCP 协议分支，避免第二身份源；证据见 `.iteration/ridge-mcp-smoke-evidence-20260811.json`。
+- Agent-to-agent 已完成跨进程闭环：`AgentEnvelope`/`AgentTransport`、`request_once`/`serve_agent`、stdio newline JSON-RPC peer、能力协商、关联/父 ID、取消/超时、结构化错误、只读与治理门；`ridgecode a2a serve/call/smoke` 是可运行入口，`communication::tests` 19 项通过，`a2a smoke` 已用两个真实 RidgeCode 子进程完成无密钥任务。`RIDGE_A2A_SECRET` 可启用 HMAC、时间窗与 nonce replay 防护；`ridge-mcp` 仍保持 MCP 边界。
+- Agent route 已落地：`build_agents` 仅把可解析凭据的 `providers[]` 放入候选；`RouteRequest` 按任务推断难度/规模/类型，`choose_route` 过滤排序，`dispatch_agent` 与 `run_planned_routed` 输出选择理由及单次 fallback。真实配置 smoke 观察到 `Zai::glm-4.6` 选择及 HTTP 429 后主 provider fallback；`/agent` 当前仅列出可用 agent，未接手动派发。
+- 发布/安装基线在本轮将递增至 `v0.5.17`；提交、推送、GitHub Release 与本机新包安装须以远端资产和 `ridgecode --version` 复核为准。
+- 本轮 NotebookLM 冷闸因用户请求触发，但本机认证已过期且 CDP 初始不可用；未消费未验证研究结论。上述代码、测试、配置与 smoke 为当前事实权威；跨进程 A2A/ridge-mcp 互操作须另立明确 receipt、身份、取消与响应契约后再开发。
+
 <!-- PROJECT_STATE_RUNTIME -->
 ## 运行元数据
 
-- repository_head:`0c341d8bb7d6b8d5d2938a63e2edb934b3b01481`
+- repository_head:`beabda277786e2279b67ecb01a5940d9541031b9`
 - requirements_version:`v0.2.0`
-- requirements_hash:`aa57b6702840fd71854ff508b13b67a0a891ad9f4074e846b9314040aa952af9`
+- requirements_hash:`a64d5502960645121a2e8604fdda470eb7ffb1e0e45dcfa5bb00c8e8a9f11df6`
 - pending_hash:`a653cd735491bf6593b289e50840a5b084fe90ed2e89cd912d283366297387f3`
-- decision_hash:`044f10aca508fa7e2a8332470553fb83980bfb3c800a61fe6497c344c49ae11b`
-- generated_at:`2026-08-10T01:20:43+00:00`
-- current_git_diff:`clean`
+- decision_hash:`a3fe79b90b89d15ac8ab0dd26f169656a23465e35b6a4019b985f579513422a4`
+- generated_at:`2026-08-13T17:28:27+00:00`
+- current_git_diff:`.iteration/a2a-cross-process-evidence-20260811.json,.iteration/agent-tui-fix-operation.json,.iteration/agent-tui-fix-promotion-operation.json,.iteration/agents/commands-reviewer.json,.iteration/agents/dispatch-plan.json,.iteration/agents/quality-reviewer.json,.iteration/budget-24h-agent.json,.iteration/command-operation.json,.iteration/command-promotion.json,.iteration/commands-agent-bin-test-after-quality-fix.log,.iteration/commands-agent-bin-test-editor-coverage.log,.iteration/commands-agent-bin-test-final-ctrlv.log,.iteration/commands-agent-check-after-quality-fix.log,.iteration/commands-agent-full-repro-1.log,.iteration/commands-agent-full-repro-2.log,.iteration/commands-agent-full-repro-3.log,.iteration/commands-agent-full-repro-4.log,.iteration/commands-agent-full-repro-5.log,.iteration/commands-agent-sonar-fix-test.log,.iteration/commands-build-2.log,.iteration/commands-build-24h-final.log,.iteration/commands-build-release-current.log,.iteration/commands-build.log,.iteration/commands-cargo-check-2.log,.iteration/commands-cargo-check-3.log,.iteration/commands-cargo-check.log,.iteration/commands-clippy-24h-final.log,.iteration/commands-clippy-completion-gate.log,.iteration/commands-clippy-final-ctrlv-2.log,.iteration/commands-clippy-final-ctrlv.log,.iteration/commands-clippy-final-new.log,.iteration/commands-clippy-final.log,.iteration/commands-clippy-sonar-fix.log,.iteration/commands-clippy.log,.iteration/commands-dispatch.json,.iteration/commands-dist-24h-final-2.log,.iteration/commands-dist-24h-final-3.log,.iteration/commands-dist-24h-final.log,.iteration/commands-install-24h-final-2.log,.iteration/commands-install-24h-final-3.log,.iteration/commands-install-24h-final.log,.iteration/commands-install-completion-gate-final.log,.iteration/commands-install-completion-gate.log,.iteration/commands-installed-smoke-24h-final-2.log,.iteration/commands-installed-smoke-24h.log,.iteration/commands-lcov-after-editor-tests.log,.iteration/commands-lcov-after-quality-fix.log,.iteration/commands-lcov-current.log,.iteration/commands-login-repro-1.log,.iteration/commands-login-repro-2.log,.iteration/commands-login-repro-3.log,.iteration/commands-login-repro-4.log,.iteration/commands-login-repro-5.log,.iteration/commands-oauth-flake-rerun.log,.iteration/commands-pty-e2e-2.log,.iteration/commands-pty-e2e-acceptance.log,.iteration/commands-pty-e2e-busy-current.log,.iteration/commands-pty-e2e-commands-current.log,.iteration/commands-pty-e2e-final-2.log,.iteration/commands-pty-e2e-final-current.log,.iteration/commands-pty-native-scrollback-after-feature-fix.log,.iteration/commands-pty-release-current.log,.iteration/commands-pty-release-final.log,.iteration/commands-quality-gate-24h-final-2.log,.iteration/commands-quality-gate-24h-final.log,.iteration/commands-quality-gate-completion-gate-final.log,.iteration/commands-quality-gate-completion-gate.log,.iteration/commands-quality-gate-final-ctrlv-2.log,.iteration/commands-quality-gate-final-ctrlv.log,.iteration/commands-quality-gate-final-new.log,.iteration/commands-quality-gate-final-passed.log,.iteration/commands-quality-gate-final-sonar.log,.iteration/commands-release-build-24h-final-2.log,.iteration/commands-release-build-24h-final-3.log,.iteration/commands-release-build-24h-final.log,.iteration/commands-release-build-completion-gate-final.log,.iteration/commands-release-build-completion-gate.log,.iteration/commands-route-test.log,.iteration/commands-scrollback-agent-test-2.log,.iteration/commands-scrollback-agent-test-3.log,.iteration/commands-scrollback-agent-test.log,.iteration/commands-scrollback-clippy.log,.iteration/commands-scrollback-debug-build-2.log,.iteration/commands-scrollback-debug-build.log,.iteration/commands-scrollback-dist.log,.iteration/commands-scrollback-fmt-check-2.log,.iteration/commands-scrollback-fmt-check.log,.iteration/commands-scrollback-fmt-final.log,.iteration/commands-scrollback-git-push.log,.iteration/commands-scrollback-install.log,.iteration/commands-scrollback-pty-debug-2.log,.iteration/commands-scrollback-pty-debug.log,.iteration/commands-scrollback-pty-installed.log,.iteration/commands-scrollback-pty-release.log,.iteration/commands-scrollback-quality-gate.log,.iteration/commands-scrollback-release-build.log,.iteration/commands-scrollback-release-upload.log,.iteration/commands-scrollback-workspace-test.log,.iteration/commands-ui-bin-test-2.log,.iteration/commands-ui-bin-test-3.log,.iteration/commands-ui-bin-test-4.log,.iteration/commands-ui-bin-test-5.log,.iteration/commands-ui-bin-test-6.log,.iteration/commands-ui-bin-test-7.log,.iteration/commands-ui-bin-test-final.log,.iteration/commands-ui-bin-test-paste-resize.log,.iteration/commands-ui-bin-test.log,.iteration/commands-ui-build.log,.iteration/commands-ui-clippy-rerun.log,.iteration/commands-ui-clippy.log,.iteration/commands-ui-coverage-final-2.log,.iteration/commands-ui-coverage-final.log,.iteration/commands-ui-final-regression.log,.iteration/commands-ui-fmt-check.log,.iteration/commands-ui-full-content-diff-tests.log,.iteration/commands-ui-full-content-tests.log,.iteration/commands-ui-full-test.log,.iteration/commands-ui-installed-help.log,.iteration/commands-ui-installed-version.log,.iteration/commands-ui-local-install.log,.iteration/commands-ui-login-rerun.log,.iteration/commands-ui-pty-answer.log,.iteration/commands-ui-pty-default.log,.iteration/commands-ui-pty-live.log,.iteration/commands-ui-quality-gate-sonar-reset.log,.iteration/commands-ui-quality-gate-sonar.log,.iteration/commands-ui-quality-gate.log,.iteration/commands-ui-release-build-v0.5.18.log,.iteration/commands-ui-release-build.log,.iteration/commands-ui-workspace-test.log,.iteration/commands-unit-test-1.log,.iteration/commands-unit-test-2.log,.iteration/commands-unit-test-3.log,.iteration/commands-unit-test-4.log,.iteration/commands-unit-test-5.log,.iteration/commands-unit-test-final.log,.iteration/commands-v0.5.18-readonly-harness.log,.iteration/commands-v0.5.18-write-harness.log,.iteration/commands-workspace-build.log,.iteration/commands-workspace-test-completion-gate.log,.iteration/commands-workspace-test-final-ctrlv-2.log,.iteration/commands-workspace-test-final-ctrlv-3.log,.iteration/commands-workspace-test-final-ctrlv.log,.iteration/commands-workspace-test-final-new.log,.iteration/commands-workspace-test-final.log,.iteration/commands-workspace-test-post-sonar.log,.iteration/commands-workspace-test-rerun.log,.iteration/commands-workspace-test.log,.iteration/context.json,.iteration/decision-24h-agent.json,.iteration/decision-a2a-cross-process-20260811.json,.iteration/decision-audit-20260813.json,.iteration/decision-historical-audit.json,.iteration/decision-nlm-latest-chats-20260812.json,.iteration/decision-nlm-refresh-20260812.json,.iteration/decision-ui-full-20260812.json,.iteration/dispatch-quality.json,.iteration/evidence-20260814-tui-control.json,.iteration/goal-run-promotion-20260812.json,.iteration/intake-decision-a2a-cross-process-20260811.json,.iteration/intake-decision-historical-audit.json,.iteration/intake-decision-next.json,.iteration/intake-decision-nlm-refresh-20260812.json,.iteration/intake-decision-open-vision-pending.json,.iteration/intake-decision-scrollback-20260813.json,.iteration/intake-decision-ui-full-20260812.json,.iteration/intake-decision-ui-full-active-20260812.json,.iteration/intake-decision.json,.iteration/intakes/INTAKE-20260810-OPEN-VISION-01.json,.iteration/intakes/INTAKE-20260810-OPEN-VISION-PENDING.json,.iteration/intakes/INTAKE-20260810-SONAR-LOCAL-01.json,.iteration/intakes/INTAKE-20260811-A2A-02.json,.iteration/intakes/INTAKE-20260811-COMMANDS-01.json,.iteration/intakes/INTAKE-20260811-COMMANDS-APPROVED-01.json,.iteration/intakes/INTAKE-20260811-HISTORICAL-01.json,.iteration/intakes/INTAKE-20260812-24H-AGENT-01.json,.iteration/intakes/INTAKE-20260812-24H-AGENT-APPROVED-01.json,.iteration/intakes/INTAKE-20260812-AGENT-TUI-FIX-01.json,.iteration/intakes/INTAKE-20260812-AGENT-TUI-FIX-APPROVED-01.json,.iteration/intakes/INTAKE-20260812-GOAL-RUN-01.json,.iteration/intakes/INTAKE-20260812-GOAL-RUN-APPROVED-01.json,.iteration/intakes/INTAKE-20260812-NLM-01.json,.iteration/intakes/INTAKE-20260812-NLM-REFRESH-01.json,.iteration/intakes/INTAKE-20260812-UI-FULL-ACTIVE-01.json,.iteration/intakes/INTAKE-20260812-UI-FULL-APPROVED-01.json,.iteration/intakes/INTAKE-20260813-ANIMATION-01.json,.iteration/intakes/INTAKE-20260813-AUDIT-01.json,.iteration/intakes/INTAKE-20260813-SCROLLBACK-01.json,.iteration/intakes/INTAKE-20260814-NEXT-01.json,.iteration/intakes/INTAKE-20260814-NEXT-02.json,.iteration/intakes/INTAKE-20260814-NEXT-03.json,.iteration/lcov-after-editor.info,.iteration/lcov-after-fix.info,.iteration/lcov-current.info,.iteration/login-flake-retry-2.log,.iteration/login-flake-retry.log,.iteration/nlm-chat-20260812.json,.iteration/nlm-chat-refresh-20260812.json,.iteration/nlm-pending-operation-20260812.json,.iteration/notebooklm-auth-audit-20260811.json,.iteration/notebooklm-response-20260812.json,.iteration/notebooklm-response-audit-20260813.json,.iteration/ocu-coordinate-scroll-check.json,.iteration/ocu-coordinate-scroll-result.json,.iteration/ocu-coordinate-scroll-sequence.json,.iteration/ocu-get-ridge.json,.iteration/ocu-help-click.json,.iteration/ocu-help-drag.json,.iteration/ocu-help-scroll.json,.iteration/ocu-help-set_value.json,.iteration/ocu-scroll-1075.json,.iteration/ocu-scroll-1075c.json,.iteration/ocu-scroll-check.json,.iteration/ocu-scroll-current-ridgecode.json,.iteration/ocu-scroll-index-1073.json,.iteration/ocu-scroll-index-1133.json,.iteration/ocu-scroll-index-1135.json,.iteration/ocu-scroll-probe-before.json,.iteration/ocu-scroll-ridgecode-1135.json,.iteration/ocu-scroll-ridgecode-current-index.json,.iteration/ocu-scroll-sequence-new.json,.iteration/ocu-scroll-terminal.json,.iteration/ocu-scrollbar-check-2.json,.iteration/ocu-scrollbar-check.json,.iteration/ocu-scrollbar-sequence-result-2.json,.iteration/ocu-scrollbar-sequence-result-3.json,.iteration/ocu-scrollbar-sequence-result.json,.iteration/ocu-scrollbar-sequence.json,.iteration/ocu-secondary-scroll.json,.iteration/ocu-set-scrollbar.json,.iteration/ocu-setvalue-result.json,.iteration/ocu-setvalue-sequence.json,.iteration/ocu-state-before-scroll.json,.iteration/ocu-state-current.json,.iteration/ocu-terminal-container-result.json,.iteration/ocu-terminal-container-sequence.json,.iteration/open-vision-approved-operation.json,.iteration/open-vision-requirement-operation.json,.iteration/promote-24h-agent-operation.json,.iteration/release-evidence-v0.5.17.json,.iteration/request.txt,.iteration/ridge-mcp-cli-probe-20260811.json,.iteration/ridge-mcp-smoke-evidence-20260811.json,.iteration/soak-correct-goal_commands_cover_status_lifecycle_and_errors.log,.iteration/soak-correct-goal_run_lifecycle_blocks_then_resumes_and_completes.log,.iteration/soak-correct-goal_run_lifecycle_does_not_complete_with_live_todo.log,.iteration/soak-correct-round-1-atomic_save_roundtrips_after_restart_without_temp_leftovers.log,.iteration/soak-correct-round-1-cancelled_checkpoint_keeps_next_action_and_clears_live_heartbeat.log,.iteration/soak-correct-round-1-dispatch_agent_falls_back_once_after_selected_provider_failure.log,.iteration/soak-correct-round-1-dispatch_agent_timeout_returns_bounded_failure.log,.iteration/soak-correct-round-1-dispatch_batch_runs_two_subagents_concurrently_and_preserves_slots.log,.iteration/soak-correct-round-1-durable_checkpoint_resumes_after_step_limit_without_replaying_reason.log,.iteration/soak-correct-round-1-execute_tool_call_edits_real_file.log,.iteration/soak-correct-round-1-goal_run_lifecycle_blocks_then_resumes_and_completes.log,.iteration/soak-correct-round-1-goal_run_lifecycle_does_not_complete_with_live_todo.log,.iteration/soak-correct-round-1-routed_orchestrator_falls_back_after_planner_and_teammate_failures.log,.iteration/soak-correct-round-2-atomic_save_roundtrips_after_restart_without_temp_leftovers.log,.iteration/soak-correct-round-2-cancelled_checkpoint_keeps_next_action_and_clears_live_heartbeat.log,.iteration/soak-correct-round-2-dispatch_agent_falls_back_once_after_selected_provider_failure.log,.iteration/soak-correct-round-2-dispatch_agent_timeout_returns_bounded_failure.log,.iteration/soak-correct-round-2-dispatch_batch_runs_two_subagents_concurrently_and_preserves_slots.log,.iteration/soak-correct-round-2-durable_checkpoint_resumes_after_step_limit_without_replaying_reason.log,.iteration/soak-correct-round-2-execute_tool_call_edits_real_file.log,.iteration/soak-correct-round-2-goal_run_lifecycle_blocks_then_resumes_and_completes.log,.iteration/soak-correct-round-2-goal_run_lifecycle_does_not_complete_with_live_todo.log,.iteration/soak-correct-round-2-routed_orchestrator_falls_back_after_planner_and_teammate_failures.log,.iteration/soak-correct-round-3-atomic_save_roundtrips_after_restart_without_temp_leftovers.log,.iteration/soak-correct-round-3-cancelled_checkpoint_keeps_next_action_and_clears_live_heartbeat.log,.iteration/soak-correct-round-3-dispatch_agent_falls_back_once_after_selected_provider_failure.log,.iteration/soak-correct-round-3-dispatch_agent_timeout_returns_bounded_failure.log,.iteration/soak-correct-round-3-dispatch_batch_runs_two_subagents_concurrently_and_preserves_slots.log,.iteration/soak-correct-round-3-durable_checkpoint_resumes_after_step_limit_without_replaying_reason.log,.iteration/soak-correct-round-3-execute_tool_call_edits_real_file.log,.iteration/soak-correct-round-3-goal_run_lifecycle_blocks_then_resumes_and_completes.log,.iteration/soak-correct-round-3-goal_run_lifecycle_does_not_complete_with_live_todo.log,.iteration/soak-correct-round-3-routed_orchestrator_falls_back_after_planner_and_teammate_failures.log,.iteration/soak-round-1-atomic_save_roundtrips_after_restart_without_temp_leftovers.log,.iteration/soak-round-1-cancelled_checkpoint_keeps_next_action_and_clears_live_heartbeat.log,.iteration/soak-round-1-dispatch_agent_falls_back_once_after_selected_provider_failure.log,.iteration/soak-round-1-dispatch_agent_timeout_returns_bounded_failure.log,.iteration/soak-round-1-dispatch_batch_runs_two_subagents_concurrently_and_preserves_slots.log,.iteration/soak-round-1-durable_checkpoint_resumes_after_step_limit_without_replaying_reason.log,.iteration/soak-round-1-goal_run_lifecycle_blocks_then_resumes_and_completes.log,.iteration/soak-round-1-goal_run_lifecycle_does_not_complete_with_live_todo.log,.iteration/soak-round-1-routed_orchestrator_falls_back_after_planner_and_teammate_failures.log,.iteration/soak-round-2-atomic_save_roundtrips_after_restart_without_temp_leftovers.log,.iteration/soak-round-2-cancelled_checkpoint_keeps_next_action_and_clears_live_heartbeat.log,.iteration/soak-round-2-dispatch_agent_falls_back_once_after_selected_provider_failure.log,.iteration/soak-round-2-dispatch_agent_timeout_returns_bounded_failure.log,.iteration/soak-round-2-dispatch_batch_runs_two_subagents_concurrently_and_preserves_slots.log,.iteration/soak-round-2-durable_checkpoint_resumes_after_step_limit_without_replaying_reason.log,.iteration/soak-round-2-goal_run_lifecycle_blocks_then_resumes_and_completes.log,.iteration/soak-round-2-goal_run_lifecycle_does_not_complete_with_live_todo.log,.iteration/soak-round-2-routed_orchestrator_falls_back_after_planner_and_teammate_failures.log,.iteration/soak-round-3-atomic_save_roundtrips_after_restart_without_temp_leftovers.log,.iteration/soak-round-3-cancelled_checkpoint_keeps_next_action_and_clears_live_heartbeat.log,.iteration/soak-round-3-dispatch_agent_falls_back_once_after_selected_provider_failure.log,.iteration/soak-round-3-dispatch_agent_timeout_returns_bounded_failure.log,.iteration/soak-round-3-dispatch_batch_runs_two_subagents_concurrently_and_preserves_slots.log,.iteration/soak-round-3-durable_checkpoint_resumes_after_step_limit_without_replaying_reason.log,.iteration/soak-round-3-goal_run_lifecycle_blocks_then_resumes_and_completes.log,.iteration/soak-round-3-goal_run_lifecycle_does_not_complete_with_live_todo.log,.iteration/soak-round-3-routed_orchestrator_falls_back_after_planner_and_teammate_failures.log,.iteration/usage-24h-agent.json,crates/agent/src/goal.rs,crates/agent/src/knowledge.rs,crates/agent/src/main.rs,crates/agent/src/mcp_tools.rs,crates/agent/src/tui/app.rs,crates/agent/src/tui/command.rs,crates/agent/src/tui/draw.rs,crates/agent/src/tui/eventfmt.rs,crates/agent/src/tui/mod.rs,crates/agent/src/tui/panel.rs,crates/agent/src/tui/render.rs,crates/agent/src/tui/tests.rs,crates/agent/src/tui/transcript.rs,docs/ARCHITECTURE.md,docs/PROJECT-STATE.md,docs/REQUIREMENTS-SPEC.md,docs/archive/events-2026-08.jsonl,scripts/windows-pty-e2e.ps1`
 
 ## 非权威 Pending 索引
 
@@ -807,160 +833,38 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 
 ```json
 {
-  "approved_constraints": [
-    "绑定 REQ-20260810-A2A-01；用户明确授权自动通过审批并直接开发。",
-    "主 agent 保留协调权；子 agent 默认只读；不绕过权限门、危险命令拦截、maker/checker 或确定性 verify。",
-    "保留 langgraph BSP 语义、provider trait、MCP JSON-RPC 语义与现有 stdio 兼容；协议差异封装在传输适配层。",
-    "不引入具体第三方 agent SDK、无界后台任务、隐式跨会话共享、未审计远程执行或敏感信息上传。",
-    "NotebookLM 只提供架构假设与候选方案；所有代码事实、根因和质量结论以本地代码、运行、测试和 CodeGraph 为准。"
+  "acceptance": [
+    "phase_progression_tests",
+    "stall_timeout_cancel_recovery_tests",
+    "bounded_soak",
+    "workspace_quality_gates",
+    "release_install_real_terminal_smoke"
   ],
-  "attempts": [
-    {
-      "evidence": {
-        "command": "mcp__chatgpt_nlm_research__research_start(provider=chatgpt)",
-        "exit_code": 1,
-        "pointer": "failed to reach Chrome CDP at http://127.0.0.1:9222"
-      },
-      "experiment": "启动 ChatGPT Deep Research bridge",
-      "result": {
-        "status": "failed",
-        "summary": "本机无可用 Chrome CDP"
-      }
-    },
-    {
-      "evidence": {
-        "command": "mcp__notebooklm_mcp__research_start(mode=deep, source=web)",
-        "exit_code": 1,
-        "pointer": "Failed to start research — Google API error code 8 (UserDisplayableError)"
-      },
-      "experiment": "启动 NotebookLM 原生 deep research",
-      "result": {
-        "status": "failed",
-        "summary": "NotebookLM Google API 返回 UserDisplayableError code 8"
-      }
-    }
+  "decision_id": "DECISION-20260812-24H-AGENT-01",
+  "non_goals": [
+    "version_or_tag_bump",
+    "langgraph_BSP_change",
+    "security_boundary_change",
+    "unbounded_background_work",
+    "automatic_push_or_release"
   ],
-  "candidate_solutions": [
-    {
-      "constraints": [
-        "复用 serde/async-trait",
-        "显式 correlation_id/parent_id",
-        "所有 transport 有界超时与取消"
-      ],
-      "core": "在 agent 层新增版本化 AgentEnvelope/AgentTransport trait，提供 in-process transport 与 stdio JSON-RPC transport，dispatch/team 接口只依赖统一会话语义。",
-      "reversibility": "高；独立模块、先接 dispatch_agent",
-      "risks": [
-        "需设计与现有 MCP JSON-RPC 的清晰适配边界"
-      ],
-      "scope": [
-        "crates/agent/src/communication.rs",
-        "knowledge.rs",
-        "orchestrate.rs",
-        "必要 mcp adapter"
-      ],
-      "validation": [
-        "纯协议矩阵测试",
-        "in-process + stdio smoke",
-        "权限/取消/错误测试"
-      ]
-    },
-    {
-      "constraints": [
-        "不扩展业务状态机",
-        "每个 agent 暴露固定 namespace",
-        "必须补齐取消和关联语义"
-      ],
-      "core": "把 agent-to-agent 消息直接映射为现有 MCP tools/call 与 JSON-RPC method，沿用 McpTransport 作为唯一多协议入口。",
-      "reversibility": "中；依赖现有 MCP wire 语义",
-      "risks": [
-        "MCP 工具语义与 agent 生命周期混淆，难以表达双向事件/能力协商"
-      ],
-      "scope": [
-        "crates/mcp/src/lib.rs",
-        "crates/agent/src/mcp_tools.rs",
-        "dispatch/team"
-      ],
-      "validation": [
-        "MCP stdio/in-process transport 测试",
-        "消息关联/错误回归"
-      ]
-    },
-    {
-      "constraints": [
-        "需保持权限、认证、重试和 bounded lifecycle"
-      ],
-      "core": "引入具体外部 A2A SDK 或远程 broker 作为运行时总线。",
-      "reversibility": "低",
-      "risks": [
-        "违反 provider/MCP 边界、增加网络与认证复杂度、当前无证据支持"
-      ],
-      "scope": [
-        "不作为首实现，仅作排除项"
-      ],
-      "validation": [
-        "仅在本地协议闭环失败且有证据时重新评估"
-      ]
-    }
+  "notebooklm": "not_used",
+  "requirements": [
+    "REQ-20260812-24H-AGENT-01"
   ],
-  "failure_signals": [
-    "dispatch_agent 与 teammate 尚无统一的 agent 消息信封、关联 ID、握手/能力协商或取消语义。",
-    "McpTransport 只抽象 JSON-RPC method/params，不表达 agent 请求/响应生命周期；直接把协议细节塞进业务状态会破坏多协议隔离。",
-    "当前 route/dispatch 能选择 provider，但不能把协作参与方、传输协议、生命周期状态作为可审计结果。"
+  "schema_version": 1,
+  "scope": [
+    "crates/agent/src/brain.rs",
+    "crates/agent/src/graph.rs",
+    "crates/agent/src/state.rs",
+    "crates/agent/src/knowledge.rs",
+    "crates/agent/src/orchestrate.rs",
+    "crates/agent/src/run.rs",
+    "crates/agent/src/goal.rs",
+    "crates/agent/src/tui"
   ],
-  "hypotheses": [
-    {
-      "against": [
-        "尚未从 NotebookLM 来源确认其通信机制重构是否要求特定 wire schema"
-      ],
-      "experiment": "深度研究提取来源中的 envelope、角色、握手、生命周期、传输与安全约束，并与当前符号逐项核验。",
-      "hypothesis": "最小正确落点是独立通信信封与 transport trait；MCP JSON-RPC 可作为一种适配，而非直接成为 agent 业务协议。",
-      "support": [
-        "现有 McpTransport 已封装 request/notify",
-        "REQ 要求协议差异不得泄漏进业务状态机"
-      ]
-    },
-    {
-      "against": [
-        "笔记本可能要求跨进程/跨机器 agent 通信"
-      ],
-      "experiment": "对来源候选做边界比较，选择能在现有安全门内完成双协议 smoke 的最小方案。",
-      "hypothesis": "in-process 与 stdio 两种 transport 足以先证明多协议闭环，无需网络 broker；远程协议作为后续适配。",
-      "support": [
-        "现有工程已有本地 agent/provider 与 MCP stdio 能力",
-        "当前 acceptance 要求无密钥本机 smoke"
-      ]
-    }
-  ],
-  "prohibitions": [
-    "不把 NotebookLM 建议直接当成代码事实、需求扩展或协议标准。",
-    "不上传密钥、cookie、原始会话、原始运行日志或用户配置敏感值。",
-    "不通过 agent-to-agent 通道下放写入/shell 权限，不接受模型自述作为成功信号。",
-    "不引入无界队列、隐式重试、无关联响应、静默取消或跨会话状态泄漏。"
-  ],
-  "question": "基于 RidgeCode 笔记本中关于 agent 通信机制重构的来源、对话与 Note，如何在现有 RidgeCode 中实现有界、可审计的 agent-to-agent 协作与多协议传输，同时保留只读子 agent、权限门、maker/checker、确定性验证和现有 provider/MCP 边界？",
-  "questions": [],
-  "target": "形成经 NotebookLM 深度研究、当前源码与 CodeGraph 核验的通信协议设计，并实现版本化消息信封、能力/握手、请求响应关联、取消/超时/错误语义及至少两种可插拔传输的最小 agent-to-agent 闭环，接入 dispatch_agent 与 teammate 路径。",
-  "verified_facts": [
-    {
-      "evidence": "CodeGraph: crates/agent/src/knowledge.rs:494-547",
-      "fact": "dispatch_agent 当前通过 dispatch_obs 选择 provider 后执行只读 sub-agent，并已有一次有界 provider fallback。"
-    },
-    {
-      "evidence": "CodeGraph: crates/agent/src/orchestrate.rs:158-286",
-      "fact": "routed orchestrator 已有 planner/worker 角色和 RouteAudit，但仍是本地函数调用接缝。"
-    },
-    {
-      "evidence": "CodeGraph: crates/provider/src/lib.rs:LlmProvider references",
-      "fact": "provider 层以 LlmProvider::complete/complete_streaming 隔离具体模型实现。"
-    },
-    {
-      "evidence": "CodeGraph: crates/mcp/src/lib.rs:36-125",
-      "fact": "MCP 层已有 McpTransport::request/notify 与 McpClient 的 JSON-RPC initialize/tools/list/tools/call 逻辑。"
-    },
-    {
-      "evidence": "CodeGraph: crates/langgraph/src/state.rs:1-50; repository AGENTS.md architecture contract",
-      "fact": "现有 langgraph 图运行有 max_supersteps、同步 apply 与取消/Join 错误边界。"
-    }
-  ]
+  "status": "approved",
+  "summary": "Implement bounded 24-hour unattended project-iteration control loop without changing version/tag.",
+  "trigger": "explicit_user_approval"
 }
 ```

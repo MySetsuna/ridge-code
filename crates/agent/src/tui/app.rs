@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
+use std::path::PathBuf;
 use std::sync::mpsc;
 
 use agent::{est_tokens, Approver, Todo};
@@ -355,6 +356,8 @@ pub(crate) struct Ui {
     pub(crate) device_auth_status: Option<String>,
     /// Background-fetched model catalog; `/model` only renders this cache.
     pub(crate) model_catalog: Option<ModelCatalog>,
+    /// MCP startup/handshake status captured before the agent graph starts.
+    pub(crate) mcp_statuses: Vec<agent::McpServerStatus>,
     /// Set after OAuth changes so the catalog is fetched with the new token.
     pub(crate) model_catalog_reload: bool,
     /// Active ChatGPT/Codex reasoning effort; `None` means provider default.
@@ -363,6 +366,8 @@ pub(crate) struct Ui {
     pub(crate) pending_model: Option<PendingModelSelection>,
     /// 自定义/skill 命令请求「以任务身份跑」(iter-39):`run_command` 展开 body 置此,主环取走起任务。
     pub(crate) run_task: Option<String>,
+    /// TUI `/goal` started this durable goal; completion/blocking settles it.
+    pub(crate) active_goal_path: Option<PathBuf>,
 }
 impl Ui {
     /// Keep the visible lifecycle phase and activity rail synchronized at
@@ -829,7 +834,10 @@ impl Ui {
                 },
             );
         }
-        self.note(format!("partial answer retained · {reason}"), Color::Yellow);
+        self.note(
+            format!("partial answer retained · {reason}"),
+            role_color(Role::Warn),
+        );
         self.commits.extend(
             answers
                 .into_iter()
@@ -1328,7 +1336,7 @@ pub(crate) fn apply_paste(ui: &mut Ui, text: &str) {
                 ui.input.rows(),
                 ui.input.buffer.chars().count()
             ),
-            Color::Gray,
+            role_color(Role::Muted),
         );
     }
 }

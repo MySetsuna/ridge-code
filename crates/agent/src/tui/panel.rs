@@ -391,14 +391,14 @@ pub(crate) fn live_history_panel_with_queue(
         });
         actions.push(PanelRowAction::FocusLiveBlock(entry.focus));
     }
-    for (index, message) in queue.iter().enumerate() {
+    for (index, _message) in queue.iter().enumerate() {
         rows.push(PanelRow {
             key: if index == 0 {
                 "⏭ pending · next".into()
             } else {
                 format!("⏳ pending · #{}", index + 1)
             },
-            value: message.clone(),
+            value: "queued message".into(),
             ctx: None,
         });
         actions.push(PanelRowAction::RemoveQueued(index));
@@ -445,7 +445,7 @@ pub(crate) fn activity_panel(history: &std::collections::VecDeque<ActivityEntry>
     )
 }
 
-/// 忙碌任务队列：显示真实 FIFO 顺序，删除只影响尚未启动的意图。
+/// 忙碌任务队列：显示真实 FIFO 顺序，编辑/置前发送只影响尚未启动的意图。
 pub(crate) fn queue_panel(queue: &std::collections::VecDeque<String>) -> Panel {
     let rows = if queue.is_empty() {
         vec![PanelRow {
@@ -457,20 +457,20 @@ pub(crate) fn queue_panel(queue: &std::collections::VecDeque<String>) -> Panel {
         queue
             .iter()
             .enumerate()
-            .map(|(index, message)| PanelRow {
+            .map(|(index, _message)| PanelRow {
                 key: if index == 0 {
                     "⏭ next".into()
                 } else {
                     format!("⏳ #{}", index + 1)
                 },
-                value: message.clone(),
+                value: "queued message".into(),
                 ctx: None,
             })
             .collect()
     };
     Panel::new(
         PanelKind::Queue,
-        "Queue · ↑↓ select · Delete remove · Esc close".into(),
+        "Queue · ↑↓ select · Enter edit · Ctrl+Enter send now · Delete remove · Esc close".into(),
         rows,
     )
 }
@@ -585,24 +585,94 @@ pub(crate) fn login_panel() -> Panel {
 
 /// MCP 页(只读):列 config 里已配置的 MCP 服务器(名 · 命令[+参数])。直读真实 `Config.mcp`。
 /// 本架构 MCP 由 `resolve_mcp` 每会话临起,无常驻进程可 start/stop —— 故只读展示,不做进程管理。
-pub(crate) fn mcp_panel() -> Panel {
+pub(crate) fn mcp_command_label(cmd: &str, args: &[String]) -> String {
+    let mut parts = vec![cmd.to_string()];
+    let mut redact_next = false;
+    for arg in args {
+        if redact_next {
+            parts.push("<redacted>".into());
+            redact_next = false;
+            continue;
+        }
+        let lower = arg.to_ascii_lowercase();
+        if let Some((name, _)) = arg.split_once('=') {
+            if mcp_secret_name(name) {
+                parts.push(format!("{name}=<redacted>"));
+                continue;
+            }
+        }
+        if mcp_secret_name(&lower) {
+            parts.push(arg.clone());
+            redact_next = true;
+        } else {
+            parts.push(arg.clone());
+        }
+    }
+    parts.join(" ")
+}
+
+fn mcp_secret_name(value: &str) -> bool {
+    let name = value
+        .trim_start_matches('-')
+        .replace('_', "-")
+        .to_ascii_lowercase();
+    name == "key"
+        || name == "token"
+        || name == "secret"
+        || name == "password"
+        || name == "credential"
+        || name == "authorization"
+        || name == "cookie"
+        || name == "header"
+        || name.ends_with("-key")
+        || name.ends_with("-token")
+        || name.ends_with("-secret")
+        || name.ends_with("-password")
+        || name.ends_with("-credential")
+}
+
+pub(crate) fn mcp_panel(statuses: &[agent::McpServerStatus]) -> Panel {
     let cfg = Config::load(config_path());
-    let rows = cfg
+    let mut names = std::collections::BTreeSet::new();
+    let mut rows: Vec<PanelRow> = cfg
         .mcp
         .iter()
-        .map(|m| PanelRow {
-            key: m.name.clone(),
-            value: if m.args.is_empty() {
-                m.cmd.clone()
-            } else {
-                format!("{} {}", m.cmd, m.args.join(" "))
-            },
-            ctx: None,
+        .map(|m| {
+            names.insert(m.name.clone());
+            let command = mcp_command_label(&m.cmd, &m.args);
+            let value = match statuses.iter().find(|status| status.name == m.name) {
+                Some(status) => format!(
+                    "{command} · {} · {}",
+                    status.trail_labels().join(" → "),
+                    status.detail
+                ),
+                None => format!("{command} · configured · not started"),
+            };
+            PanelRow {
+                key: m.name.clone(),
+                value,
+                ctx: None,
+            }
         })
         .collect();
+    for status in statuses
+        .iter()
+        .filter(|status| !names.contains(&status.name))
+    {
+        rows.push(PanelRow {
+            key: status.name.clone(),
+            value: format!(
+                "{} · {} · {}",
+                status.trail_labels().join(" → "),
+                status.state.label(),
+                status.detail
+            ),
+            ctx: None,
+        });
+    }
     Panel::new(
         PanelKind::Mcp,
-        "MCP servers (read-only) · type to filter · Esc close".into(),
+        "MCP servers · runtime status (read-only) · type to filter · Esc close".into(),
         rows,
     )
 }
@@ -636,6 +706,7 @@ pub(crate) enum PanelAction {
     First,
     Last,
     Enter,
+    SendNow,
     Esc,
     Remove,
     Char(char),
@@ -653,6 +724,9 @@ pub(crate) fn panel_action(key: &KeyEvent) -> PanelAction {
             KeyCode::PageDown => return PanelAction::DetailPageDown,
             _ => {}
         }
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Enter {
+        return PanelAction::SendNow;
     }
     match key.code {
         KeyCode::Up => PanelAction::Up,

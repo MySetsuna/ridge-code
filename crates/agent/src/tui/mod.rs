@@ -15,9 +15,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, size},
 };
-use ratatui::{
-    backend::CrosstermBackend, layout::Rect, style::Color, Terminal, TerminalOptions, Viewport,
-};
+use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal, TerminalOptions, Viewport};
 
 use agent::{
     active_run_dir_for, agent_run_config, build_llm_agent_full, est_tokens, expand_mentions,
@@ -538,7 +536,7 @@ fn apply_attention_action(ui: &mut Ui, action: InputAction) {
             InputAction::ToggleActivity => return,
             _ => return,
         };
-        ui.note(message, Color::Gray);
+        ui.note(message, role_color(Role::Muted));
     }
 }
 
@@ -724,9 +722,10 @@ fn handle_ctrl_c(context: &mut KeyEventContext<'_>) -> anyhow::Result<KeyEventRe
         *context.momentary_hold = false;
         interrupt_task(context, handle, true);
     } else {
-        context
-            .ui
-            .note("press Ctrl-C again within 2 seconds to exit", Color::Yellow);
+        context.ui.note(
+            "press Ctrl-C again within 2 seconds to exit",
+            role_color(Role::Warn),
+        );
     }
     Ok(KeyEventResult::Continue)
 }
@@ -736,6 +735,7 @@ fn interrupt_task(
     handle: tokio::task::JoinHandle<()>,
     clear_activity: bool,
 ) {
+    settle_active_goal(context.ui, false, "goal task interrupted by user");
     mark_takeover_requested(context.ui);
     if let Some(task) = context.last_task {
         let _ = mark_durable_cancelled(active_run_dir_for(task), "cancelled by user takeover");
@@ -773,7 +773,7 @@ fn interrupt_task(
     } else {
         "interrupted current task 路 takeover ready".into()
     };
-    context.ui.note(tail, Color::Yellow);
+    context.ui.note(tail, role_color(Role::Warn));
 }
 
 fn handle_approval_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> bool {
@@ -787,7 +787,7 @@ fn handle_approval_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> boo
                     context.ui.resume_after_approval();
                 }
             }
-            context.ui.note("鉁?approved", Color::Green);
+            context.ui.note("鉁?approved", role_color(Role::Success));
         }
         ApprovalAction::Reject => {
             if let Some(request) = context.pending.take() {
@@ -795,7 +795,7 @@ fn handle_approval_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> boo
                     context.ui.resume_after_approval();
                 }
             }
-            context.ui.note("鉁?rejected", Color::Red);
+            context.ui.note("鉁?rejected", role_color(Role::Error));
         }
         ApprovalAction::Scroll(delta) => context.ui.scroll = apply_scroll(context.ui.scroll, delta),
         ApprovalAction::Ignore => {
@@ -855,6 +855,7 @@ async fn handle_panel_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> 
     match panel_action(key) {
         PanelAction::Esc => close_panel(context.ui),
         PanelAction::Remove => remove_panel_selection(context.ui, key.code == KeyCode::Backspace),
+        PanelAction::SendNow => send_queue_selection_now(context.ui, context.pending_submit),
         PanelAction::Up
         | PanelAction::Down
         | PanelAction::DetailPageUp
@@ -919,16 +920,13 @@ fn remove_panel_selection(ui: &mut Ui, allow_edit: bool) {
         }
     });
     if let Some((index, from_live_panel)) = selection {
-        if let Some(message) = ui.remove_queued(index) {
-            ui.record_activity(
-                ActivityKind::Queue,
-                format!("removed 路 {}", clip_display_cells(&message, 44)),
-            );
+        if ui.remove_queued(index).is_some() {
+            ui.record_activity(ActivityKind::Queue, "removed queued message");
             ui.note(
                 format!(
                     "removed pending item ({} left): {}",
                     ui.queued.len(),
-                    message
+                    "queued message"
                 ),
                 role_color(Role::Warn),
             );
@@ -941,6 +939,55 @@ fn remove_panel_selection(ui: &mut Ui, allow_edit: bool) {
     } else if allow_edit {
         edit_panel(ui, PanelAction::Backspace);
     }
+}
+
+fn queue_selection(ui: &Ui) -> Option<usize> {
+    ui.panel
+        .as_ref()
+        .filter(|panel| panel.kind == PanelKind::Queue && panel.editing.is_none())
+        .and_then(Panel::selected_index)
+}
+
+pub(crate) fn edit_queue_selection(ui: &mut Ui) {
+    let Some(index) = queue_selection(ui) else {
+        return;
+    };
+    let Some(message) = ui.remove_queued(index) else {
+        return;
+    };
+    ui.input.buffer = message;
+    ui.input.cursor = ui.input.buffer.chars().count();
+    ui.input.hist_idx = None;
+    ui.input.draft.clear();
+    ui.input_editor_scroll = None;
+    ui.popup = None;
+    ui.panel = None;
+    ui.record_activity(ActivityKind::Queue, "editing queued message");
+    ui.note(
+        "editing queued message · Enter re-queues · Ctrl+Enter sends next · Esc cancels",
+        role_color(Role::Primary),
+    );
+}
+
+pub(crate) fn send_queue_selection_now(ui: &mut Ui, pending_submit: &mut Option<String>) {
+    let Some(index) = queue_selection(ui) else {
+        return;
+    };
+    let Some(message) = ui.remove_queued(index) else {
+        return;
+    };
+    // A pending submission wins over the FIFO. Preserve that older pending
+    // item by putting it back at the front after the selected item.
+    if let Some(previous) = pending_submit.replace(message) {
+        ui.queued.push_front(previous);
+    }
+    ui.panel = None;
+    ui.refresh_queue_panel();
+    ui.record_activity(ActivityKind::Queue, "sending selected queued message next");
+    ui.note(
+        "sending selected queued message next · current turn continues",
+        role_color(Role::Primary),
+    );
 }
 
 fn navigate_panel(ui: &mut Ui, action: PanelAction) {
@@ -1006,6 +1053,15 @@ fn edit_panel(ui: &mut Ui, action: PanelAction) {
 }
 
 async fn panel_enter_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> anyhow::Result<()> {
+    if context
+        .ui
+        .panel
+        .as_ref()
+        .is_some_and(|panel| panel.kind == PanelKind::Queue)
+    {
+        edit_queue_selection(context.ui);
+        return Ok(());
+    }
     let login_submit = matches!(
         context.ui.panel.as_ref(),
         Some(panel) if panel.kind == PanelKind::Login && panel.editing.is_some()
@@ -1041,7 +1097,7 @@ async fn panel_enter_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> a
         Some(preset) if !key_text.trim().is_empty() => {
             context
                 .ui
-                .note(format!("verifying {}…", preset.id), Color::Gray);
+                .note(format!("verifying {}…", preset.id), role_color(Role::Muted));
             login_apply_verified(
                 preset,
                 key_text.trim(),
@@ -1051,8 +1107,12 @@ async fn panel_enter_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> a
             )
             .await;
         }
-        Some(_) => context.ui.note("enter a non-empty API key", Color::Yellow),
-        None => context.ui.note("no provider selected", Color::Red),
+        Some(_) => context
+            .ui
+            .note("enter a non-empty API key", role_color(Role::Warn)),
+        None => context
+            .ui
+            .note("no provider selected", role_color(Role::Error)),
     }
     let _ = key;
     Ok(())
@@ -1259,7 +1319,9 @@ fn handle_input_action(action: InputAction, context: &mut KeyEventContext<'_>) {
         | InputAction::ToggleActivity => apply_attention_action(context.ui, action),
         InputAction::OpenLiveSearch => {
             if !context.ui.open_live_search("") {
-                context.ui.note("no live blocks to search", Color::Gray);
+                context
+                    .ui
+                    .note("no live blocks to search", role_color(Role::Muted));
             }
         }
         InputAction::OpenInputEditor => {
@@ -1271,7 +1333,7 @@ fn handle_input_action(action: InputAction, context: &mut KeyEventContext<'_>) {
             } else {
                 context.ui.note(
                     "fullscreen editor opens for long or multiline input",
-                    Color::Gray,
+                    role_color(Role::Muted),
                 );
             }
         }
@@ -1279,7 +1341,7 @@ fn handle_input_action(action: InputAction, context: &mut KeyEventContext<'_>) {
             Ok(paste) => apply_clipboard_paste(context.ui, paste),
             Err(error) => context.ui.note(
                 format!("clipboard paste unavailable: {error}"),
-                Color::Yellow,
+                role_color(Role::Warn),
             ),
         },
         InputAction::Ignore => {}
@@ -1297,7 +1359,7 @@ fn apply_clipboard_paste(ui: &mut Ui, paste: ClipboardPaste) {
             ui.input.insert_str(&placeholder);
             ui.note(
                 format!("pasted {placeholder} · saved {}", path.display()),
-                Color::Gray,
+                role_color(Role::Muted),
             );
             sync_input_editor_scroll(ui);
         }
@@ -1421,33 +1483,43 @@ fn handle_submission_action(action: InputAction, ui: &mut Ui, pending_submit: &m
     }
 }
 
+fn display_submission(input: &str) -> String {
+    if input.starts_with("/goal") {
+        input.to_owned()
+    } else if input.starts_with('/') {
+        input
+            .split_whitespace()
+            .next()
+            .unwrap_or("command")
+            .to_owned()
+    } else {
+        "task submitted".to_owned()
+    }
+}
+
 fn queue_input(ui: &mut Ui, input: String) {
-    ui.queued.push_back(input.clone());
+    ui.queued.push_back(input);
     ui.refresh_queue_panel();
-    ui.record_activity(
-        ActivityKind::Queue,
-        format!("queued 路 {}", clip_display_cells(&input, 48)),
-    );
+    ui.record_activity(ActivityKind::Queue, "queued message");
     ui.note(
         format!(
-            "鈴?queued ({} pending; current turn continues): {input}",
-            ui.queued.len()
+            "鈴?queued ({} pending; current turn continues): {}",
+            ui.queued.len(),
+            "queued message"
         ),
         role_color(Role::Muted),
     );
 }
 
 fn push_queue_front(ui: &mut Ui, input: String) {
-    ui.queued.push_front(input.clone());
+    ui.queued.push_front(input);
     ui.refresh_queue_panel();
-    ui.record_activity(
-        ActivityKind::Queue,
-        format!("front-queued 路 {}", clip_display_cells(&input, 44)),
-    );
+    ui.record_activity(ActivityKind::Queue, "front-queued message");
     ui.note(
         format!(
-            "鈴?front-queued ({} pending; current turn continues): {input}",
-            ui.queued.len()
+            "鈴?front-queued ({} pending; current turn continues): {}",
+            ui.queued.len(),
+            "queued message"
         ),
         role_color(Role::Primary),
     );
@@ -1487,18 +1559,18 @@ fn session_input_history(history: &[Message]) -> Vec<String> {
 fn note_initial_ui(ui: &mut Ui, skip_danger: bool, history: &[Message]) {
     ui.note(
         "RidgeCode  路  inline mode: output lands in terminal history (native scroll/select) 路 Enter send/queue 路 Ctrl+Enter front-queue without interrupt 路 Ctrl+I/Alt+I live inspect 路 Ctrl+Q queue 路 Ctrl+Space hold/follow 路 Ctrl+A answers 路 Ctrl+T activity 路 Ctrl+J newline 路 Esc/Ctrl-C takeover; press Ctrl-C twice to exit 路 /help",
-        Color::Cyan,
+        role_color(Role::Info),
     );
     if skip_danger {
         ui.note(
             "鈿?skip-danger: tools auto-approved (disaster commands still hard-blocked)",
-            Color::Red,
+            role_color(Role::Error),
         );
     }
     if !history.is_empty() {
         ui.note(
             format!("restored {} session messages", history.len()),
-            Color::Green,
+            role_color(Role::Success),
         );
     }
 }
@@ -1557,7 +1629,7 @@ fn poll_model_catalog(
     if empty && failures > 0 {
         ui.note(
             "model catalog unavailable; retry /model after checking credentials or network",
-            Color::Yellow,
+            role_color(Role::Warn),
         );
     }
     true
@@ -1595,7 +1667,7 @@ fn handle_device_oauth_event(
                     },
                     provider::oauth::OPENAI_DEVICE_VERIFICATION_URL
                 ),
-                Color::Cyan,
+                role_color(Role::Info),
             );
         }
         DeviceOAuthEvent::Complete(result) => {
@@ -1607,7 +1679,10 @@ fn handle_device_oauth_event(
                 }
                 Err(error) => {
                     ui.device_auth_status = Some(format!("Device auth failed: {error}"));
-                    ui.note(format!("Codex device OAuth failed: {error}"), Color::Red);
+                    ui.note(
+                        format!("Codex device OAuth failed: {error}"),
+                        role_color(Role::Error),
+                    );
                 }
             }
         }
@@ -1850,9 +1925,10 @@ async fn process_pending_submit(context: &mut PendingSubmitContext<'_>) -> anyho
         Some(input.clone())
     };
     if let Some(task_input) = task_input {
-        context
-            .ui
-            .note(format!("鈥?{input}"), role_color(Role::Command));
+        context.ui.note(
+            format!("鈥?{}", display_submission(&input)),
+            role_color(Role::Command),
+        );
         context
             .history
             .push(Message::user(expand_mentions(&task_input)));
@@ -1981,9 +2057,10 @@ async fn prepare_loop(context: &mut LoopPrepareContext<'_>) -> anyhow::Result<bo
                 )
                 .await;
             }
-            Err(error) => context
-                .ui
-                .note(format!("OAuth callback failed: {error}"), Color::Red),
+            Err(error) => context.ui.note(
+                format!("OAuth callback failed: {error}"),
+                role_color(Role::Error),
+            ),
         }
         *context.dirty = true;
     }
@@ -2277,7 +2354,7 @@ fn handle_successful_run(output: AgentState, context: &mut DoneEventContext<'_>)
         (!complete).then_some(halt_reason_display(reason)),
     );
     let (status, color) = if complete {
-        ("鉁?approved".to_string(), Color::Green)
+        ("鉁?approved".to_string(), role_color(Role::Success))
     } else {
         (
             format!(
@@ -2285,7 +2362,7 @@ fn handle_successful_run(output: AgentState, context: &mut DoneEventContext<'_>)
                 halt_reason_display(reason),
                 halt_reason_guidance(reason)
             ),
-            Color::Red,
+            role_color(Role::Error),
         )
     };
     context.ui.note(
@@ -2295,6 +2372,15 @@ fn handle_successful_run(output: AgentState, context: &mut DoneEventContext<'_>)
         ),
         color,
     );
+    let evidence = if complete {
+        format!(
+            "TUI goal run verified: steps={} tokens={}",
+            output.steps, output.total_tokens
+        )
+    } else {
+        format!("TUI goal run stopped: {}", halt_reason_display(reason))
+    };
+    settle_active_goal(context.ui, complete, &evidence);
     agent::fire_session_hooks(
         "stop",
         &format!("steps={} tokens={}", output.steps, output.total_tokens),
@@ -2312,7 +2398,7 @@ fn handle_failed_run(error: String, context: &mut DoneEventContext<'_>) {
         let retry = *context.retry_count;
         context.ui.note(
             format!("鈫?Transient failure, retrying {retry}/{TUI_MAX_RETRIES} (last: {error})"),
-            Color::Yellow,
+            role_color(Role::Warn),
         );
         context.ui.busy = true;
         context.ui.waiting = false;
@@ -2337,10 +2423,30 @@ fn handle_failed_run(error: String, context: &mut DoneEventContext<'_>) {
     } else {
         format!("error: {error}")
     };
-    context.ui.note(tail, Color::Red);
+    context.ui.note(&tail, role_color(Role::Error));
     context.ui.mark_error();
+    settle_active_goal(context.ui, false, &tail);
     agent::fire_session_hooks("stop", "error");
     *context.retry_count = 0;
+}
+
+fn settle_active_goal(ui: &mut Ui, complete: bool, evidence: &str) {
+    let Some(path) = ui.active_goal_path.take() else {
+        return;
+    };
+    let result = agent::update_goal(path, |goal| {
+        if complete {
+            goal.complete(evidence)
+        } else {
+            goal.block(evidence, Some("inspect the run, then resume goal"))
+        }
+    });
+    if let Err(error) = result {
+        ui.note(
+            format!("goal state update failed: {error}"),
+            role_color(Role::Error),
+        );
+    }
 }
 
 fn handle_tick(
@@ -2509,6 +2615,9 @@ async fn run_event_loop(context: TuiLoopContext) -> anyhow::Result<()> {
     if let Some(handle) = task {
         handle.abort();
     }
+    if ui.active_goal_path.is_some() {
+        settle_active_goal(&mut ui, false, "TUI exited before goal completion");
+    }
     Ok(())
 }
 
@@ -2529,6 +2638,7 @@ pub(super) async fn run(
 ) -> anyhow::Result<()> {
     tui_trace("run.enter");
     set_dynamic_commands(&commands); // 自定义/skill 命令名进补全源(iter-39)
+    let mcp_statuses = mcp.statuses().to_vec();
     let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
     let approver = tui_approver(skip_danger, approval_tx);
     let bus = null_token_bus();
@@ -2550,6 +2660,7 @@ pub(super) async fn run(
     let live_cache = LiveOutputCache::default();
     let mut ui = Ui {
         effort: Some(initial_effort),
+        mcp_statuses,
         ..Ui::default()
     };
     let commands_fixture = std::env::var("RIDGE_TUI_FIXTURE").ok().as_deref() == Some("commands");
