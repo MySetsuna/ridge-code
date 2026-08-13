@@ -327,7 +327,7 @@ pub(crate) struct Ui {
     /// Start time of the currently displayed activity; diagnostics only.
     pub(crate) activity_started: Option<std::time::Instant>,
     pub(crate) frame: usize,
-    /// 启动帧序列进度(iter-28):< SPLASH_TICKS 时 tick 驱动渐显,末帧 banner 入历史。
+    /// 启动动画已在进入 TUI 前完成；此值仅作历史状态兼容哨兵。
     pub(crate) splash: usize,
     /// 本任务流式 token 估算累计(iter-31):token_rx 每块 `est_tokens` 累加,Submit 清零、done 保留展示。
     pub(crate) stream_tokens: usize,

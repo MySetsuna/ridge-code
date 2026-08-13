@@ -207,6 +207,9 @@ async fn run_cli() -> anyhow::Result<()> {
     if let Some(dir) = &cwd {
         std::env::set_current_dir(dir)?;
     }
+    if task.is_none() && tui_requested() {
+        tui::play_startup_animation()?;
+    }
     let cfg = load_config();
     apply_config_proxy(&cfg);
     let auth = load_auth();

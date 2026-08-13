@@ -13,7 +13,7 @@ use crossterm::{
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, size},
 };
 use ratatui::{
     backend::CrosstermBackend, layout::Rect, style::Color, Terminal, TerminalOptions, Viewport,
@@ -42,6 +42,37 @@ pub(crate) type ModelCatalog = Vec<(String, Vec<provider::models::ModelInfo>)>;
 const LIVE_HEIGHT: u16 = 14;
 /// 单次 token 唤醒最多合并的 chunk；留出下一轮 select 处理键盘，保证 Ctrl-C 可抢占。
 const MAX_STREAM_CHUNKS_PER_WAKE: usize = 256;
+
+/// Play the exact standalone intro before any provider/configuration logs or
+/// the inline ratatui viewport can write to the terminal.
+pub(crate) fn play_startup_animation() -> io::Result<()> {
+    use std::io::Write;
+
+    let mut stdout = io::stdout();
+    stdout.write_all(b"\x1b[?25l\x1b[2J")?;
+    stdout.flush()?;
+    let start = Instant::now();
+    let mut frame_index = 0u64;
+    loop {
+        let elapsed = start.elapsed().as_secs_f64();
+        if elapsed > SPLASH_DURATION_SECS {
+            break;
+        }
+        let (columns, rows) = size().unwrap_or((100, 28));
+        let height = usize::from(rows.saturating_sub(1).max(8));
+        let frame = splash_canvas(usize::from(columns), height, elapsed, SPLASH_DURATION_SECS);
+        stdout.write_all(b"\x1b[H")?;
+        stdout.write_all(frame.as_bytes())?;
+        stdout.flush()?;
+        frame_index += 1;
+        let next_frame = start + Duration::from_secs_f64(frame_index as f64 / SPLASH_FPS as f64);
+        if let Some(remaining) = next_frame.checked_duration_since(Instant::now()) {
+            std::thread::sleep(remaining);
+        }
+    }
+    stdout.write_all(b"\x1b[0m\x1b[?25h\n")?;
+    stdout.flush()
+}
 
 fn inline_height_cap() -> u16 {
     // Keep the viewport cap stable; ratatui clamps it to current terminal height
@@ -1675,7 +1706,6 @@ async fn run_event_step(context: EventStepContext<'_>) -> anyhow::Result<EventSt
                 // native scrollback aligned with the new terminal width.
                 let _ = terminal.autoresize();
                 sync_input_editor_scroll(ui);
-                refresh_splash_for_width(ui, terminal);
             }
             let result = handle_key_event(
                 event,
@@ -1750,7 +1780,7 @@ async fn run_event_step(context: EventStepContext<'_>) -> anyhow::Result<EventSt
         }
         _ = tick.tick() => {
             *animation_due = ui.busy && pending.is_none() && ui.panel.is_none();
-            handle_tick(ui, &*last_activity, &*pending, terminal)
+            handle_tick(ui, &*last_activity, &*pending)
         }
         else => return Ok(EventStepResult { exit: true, dirty: false }),
     };
@@ -2317,7 +2347,6 @@ fn handle_tick(
     ui: &mut Ui,
     last_activity: &Option<Instant>,
     pending: &Option<ApprovalRequest>,
-    terminal: &Term,
 ) -> bool {
     let was_waiting = ui.waiting;
     ui.waiting = ui.busy && last_activity.is_some_and(|at| at.elapsed() >= Duration::from_secs(8));
@@ -2328,34 +2357,8 @@ fn handle_tick(
         return false;
     }
     ui.splash += 1;
-    let width = terminal
-        .size()
-        .map(|size| size.width as usize)
-        .unwrap_or(80);
-    if ui.splash == SPLASH_TICKS {
-        ui.note(splash_block(width).join("\n"), role_color(Role::Primary));
-        ui.clear_streams();
-    } else {
-        ui.transcript.set_splash(indent(
-            &splash_frame_for_width(ui.splash, SPLASH_TICKS, width),
-            splash_pad(width),
-        ));
-    }
+    ui.splash = SPLASH_TICKS;
     true
-}
-
-fn refresh_splash_for_width(ui: &mut Ui, terminal: &Term) {
-    if ui.splash >= SPLASH_TICKS || ui.busy {
-        return;
-    }
-    let width = terminal
-        .size()
-        .map(|size| size.width as usize)
-        .unwrap_or(80);
-    ui.transcript.set_splash(indent(
-        &splash_frame_for_width(ui.splash, SPLASH_TICKS, width),
-        splash_pad(width),
-    ));
 }
 
 struct TuiLoopContext {

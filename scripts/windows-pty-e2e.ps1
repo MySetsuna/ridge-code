@@ -371,7 +371,11 @@ namespace RidgeCode {
 $session = $null
 $text = New-Object System.Text.StringBuilder
 $runtimeTimeoutMs = if ($commandsMode) { [Math]::Max($TimeoutMs, 10000) } else { $TimeoutMs }
-$deadline = [DateTime]::UtcNow.AddMilliseconds($runtimeTimeoutMs)
+$startupGraceMs = 4000
+$deadline = [DateTime]::UtcNow.AddMilliseconds($runtimeTimeoutMs + $startupGraceMs)
+$startupEsc = [char]27
+$startupShowMarker = $startupEsc + '[?25h'
+$startupReadyAt = $null
 $sentHelp = $false
 $commandsStage = 0
 $commandsLoginObserved = $false
@@ -512,7 +516,14 @@ try {
             $rawOutput.AddRange($bytes)
             [void]$text.Append([Text.Encoding]::UTF8.GetString($bytes))
         }
-        $elapsed = ($runtimeTimeoutMs - ($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+        if ($null -eq $startupReadyAt -and $text.ToString().Contains($startupShowMarker)) {
+            $startupReadyAt = [DateTime]::UtcNow
+        }
+        $elapsed = if ($null -ne $startupReadyAt) {
+            ([DateTime]::UtcNow - $startupReadyAt).TotalMilliseconds
+        } else {
+            -1
+        }
         if (-not $sentHelp -and $elapsed -ge $EnterAfterMs) {
             $session.Send([Text.Encoding]::UTF8.GetBytes('/help'))
             $session.Send([byte[]](0x0d))
@@ -954,6 +965,38 @@ try {
     # chunk boundary.
     $ansiPattern = '\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))'
     $plain = [regex]::Replace($text.ToString(), $ansiPattern, '')
+    # Startup contract: the standalone reference canvas must be the first
+    # application surface.  Host-generated ConPTY setup bytes may precede it,
+    # but config/provider logs must follow the animation hand-off marker.
+    $startupText = $text.ToString()
+    $startupHideIndex = $startupText.IndexOf($startupEsc + '[?25l')
+    $startupClearIndex = $startupText.IndexOf($startupEsc + '[2J', [Math]::Max(0, $startupHideIndex))
+    $startupHomeIndex = $startupText.IndexOf($startupEsc + '[H', [Math]::Max(0, $startupClearIndex))
+    $startupNextHomeIndex = if ($startupHomeIndex -ge 0) {
+        $startupText.IndexOf($startupEsc + '[H', $startupHomeIndex + 3)
+    } else {
+        -1
+    }
+    $startupRgbIndex = $startupText.IndexOf($startupEsc + '[38;2;', [Math]::Max(0, $startupHomeIndex))
+    $startupShowIndex = $startupText.IndexOf($startupShowMarker, [Math]::Max(0, $startupRgbIndex))
+    $startupLogIndex = $startupText.IndexOf('[ridgecode]')
+    $startupFrameLineBreaks = if ($startupHomeIndex -ge 0 -and $startupNextHomeIndex -gt $startupHomeIndex) {
+        ([regex]::Matches(
+                $startupText.Substring($startupHomeIndex, $startupNextHomeIndex - $startupHomeIndex),
+                '\r?\n'
+            )).Count
+    } else {
+        0
+    }
+    $startupExpectedFrameLineBreaks = [Math]::Max(8, $Rows - 1) - 1
+    $startupAnimationEvidenceSatisfied =
+        $startupHideIndex -ge 0 -and
+        $startupClearIndex -gt $startupHideIndex -and
+        $startupHomeIndex -gt $startupClearIndex -and
+        $startupRgbIndex -gt $startupHomeIndex -and
+        $startupShowIndex -gt $startupRgbIndex -and
+        $startupLogIndex -gt $startupShowIndex -and
+        $startupFrameLineBreaks -eq $startupExpectedFrameLineBreaks
     # ConPTY cursor-addressed redraws can insert cell separators or split a
     # word across writes.  Keep a compact ASCII probe for fixture markers;
     # snapshot rows below remain the authoritative visible-frame evidence.
@@ -1041,7 +1084,7 @@ try {
     }
     $outputPrefixHex = (($rawOutput | Select-Object -First 64 | ForEach-Object { '{0:X2}' -f $_ }) -join '')
     [pscustomobject]@{
-        status = if ($crosstermEventsObserved -and $nativeMousePathSatisfied -and $busyFixtureFrontObserved -and $queueEvidenceSatisfied -and $inspectEvidenceSatisfied -and $inspectQueueEvidenceSatisfied -and $reasoningEvidenceSatisfied -and $answerInspectEvidenceSatisfied -and $holdEvidenceSatisfied -and $resizeEvidenceSatisfied -and $completionEvidenceSatisfied -and $commandsEvidenceSatisfied -and $takeoverEvidenceSatisfied) { 'passed' } else { 'partial' }
+        status = if ($startupAnimationEvidenceSatisfied -and $crosstermEventsObserved -and $nativeMousePathSatisfied -and $busyFixtureFrontObserved -and $queueEvidenceSatisfied -and $inspectEvidenceSatisfied -and $inspectQueueEvidenceSatisfied -and $reasoningEvidenceSatisfied -and $answerInspectEvidenceSatisfied -and $holdEvidenceSatisfied -and $resizeEvidenceSatisfied -and $completionEvidenceSatisfied -and $commandsEvidenceSatisfied -and $takeoverEvidenceSatisfied) { 'passed' } else { 'partial' }
         binary = $binaryPath
         pid = $session.ProcessId
         columns = $Columns
@@ -1049,6 +1092,15 @@ try {
         input_bytes = $session.BytesWritten
         output_bytes = $session.BytesRead
         output_prefix_hex = $outputPrefixHex
+        startup_animation_evidence_satisfied = $startupAnimationEvidenceSatisfied
+        startup_hide_index = $startupHideIndex
+        startup_clear_index = $startupClearIndex
+        startup_home_index = $startupHomeIndex
+        startup_rgb_index = $startupRgbIndex
+        startup_show_index = $startupShowIndex
+        startup_log_index = $startupLogIndex
+        startup_frame_line_breaks = $startupFrameLineBreaks
+        startup_expected_frame_line_breaks = $startupExpectedFrameLineBreaks
         output_text_preview = if ($plain.Length -gt 1000) { $plain.Substring(0, 1000) } else { $plain }
         output_text_tail = if ($plain.Length -gt 1000) { $plain.Substring($plain.Length - 1000) } else { $plain }
         raw_output_path = if ($KeepDiagnostics) { $rawOutputPath } else { $null }

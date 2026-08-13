@@ -877,6 +877,7 @@ impl LiveTranscript {
         self.splash = None;
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set_splash(&mut self, text: String) {
         self.touch_render();
         self.blocks.clear();

@@ -1765,147 +1765,240 @@ pub(crate) fn wrap_commit_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Li
 /// compact, heavyweight inscription instead of the former mixed-case banner.
 pub(crate) const SPLASH: &[&str] = &[
     r"██████▙ ███████ ██████▙ ▟█████▛ ███████ ▟██████ ▟█████▙ ██████▙ ███████",
-    r" ██  ██   ███    ██  ▜█ ██       ██      ██      ██   ██  ██  ▜█  ██    ",
-    r" ██  ██   ███    ██   █ ██  ▟██  ██ ▄    ██      ██   ██  ██   █  ██ ▄  ",
-    r" █████▛   ███    ██   █ ██   ██  █████   ██      ██   ██  ██   █  █████ ",
-    r" ██ ▜█    ███    ██  ▟█ ██  ▟██  ██      ██      ██   ██  ██  ▟█  ██    ",
+    r" ██  ██   ███    ██  ▜█ ██       ██     ██      ██   ██  ██  ▜█  ██    ",
+    r" ██  ██   ███    ██   █ ██  ▟██  ██ ▄   ██      ██   ██  ██   █  ██ ▄  ",
+    r" █████▛   ███    ██   █ ██   ██  █████  ██      ██   ██  ██   █  █████ ",
+    r" ██ ▜█    ███    ██  ▟█ ██  ▟██  ██     ██      ██   ██  ██  ▟█  ██    ",
     r"███  ██ ███████ ██████▛ ▜█████▛ ███████ ▜██████ ▜█████▛ ██████▛ ███████",
 ];
-/// Short, smooth reveal; at the normal tick rate this completes in under a second.
-pub(crate) const SPLASH_TICKS: usize = 10;
+/// TUI hand-off sentinel; the standalone reference animation runs before TUI.
+pub(crate) const SPLASH_TICKS: usize = 1;
 /// banner 最大行宽(用于居中与折行守卫)。
+#[cfg(test)]
 pub(crate) const SPLASH_W: usize = 71;
+pub(crate) const SPLASH_H: usize = 6;
+pub(crate) const SPLASH_DURATION_SECS: f64 = 2.6;
+pub(crate) const SPLASH_FPS: u32 = 60;
 
-/// Startup frames: the Roman inscription settles vertically, then a bright
-/// sweep crosses it while a paler, clockwise-leaning reflection materialises.
-pub(crate) fn splash_frame(tick: usize, total: usize) -> String {
-    let total = total.max(1);
-    let phase = tick.min(total);
-    let settle_end = (total * 3 / 5).max(1);
+type SplashRgb = (i32, i32, i32);
+
+fn splash_py_round(value: f64) -> i32 {
+    // Python's round() uses ties-to-even; matching it keeps RGB transitions
+    // frame-identical at the half-way points used by the reference script.
+    let floor = value.floor();
+    let fraction = value - floor;
+    if fraction < 0.5 {
+        floor as i32
+    } else if fraction > 0.5 {
+        floor as i32 + 1
+    } else {
+        let integer = floor as i64;
+        if integer % 2 == 0 {
+            integer as i32
+        } else {
+            integer as i32 + 1
+        }
+    }
+}
+
+fn splash_ease(value: f64) -> f64 {
+    let t = value.clamp(0.0, 1.0);
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
+fn splash_rgb(rgb: SplashRgb) -> String {
+    format!("\x1b[38;2;{};{};{}m", rgb.0, rgb.1, rgb.2)
+}
+
+fn splash_base(x: usize, logo_w: usize, vertical: f64) -> SplashRgb {
+    if x as f64 >= logo_w as f64 * 5.0 / 9.0 {
+        let code_x = (x as f64 - logo_w as f64 * 5.0 / 9.0) / (logo_w as f64 * 4.0 / 9.0).max(1.0);
+        (
+            splash_py_round(112.0 - 72.0 * code_x + 24.0 * (1.0 - vertical)),
+            splash_py_round(62.0 + 86.0 * code_x + 24.0 * (1.0 - vertical)),
+            splash_py_round(196.0 + 48.0 * code_x),
+        )
+    } else {
+        (
+            splash_py_round(78.0 + 58.0 * (1.0 - vertical)),
+            splash_py_round(58.0 + 82.0 * (1.0 - vertical)),
+            splash_py_round(25.0 + 25.0 * (1.0 - vertical)),
+        )
+    }
+}
+
+fn splash_foreground_tone(
+    base: SplashRgb,
+    x: usize,
+    logo_w: usize,
+    glow: f64,
+    alpha: f64,
+) -> SplashRgb {
+    let hi = if x as f64 >= logo_w as f64 * 5.0 / 9.0 {
+        (225, 235, 255)
+    } else {
+        (205, 180, 92)
+    };
+    (
+        splash_py_round((base.0 as f64 + (hi.0 - base.0) as f64 * glow) * alpha),
+        splash_py_round((base.1 as f64 + (hi.1 - base.1) as f64 * glow) * alpha),
+        splash_py_round((base.2 as f64 + (hi.2 - base.2) as f64 * glow) * alpha),
+    )
+}
+
+struct SplashCanvas {
+    grid: Vec<Vec<char>>,
+    colors: Vec<Vec<Option<SplashRgb>>>,
+    width: usize,
+    height: usize,
+    ox: isize,
+    oy: isize,
+    logo_w: usize,
+}
+
+fn splash_paint_reflection(canvas: &mut SplashCanvas, reflection: f64) {
+    let reflected_rows = SPLASH_H.min(
+        (canvas.height as isize - (canvas.oy + SPLASH_H as isize + 1))
+            .max(0)
+            .try_into()
+            .unwrap_or(0),
+    );
+    for ry in 0..reflected_rows {
+        let row_alpha = splash_ease((reflection * 1.45 - ry as f64 * 0.075).clamp(0.0, 1.0));
+        if row_alpha <= 0.01 {
+            continue;
+        }
+        let source_y = SPLASH_H - 1 - ry;
+        let fade = (0.48 - 0.025 * ry as f64) * row_alpha;
+        let left_lean = splash_py_round(ry as f64 * 0.75) as isize;
+        for (x, ch) in SPLASH[source_y].chars().enumerate() {
+            if ch == ' ' {
+                continue;
+            }
+            let gx = canvas.ox + x as isize - left_lean;
+            let gy = canvas.oy + SPLASH_H as isize + 1 + ry as isize;
+            if gx < 0 || gy < 0 || gx >= canvas.width as isize || gy >= canvas.height as isize {
+                continue;
+            }
+            let base = splash_base(x, canvas.logo_w, source_y as f64 / (SPLASH_H - 1) as f64);
+            canvas.grid[gy as usize][gx as usize] = ch;
+            canvas.colors[gy as usize][gx as usize] = Some((
+                splash_py_round(base.0 as f64 * fade),
+                splash_py_round(base.1 as f64 * fade),
+                splash_py_round(base.2 as f64 * fade),
+            ));
+        }
+    }
+}
+
+fn splash_paint_foreground_cell(
+    canvas: &mut SplashCanvas,
+    x: usize,
+    y: usize,
+    ch: char,
+    local_alpha: f64,
+    lift: isize,
+    sweep: Option<f64>,
+) {
+    let gx = canvas.ox + x as isize;
+    let gy = canvas.oy + y as isize + lift;
+    if gx < 0 || gy < 0 || gx >= canvas.width as isize || gy >= canvas.height as isize {
+        return;
+    }
+    let glow = if let Some(sweep) = sweep {
+        (1.0 - (x as f64 - sweep).abs() / 11.0).max(0.0).powi(2)
+    } else {
+        0.0
+    };
+    let base = splash_base(x, canvas.logo_w, y as f64 / (SPLASH_H - 1) as f64);
+    canvas.colors[gy as usize][gx as usize] = Some(splash_foreground_tone(
+        base,
+        x,
+        canvas.logo_w,
+        glow,
+        local_alpha,
+    ));
+    canvas.grid[gy as usize][gx as usize] = ch;
+}
+
+fn splash_paint_foreground(canvas: &mut SplashCanvas, reveal: f64, sweep: f64, sweep_active: bool) {
+    for (y, row) in SPLASH.iter().enumerate() {
+        let row_delay = (SPLASH_H - 1 - y) as f64 * 0.018;
+        let local_alpha = splash_ease(((reveal - row_delay) / 0.88).clamp(0.0, 1.0));
+        if local_alpha <= 0.025 {
+            continue;
+        }
+        let lift = splash_py_round((1.0 - local_alpha).powi(2) * 4.0) as isize;
+        for (x, ch) in row.chars().enumerate() {
+            if ch != ' ' {
+                splash_paint_foreground_cell(
+                    canvas,
+                    x,
+                    y,
+                    ch,
+                    local_alpha,
+                    lift,
+                    sweep_active.then_some(sweep),
+                );
+            }
+        }
+    }
+}
+
+fn splash_encode_rows(grid: &[Vec<char>], colors: &[Vec<Option<SplashRgb>>]) -> String {
+    let height = grid.len();
+    let width = grid.first().map_or(0, Vec::len);
+    let mut lines = Vec::with_capacity(height);
+    for row in 0..height {
+        let mut line = String::new();
+        let mut active = None;
+        for column in 0..width {
+            if colors[row][column] != active {
+                let escape = colors[row][column]
+                    .map(splash_rgb)
+                    .unwrap_or_else(|| "\x1b[0m".to_string());
+                line.push_str(&escape);
+                active = colors[row][column];
+            }
+            line.push(grid[row][column]);
+        }
+        line.push_str("\x1b[0m");
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
+/// Exact full-canvas frame port of `C:\code\wind\scripts\intro_block_preview.py`.
+/// The live ratatui viewport must not clip or recolor this output.
+pub(crate) fn splash_canvas(width: usize, height: usize, elapsed: f64, duration: f64) -> String {
+    let width = width.max(1);
+    let height = height.max(1);
     let logo_w = SPLASH
         .iter()
         .map(|line| line.chars().count())
         .max()
         .unwrap_or(0);
-    let mut rows = splash_settle_rows(phase, settle_end);
+    let ox = (width as isize - logo_w as isize).div_euclid(2);
+    let oy = (height as isize - SPLASH_H as isize).div_euclid(2);
+    let t = (elapsed / duration).clamp(0.0, 1.0);
 
-    if phase >= settle_end {
-        for (row, source) in rows.iter_mut().zip(SPLASH) {
-            *row = (*source).to_owned();
-        }
-        splash_apply_sweep(&mut rows, phase, settle_end, total, logo_w);
-        splash_add_reflection(&mut rows, phase, settle_end, total);
-    }
-
-    rows.join("\n")
-}
-
-fn splash_settle_rows(phase: usize, settle_end: usize) -> Vec<String> {
-    let mut rows = vec![String::new(); SPLASH.len() + 1 + SPLASH.len()];
-    // A short, smooth bottom-up settle replaces the old left-to-right wipe.
-    for (y, line) in SPLASH.iter().enumerate() {
-        let delay = SPLASH.len().saturating_sub(y + 1) / 2;
-        let local = phase.saturating_sub(delay).min(settle_end);
-        if local == 0 {
-            continue;
-        }
-        let lift = 2usize.saturating_sub(2 * local / settle_end);
-        let target = (y + lift).min(SPLASH.len() - 1);
-        rows[target] = line.to_string();
-    }
-    rows
-}
-
-fn splash_apply_sweep(
-    rows: &mut [String],
-    phase: usize,
-    settle_end: usize,
-    total: usize,
-    logo_w: usize,
-) {
-    if phase <= settle_end {
-        return;
-    }
-    let sweep_span = (total - settle_end).max(1);
-    let beam = logo_w * (phase - settle_end) / sweep_span;
-    for row in rows.iter_mut().take(SPLASH.len()) {
-        *row = row
-            .chars()
-            .enumerate()
-            .map(|(x, ch)| {
-                if ch != ' ' && x.abs_diff(beam) <= 2 {
-                    '▓'
-                } else {
-                    ch
-                }
-            })
-            .collect();
-    }
-}
-
-fn splash_add_reflection(rows: &mut [String], phase: usize, settle_end: usize, total: usize) {
-    let sweep_span = (total - settle_end).max(1);
-    let strength = phase - settle_end;
-    // Reflection appears with the sweep, already translucent (░/▒), and leans
-    // left more strongly toward the waterline's lower edge.
-    for ry in 0..SPLASH.len() {
-        let source = SPLASH[SPLASH.len() - 1 - ry];
-        let shade = if strength * 2 >= sweep_span + ry {
-            '▒'
-        } else {
-            '░'
-        };
-        let reflected: String = source
-            .chars()
-            .map(|ch| if ch == ' ' { ' ' } else { shade })
-            .collect();
-        // Decreasing inset down the reflection creates a leftward, clockwise
-        // rake without introducing a black placeholder.
-        let inset = (SPLASH.len() - 1 - ry) * 2;
-        rows[SPLASH.len() + 1 + ry] = format!("{}{}", " ".repeat(inset), reflected);
-    }
-}
-
-/// Width-aware startup frame. Narrow terminals get a truthful one-line badge
-/// instead of a wordmark that silently wraps past the viewport.
-pub(crate) fn splash_frame_for_width(tick: usize, total: usize, width: usize) -> String {
-    if width < SPLASH_W {
-        let label = "◆ RidgeCode";
-        let visible = label.chars().count() * tick.min(total) / total.max(1);
-        return label.chars().take(visible.max(1)).collect();
-    }
-    splash_frame(tick, total)
-}
-
-/// banner 在 `width` 内水平居中的左空白列数(纯函数)。
-pub(crate) fn splash_pad(width: usize) -> usize {
-    width.saturating_sub(SPLASH_W) / 2
-}
-
-/// 每行前置 `pad` 空格(动画帧居中用)。
-pub(crate) fn indent(text: &str, pad: usize) -> String {
-    let p = " ".repeat(pad);
-    text.lines()
-        .map(|l| format!("{p}{l}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// 落定 banner 块(iter-36,纯函数,防「标识乱了」):
-/// 终端宽 ≥ banner 宽 → **居中** ASCII 艺术字(逐行 `trim_end` 去尾空格,故每行 ≤ width 不折行)+ 英文 tagline;
-/// 窄于 banner 宽 → 退化紧凑单行标题(极窄也不折行)。
-pub(crate) fn splash_block(width: usize) -> Vec<String> {
-    if width < SPLASH_W {
-        return vec!["◆ RidgeCode".to_string()];
-    }
-    let pad = " ".repeat(splash_pad(width));
-    let mut out: Vec<String> = SPLASH
-        .iter()
-        .map(|l| format!("{pad}{}", l.trim_end()))
-        .collect();
-    let tag = "modular general-purpose agent framework";
-    let tpad = " ".repeat(width.saturating_sub(tag.chars().count()) / 2);
-    out.push(String::new());
-    out.push(format!("{tpad}{tag}"));
-    out
+    let entry_end = 0.54;
+    let sweep_end = 0.78;
+    let reveal = splash_ease((t / entry_end).min(1.0));
+    let sweep_progress = splash_ease(((t - entry_end) / (sweep_end - entry_end)).clamp(0.0, 1.0));
+    let sweep = -12.0 + (logo_w as f64 + 24.0) * sweep_progress;
+    let sweep_active = (entry_end..=sweep_end).contains(&t);
+    let reflection = splash_ease(((t - entry_end) / (sweep_end - entry_end)).clamp(0.0, 1.0));
+    let mut canvas = SplashCanvas {
+        grid: vec![vec![' '; width]; height],
+        colors: vec![vec![None; width]; height],
+        width,
+        height,
+        ox,
+        oy,
+        logo_w,
+    };
+    splash_paint_reflection(&mut canvas, reflection);
+    splash_paint_foreground(&mut canvas, reveal, sweep, sweep_active);
+    splash_encode_rows(&canvas.grid, &canvas.colors)
 }

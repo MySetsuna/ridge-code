@@ -533,16 +533,15 @@ fn submitted_command_marks_tui_dirty_for_first_panel_frame() {
 #[test]
 fn extracted_tick_handler_transitions_waiting_and_splash() {
     let mut ui = Ui::default();
-    let terminal = test_crossterm_terminal();
     let idle = None;
     let pending = None;
     for _ in 0..SPLASH_TICKS {
-        let _ = handle_tick(&mut ui, &idle, &pending, &terminal);
+        let _ = handle_tick(&mut ui, &idle, &pending);
     }
     assert_eq!(ui.splash, SPLASH_TICKS);
     ui.busy = true;
     let stale = Some(Instant::now() - Duration::from_secs(9));
-    assert!(!handle_tick(&mut ui, &stale, &pending, &terminal));
+    assert!(!handle_tick(&mut ui, &stale, &pending));
     assert!(ui.waiting);
 }
 
@@ -10079,52 +10078,42 @@ fn fold_lines_caps_output() {
     assert!(folded.contains("+10 lines folded"));
 }
 
-/// Startup animation contract: it begins empty, settles the complete Roman
-/// RIDGECODE wordmark, then introduces both the sweep and pale reflection.
+/// Startup animation contract: exact reference canvas dimensions, timing, RGB
+/// SGR output, wordmark, sweep and reflection remain observable.
 #[test]
-fn splash_reveals_then_reflects() {
-    let first = splash_frame(0, SPLASH_TICKS);
-    assert!(first.chars().all(|c| c == '\n'));
+fn splash_canvas_matches_reference_contract() {
+    assert_eq!(SPLASH_W, 71);
+    assert_eq!(SPLASH_H, 6);
+    assert_eq!(SPLASH_DURATION_SECS, 2.6);
+    assert_eq!(SPLASH_FPS, 60);
 
-    let settle_tick = SPLASH_TICKS * 3 / 5;
-    let settled = splash_frame(settle_tick, SPLASH_TICKS);
+    let first = splash_canvas(100, 27, 0.0, SPLASH_DURATION_SECS);
+    assert_eq!(first.lines().count(), 27);
+    assert!(!first.contains('█'));
+
+    let final_frame = splash_canvas(100, 27, SPLASH_DURATION_SECS, SPLASH_DURATION_SECS);
+    assert_eq!(final_frame.lines().count(), 27);
+    assert!(final_frame.contains("\x1b[38;2;"));
     for line in SPLASH {
-        assert!(settled.contains(line));
+        assert!(strip_sgr(&final_frame).contains(line));
     }
-
-    let final_frame = splash_frame(SPLASH_TICKS, SPLASH_TICKS);
-    assert!(final_frame.contains('▓')); // moving light remains visible
-    assert!(final_frame.contains('▒')); // coloured/translucent reflection
-    assert_eq!(final_frame.lines().count(), SPLASH.len() * 2 + 1);
 }
 
-/// iter-36:落定 banner 防「标识乱了」—— 宽则居中艺术字(每行 ≤ width 不折)+ tagline,窄则紧凑单行。
-#[test]
-fn splash_block_guards_width() {
-    let wide = splash_block(80);
-    assert!(wide.len() > SPLASH.len()); // 含 tagline
-    for line in &wide {
-        assert!(
-            line.chars().count() <= 80,
-            "banner 行不得超宽致折行: {line:?}"
-        );
+fn strip_sgr(text: &str) -> String {
+    let mut plain = String::new();
+    let mut escape = false;
+    for ch in text.chars() {
+        if escape {
+            if ch == 'm' {
+                escape = false;
+            }
+        } else if ch == '\x1b' {
+            escape = true;
+        } else {
+            plain.push(ch);
+        }
     }
-    assert!(wide.iter().any(|l| l.contains('█'))); // Roman block wordmark remains
-    let narrow = splash_block(10);
-    assert_eq!(narrow.len(), 1); // 退化单行
-    assert!(narrow[0].chars().count() <= 12); // 极窄也不折
-    assert!(!has_cjk(&narrow[0]));
-}
-
-#[test]
-fn splash_animation_adapts_to_narrow_width_without_wrapping() {
-    let frame = splash_frame_for_width(SPLASH_TICKS / 2, SPLASH_TICKS, 24);
-    assert_eq!(frame.lines().count(), 1);
-    assert!(frame.chars().count() <= 12);
-    assert_eq!(
-        splash_frame_for_width(SPLASH_TICKS, SPLASH_TICKS, 24),
-        "◆ RidgeCode"
-    );
+    plain
 }
 
 /// iter-36:所有交互页标题为英文(全局显示英化)。
@@ -10559,19 +10548,19 @@ use super::{
     queue_panel_toggle_action, reasoning_commit_lines, reasoning_history_panel,
     render_status_template, render_todo_block, responsive_live_layout, role_color, run_command,
     sanitize_display_text, sanitize_paste, selection_style, semantic_focus_action, should_draw,
-    splash_block, splash_frame, splash_frame_for_width, status_line_projection, str_cells,
-    stream_channel_badge, stream_tail, summarize_event, superstep_is_busy, tail_display_cells,
-    telemetry_surface, terminal_event_action, todo_progress, token_rate, tool_detail_scroll_action,
-    tool_focus_action, tool_history_panel, tool_preview, tools_panel, top_chrome,
-    unfinished_answer_reason, up_fallback_is_home, wrap_commit_lines, wrap_input, wrap_live_spans,
-    wrap_live_spans_tail, wrapped_rows, ActivityKind, ApprovalAction, ApprovalRequest,
-    CommandCatalog, CommandStats, DetailLayoutCache, InputAction, InputChromeArgs, InputState,
-    LiveBlockFocus, LiveChannel, LiveFramePlan, LiveLineKind, LiveOutputCache, LiveScrollAction,
-    LiveTranscript, Panel, PanelAction, PanelItemsCache, PanelKind, PanelRow, PanelRowAction,
-    Popup, PresentationChannel, PresentationMetrics, PresentationStatus, Role, StatusVars,
-    TerminalEventAction, ToolBlock, ToolPhase, Ui, Vitals, CHATGPT_MODEL_GROUP, CLAUDE_OAUTH_ROW,
-    CODEX_OAUTH_ROW, MAX_ACTIVITY_HISTORY, MAX_ANSWER_HISTORY, MAX_ANSWER_HISTORY_CHARS,
-    MAX_PENDING_PREVIEW_CHARS, MAX_PENDING_PREVIEW_ROWS, MAX_PRESENTATION_RECORDS,
-    MAX_REASONING_HISTORY, MAX_REASONING_HISTORY_CHARS, MAX_TOOL_HISTORY, SLASH_COMMANDS, SPLASH,
-    SPLASH_TICKS,
+    splash_canvas, status_line_projection, str_cells, stream_channel_badge, stream_tail,
+    summarize_event, superstep_is_busy, tail_display_cells, telemetry_surface,
+    terminal_event_action, todo_progress, token_rate, tool_detail_scroll_action, tool_focus_action,
+    tool_history_panel, tool_preview, tools_panel, top_chrome, unfinished_answer_reason,
+    up_fallback_is_home, wrap_commit_lines, wrap_input, wrap_live_spans, wrap_live_spans_tail,
+    wrapped_rows, ActivityKind, ApprovalAction, ApprovalRequest, CommandCatalog, CommandStats,
+    DetailLayoutCache, InputAction, InputChromeArgs, InputState, LiveBlockFocus, LiveChannel,
+    LiveFramePlan, LiveLineKind, LiveOutputCache, LiveScrollAction, LiveTranscript, Panel,
+    PanelAction, PanelItemsCache, PanelKind, PanelRow, PanelRowAction, Popup, PresentationChannel,
+    PresentationMetrics, PresentationStatus, Role, StatusVars, TerminalEventAction, ToolBlock,
+    ToolPhase, Ui, Vitals, CHATGPT_MODEL_GROUP, CLAUDE_OAUTH_ROW, CODEX_OAUTH_ROW,
+    MAX_ACTIVITY_HISTORY, MAX_ANSWER_HISTORY, MAX_ANSWER_HISTORY_CHARS, MAX_PENDING_PREVIEW_CHARS,
+    MAX_PENDING_PREVIEW_ROWS, MAX_PRESENTATION_RECORDS, MAX_REASONING_HISTORY,
+    MAX_REASONING_HISTORY_CHARS, MAX_TOOL_HISTORY, SLASH_COMMANDS, SPLASH, SPLASH_DURATION_SECS,
+    SPLASH_FPS, SPLASH_H, SPLASH_TICKS, SPLASH_W,
 };
