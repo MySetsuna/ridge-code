@@ -494,6 +494,8 @@ mod clipboard;
 mod command;
 mod draw;
 mod eventfmt;
+#[cfg(test)]
+mod idle_submit_tests;
 mod input;
 mod panel;
 mod presentation;

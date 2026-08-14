@@ -431,8 +431,8 @@ fn available_tool_specs(
     specs
         .iter()
         .filter(|spec| {
-            !(state.dispatch_wave_count() >= MAX_DISPATCH_BATCHES && spec.name == "dispatch_agents")
-                && !(state.codegraph_unavailable && spec.name.starts_with("codegraph__"))
+            !(state.dispatch_wave_count() >= MAX_DISPATCH_BATCHES && spec.name == "dispatch_agents"
+                || state.codegraph_unavailable && spec.name.starts_with("codegraph__"))
         })
         .cloned()
         .collect()

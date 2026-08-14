@@ -6192,8 +6192,10 @@ fn decide_key_dedups_and_recovers_ime_space() {
         "全角空格同样归一"
     );
 
-    // 悬空的**非字符** Release(如启动残留的 Enter 松键)→ 忽略,不误触发 Submit。
-    assert!(decide_key(&mut p, &release(KeyCode::Enter)).is_none());
+    // Windows ConPTY 常把 Enter 打成悬空 Release;空缓冲 Submit 是 no-op,必须收下。
+    let enter = decide_key(&mut p, &release(KeyCode::Enter)).expect("dangling Enter Release");
+    assert_eq!(enter.code, KeyCode::Enter);
+    assert_eq!(enter.kind, KeyEventKind::Press);
 
     // Unix 口径:只有 Press、无 Release,普通空格照常处理。
     assert_eq!(

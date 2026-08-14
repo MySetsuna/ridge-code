@@ -257,10 +257,8 @@ pub(crate) fn verify_route(s: &AgentState) -> Vec<String> {
     } else if completion_blocked(s) {
         vec!["reason".to_string()]
     } else if s.approved
-        || (s.explore_handoff && s.explore_action_used)
         || (s.explore_handoff
-            && !s.explore_action_used
-            && s.last_action.as_deref() == Some("finish"))
+            && (s.explore_action_used || s.last_action.as_deref() == Some("finish")))
     {
         vec![END.to_string()]
     } else {

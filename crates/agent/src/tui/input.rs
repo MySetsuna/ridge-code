@@ -93,8 +93,9 @@ pub(crate) enum InputAction {
 /// 规则:
 /// - Press / Repeat → 收下(并记入 `pressed`);
 /// - Release 若配得上先前 Press(正常松键)→ 丢弃(免 Windows 双触发),并从 `pressed` 移除;
-/// - **悬空** Release(配不上任何 Press)→ 仅当是**字符键**才收下(= 输入法注入;非字符如启动残留的
-///   Enter 松键则忽略,免误触发)。
+/// - **悬空** Release(配不上任何 Press)→ 收下字符键(= 输入法注入)、旧控制字节、以及
+///   **Enter**(Windows ConPTY / 部分宿主只投递 Enter 的 key-up `INPUT_RECORD`;空缓冲
+///   Submit 本就是 no-op,启动残留松键不会误发任务)。其余功能键仍忽略。
 ///
 /// 普通输入/面板下游一律以 **Press** 呈现(下游 `input_action`/`panel_action` 内部只认 Press),
 /// 仅 Ctrl+Space 的 Release 留给主循环拦截即时审计；并把 no-break(U+00A0)/全角(U+3000)空格
@@ -150,8 +151,11 @@ pub(crate) fn decide_key(
             } else if pressed.remove(&ev.code) {
                 false // 正常松键:对应的 Press 已处理过
             } else {
-                matches!(ev.code, KeyCode::Char(_)) || legacy_control_release
-                // 悬空 Release:接收字符/旧控制字节(输入法与兼容 PTY 注入),非功能键仍忽略
+                matches!(ev.code, KeyCode::Char(_))
+                    || legacy_control_release
+                    || ev.code == KeyCode::Enter
+                // 悬空 Release:字符/旧控制字节(输入法与兼容 PTY)以及 Enter
+                // (Windows ConPTY 常只给 key-up)。其余功能键仍忽略。
             }
         }
     };
