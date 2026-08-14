@@ -215,6 +215,28 @@ async fn idle_enter_press_runs_help_command() {
 }
 
 #[test]
+fn dangling_function_releases_become_press() {
+    for code in [
+        KeyCode::Esc,
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Tab,
+        KeyCode::Backspace,
+    ] {
+        let mut pressed = std::collections::HashSet::new();
+        let ev = super::decide_key(
+            &mut pressed,
+            &KeyEvent::new_with_kind(code, KeyModifiers::NONE, KeyEventKind::Release),
+        )
+        .unwrap_or_else(|| panic!("dangling {code:?} Release"));
+        assert_eq!(ev.code, code);
+        assert_eq!(ev.kind, KeyEventKind::Press);
+    }
+}
+
+#[test]
 fn dangling_enter_release_becomes_press() {
     let mut pressed = std::collections::HashSet::new();
     let ev = super::decide_key(

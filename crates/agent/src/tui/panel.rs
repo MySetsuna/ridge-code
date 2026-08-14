@@ -555,6 +555,7 @@ pub(crate) fn agent_panel(defs: &[agent::Agent]) -> Panel {
 
 pub(crate) const CLAUDE_OAUTH_ROW: &str = "claude-oauth";
 pub(crate) const CODEX_OAUTH_ROW: &str = "codex-oauth";
+pub(crate) const GROK_OAUTH_ROW: &str = "grok-oauth";
 
 /// 登录页(iter-38):列内置供应商 preset(id · label · model),Enter 选中后就地输入 key;
 /// 另含订阅 OAuth 入口(iter-43 Claude / iter-48 ChatGPT Codex),授权码登录。
@@ -568,6 +569,11 @@ pub(crate) fn login_panel() -> Panel {
         PanelRow {
             key: CODEX_OAUTH_ROW.to_string(),
             value: "ChatGPT Plus/Pro OAuth (Codex) · browser auth".to_string(),
+            ctx: None,
+        },
+        PanelRow {
+            key: GROK_OAUTH_ROW.to_string(),
+            value: "SuperGrok / X Premium OAuth · device code".to_string(),
             ctx: None,
         },
     ];

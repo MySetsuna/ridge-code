@@ -5825,16 +5825,15 @@ fn named_provider_selection_keeps_profile_identity_separate_from_wire_kind() {
 fn login_panel_lists_all_presets() {
     let p = login_panel();
     assert_eq!(p.kind, PanelKind::Login);
-    assert_eq!(p.rows.len(), PROVIDER_PRESETS.len() + 2);
+    assert_eq!(p.rows.len(), PROVIDER_PRESETS.len() + 3);
     let keys: Vec<&str> = p.rows.iter().map(|r| r.key.as_str()).collect();
     assert!(keys.contains(&CLAUDE_OAUTH_ROW));
     assert!(keys.contains(&CODEX_OAUTH_ROW));
+    assert!(keys.contains(&GROK_OAUTH_ROW));
     assert!(keys.contains(&"openai"));
-    for r in p
-        .rows
-        .iter()
-        .filter(|r| r.key != CLAUDE_OAUTH_ROW && r.key != CODEX_OAUTH_ROW)
-    {
+    for r in p.rows.iter().filter(|r| {
+        r.key != CLAUDE_OAUTH_ROW && r.key != CODEX_OAUTH_ROW && r.key != GROK_OAUTH_ROW
+    }) {
         assert!(
             preset_by_id(&r.key).is_some(),
             "登录页行 key 非 preset id: {}",
@@ -10721,8 +10720,8 @@ use super::{
     LiveTranscript, Panel, PanelAction, PanelItemsCache, PanelKind, PanelRow, PanelRowAction,
     Popup, PresentationChannel, PresentationMetrics, PresentationStatus, Role, StatusVars,
     TerminalEventAction, ToolBlock, ToolPhase, Ui, Vitals, CHATGPT_MODEL_GROUP, CLAUDE_OAUTH_ROW,
-    CODEX_OAUTH_ROW, MAX_ACTIVITY_HISTORY, MAX_ANSWER_HISTORY, MAX_ANSWER_HISTORY_CHARS,
-    MAX_PENDING_PREVIEW_ROWS, MAX_PRESENTATION_RECORDS, MAX_REASONING_HISTORY,
-    MAX_REASONING_HISTORY_CHARS, MAX_TOOL_HISTORY, SLASH_COMMANDS, SPLASH, SPLASH_DURATION_SECS,
-    SPLASH_FPS, SPLASH_H, SPLASH_TICKS, SPLASH_W,
+    CODEX_OAUTH_ROW, GROK_OAUTH_ROW, MAX_ACTIVITY_HISTORY, MAX_ANSWER_HISTORY,
+    MAX_ANSWER_HISTORY_CHARS, MAX_PENDING_PREVIEW_ROWS, MAX_PRESENTATION_RECORDS,
+    MAX_REASONING_HISTORY, MAX_REASONING_HISTORY_CHARS, MAX_TOOL_HISTORY, SLASH_COMMANDS, SPLASH,
+    SPLASH_DURATION_SECS, SPLASH_FPS, SPLASH_H, SPLASH_TICKS, SPLASH_W,
 };

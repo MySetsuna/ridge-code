@@ -5,8 +5,8 @@ use std::time::Duration;
 use crate::{
     auth_path, config_path, load_auth, make_provider, now_epoch, oauth_defaults, oauth_path,
     persist_config, register_oauth_profile, save_oauth_token, save_session, secure_file,
-    session_path, start_device_oauth, start_local_callback, verify_provider_key,
-    LocalOAuthCallback, ReplMeta,
+    session_path, start_device_oauth, start_local_callback, start_xai_device_oauth,
+    verify_provider_key, LocalOAuthCallback, ReplMeta,
 };
 use agent::{
     apply_login, auth_upsert, compact_history, resolve_top_level_key, Config, PROVIDER_PRESETS,
@@ -16,7 +16,7 @@ use provider::{AnthropicProvider, Message, SwapProvider};
 use super::{
     agent_panel, config_panel, effort_panel, login_panel, mcp_panel, models_panel, skills_panel,
     tools_panel, ModelCatalog, PanelKind, PendingModelSelection, Role, Ui, CLAUDE_OAUTH_ROW,
-    CODEX_OAUTH_ROW, DEFAULT_STATUS_BAR,
+    CODEX_OAUTH_ROW, DEFAULT_STATUS_BAR, GROK_OAUTH_ROW,
 };
 use crate::tui::{self, role_color};
 use agent::preset_by_id;
@@ -646,6 +646,8 @@ pub(crate) fn apply_oauth_token(
                 .unwrap_or_else(|| dm.to_string());
             let base_url = if ocfg.provider == "openai" {
                 std::env::var("RIDGE_CHATGPT_BASE_URL").unwrap_or_else(|_| db.to_string())
+            } else if ocfg.provider == "xai" {
+                std::env::var("RIDGE_XAI_BASE_URL").unwrap_or_else(|_| db.to_string())
             } else {
                 std::env::var("RIDGE_BASE_URL")
                     .ok()
@@ -695,13 +697,13 @@ fn oauth_swap_provider(
     account_id: Option<String>,
     effort: &str,
 ) -> Arc<dyn provider::LlmProvider> {
-    if provider_id == "anthropic" {
-        Arc::new(AnthropicProvider::new_oauth(base, model, access))
-    } else {
-        Arc::new(
+    match provider_id {
+        "anthropic" => Arc::new(AnthropicProvider::new_oauth(base, model, access)),
+        "openai" => Arc::new(
             provider::ChatGptProvider::new(base, model, access, account_id)
                 .with_reasoning_effort(effort),
-        )
+        ),
+        _ => Arc::new(provider::OpenAiProvider::new(base, model, access)),
     }
 }
 
@@ -1197,6 +1199,10 @@ fn panel_enter_login(ui: &mut Ui, key: Option<String>) {
         begin_oauth(ui, &provider::oauth::OPENAI);
         return;
     }
+    if id == GROK_OAUTH_ROW {
+        begin_login_grok(ui);
+        return;
+    }
     let Some(panel) = ui.panel.as_mut() else {
         return;
     };
@@ -1516,6 +1522,7 @@ async fn handle_login_command(
         "/login --codex" | "/login codex-oauth" => {
             begin_login_oauth(ui, &provider::oauth::OPENAI, CODEX_OAUTH_ROW)
         }
+        "/login --grok" | "/login --xai" | "/login grok-oauth" => begin_login_grok(ui),
         _ if input.starts_with("/login ") => login_command(input, ui, meta, swap).await,
         _ => return false,
     }
@@ -1524,7 +1531,28 @@ async fn handle_login_command(
 
 fn show_login_list(ui: &mut Ui) {
     let ids: Vec<&str> = PROVIDER_PRESETS.iter().map(|preset| preset.id).collect();
-    ui.note(format!("built-in providers: {}\nOAuth: claude-oauth (/login --claude) · codex-oauth (/login --codex)\n端口受限时执行: ridgecode login --codex --device-auth\ninteractive: /login  ·  quick: /login <id> <API_KEY> (verified; key → ~/.ridge/auth.json, not config)", ids.join(", ")), role_color(Role::Muted));
+    ui.note(format!("built-in providers: {}\nOAuth: claude-oauth (/login --claude) · codex-oauth (/login --codex) · grok-oauth (/login --grok)\n端口受限: ridgecode login --codex --device-auth 或 ridgecode login --grok\ninteractive: /login  ·  quick: /login <id> <API_KEY> (verified; key → ~/.ridge/auth.json, not config)", ids.join(", ")), role_color(Role::Muted));
+}
+
+fn begin_login_grok(ui: &mut Ui) {
+    ui.panel = Some(login_panel());
+    if let Some(panel) = ui.panel.as_mut() {
+        if let Some(position) = panel
+            .view
+            .iter()
+            .position(|&index| panel.rows[index].key == GROK_OAUTH_ROW)
+        {
+            panel.sel = position;
+        }
+        panel.editing = None;
+        panel.title = "Grok OAuth · SuperGrok device auth · browser will open · Esc cancel".into();
+    }
+    ui.device_auth_status = Some("Requesting Grok device code...".into());
+    ui.oauth_device = Some(start_xai_device_oauth());
+    ui.note(
+        "SuperGrok / X Premium: browser will open accounts.x.ai. Enter the device code if asked.",
+        role_color(Role::Info),
+    );
 }
 
 fn begin_login_oauth(ui: &mut Ui, provider: &provider::oauth::OAuthConfig, row_id: &str) {

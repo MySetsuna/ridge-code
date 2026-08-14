@@ -124,6 +124,25 @@ pub(crate) fn normalize_key_event(ev: &KeyEvent) -> KeyEvent {
 /// Ctrl+Space has a useful press/release pair on Windows and on terminals
 /// that enable Kitty `REPORT_EVENT_TYPES`. Keep that one release event for
 /// momentary live-audit handling; every other release remains deduplicated.
+fn is_legacy_function_release(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::Enter
+            | KeyCode::Esc
+            | KeyCode::Tab
+            | KeyCode::Backspace
+            | KeyCode::Delete
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+    )
+}
+
 pub(crate) fn is_momentary_hold_key(key: &KeyEvent) -> bool {
     let code = canonical_key_code(key);
     (key.modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char(' '))
@@ -153,9 +172,9 @@ pub(crate) fn decide_key(
             } else {
                 matches!(ev.code, KeyCode::Char(_))
                     || legacy_control_release
-                    || ev.code == KeyCode::Enter
-                // 悬空 Release:字符/旧控制字节(输入法与兼容 PTY)以及 Enter
-                // (Windows ConPTY 常只给 key-up)。其余功能键仍忽略。
+                    || is_legacy_function_release(ev.code)
+                // 悬空 Release:字符/旧控制字节,以及 Windows ConPTY 常只给
+                // key-up 的 Enter/Esc/方向键等功能键。
             }
         }
     };

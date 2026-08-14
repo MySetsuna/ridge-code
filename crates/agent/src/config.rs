@@ -270,14 +270,25 @@ pub const CONFIG_KEYS: &[&str] = &[
 /// 把一个标量键写进 JSON 配置文本,**保留其余键**(如 `mcp`),返回美化后的新文本。
 /// 文本空/坏 → 从空对象起。类型按 key 归一:`budget_tokens`→number、`skip_danger`→bool、其余→string。
 /// 供 REPL 的 `/config set` 用 —— 写盘由调用方做,这里只做纯文本变换(可单测)。
+fn config_json_root(text: &str) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let trimmed = text.trim_start_matches('\u{feff}').trim();
+    if trimmed.is_empty() {
+        return Ok(serde_json::Map::new());
+    }
+    match serde_json::from_str(trimmed) {
+        Ok(serde_json::Value::Object(map)) => Ok(map),
+        Ok(_) => Err("config.json root must be a JSON object".into()),
+        Err(error) => Err(format!(
+            "refusing to rewrite unreadable config.json ({error})"
+        )),
+    }
+}
+
 pub fn config_set(text: &str, key: &str, value: &str) -> Result<String, String> {
     if !CONFIG_KEYS.contains(&key) {
         return Err(format!("未知配置键 {key};可设:{}", CONFIG_KEYS.join(", ")));
     }
-    let mut root = match serde_json::from_str::<serde_json::Value>(text) {
-        Ok(serde_json::Value::Object(m)) => m,
-        _ => serde_json::Map::new(),
-    };
+    let mut root = config_json_root(text)?;
     let v = match key {
         "effort" => serde_json::Value::from(
             provider::normalize_reasoning_effort(value)
@@ -340,10 +351,7 @@ pub fn config_set_selection(
 /// 往 JSON 配置文本的 `providers` 数组加/覆盖一个 provider 档案(按 `name` 去重),**保留其余键**。
 /// 文本空/坏 → 从空对象起。纯变换,可单测;写盘由调用方做。供 REPL 的 `/provider add` 用。
 pub fn config_add_provider(text: &str, profile: &ProviderProfile) -> Result<String, String> {
-    let mut root = match serde_json::from_str::<serde_json::Value>(text) {
-        Ok(serde_json::Value::Object(m)) => m,
-        _ => serde_json::Map::new(),
-    };
+    let mut root = config_json_root(text)?;
     let entry = serde_json::to_value(profile).map_err(|e| e.to_string())?;
     let arr = root
         .entry("providers")
@@ -475,6 +483,12 @@ mod tests {
         // 未知键 / 坏类型 → Err(不写坏文件)。
         assert!(config_set(start, "api_key", "sk-x").is_err());
         assert!(config_set(start, "budget_tokens", "abc").is_err());
+        let bom = format!("\u{feff}{start}");
+        let from_bom = config_set(&bom, "effort", "low").unwrap();
+        assert_eq!(Config::parse(&from_bom).mcp.len(), 1);
+        assert!(config_set("{not-json", "effort", "low")
+            .unwrap_err()
+            .contains("unreadable"));
     }
 
     #[test]

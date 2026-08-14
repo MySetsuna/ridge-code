@@ -70,6 +70,29 @@ pub const OPENAI_DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/
 pub const OPENAI_DEVICE_VERIFICATION_URL: &str = "https://auth.openai.com/codex/device";
 pub const OPENAI_DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 
+/// SuperGrok / X Premium device-code login (RFC 8628) against accounts.x.ai.
+/// Client id is xAI's shared public agent client used by OpenClaw/Hermes.
+pub const XAI: OAuthConfig = OAuthConfig {
+    provider: "xai",
+    client_id: "b1a00492-073a-47ea-816f-4c329264a828",
+    authorize_url: "https://accounts.x.ai/sign-in",
+    token_url: "https://accounts.x.ai/oauth2/token",
+    redirect_uri: "http://127.0.0.1:54545/callback",
+    scopes: "openid profile email offline_access",
+    extra_query: "",
+    token_wire: TokenWire::Form,
+};
+pub const XAI_DEVICE_CODE_URL: &str = "https://accounts.x.ai/oauth2/device/code";
+pub const XAI_DEVICE_VERIFICATION_URL: &str = "https://accounts.x.ai/oauth2/device";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rfc8628DeviceCode {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub interval_secs: u64,
+}
+
 /// 无填充 base64url 编码(RFC 4648 §5;非 crypto,纯编码,手写 + 测,省一依赖)。
 pub fn base64url_nopad(bytes: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -461,6 +484,80 @@ pub async fn refresh(
     parse_token_response(&v, now_epoch, Some(refresh_token))
 }
 
+pub fn parse_rfc8628_device_response(v: &Value) -> Result<Rfc8628DeviceCode, ProviderError> {
+    let device_code = v["device_code"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or("device code response missing device_code")?
+        .to_string();
+    let user_code = v["user_code"]
+        .as_str()
+        .filter(|code| !code.is_empty())
+        .ok_or("device code response missing user_code")?
+        .to_string();
+    let verification_uri = v
+        .get("verification_uri_complete")
+        .or_else(|| v.get("verification_uri"))
+        .and_then(Value::as_str)
+        .filter(|uri| !uri.is_empty())
+        .unwrap_or(XAI_DEVICE_VERIFICATION_URL)
+        .to_string();
+    let interval_secs = json_u64(v, "interval").unwrap_or(5).max(1);
+    Ok(Rfc8628DeviceCode {
+        device_code,
+        user_code,
+        verification_uri,
+        interval_secs,
+    })
+}
+
+pub fn is_rfc8628_pending(error: &ProviderError) -> bool {
+    let text = error.to_string();
+    text.contains("authorization_pending") || text.contains("slow_down")
+}
+
+pub async fn request_rfc8628_device_code(
+    http: &dyn HttpClient,
+    cfg: &OAuthConfig,
+    device_code_url: &str,
+) -> Result<Rfc8628DeviceCode, ProviderError> {
+    let form = [("client_id", cfg.client_id), ("scope", cfg.scopes)];
+    parse_rfc8628_device_response(&http.post_form(device_code_url, &form).await?)
+}
+
+pub async fn poll_rfc8628_device_token(
+    http: &dyn HttpClient,
+    cfg: &OAuthConfig,
+    device: &Rfc8628DeviceCode,
+    now_epoch: u64,
+) -> Result<OAuthToken, ProviderError> {
+    let started = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(15 * 60);
+    let grant = "urn:ietf:params:oauth:grant-type:device_code";
+    loop {
+        if started.elapsed() > timeout {
+            return Err("device authorization timed out".into());
+        }
+        let form = [
+            ("grant_type", grant),
+            ("device_code", device.device_code.as_str()),
+            ("client_id", cfg.client_id),
+        ];
+        match http.post_form(cfg.token_url, &form).await {
+            Ok(value) => return parse_token_response(&value, now_epoch, None),
+            Err(error) if is_rfc8628_pending(&error) => {
+                let wait = if error.to_string().contains("slow_down") {
+                    device.interval_secs.saturating_add(5)
+                } else {
+                    device.interval_secs
+                };
+                tokio::time::sleep(std::time::Duration::from_secs(wait.max(1))).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn json_headers() -> Vec<(String, String)> {
     vec![("Content-Type".to_string(), "application/json".to_string())]
 }
@@ -507,5 +604,30 @@ fn split_code_state(s: &str) -> (String, String) {
     match s.trim().split_once('#') {
         Some((c, st)) => (c.to_string(), st.to_string()),
         None => (s.trim().to_string(), String::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_rfc8628_pending, parse_rfc8628_device_response, XAI};
+    use serde_json::json;
+
+    #[test]
+    fn rfc8628_device_response_reads_codes_and_interval() {
+        let parsed = parse_rfc8628_device_response(&json!({
+            "device_code": "dev-1",
+            "user_code": "ABCD-EFGH",
+            "verification_uri": "https://accounts.x.ai/oauth2/device",
+            "interval": 7
+        }))
+        .expect("device response");
+        assert_eq!(parsed.device_code, "dev-1");
+        assert_eq!(parsed.user_code, "ABCD-EFGH");
+        assert_eq!(parsed.interval_secs, 7);
+        assert!(parsed.verification_uri.contains("accounts.x.ai"));
+        assert_eq!(XAI.provider, "xai");
+        assert!(is_rfc8628_pending(
+            &"http 400: {\"error\":\"authorization_pending\"}".into()
+        ));
     }
 }

@@ -61,8 +61,8 @@ mod console_encoding {
 pub(crate) use login::{
     now_epoch, oauth_defaults, oauth_model_info, oauth_path, register_oauth_profile,
     resolve_claude_oauth_provider, run_login, save_oauth_token, start_device_oauth,
-    start_local_callback, verify_provider_key, DeviceOAuthEvent, DeviceOAuthFlow,
-    LocalOAuthCallback,
+    start_local_callback, start_xai_device_oauth, verify_provider_key, DeviceOAuthEvent,
+    DeviceOAuthFlow, LocalOAuthCallback,
 };
 pub(crate) use run::{headless, node_label, run_demo, run_once};
 

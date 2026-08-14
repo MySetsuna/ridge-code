@@ -1,7 +1,7 @@
 //! 供应商登录/认证/OAuth:key 校验、login 子命令、Claude 订阅 OAuth(iter-43)。
 use crate::{auth_path, config_path, ridge_home, secure_file};
 use agent::{apply_login, auth_upsert, preset_by_id, Config, PROVIDER_PRESETS};
-use provider::{AnthropicProvider, LlmProvider, Message};
+use provider::{AnthropicProvider, LlmProvider, Message, OpenAiProvider};
 use std::io::Write;
 use std::sync::Arc;
 
@@ -51,6 +51,7 @@ pub(crate) fn print_presets() {
          \x20         ridgecode login kimi --no-default          (add as a switchable profile)\n\
          \x20         ridgecode login openai sk-... --no-verify  (skip the connection check)\n\
          OAuth fallback: ridgecode login --codex --device-auth (no localhost callback port required).\n\
+         SuperGrok / X Premium: ridgecode login --grok  (accounts.x.ai device code, no API key).\n\
          Login verifies the key against the endpoint before saving. Key goes to ~/.ridge/auth.json\n\
          (never into config.json). Omit KEY to be prompted on stdin."
     );
@@ -69,6 +70,7 @@ pub(crate) async fn run_login(args: &[String]) -> anyhow::Result<()> {
     let mut no_verify = false;
     let mut oauth_claude = false;
     let mut oauth_codex = false;
+    let mut oauth_grok = false;
     let mut device_auth = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -80,13 +82,22 @@ pub(crate) async fn run_login(args: &[String]) -> anyhow::Result<()> {
             "--device-auth" => device_auth = true,
             "--claude" => oauth_claude = true, // iter-43:OAuth 订阅登录(接 Claude Pro/Max)
             "--codex" => oauth_codex = true,   // iter-48:OAuth 订阅登录(接 ChatGPT Plus/Pro)
+            "--grok" | "--xai" => oauth_grok = true,
             "--model" => model = it.next().cloned(),
             "--name" => name = it.next().cloned(),
             _ => positional.push(a),
         }
     }
     // OAuth(PKCE)订阅登录,与 api-key 登录分道(iter-43 claude / iter-48 codex)。
-    if let Some(result) = run_oauth_login(oauth_claude, oauth_codex, device_auth, no_verify).await {
+    if let Some(result) = run_oauth_login(
+        oauth_claude,
+        oauth_codex,
+        oauth_grok,
+        device_auth,
+        no_verify,
+    )
+    .await
+    {
         return result;
     }
     if list || positional.is_empty() {
@@ -171,13 +182,17 @@ pub(crate) async fn run_login(args: &[String]) -> anyhow::Result<()> {
 async fn run_oauth_login(
     claude: bool,
     codex: bool,
+    grok: bool,
     device_auth: bool,
     no_verify: bool,
 ) -> Option<anyhow::Result<()>> {
+    if grok {
+        return Some(run_login_xai_device(no_verify).await);
+    }
     if claude {
         if device_auth {
             return Some(Err(anyhow::anyhow!(
-                "--device-auth is only supported with `--codex`"
+                "--device-auth is only supported with `--codex` or `--grok`"
             )));
         }
         return Some(run_login_oauth(&provider::oauth::ANTHROPIC, no_verify).await);
@@ -226,6 +241,7 @@ pub(crate) fn save_oauth_token(
 pub(crate) fn oauth_defaults(provider_id: &str) -> (&'static str, &'static str) {
     match provider_id {
         "openai" => ("gpt-5", "https://chatgpt.com/backend-api/codex"),
+        "xai" => ("grok-4-latest", "https://api.x.ai/v1"),
         _ => ("claude-sonnet-4-6", "https://api.anthropic.com/v1"),
     }
 }
@@ -254,6 +270,8 @@ fn oauth_model_and_base(cfg: &Config, provider_id: &str) -> (String, String) {
         .unwrap_or_else(|| default_model.to_string());
     let base = if provider_id == "openai" {
         std::env::var("RIDGE_CHATGPT_BASE_URL").unwrap_or_else(|_| default_base.to_string())
+    } else if provider_id == "xai" {
+        std::env::var("RIDGE_XAI_BASE_URL").unwrap_or_else(|_| default_base.to_string())
     } else {
         std::env::var("RIDGE_BASE_URL")
             .ok()
@@ -268,7 +286,11 @@ fn oauth_model_and_base(cfg: &Config, provider_id: &str) -> (String, String) {
 /// even when config.json still contains an unrelated API provider.
 pub(crate) fn oauth_model_info(cfg: &Config) -> Option<(String, String, String)> {
     let text = std::fs::read_to_string(oauth_path()).ok()?;
-    for ocfg in [&provider::oauth::ANTHROPIC, &provider::oauth::OPENAI] {
+    for ocfg in [
+        &provider::oauth::ANTHROPIC,
+        &provider::oauth::OPENAI,
+        &provider::oauth::XAI,
+    ] {
         if agent::oauth_get(&text, ocfg.provider).is_some() {
             let (model, base) = oauth_model_and_base(cfg, ocfg.provider);
             return Some((ocfg.provider.to_string(), model, base));
@@ -286,13 +308,13 @@ fn oauth_provider(
     account_id: Option<String>,
     effort: &str,
 ) -> Arc<dyn LlmProvider> {
-    if provider_id == "anthropic" {
-        Arc::new(AnthropicProvider::new_oauth(base, model, access))
-    } else {
-        Arc::new(
+    match provider_id {
+        "anthropic" => Arc::new(AnthropicProvider::new_oauth(base, model, access)),
+        "openai" => Arc::new(
             provider::ChatGptProvider::new(base, model, access, account_id)
                 .with_reasoning_effort(effort),
-        )
+        ),
+        _ => Arc::new(OpenAiProvider::new(base, model, access)),
     }
 }
 
@@ -419,6 +441,35 @@ pub(crate) async fn run_login_device_auth(no_verify: bool) -> anyhow::Result<()>
     finish_oauth_login(&oauth::OPENAI, token, no_verify).await
 }
 
+pub(crate) async fn run_login_xai_device(no_verify: bool) -> anyhow::Result<()> {
+    use provider::oauth;
+
+    println!("\n== ridgecode login --grok (SuperGrok / X Premium device auth) ==\n");
+    println!("Requesting device code from accounts.x.ai…");
+    std::io::stdout().flush().ok();
+    let http = provider::http::ReqwestClient::new();
+    let device = oauth::request_rfc8628_device_code(&http, &oauth::XAI, oauth::XAI_DEVICE_CODE_URL)
+        .await
+        .map_err(|e| anyhow::anyhow!("Grok device auth request failed: {e}"))?;
+    let opened = open_in_browser(&device.verification_uri);
+    println!(
+        "1) {}:\n{}\n",
+        if opened {
+            "已在默认浏览器打开 xAI 授权页（下方 URL 仍可手动复制）"
+        } else {
+            "请在浏览器打开 xAI 授权页"
+        },
+        device.verification_uri
+    );
+    println!("2) 如页面要求，输入一次性设备码：{}", device.user_code);
+    println!("   使用 SuperGrok 或 X Premium 账号授权（最多 15 分钟）…");
+    std::io::stdout().flush().ok();
+    let token = oauth::poll_rfc8628_device_token(&http, &oauth::XAI, &device, now_epoch())
+        .await
+        .map_err(|e| anyhow::anyhow!("Grok device auth polling failed: {e}"))?;
+    finish_oauth_login(&oauth::XAI, token, no_verify).await
+}
+
 pub(crate) enum DeviceOAuthEvent {
     Ready { user_code: String, opened: bool },
     Complete(Result<provider::oauth::OAuthToken, String>),
@@ -426,6 +477,7 @@ pub(crate) enum DeviceOAuthEvent {
 
 pub(crate) struct DeviceOAuthFlow {
     pub(crate) receiver: tokio::sync::mpsc::UnboundedReceiver<DeviceOAuthEvent>,
+    pub(crate) provider: &'static str,
     cancel: tokio::task::AbortHandle,
 }
 
@@ -468,6 +520,43 @@ pub(crate) fn start_device_oauth() -> DeviceOAuthFlow {
     });
     DeviceOAuthFlow {
         receiver,
+        provider: "openai",
+        cancel: task.abort_handle(),
+    }
+}
+
+pub(crate) fn start_xai_device_oauth() -> DeviceOAuthFlow {
+    let (tx, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        let result = async {
+            let http = provider::http::ReqwestClient::new();
+            let device = provider::oauth::request_rfc8628_device_code(
+                &http,
+                &provider::oauth::XAI,
+                provider::oauth::XAI_DEVICE_CODE_URL,
+            )
+            .await
+            .map_err(|e| format!("Grok device auth request failed: {e}"))?;
+            let opened = open_in_browser(&device.verification_uri);
+            let _ = tx.send(DeviceOAuthEvent::Ready {
+                user_code: device.user_code.clone(),
+                opened,
+            });
+            provider::oauth::poll_rfc8628_device_token(
+                &http,
+                &provider::oauth::XAI,
+                &device,
+                now_epoch(),
+            )
+            .await
+            .map_err(|e| format!("Grok device auth polling failed: {e}"))
+        }
+        .await;
+        let _ = tx.send(DeviceOAuthEvent::Complete(result));
+    });
+    DeviceOAuthFlow {
+        receiver,
+        provider: "xai",
         cancel: task.abort_handle(),
     }
 }
@@ -740,13 +829,15 @@ fn read_pasted_authorization(expected_state: &str) -> anyhow::Result<String> {
 
 pub(crate) fn register_oauth_profile(provider_id: &str) -> Option<String> {
     let (dm, db) = oauth_defaults(provider_id);
+    let (name, kind) = match provider_id {
+        "anthropic" => ("claude-max", "anthropic"),
+        "openai" => ("chatgpt-plus", "openai"),
+        "xai" => ("grok", "openai"),
+        _ => return None,
+    };
     let prof = agent::ProviderProfile {
-        name: if provider_id == "anthropic" {
-            "claude-max".to_string()
-        } else {
-            "chatgpt-plus".to_string()
-        },
-        kind: provider_id.to_string(),
+        name: name.to_string(),
+        kind: kind.to_string(),
         model: dm.to_string(),
         base_url: db.to_string(),
         key_env: String::new(),
@@ -772,7 +863,11 @@ pub(crate) async fn resolve_claude_oauth_provider(
     effort: &str,
 ) -> Option<Arc<dyn LlmProvider>> {
     let text = std::fs::read_to_string(oauth_path()).ok()?;
-    for oauth_config in [&provider::oauth::ANTHROPIC, &provider::oauth::OPENAI] {
+    for oauth_config in [
+        &provider::oauth::ANTHROPIC,
+        &provider::oauth::OPENAI,
+        &provider::oauth::XAI,
+    ] {
         if let Some(provider) = resolve_oauth_candidate(cfg, effort, &text, oauth_config).await {
             return Some(provider);
         }
@@ -1057,6 +1152,8 @@ mod tests {
             "https://chatgpt.com/backend-api/codex"
         );
         assert_eq!(oauth_defaults("anthropic").0, "claude-sonnet-4-6");
+        assert_eq!(oauth_defaults("xai").0, "grok-4-latest");
+        assert_eq!(oauth_defaults("xai").1, "https://api.x.ai/v1");
         assert_eq!(oauth_defaults("unknown").1, "https://api.anthropic.com/v1");
         assert!(now_epoch() > 0);
     }

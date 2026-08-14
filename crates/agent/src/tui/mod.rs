@@ -1724,31 +1724,52 @@ fn handle_device_oauth_event(
 ) {
     match event {
         DeviceOAuthEvent::Ready { user_code, opened } => {
+            let provider = ui
+                .oauth_device
+                .as_ref()
+                .map(|flow| flow.provider)
+                .unwrap_or("openai");
+            let verify_url = if provider == "xai" {
+                provider::oauth::XAI_DEVICE_VERIFICATION_URL
+            } else {
+                provider::oauth::OPENAI_DEVICE_VERIFICATION_URL
+            };
+            let label = if provider == "xai" { "Grok" } else { "Codex" };
             ui.device_auth_status = Some(format!("Device code: {user_code}"));
             ui.note(
                 format!(
-                    "Codex device auth: {} browser at {} and enter code: {user_code}",
+                    "{label} device auth: {} browser at {verify_url} and enter code: {user_code}",
                     if opened {
                         "browser opened; visit"
                     } else {
                         "open"
                     },
-                    provider::oauth::OPENAI_DEVICE_VERIFICATION_URL
                 ),
                 role_color(Role::Info),
             );
         }
         DeviceOAuthEvent::Complete(result) => {
+            let provider = ui
+                .oauth_device
+                .as_ref()
+                .map(|flow| flow.provider)
+                .unwrap_or("openai");
+            let ocfg = if provider == "xai" {
+                &provider::oauth::XAI
+            } else {
+                &provider::oauth::OPENAI
+            };
+            let label = if provider == "xai" { "Grok" } else { "Codex" };
             ui.oauth_device.take();
             match result {
                 Ok(token) => {
                     ui.device_auth_status = None;
-                    apply_oauth_token(&provider::oauth::OPENAI, token, meta, swap, ui);
+                    apply_oauth_token(ocfg, token, meta, swap, ui);
                 }
                 Err(error) => {
                     ui.device_auth_status = Some(format!("Device auth failed: {error}"));
                     ui.note(
-                        format!("Codex device OAuth failed: {error}"),
+                        format!("{label} device OAuth failed: {error}"),
                         role_color(Role::Error),
                     );
                 }

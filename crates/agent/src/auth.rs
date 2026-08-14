@@ -51,8 +51,16 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         label: "xAI Grok",
         kind: "openai",
         base_url: "https://api.x.ai/v1",
-        default_model: "grok-2-latest",
+        default_model: "grok-4-latest",
         key_env: "XAI_API_KEY",
+    },
+    ProviderPreset {
+        id: "volc",
+        label: "Volcengine Ark (方舟)",
+        kind: "openai",
+        base_url: "https://ark.cn-beijing.volces.com/api/coding/v3",
+        default_model: "glm-5-2-260617",
+        key_env: "ARK_API_KEY",
     },
     // ── 中国顶级 ──
     ProviderPreset {
@@ -274,6 +282,7 @@ mod tests {
             "anthropic",
             "gemini",
             "grok",
+            "volc",
             "glm",
             "kimi",
             "deepseek",
