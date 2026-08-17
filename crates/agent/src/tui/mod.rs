@@ -1555,17 +1555,15 @@ fn edit_input(action: InputAction, ui: &mut Ui) {
         InputAction::Home => ui.input.home(),
         InputAction::End => ui.input.end(),
         InputAction::NewLine => ui.input.insert('\n'),
-        InputAction::CursorUpOrHistory => {
-            if !ui.input.move_up() {
-                let width = crossterm::terminal::size()
-                    .map(|(columns, _)| columns)
-                    .unwrap_or(80)
-                    .saturating_sub(2);
-                if up_fallback_is_home(&ui.input.buffer, ui.input.cursor, width) {
-                    ui.input.home();
-                } else {
-                    ui.input.recall_prev();
-                }
+        InputAction::CursorUpOrHistory if !ui.input.move_up() => {
+            let width = crossterm::terminal::size()
+                .map(|(columns, _)| columns)
+                .unwrap_or(80)
+                .saturating_sub(2);
+            if up_fallback_is_home(&ui.input.buffer, ui.input.cursor, width) {
+                ui.input.home();
+            } else {
+                ui.input.recall_prev();
             }
         }
         InputAction::CursorDownOrHistory => cursor_down_or_history(ui),

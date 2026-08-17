@@ -1,9 +1,9 @@
-﻿<#
+<#
 .SYNOPSIS
   RidgeCode 安装器(Windows)—— 零 cargo、零源码,只需一个独立 .exe。
 .DESCRIPTION
   在线装最新版:  irm https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.ps1 | iex
-  指定版本:      &([scriptblock]::Create((irm .../v0.5.21/scripts/install.ps1))) -Version v0.5.21
+  指定版本:      &([scriptblock]::Create((irm .../v0.5.22/scripts/install.ps1))) -Version v0.5.22
   装本地已构建:  .\scripts\install.ps1 -Local .\target\release\ridgecode.exe
   装到 $env:LOCALAPPDATA\Programs\ridgecode,并把该目录加入「用户 PATH」(新终端生效)。
 .PARAMETER Version

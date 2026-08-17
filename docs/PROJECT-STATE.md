@@ -5,7 +5,7 @@
 
 ## A. 项目定位与北极星(稳定段,少改)
 
-RidgeCode 是一个**模块化、跨领域可扩展的通用 agent 框架**(单二进制 `ridgecode`,Rust workspace,当前 v0.5.21,住 `crates/agent`)。既能像 Claude Code 写代码,又能做编程以外的事。**加新能力 = 加一个 MCP server 配置或一个 SKILL.md,而不是改 Rust 源码。**
+RidgeCode 是一个**模块化、跨领域可扩展的通用 agent 框架**(单二进制 `ridgecode`,Rust workspace,当前 v0.5.22,住 `crates/agent`)。既能像 Claude Code 写代码,又能做编程以外的事。**加新能力 = 加一个 MCP server 配置或一个 SKILL.md,而不是改 Rust 源码。**
 
 四层解耦(已全部落地):
 1. **内核** —— `langgraph` 纯图引擎(StateGraph + Pregel BSP 超步 + checkpoint 时间旅行,零 LLM 依赖);
@@ -825,3 +825,4 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - Agent route 已落地：`build_agents` 仅把可解析凭据的 `providers[]` 放入候选；`RouteRequest` 按任务推断难度/规模/类型，`choose_route` 过滤排序，`dispatch_agent` 与 `run_planned_routed` 输出选择理由及单次 fallback。真实配置 smoke 观察到 `Zai::glm-4.6` 选择及 HTTP 429 后主 provider fallback；`/agent` 当前仅列出可用 agent，未接手动派发。
 - 发布/安装基线在本轮将递增至 `v0.5.17`；提交、推送、GitHub Release 与本机新包安装须以远端资产和 `ridgecode --version` 复核为准。
 - 本轮 NotebookLM 冷闸因用户请求触发，但本机认证已过期且 CDP 初始不可用；未消费未验证研究结论。上述代码、测试、配置与 smoke 为当前事实权威；跨进程 A2A/ridge-mcp 互操作须另立明确 receipt、身份、取消与响应契约后再开发。
+
