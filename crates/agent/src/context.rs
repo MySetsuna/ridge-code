@@ -93,13 +93,45 @@ pub(crate) fn durable_state_block(s: &AgentState) -> Option<String> {
     let explore_nudge = s.explore_streak >= EXPLORE_NUDGE_AFTER;
     if s.modified_files.is_empty()
         && s.last_error.is_none()
+        && s.issues.is_empty()
         && !explore_nudge
         && s.dispatch_wave_count() == 0
         && !s.codegraph_unavailable
+        && s.todos.is_empty()
+        && s.last_read_paths.is_empty()
+        && s.live_shell_jobs.is_empty()
     {
         return None;
     }
     let mut b = String::from("<durable_state>\n");
+    if !s.issues.is_empty() {
+        b.push_str(&format!("verification_issues: {}\n", s.issues.join("; ")));
+        b.push_str(
+            "recovery: The previous final answer was rejected. Do not return another final answer yet. Continue the user's required sequence with the next concrete tool call; resolve the issue, then verify before answering.\n",
+        );
+    }
+    if s.todos.iter().any(|todo| todo.status.trim() != "completed") {
+        let items: Vec<String> = s
+            .todos
+            .iter()
+            .map(|todo| format!("[{}] {}", todo.status, todo.content))
+            .collect();
+        b.push_str(&format!("todos: {}\n", items.join("; ")));
+    }
+    if !s.last_read_paths.is_empty() {
+        b.push_str(&format!("located: {}\n", s.last_read_paths.join(", ")));
+        if s.modified_files.is_empty() {
+            b.push_str(
+                "next: continue the user's required sequence. Edit only a task-approved path; a located evidence path is not automatically writable. Do not restart full-repo search.\n",
+            );
+        }
+    }
+    if !s.live_shell_jobs.is_empty() {
+        b.push_str(&format!(
+            "live_jobs: {} (poll run_shell job_id; do not restart; blocks completion)\n",
+            s.live_shell_jobs.join(", ")
+        ));
+    }
     if !s.modified_files.is_empty() {
         let files: Vec<&str> = s.modified_files.iter().map(String::as_str).collect();
         b.push_str(&format!("已改文件: {}\n", files.join(", ")));
@@ -167,7 +199,7 @@ mod tests {
     };
     use crate::brain::{tool_output_failed, tool_output_ok};
     use crate::exec::is_error_observation;
-    use crate::state::{AgentState, EXPLORE_NUDGE_AFTER};
+    use crate::state::{AgentState, Todo, EXPLORE_NUDGE_AFTER};
     use provider::{Message, Role};
 
     /// 上下文腐烂判定:小历史不腐烂;单条超硬上限的巨消息(压不掉)→ 腐烂。
@@ -401,6 +433,39 @@ mod tests {
     }
 
     #[test]
+    fn compact_keeps_todos_and_located_paths_in_fact_block() {
+        let mut history = vec![Message::user("edit pack.txt then package")];
+        for i in 0..20 {
+            history.push(Message::assistant(format!("noise {i} {}", "x".repeat(800))));
+            history.push(Message::tool_result(
+                format!("c{i}"),
+                format!("search hit {}", "y".repeat(800)),
+            ));
+        }
+        let state = AgentState {
+            history,
+            todos: vec![Todo {
+                content: "pack release".into(),
+                status: "in_progress".into(),
+            }],
+            last_read_paths: vec!["pack.txt".into()],
+            live_shell_jobs: vec!["sh-1-2".into()],
+            ..Default::default()
+        };
+        let msgs = to_messages("SYS", &state);
+        let last = msgs.last().unwrap();
+        assert_eq!(last.role, Role::System);
+        assert!(last.content.contains("pack release"), "{}", last.content);
+        assert!(last.content.contains("pack.txt"), "{}", last.content);
+        assert!(last.content.contains("sh-1-2"), "{}", last.content);
+        assert!(
+            last.content.contains("live_jobs"),
+            "compact must keep parked jobs: {}",
+            last.content
+        );
+    }
+
+    #[test]
     fn durable_state_reports_dispatch_wave_budget_without_blocking_next_wave() {
         let state = AgentState {
             dispatch_batches_used: 2,
@@ -410,5 +475,24 @@ mod tests {
         assert!(block.contains("dispatch_batches: 2/8 used"));
         assert!(block.contains("6 remaining"));
         assert!(block.contains("each wave may run 2-3 sub-agents"));
+    }
+
+    #[test]
+    fn durable_state_exposes_verifier_rejection_to_the_next_model_turn() {
+        let state = AgentState {
+            issues: vec!["target known, matching edit not landed".into()],
+            ..AgentState::new("write result.md")
+        };
+        let messages = to_messages("SYS", &state);
+        let feedback = messages.last().expect("verifier feedback system message");
+        assert_eq!(feedback.role, Role::System);
+        assert!(feedback.content.contains("verification_issues"));
+        assert!(feedback
+            .content
+            .contains("target known, matching edit not landed"));
+        assert!(feedback
+            .content
+            .contains("previous final answer was rejected"));
+        assert!(feedback.content.contains("next concrete tool call"));
     }
 }

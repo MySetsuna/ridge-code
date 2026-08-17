@@ -1,7 +1,7 @@
 use crate::brain::{
-    act_route, build_system_prompt_with_mode, explore_handoff_patch, is_explore_tool,
-    is_land_edit_tool, reason_route, verify_failure_reason, verify_node, verify_ok,
-    verify_route_llm,
+    act_route, build_system_prompt_with_mode, completion_blocked, explore_handoff_patch,
+    is_explore_tool, is_land_edit_tool, needs_land_edit, reason_route, tool_output_ok,
+    verify_failure_reason, verify_node, verify_ok, verify_route_llm,
 };
 use crate::context::{bound_observation, to_messages};
 use crate::exec::{
@@ -26,11 +26,17 @@ use std::time::Duration;
 // halt_reason 已移至 orchestrate;此处再导出,保持 `crate::graph::halt_reason` 路径不变
 //(signals.rs 经 `use crate::graph::*` 依赖它,不在本次改动范围内)。
 pub(crate) use crate::orchestrate::halt_reason;
+use crate::orchestrate::HaltReason;
 
 /// 流式 token 总线:REPL 每回合把一个 sender 塞进来,reason 节点边收 provider 的增量
 /// 边往里发,REPL 侧就能**逐字显示**(像 Claude Code)。载 [`StreamChunk`] 以**分道**回答/思考
 /// (回答恒显、思考灰显)。`None` = 该回合不流式。
 pub type TokenBus = Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<StreamChunk>>>>;
+
+const PROVIDER_ACTION_RETRY_GUIDANCE: &str =
+    "<provider_retry><action_required>true</action_required>The previous provider turn failed or returned no actionable completion. Select the next unfinished step from the original user request/current todos and invoke exactly one matching tool now.</provider_retry>";
+const PROVIDER_FINAL_RETRY_GUIDANCE: &str =
+    "<provider_retry><action_required>false</action_required>Objective work is complete. Return the complete final answer now; do not plan, narrate a future action, or request a tool.</provider_retry>";
 
 /// 一个「永不流式」的空总线(测试 / 非交互装配用)。
 pub fn null_token_bus() -> TokenBus {
@@ -351,17 +357,40 @@ fn add_reason_node(
         let provider = provider.clone();
         let system = system.clone();
         let force_action = state.explore_handoff && !state.explore_action_used;
-        let candidate_tools = if force_action {
+        let retrying = state.last_action.as_deref() == Some("retry");
+        let retry_action = retrying && retry_requires_tool(&state);
+        let next_explicit = explicit_next_tools(&state);
+        let explicit_sequence = explicit_tool_sequence_declared(&state);
+        let explicit_action_required = next_explicit.is_some();
+        let mut candidate_tools = if force_action {
             handoff_tool_specs(&specs)
         } else {
             specs.clone()
         };
-        let tools = available_tool_specs(&candidate_tools, &state);
+        if let Some(allowed) = next_explicit {
+            candidate_tools.retain(|spec| allowed.contains(&spec.name.as_str()));
+        }
+        let tools = if (retrying && !retry_action)
+            || (explicit_sequence && !explicit_action_required)
+        {
+            Vec::new()
+        } else {
+            available_tool_specs(&candidate_tools, &state)
+        };
         let bus = token_bus.clone();
         let steer_bus = steer_bus.clone();
         async move {
-            let mut messages = to_messages(&system, &state);
             let guidance = take_steer(&steer_bus);
+            if explicit_sequence && !explicit_action_required && verify_ok(&state) {
+                return Ok::<_, provider::ProviderError>(reason_patch(
+                    &state,
+                    deterministic_wrapup(&state, HaltReason::Approved),
+                    None,
+                    provider::Usage::default(),
+                    guidance,
+                ));
+            }
+            let mut messages = to_messages(&system, &state);
             for text in &guidance {
                 messages.push(Message::user(steer_message(text)));
             }
@@ -369,6 +398,25 @@ fn add_reason_node(
                 messages.push(Message::new(
                     Role::System,
                     "<explore_handoff>Read/search budget is exhausted. Do not call read, search, web, codegraph, or dispatch tools. Choose the smallest safe edit/write/apply_edits or verification command now; if no safe action is possible, state the concrete blocker. Do not claim completion without an objective result.</explore_handoff>",
+                ));
+            }
+            if retrying {
+                messages.push(Message::new(
+                    Role::System,
+                    if retry_action {
+                        PROVIDER_ACTION_RETRY_GUIDANCE
+                    } else {
+                        PROVIDER_FINAL_RETRY_GUIDANCE
+                    },
+                ));
+            } else if explicit_sequence {
+                messages.push(Message::new(
+                    Role::System,
+                    if explicit_action_required {
+                        PROVIDER_ACTION_RETRY_GUIDANCE
+                    } else {
+                        PROVIDER_FINAL_RETRY_GUIDANCE
+                    },
                 ));
             }
             let request = CompletionRequest {
@@ -389,7 +437,7 @@ fn add_reason_node(
                 Ok(completion) => completion,
                 Err(error) => {
                     requeue_steer(&steer_bus, guidance);
-                    return Err(error);
+                    return Ok(provider_retry_patch(&state, error.to_string()));
                 }
             };
             let usage = completion.usage.clone();
@@ -410,6 +458,99 @@ fn add_reason_node(
         }
     });
     graph_trace("system.ready");
+}
+
+fn retry_requires_tool(state: &AgentState) -> bool {
+    completion_blocked(state)
+        || state
+            .tool_output
+            .as_deref()
+            .is_none_or(is_error_observation)
+        || explicit_tool_sequence_incomplete(state)
+}
+
+fn explicit_tool_sequence_incomplete(state: &AgentState) -> bool {
+    explicit_next_tools(state).is_some()
+}
+
+fn explicit_tool_sequence_declared(state: &AgentState) -> bool {
+    let task = state.task.to_ascii_lowercase();
+    task.contains("required sequence")
+        || task.contains("do not skip or reorder")
+        || (task.contains("first use") && task.contains("then use"))
+}
+
+fn explicit_next_tools(state: &AgentState) -> Option<Vec<&'static str>> {
+    let task = state.task.to_ascii_lowercase();
+    if !explicit_tool_sequence_declared(state) {
+        return None;
+    }
+    let search_required = task.matches("use the search tool").count();
+    let read_required = task.matches("use read_file").count();
+    let read_back_required =
+        usize::from(task.contains("read result.md back") || task.contains("read it back"));
+    let write_required = usize::from(
+        task.contains("use write_file")
+            || task.contains("using write_file")
+            || task.contains("use edit_file"),
+    );
+    let run_required =
+        usize::from(task.contains("use run_shell") || task.contains("with run_shell"));
+    let mut required = Vec::new();
+    required.extend((0..search_required).map(|_| vec!["search"]));
+    required.extend((0..read_required).map(|_| vec!["read_file"]));
+    required.extend((0..write_required).map(|_| vec!["write_file", "edit_file", "apply_edits"]));
+    required.extend((0..read_back_required).map(|_| vec!["read_file"]));
+    required.extend((0..run_required).map(|_| vec!["run_shell"]));
+    if required.is_empty() {
+        return None;
+    }
+
+    let successful_calls = state
+        .history
+        .iter()
+        .flat_map(|message| &message.tool_calls)
+        .filter(|call| {
+            state.history.iter().any(|result| {
+                result.role == Role::Tool
+                    && result.tool_call_id.as_deref() == Some(call.id.as_str())
+                    && !is_error_observation(&result.content)
+                    && (call.name != "run_shell" || tool_output_ok(&result.content))
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut cursor = 0;
+    for allowed in required {
+        let Some(relative) = successful_calls[cursor..]
+            .iter()
+            .position(|call| allowed.contains(&call.name.as_str()))
+        else {
+            return Some(allowed);
+        };
+        cursor += relative + 1;
+    }
+    None
+}
+
+fn provider_retry_patch(state: &AgentState, error: String) -> Patch {
+    let detail = error
+        .lines()
+        .next()
+        .unwrap_or("provider request failed")
+        .chars()
+        .take(500)
+        .collect::<String>();
+    Patch::Batch(vec![
+        Patch::BumpStep,
+        Patch::Message(format!(
+            "reason#{}: provider error -> retry: {detail}",
+            state.steps + 1
+        )),
+        Patch::SetLastError(Some(format!("provider error: {detail}"))),
+        Patch::SetErrStreak(state.err_streak + 1),
+        Patch::PendingCall(None),
+        Patch::Action(Some("retry".to_string())),
+    ])
 }
 
 fn handoff_tool_specs(specs: &[provider::ToolSpec]) -> Vec<provider::ToolSpec> {
@@ -455,6 +596,9 @@ fn reason_patch(
     );
     match call {
         Some(call) => {
+            patches.push(Patch::Issues(Vec::new()));
+            patches.push(Patch::SetLastError(None));
+            patches.push(Patch::SetErrStreak(0));
             patches.push(Patch::Message(format!(
                 "reason#{}: tool_call {} {}",
                 state.steps + 1,
@@ -468,11 +612,26 @@ fn reason_patch(
             patches.push(Patch::Action(Some("tool".to_string())));
         }
         None => {
+            if text.trim().is_empty() {
+                patches.push(Patch::Message(format!(
+                    "reason#{}: empty completion (no text or tool call) -> retry",
+                    state.steps + 1
+                )));
+                patches.push(Patch::SetLastError(Some(
+                    "provider returned an empty completion without a tool call".to_string(),
+                )));
+                patches.push(Patch::SetErrStreak(state.err_streak + 1));
+                patches.push(Patch::PendingCall(None));
+                patches.push(Patch::Action(Some("retry".to_string())));
+                return Patch::Batch(patches);
+            }
             patches.push(Patch::Message(format!(
                 "reason#{}: (final) {text}",
                 state.steps + 1
             )));
             patches.push(Patch::PushHistory(Message::assistant(text)));
+            patches.push(Patch::SetLastError(None));
+            patches.push(Patch::SetErrStreak(0));
             patches.push(Patch::PendingCall(None));
             patches.push(Patch::Action(Some("finish".to_string())));
         }
@@ -497,7 +656,10 @@ fn add_act_node(graph: &mut StateGraph<AgentState>, context: ActContext) {
         async move {
             let patch = match state.pending_call.as_ref() {
                 Some(call) => {
-                    let observation = if state.dispatch_wave_count() >= MAX_DISPATCH_BATCHES
+                    let effective_call = normalize_explicit_run_shell(&state, call);
+                    let observation = if let Some(blocked) = explicit_sequence_block(&state, call) {
+                        blocked
+                    } else if state.dispatch_wave_count() >= MAX_DISPATCH_BATCHES
                         && call.name == "dispatch_agents"
                     {
                         format!(
@@ -512,8 +674,18 @@ fn add_act_node(graph: &mut StateGraph<AgentState>, context: ActContext) {
                             "BLOCKED (explore handoff): {} is read-only; choose an edit or verification action",
                             call.name
                         )
+                    } else if is_broad_search_after_target(&state, call) {
+                        format!(
+                            "BLOCKED (target known): located {}; use edit_file/write_file/apply_edits or run_shell to verify. Do not restart full-repo search.",
+                            state.last_read_paths.join(", ")
+                        )
+                    } else if is_explore_shell_after_target(&state, call) {
+                        format!(
+                            "BLOCKED (target known): located {}; use edit_file/write_file/apply_edits, not run_shell as an editor or search.",
+                            state.last_read_paths.join(", ")
+                        )
                     } else {
-                        execute_pending_call(call, &context).await
+                        execute_pending_call(&effective_call, &context).await
                     };
                     act_patch(&state, call, observation)
                 }
@@ -522,6 +694,68 @@ fn add_act_node(graph: &mut StateGraph<AgentState>, context: ActContext) {
             Ok::<_, Infallible>(patch)
         }
     });
+}
+
+fn explicit_sequence_block(state: &AgentState, call: &provider::ToolCall) -> Option<String> {
+    let allowed = match explicit_next_tools(state) {
+        Some(allowed) => allowed,
+        None if explicit_tool_sequence_declared(state) => {
+            return Some(format!(
+                "BLOCKED (explicit sequence): required sequence is complete; received {} instead of a final answer",
+                call.name
+            ));
+        }
+        None => return None,
+    };
+    if !allowed.contains(&call.name.as_str()) {
+        return Some(format!(
+            "BLOCKED (explicit sequence): next required tool is {}; received {}",
+            allowed.join(" or "),
+            call.name
+        ));
+    }
+    if call.name == "run_shell" {
+        if let Some(expected) = exact_run_shell_command(&state.task) {
+            let actual = call
+                .arguments
+                .get("cmd")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if actual != expected {
+                return Some(format!(
+                    "BLOCKED (explicit sequence): run_shell command must exactly equal `{expected}`"
+                ));
+            }
+        }
+    }
+    None
+}
+
+fn normalize_explicit_run_shell(
+    state: &AgentState,
+    call: &provider::ToolCall,
+) -> provider::ToolCall {
+    let mut effective = call.clone();
+    if call.name == "run_shell" && exact_run_shell_command(&state.task).is_some() {
+        if let serde_json::Value::Object(arguments) = &mut effective.arguments {
+            arguments.remove("shell");
+        }
+    }
+    effective
+}
+
+fn exact_run_shell_command(task: &str) -> Option<&str> {
+    const MARKER: &str = "run this exact command with run_shell:";
+    let lower = task.to_ascii_lowercase();
+    let tail = task.get(lower.find(MARKER)? + MARKER.len()..)?.trim_start();
+    let end = [tail.find(". It passes"), tail.find('\n'), tail.find('\r')]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(tail.len());
+    let command = tail.get(..end)?.trim();
+    (!command.is_empty()).then_some(command)
 }
 
 async fn execute_pending_call(call: &provider::ToolCall, context: &ActContext) -> String {
@@ -575,8 +809,11 @@ fn act_patch(state: &AgentState, call: &provider::ToolCall, observation: String)
         Patch::PendingCall(None),
     ];
     if state.explore_handoff {
-        let action_used = !is_explore_tool(&call.name) && !is_error_observation(&observation);
-        patches.push(Patch::SetExploreActionUsed(action_used));
+        patches.push(Patch::SetExploreActionUsed(satisfies_handoff_action(
+            state,
+            call,
+            &observation,
+        )));
     }
     if state.explore_handoff && is_land_edit_tool(&call.name) && !is_error_observation(&observation)
     {
@@ -607,6 +844,71 @@ fn codegraph_unavailable(observation: &str) -> bool {
         || lower.contains("no .codegraph")
         || lower.contains("codegraph cannot query")
         || lower.contains("codegraph-mcp unavailable")
+}
+
+fn is_broad_search_after_target(state: &AgentState, call: &provider::ToolCall) -> bool {
+    if call.name != "search" || state.last_read_paths.is_empty() {
+        return false;
+    }
+    let path = call
+        .arguments
+        .get("path")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim();
+    path.is_empty() || path == "." || path == "./"
+}
+
+fn satisfies_handoff_action(
+    state: &AgentState,
+    call: &provider::ToolCall,
+    observation: &str,
+) -> bool {
+    if is_error_observation(observation) {
+        return false;
+    }
+    if is_land_edit_tool(&call.name) {
+        return true;
+    }
+    // A change task that already located a file is not "acted on" by another
+    // shell listing or test run. Verify shells only count after a write lands.
+    call.name == "run_shell" && !needs_land_edit(state)
+}
+
+fn is_explore_shell_after_target(state: &AgentState, call: &provider::ToolCall) -> bool {
+    if call.name != "run_shell" || state.last_read_paths.is_empty() {
+        return false;
+    }
+    let cmd = call
+        .arguments
+        .get("cmd")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    [
+        "get-content",
+        "set-content",
+        "select-string",
+        "get-childitem",
+        "get-item",
+        "gci ",
+        "findstr",
+        "rg ",
+        "rg.exe",
+        "[io.file]::",
+        "out-file",
+        "add-content",
+        "type ",
+        "cat ",
+        "head ",
+        "tail ",
+        "find ",
+        "dir ",
+        "ls ",
+        "tree ",
+    ]
+    .iter()
+    .any(|marker| cmd.contains(marker))
 }
 
 fn next_explore_streak(state: &AgentState, call: &provider::ToolCall, observation: &str) -> usize {
@@ -683,12 +985,14 @@ fn add_wrapup_node(
                 messages,
                 tools: vec![],
             };
-            let (text, usage) = match provider.complete(&request).await {
+            let (candidate, usage) = match provider.complete(&request).await {
                 Ok(completion) => (completion.text, completion.usage),
-                Err(error) => (
-                    format!("(交接说明生成失败:{error})"),
-                    provider::Usage::default(),
-                ),
+                Err(_) => (String::new(), provider::Usage::default()),
+            };
+            let text = if candidate.trim().is_empty() {
+                deterministic_wrapup(&state, reason)
+            } else {
+                candidate
             };
             Ok::<_, Infallible>(Patch::Batch(vec![
                 Patch::AddUsage(usage),
@@ -697,6 +1001,78 @@ fn add_wrapup_node(
             ]))
         }
     });
+}
+
+fn deterministic_wrapup(state: &AgentState, reason: HaltReason) -> String {
+    let mut tools = Vec::new();
+    for message in &state.display_messages {
+        let Some((name, _)) = message
+            .strip_prefix("act: ")
+            .and_then(|rest| rest.split_once(" -> "))
+        else {
+            continue;
+        };
+        if !tools.iter().any(|known| known == &name) {
+            tools.push(name);
+        }
+    }
+    let tools = if tools.is_empty() {
+        "none recorded".to_string()
+    } else {
+        tools.join(" → ")
+    };
+    let reads = if state.last_read_paths.is_empty() {
+        "none recorded".to_string()
+    } else {
+        state.last_read_paths.join(", ")
+    };
+    let writes = if state.modified_files.is_empty() {
+        "none recorded".to_string()
+    } else {
+        state
+            .modified_files
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let evidence = state
+        .tool_output
+        .as_deref()
+        .unwrap_or("none recorded")
+        .chars()
+        .take(2_000)
+        .collect::<String>();
+    let cjk = state
+        .task
+        .chars()
+        .any(|ch| matches!(ch, '\u{3400}'..='\u{9fff}' | '\u{f900}'..='\u{faff}'));
+
+    if cjk {
+        let (heading, status) = if reason == HaltReason::Approved {
+            ("任务已完成", "客观工作与验证均已完成。".to_string())
+        } else {
+            ("任务暂停", format!("停机原因：`{}`。", reason.as_str()))
+        };
+        format!(
+            "## {heading}\n\n**状态：** {status}\n\n| 项目 | 证据 |\n| --- | --- |\n| 已执行工具 | `{tools}` |\n| 已读取路径 | `{reads}` |\n| 已修改文件 | `{writes}` |\n| 最终验证 | 见下方真实工具输出 |\n\n```text\n{evidence}\n```"
+        )
+    } else {
+        let (heading, status) = if reason == HaltReason::Approved {
+            (
+                "Task completed",
+                "Objective work and verification completed.".to_string(),
+            )
+        } else {
+            (
+                "Task paused",
+                format!("Halt reason: `{}`.", reason.as_str()),
+            )
+        };
+        format!(
+            "## {heading}\n\n**Status:** {status}\n\n| Item | Evidence |\n| --- | --- |\n| Tools completed | `{tools}` |\n| Read paths | `{reads}` |\n| Modified files | `{writes}` |\n| Final check | See actual tool output below |\n\n```text\n{evidence}\n```"
+        )
+    }
 }
 
 /// 给独立 reviewer 的复核请求:system 定角色 + user 附上 agent 的轨迹。
@@ -727,8 +1103,9 @@ mod tests {
     };
     use crate::{
         build_agent, build_llm_agent, build_llm_agent_full_with_steer, build_llm_agent_reviewed,
-        build_llm_agent_with, default_tool, resolve_mcp, scripted, AgentState, AutoApprove, Brain,
-        HaltReason, McpTools, Tool, MAX_DISPATCH_BATCHES, MAX_EXPLORE, MAX_STEPS,
+        build_llm_agent_with, completion_blocked, default_tool, execute_tool_call, resolve_mcp,
+        scripted, AgentState, AutoApprove, Brain, HaltReason, McpTools, Tool, MAX_DISPATCH_BATCHES,
+        MAX_EXPLORE, MAX_STEPS,
     };
     use langgraph::GraphState;
     use langgraph::RunConfig;
@@ -787,6 +1164,432 @@ mod tests {
             .history
             .iter()
             .any(|message| message.content.contains("keep the change minimal")));
+    }
+
+    #[test]
+    fn empty_completion_retries_without_claiming_finish() {
+        let state = AgentState::new("write result.md");
+        let history_len = state.history.len();
+        let mut output = state.clone();
+        output.apply(reason_patch(
+            &state,
+            String::new(),
+            None,
+            provider::Usage::default(),
+            Vec::new(),
+        ));
+
+        assert_eq!(output.last_action.as_deref(), Some("retry"));
+        assert_eq!(output.history.len(), history_len);
+        assert_eq!(output.err_streak, 1);
+        assert!(output
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("empty completion")));
+        assert_eq!(super::reason_route(&output), vec!["reason"]);
+
+        let retry_state = output.clone();
+        output.apply(reason_patch(
+            &retry_state,
+            String::new(),
+            Some(ToolCall {
+                id: "recovered-call".into(),
+                name: "read_file".into(),
+                arguments: serde_json::json!({"path": "Cargo.toml"}),
+            }),
+            provider::Usage::default(),
+            Vec::new(),
+        ));
+        assert_eq!(output.err_streak, 0);
+        assert!(output.last_error.is_none());
+    }
+
+    #[derive(Clone)]
+    struct RecoveryProvider {
+        responses: Arc<std::sync::Mutex<std::collections::VecDeque<Completion>>>,
+        requests: Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for RecoveryProvider {
+        async fn complete(&self, request: &CompletionRequest) -> Result<Completion, ProviderError> {
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_default())
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_final_feedback_reaches_model_and_recovers_to_a_write() {
+        let target = format!("verify_feedback_target_{}.md", std::process::id());
+        let _ = std::fs::remove_file(&target);
+        let responses = vec![
+            Completion {
+                text: "done without writing".into(),
+                ..Default::default()
+            },
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "write-after-feedback".into(),
+                    name: "write_file".into(),
+                    arguments: serde_json::json!({"path": target.as_str(), "contents": "recovered\n"}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                text: "wrote the requested file".into(),
+                ..Default::default()
+            },
+        ];
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = RecoveryProvider {
+            responses: Arc::new(std::sync::Mutex::new(responses.into())),
+            requests: requests.clone(),
+        };
+        let app = build_llm_agent_with(Arc::new(provider), McpTools::empty()).unwrap();
+        let output = app
+            .invoke(AgentState::new(format!("write {target}")))
+            .await
+            .unwrap();
+        let request_log = requests.lock().unwrap();
+        let feedback_visible = request_log.get(1).is_some_and(|request| {
+            request.messages.iter().any(|message| {
+                message.content.contains("verification_issues")
+                    && message.content.contains("matching edit not landed")
+                    && message.content.contains("next concrete tool call")
+            })
+        });
+        let body = std::fs::read_to_string(&target).unwrap_or_default();
+        let _ = std::fs::remove_file(&target);
+
+        assert!(feedback_visible, "second request lacked verifier feedback");
+        assert!(output.approved, "messages: {:?}", output.messages);
+        assert!(body.contains("recovered"));
+    }
+
+    #[tokio::test]
+    async fn empty_completion_retry_requires_one_concrete_tool_call() {
+        let responses = vec![
+            Completion::default(),
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "verify-after-empty".into(),
+                    name: "run_shell".into(),
+                    arguments: serde_json::json!({"cmd": "exit 0"}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                text: "verification passed".into(),
+                ..Default::default()
+            },
+        ];
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = RecoveryProvider {
+            responses: Arc::new(std::sync::Mutex::new(responses.into())),
+            requests: requests.clone(),
+        };
+        let app = build_llm_agent_with(Arc::new(provider), McpTools::empty()).unwrap();
+        let output = app
+            .invoke(AgentState::new("run the verification command"))
+            .await
+            .unwrap();
+        let request_log = requests.lock().unwrap();
+
+        assert!(request_log.get(1).is_some_and(|request| request
+            .messages
+            .iter()
+            .any(|message| message.content.contains("<provider_retry>"))));
+        assert!(request_log.get(1).is_some_and(|request| {
+            !request.tools.is_empty()
+                && request.messages.iter().any(|message| {
+                    message
+                        .content
+                        .contains("<action_required>true</action_required>")
+                })
+        }));
+        assert!(output.approved, "messages: {:?}", output.messages);
+        assert!(output
+            .messages
+            .iter()
+            .any(|message| message.contains("empty completion")));
+    }
+
+    #[tokio::test]
+    async fn empty_completion_after_success_retries_as_final_without_tools() {
+        let responses = vec![
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "successful-check".into(),
+                    name: "run_shell".into(),
+                    arguments: serde_json::json!({"cmd": "exit 0"}),
+                }],
+                ..Default::default()
+            },
+            Completion::default(),
+            Completion {
+                text: "complete final answer".into(),
+                ..Default::default()
+            },
+        ];
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = RecoveryProvider {
+            responses: Arc::new(std::sync::Mutex::new(responses.into())),
+            requests: requests.clone(),
+        };
+        let app = build_llm_agent_with(Arc::new(provider), McpTools::empty()).unwrap();
+        let output = app
+            .invoke(AgentState::new("run the verification command"))
+            .await
+            .unwrap();
+        let request_log = requests.lock().unwrap();
+        let final_retry = request_log.get(2).expect("final retry request");
+
+        assert!(final_retry.tools.is_empty());
+        assert!(final_retry.messages.iter().any(|message| message
+            .content
+            .contains("<action_required>false</action_required>")));
+        assert!(output.approved, "messages: {:?}", output.messages);
+        assert!(output
+            .messages
+            .iter()
+            .any(|message| message.contains("complete final answer")));
+    }
+
+    #[tokio::test]
+    async fn explicit_sequence_forces_each_action_then_a_tool_free_final() {
+        let responses = vec![
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "sequence-search".into(),
+                    name: "search".into(),
+                    arguments: serde_json::json!({"path": "Cargo.toml", "pattern": "workspace"}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "sequence-shell".into(),
+                    name: "run_shell".into(),
+                    arguments: serde_json::json!({"cmd": "exit 0"}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                text: "complete final answer".into(),
+                ..Default::default()
+            },
+        ];
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = RecoveryProvider {
+            responses: Arc::new(std::sync::Mutex::new(responses.into())),
+            requests: requests.clone(),
+        };
+        let app = build_llm_agent_with(Arc::new(provider), McpTools::empty()).unwrap();
+        let output = app
+            .invoke(AgentState::new(
+                "First use the search tool. Then use run_shell.",
+            ))
+            .await
+            .unwrap();
+        let request_log = requests.lock().unwrap();
+
+        assert_eq!(request_log.len(), 2);
+        assert_eq!(
+            request_log[0]
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["search"]
+        );
+        assert!(request_log[0].messages.iter().any(|message| message
+            .content
+            .contains("<action_required>true</action_required>")));
+        assert_eq!(
+            request_log[1]
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["run_shell"]
+        );
+        assert!(request_log[1].messages.iter().any(|message| message
+            .content
+            .contains("<action_required>true</action_required>")));
+        assert!(output.approved, "messages: {:?}", output.messages);
+        assert_eq!(output.steps, 3);
+        assert_eq!(output.err_streak, 0);
+        assert!(output.last_error.is_none());
+        assert!(output.history.iter().any(|message| {
+            message.role == provider::Role::Assistant
+                && message.content.contains("## Task completed")
+        }));
+    }
+
+    #[test]
+    fn required_tool_sequence_cannot_finalize_before_every_explicit_step() {
+        let target = ".iteration/ridge-mcp-capability-work/result.md";
+        let mut state = AgentState::new(format!(
+            "First use the search tool. Then use read_file. Write {target} using write_file or edit_file. Read result.md back. Run this exact command with run_shell: cargo test -p agent. It passes only on exit 0."
+        ));
+        state.modified_files.insert(target.to_string());
+        state.last_read_paths = vec!["crates/agent/src/exec.rs".into(), target.into()];
+        state.tool_output = Some("wrote result".into());
+        for (index, (name, output)) in [
+            ("search", "matches"),
+            ("read_file", "source"),
+            ("run_shell", "exit 0: 1 passed; 0 failed"),
+            ("write_file", "wrote result"),
+            ("read_file", "result body"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("call-{index}");
+            state.history.push(
+                provider::Message::assistant("").with_tool_calls(vec![ToolCall {
+                    id: id.clone(),
+                    name: name.into(),
+                    arguments: serde_json::json!({}),
+                }]),
+            );
+            state
+                .history
+                .push(provider::Message::tool_result(id, output));
+        }
+        assert!(super::retry_requires_tool(&state));
+        assert_eq!(super::explicit_next_tools(&state), Some(vec!["run_shell"]));
+        let out_of_order = ToolCall {
+            id: "signal".into(),
+            name: "signal_write".into(),
+            arguments: serde_json::json!({}),
+        };
+        assert!(super::explicit_sequence_block(&state, &out_of_order)
+            .is_some_and(|message| message.contains("next required tool is run_shell")));
+        let exact_shell = ToolCall {
+            id: "exact-shell".into(),
+            name: "run_shell".into(),
+            arguments: serde_json::json!({"cmd":"cargo test -p agent","shell":"bash"}),
+        };
+        assert!(super::explicit_sequence_block(&state, &exact_shell).is_none());
+        assert!(super::normalize_explicit_run_shell(&state, &exact_shell)
+            .arguments
+            .get("shell")
+            .is_none());
+
+        state.history.push(
+            provider::Message::assistant("").with_tool_calls(vec![ToolCall {
+                id: "call-test".into(),
+                name: "run_shell".into(),
+                arguments: serde_json::json!({"cmd":"cargo test -p agent"}),
+            }]),
+        );
+        state.history.push(provider::Message::tool_result(
+            "call-test",
+            "exit 0: 1 passed; 0 failed",
+        ));
+        assert!(!super::retry_requires_tool(&state));
+        assert!(super::explicit_sequence_block(&state, &out_of_order)
+            .is_some_and(|message| message.contains("required sequence is complete")));
+    }
+
+    #[tokio::test]
+    async fn empty_final_after_success_gets_a_complete_deterministic_wrapup() {
+        let mut responses = vec![Completion {
+            tool_calls: vec![ToolCall {
+                id: "successful-check".into(),
+                name: "run_shell".into(),
+                arguments: serde_json::json!({"cmd": "exit 0"}),
+            }],
+            ..Default::default()
+        }];
+        responses.extend((0..crate::MAX_ERR_STREAK).map(|_| Completion::default()));
+        let provider = RecoveryProvider {
+            responses: Arc::new(std::sync::Mutex::new(responses.into())),
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+        let app = build_llm_agent_with(Arc::new(provider), McpTools::empty()).unwrap();
+        let output = app
+            .invoke(AgentState::new("run the verification command"))
+            .await
+            .unwrap();
+        let final_message = output.messages.last().cloned().unwrap_or_default();
+
+        assert!(output.approved, "messages: {:?}", output.messages);
+        assert!(
+            final_message.contains("## Task completed"),
+            "{final_message}"
+        );
+        assert!(final_message.contains("**Status:**"), "{final_message}");
+        assert!(
+            final_message.contains("| Item | Evidence |"),
+            "{final_message}"
+        );
+        assert!(final_message.contains("run_shell"), "{final_message}");
+        assert!(final_message.contains("exit 0:"), "{final_message}");
+        assert!(final_message.contains("```text"), "{final_message}");
+    }
+
+    #[derive(Clone)]
+    struct ErrorThenRecoveryProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        requests: Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for ErrorThenRecoveryProvider {
+        async fn complete(&self, request: &CompletionRequest) -> Result<Completion, ProviderError> {
+            self.requests.lock().unwrap().push(request.clone());
+            match self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                0 => Err("transient provider outage".into()),
+                1 => Ok(Completion {
+                    tool_calls: vec![ToolCall {
+                        id: "verify-after-error".into(),
+                        name: "run_shell".into(),
+                        arguments: serde_json::json!({"cmd": "exit 0"}),
+                    }],
+                    ..Default::default()
+                }),
+                _ => Ok(Completion {
+                    text: "recovered and verified".into(),
+                    ..Default::default()
+                }),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_error_is_bounded_state_and_recovers_in_graph() {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = ErrorThenRecoveryProvider {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            requests: requests.clone(),
+        };
+        let app = build_llm_agent_with(Arc::new(provider), McpTools::empty()).unwrap();
+        let output = app
+            .invoke(AgentState::new("run the verification command"))
+            .await
+            .unwrap();
+
+        assert!(output.approved, "messages: {:?}", output.messages);
+        assert_eq!(output.err_streak, 0);
+        assert!(output
+            .messages
+            .iter()
+            .any(|message| message.contains("provider error -> retry")));
+        assert!(requests
+            .lock()
+            .unwrap()
+            .get(1)
+            .is_some_and(|request| request
+                .messages
+                .iter()
+                .any(|message| message.content.contains("exactly one matching tool"))));
     }
 
     #[test]
@@ -854,6 +1657,28 @@ mod tests {
         assert!(state.display_messages[0].contains("HEAD_MARK"));
         assert!(state.display_messages[0].contains("middle line\nmiddle line\nmiddle line"));
         assert!(state.display_messages[0].contains("TAIL_MARK"));
+    }
+
+    #[test]
+    fn successful_source_read_with_error_literals_resets_error_streak() {
+        let call = ToolCall {
+            id: "source-read".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({"path": "crates/agent/src/exec.rs"}),
+        };
+        let observation = "fn execute() {\n    format!(\"shell error: {error}\");\n    return \"BLOCKED example\";\n}";
+        let mut state = AgentState {
+            err_streak: 4,
+            ..AgentState::new("inspect source")
+        };
+        state.apply(super::act_patch(&state, &call, observation.into()));
+
+        assert_eq!(state.err_streak, 0);
+        assert_eq!(
+            state.last_read_paths,
+            vec!["crates/agent/src/exec.rs".to_string()]
+        );
+        assert!(state.last_error.is_none());
     }
 
     #[test]
@@ -1438,6 +2263,268 @@ mod tests {
                 .iter()
                 .any(|m| m.contains("[WRAP]") && m.contains("(final)")),
             "应有且仅经一次 wrapup 收束陈述作为 (final) 终答"
+        );
+    }
+
+    #[test]
+    fn failed_job_poll_clears_live_jobs_and_unblocks_completion() {
+        #[cfg(windows)]
+        let cmd = "Start-Sleep -Seconds 1; exit 7";
+        #[cfg(not(windows))]
+        let cmd = "sleep 1; exit 7";
+        #[cfg(windows)]
+        let shell = Some("powershell");
+        #[cfg(not(windows))]
+        let shell = Some("sh");
+        let parked = tools::run_or_park_shell_with_limits(
+            shell,
+            cmd,
+            Duration::from_millis(200),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let id = match parked {
+            tools::ShellObservation::Running(progress) => progress.id,
+            tools::ShellObservation::Finished(result) => {
+                panic!(
+                    "expected park so the fail path can poll; got exit {}: {}{}",
+                    result.code, result.stdout, result.stderr
+                );
+            }
+        };
+
+        let start_call = ToolCall {
+            id: "job-start".into(),
+            name: "run_shell".into(),
+            arguments: serde_json::json!({ "cmd": cmd, "shell": shell }),
+        };
+        let mut state = AgentState::new("pack release");
+        state.apply(super::act_patch(
+            &state,
+            &start_call,
+            format!("job {id} running elapsed=0s\nCall run_shell with job_id=\"{id}\" to poll."),
+        ));
+        assert_eq!(state.live_shell_jobs, vec![id.clone()]);
+        assert!(
+            completion_blocked(&state),
+            "a parked job must block completion"
+        );
+
+        let poll_call = ToolCall {
+            id: "job-poll".into(),
+            name: "run_shell".into(),
+            arguments: serde_json::json!({ "job_id": id }),
+        };
+        let started = std::time::Instant::now();
+        let observation = loop {
+            let obs = execute_tool_call(&poll_call);
+            if obs.starts_with("exit ") {
+                break obs;
+            }
+            assert!(!obs.contains("timed out after 180000ms"), "{obs}");
+            if started.elapsed() > Duration::from_secs(8) {
+                panic!("failing job did not settle: {obs}");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(
+            observation.starts_with("exit ") && !observation.starts_with("exit 0:"),
+            "poll must be a failed finish: {observation}"
+        );
+
+        state.apply(super::act_patch(&state, &poll_call, observation));
+        assert!(
+            state.live_shell_jobs.is_empty(),
+            "failed/timeout poll must drop the job: {:?}",
+            state.live_shell_jobs
+        );
+        assert!(
+            !completion_blocked(&state),
+            "settled failed job must not permanently block completion"
+        );
+        assert!(
+            state
+                .last_error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("exit ")),
+            "failure still records last_error: {:?}",
+            state.last_error
+        );
+    }
+
+    #[tokio::test]
+    async fn known_target_blocks_full_repo_search_and_finish_is_not_success() {
+        let scripted = provider::ScriptedProvider::new(vec![
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "r1".into(),
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": "Cargo.toml", "limit": 8}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "s1".into(),
+                    name: "search".into(),
+                    arguments: serde_json::json!({"pattern": "package", "path": "."}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                text: "I am done".into(),
+                ..Default::default()
+            },
+        ]);
+        let app = build_llm_agent_with(Arc::new(scripted), McpTools::empty()).unwrap();
+        let out = app
+            .invoke(AgentState::new("edit Cargo.toml then pack"))
+            .await
+            .unwrap();
+        assert!(
+            out.last_read_paths
+                .iter()
+                .any(|path| path.contains("Cargo.toml")),
+            "read should locate Cargo.toml: {:?}",
+            out.last_read_paths
+        );
+        assert!(
+            out.messages
+                .iter()
+                .any(|m| m.contains("BLOCKED (target known)")),
+            "expected blocked whole-repo search: {:?}",
+            out.messages
+        );
+        assert!(
+            !out.approved,
+            "explore wrapup after blocked search is not success"
+        );
+        assert!(out.modified_files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn known_target_blocks_explore_shell_then_lands_edit() {
+        let target = format!("steer_handoff_target_{}.txt", std::process::id());
+        let _ = std::fs::remove_file(&target);
+        std::fs::write(&target, "old-token\n").expect("write fixture");
+        let scripted = provider::ScriptedProvider::new(vec![
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "r1".into(),
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": target.as_str()}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "sh1".into(),
+                    name: "run_shell".into(),
+                    arguments: serde_json::json!({
+                        "cmd": "Get-ChildItem -Recurse . | Select-String old-token"
+                    }),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "e1".into(),
+                    name: "edit_file".into(),
+                    arguments: serde_json::json!({
+                        "path": target.as_str(),
+                        "old_string": "old-token",
+                        "new_string": "new-token"
+                    }),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                text: "edited the located file".into(),
+                ..Default::default()
+            },
+        ]);
+        let app = build_llm_agent_with(Arc::new(scripted), McpTools::empty()).unwrap();
+        let out = app
+            .invoke(AgentState::new("edit steer_handoff_target.txt then pack"))
+            .await
+            .unwrap();
+        let body = std::fs::read_to_string(&target).unwrap_or_default();
+        let _ = std::fs::remove_file(&target);
+        assert!(
+            out.last_read_paths
+                .iter()
+                .any(|path| path.contains(target.as_str())),
+            "read should locate the fixture: {:?}",
+            out.last_read_paths
+        );
+        assert!(
+            out.messages
+                .iter()
+                .any(|m| m.contains("BLOCKED (target known)")),
+            "explore shell after locate must be blocked: {:?}",
+            out.messages
+        );
+        assert!(
+            out.modified_files
+                .iter()
+                .any(|path| path.contains(target.as_str())),
+            "next action after the block must land an edit: {:?}",
+            out.modified_files
+        );
+        assert!(
+            body.contains("new-token"),
+            "shipped edit_file must rewrite the located file: {body:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn known_target_shell_without_edit_is_not_success() {
+        let scripted = provider::ScriptedProvider::new(vec![
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "r1".into(),
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": "Cargo.toml", "limit": 8}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "sh1".into(),
+                    name: "run_shell".into(),
+                    arguments: serde_json::json!({"cmd": "echo ridge-no-edit"}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                text: "I am done".into(),
+                ..Default::default()
+            },
+        ]);
+        let app = build_llm_agent_with(Arc::new(scripted), McpTools::empty()).unwrap();
+        let out = app
+            .invoke(AgentState::new("edit Cargo.toml then pack"))
+            .await
+            .unwrap();
+        assert!(
+            out.last_read_paths
+                .iter()
+                .any(|path| path.contains("Cargo.toml")),
+            "{:?}",
+            out.last_read_paths
+        );
+        assert!(
+            out.modified_files.is_empty(),
+            "verify shell must not count as the edit: {:?}",
+            out.modified_files
+        );
+        assert!(
+            !out.approved,
+            "change task with a known target cannot succeed without a write"
+        );
+        assert!(
+            !out.explore_action_used || out.explore_handoff,
+            "run_shell must not satisfy handoff before a write"
         );
     }
 

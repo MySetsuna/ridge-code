@@ -9,6 +9,7 @@ const MAX_LIVE_TEXT_CHARS: usize = 32_768;
 const MAX_READ_BATCH_PATHS: usize = 8;
 const MAX_READ_BATCH_PATH_CHARS: usize = 96;
 const TOOL_DETAIL_SCROLL_STEP: usize = 4;
+const TOOL_FOLD_THRESHOLD: usize = 8;
 const LIVE_SCROLL_STEP: usize = 4;
 const MAX_LIVE_INSPECT_OFFSET: usize = 512;
 const MAX_LIVE_PHASE_TRACE: usize = 5;
@@ -162,6 +163,9 @@ pub(crate) struct ToolBlock {
     summary: String,
     summary_color: Color,
     details: Vec<(String, Color)>,
+    /// Complete sanitized tool observation for Ctrl+T audit/copy. Main/live
+    /// projections use `details` and may remain folded.
+    audit_details: Option<String>,
     /// Stable, bounded affordance text for the collapsed projection. Keeping
     /// it with the block lets live and scrollback renderers share the same
     /// detail-count signal without borrowing a temporary String.
@@ -209,6 +213,7 @@ impl ToolBlock {
             summary_color,
             collapsed_hint: tool_detail_hint(details.len()),
             details,
+            audit_details: None,
             expanded: false,
             detail_scroll: 0,
             phase,
@@ -238,6 +243,7 @@ impl ToolBlock {
     }
 
     fn merge_observation(&mut self, mut incoming: Self) {
+        let incoming_audit = incoming.audit_details.take();
         let mut read_batch_paths = std::mem::take(&mut self.read_batch_paths);
         read_batch_paths.extend(incoming.read_batch_paths);
         let is_read = self.tool_name.as_deref() == Some("read_file")
@@ -248,12 +254,14 @@ impl ToolBlock {
             let failed = incoming.read_batch_error;
             let marker = if failed { '✗' } else { '✓' };
             let label = if failed { "Read failed" } else { "Read" };
+            if let Some(path) = read_path.as_ref() {
+                details.push((format!("  ── Read {path}"), incoming.summary_color));
+            }
             self.summary = read_path
                 .map(|path| format!("  {marker} {label} {path}"))
                 .unwrap_or_else(|| format!("  {marker} {label}"));
             self.summary_color = incoming.summary_color;
-            // Do not put the file body in any user-facing projection. The
-            // execution history remains complete in the provider message.
+            details.append(&mut incoming.details);
         } else {
             details.push((self.summary.clone(), self.summary_color));
             details.append(&mut self.details);
@@ -262,6 +270,7 @@ impl ToolBlock {
             self.summary_color = incoming.summary_color;
         }
         self.details = details;
+        self.audit_details = merge_audit_text(self.audit_details.take(), incoming_audit);
         self.collapsed_hint = tool_detail_hint(self.details.len());
         self.phase = ToolPhase::Observation;
         self.tool_name = incoming.tool_name;
@@ -271,21 +280,24 @@ impl ToolBlock {
         self.detail_scroll = 0;
     }
 
-    /// Fold one completed read into the current batch while retaining file
-    /// paths in arrival order; file bodies stay in model context only.
-    fn merge_read_batch(&mut self, incoming: Self) {
+    /// Fold one completed read into the current batch while retaining both the
+    /// compact path summary and complete audit details.
+    fn merge_read_batch(&mut self, mut incoming: Self) {
+        let incoming_audit = incoming.audit_details.take();
         let count = self
             .read_batch_count
             .saturating_add(incoming.read_batch_count);
         let has_error = self.read_batch_error || incoming.read_batch_error;
         let mut read_batch_paths = std::mem::take(&mut self.read_batch_paths);
-        read_batch_paths.extend(incoming.read_batch_paths);
+        let incoming_path = incoming.read_batch_paths.first().cloned();
+        read_batch_paths.append(&mut incoming.read_batch_paths);
         let read_batch_paths = bound_read_batch_paths(read_batch_paths);
-        let mut details = Vec::with_capacity(read_batch_paths.len());
-        for path in &read_batch_paths {
-            details.push((format!("  ✓ Read {path}"), self.summary_color));
+        if let Some(path) = incoming_path {
+            self.details
+                .push((format!("  ── Read {path}"), incoming.summary_color));
         }
-        self.details = details;
+        self.details.append(&mut incoming.details);
+        self.audit_details = merge_audit_text(self.audit_details.take(), incoming_audit);
         self.collapsed_hint = tool_detail_hint(self.details.len());
         self.summary = read_batch_summary(count, &read_batch_paths, has_error);
         self.summary_color = if has_error {
@@ -367,13 +379,12 @@ impl ToolBlock {
     }
 
     pub(crate) fn details_text(&self) -> String {
+        if let Some(audit) = self.audit_details.as_ref() {
+            return audit.clone();
+        }
         if self.details.is_empty() {
             return if matches!(self.phase, ToolPhase::Observation) {
-                if self.tool_name.as_deref() == Some("read_file") {
-                    "file contents hidden from TUI".to_owned()
-                } else {
-                    "no output".to_owned()
-                }
+                "no output".to_owned()
             } else {
                 String::new()
             };
@@ -387,6 +398,22 @@ impl ToolBlock {
 
     pub(crate) fn collapsed_hint(&self) -> &str {
         &self.collapsed_hint
+    }
+
+    pub(crate) fn with_audit_text(mut self, text: &str) -> Self {
+        let text = super::render::sanitize_display_text(text);
+        self.audit_details = (!text.trim().is_empty()).then_some(text);
+        self
+    }
+
+    pub(crate) fn collapsed_lines(&self) -> Vec<(String, Color)> {
+        let mut lines = vec![(self.summary.clone(), self.summary_color)];
+        if self.details.len() > TOOL_FOLD_THRESHOLD {
+            lines.push((self.collapsed_hint.clone(), role_color(Role::Muted)));
+        } else {
+            lines.extend(self.details.iter().cloned());
+        }
+        lines
     }
 
     pub(crate) fn presentation_chars(&self) -> usize {
@@ -516,6 +543,7 @@ impl ToolBlock {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn commit_lines(&self) -> Vec<(String, Color)> {
         // Native scrollback is the complete audit record. Keep the compact
         // summary marker, then append every detail row regardless of the live
@@ -526,8 +554,22 @@ impl ToolBlock {
     }
 }
 
+fn merge_audit_text(current: Option<String>, incoming: Option<String>) -> Option<String> {
+    match (current, incoming) {
+        (Some(mut current), Some(incoming)) => {
+            if !current.is_empty() && !incoming.is_empty() {
+                current.push('\n');
+            }
+            current.push_str(&incoming);
+            Some(current)
+        }
+        (Some(current), None) => Some(current),
+        (None, incoming) => incoming,
+    }
+}
+
 fn tool_detail_hint(rows: usize) -> String {
-    format!("  [Ctrl+O details · {rows} rows]")
+    format!("  … +{rows} lines (Ctrl+T to view transcript)")
 }
 
 fn compact_read_path(summary: &str) -> String {
@@ -2314,16 +2356,17 @@ mod tests {
 
     #[test]
     fn tool_details_toggle() {
-        let mut tool = ToolBlock::from_lines(vec![
+        let mut lines = vec![
             ("tool".into(), Color::Cyan),
             ("- old".into(), Color::Red),
             ("+ new".into(), Color::Green),
-        ])
-        .expect("tool");
+        ];
+        lines.extend((0..8).map(|index| (format!("detail {index}"), Color::Gray)));
+        let mut tool = ToolBlock::from_lines(lines).expect("tool");
         assert!(tool
             .live_lines()
             .iter()
-            .any(|line| line.text.contains("[Ctrl+O details")));
+            .any(|line| line.text.contains("Ctrl+T to view transcript")));
         assert!(tool.toggle());
         let expanded = tool.live_lines();
         assert!(expanded.iter().any(|line| line.text == "- old"));
@@ -2542,7 +2585,7 @@ mod tests {
         assert!(lines.iter().any(|line| line.text == "a1"));
         assert!(!lines
             .iter()
-            .any(|line| line.text.contains("[Ctrl+O details")));
+            .any(|line| line.text.contains("Ctrl+T to view transcript")));
     }
 
     #[test]

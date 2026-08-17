@@ -1,6 +1,6 @@
 use super::{
-    handle_key_event, process_pending_submit, CommitBlock, KeyEventContext, PendingSubmitContext,
-    StartTask,
+    handle_key_event, process_pending_submit, CommitBlock, KeyEventContext, Panel, PanelKind,
+    PanelRow, PendingSubmitContext, StartTask,
 };
 use crate::ReplMeta;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -258,4 +258,249 @@ async fn empty_idle_enter_release_does_not_submit() {
     harness.send(enter_release()).await;
     assert!(harness.pending_submit.is_none());
     assert!(harness.ui.input.buffer.is_empty());
+}
+
+fn esc() -> Event {
+    Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+}
+
+#[tokio::test]
+async fn idle_esc_bracket_a_is_history_nav_not_literal() {
+    let mut harness = IdleHarness::new();
+    harness.type_text("first-line").await;
+    harness.send(enter_release()).await;
+    assert!(!harness.consume_submit().await);
+    harness.type_text("second-line").await;
+    harness.send(esc()).await;
+    harness.send(press_char('[')).await;
+    harness.send(press_char('A')).await;
+    assert!(
+        !harness.ui.input.buffer.contains("[A"),
+        "CSI leftover inserted: {}",
+        harness.ui.input.buffer
+    );
+    assert_eq!(harness.ui.input.buffer, "first-line");
+}
+
+#[tokio::test]
+async fn leftover_bracket_a_in_buffer_navigates() {
+    let mut harness = IdleHarness::new();
+    harness.type_text("hello[").await;
+    harness.send(press_char('A')).await;
+    assert!(
+        !harness.ui.input.buffer.contains("[A"),
+        "leftover CSI inserted: {}",
+        harness.ui.input.buffer
+    );
+    assert_eq!(harness.ui.input.buffer, "hello");
+}
+
+#[tokio::test]
+async fn leftover_csi_tails_navigate_through_key_handler() {
+    for (typed, incoming, forbidden) in [
+        ("keep[", 'A', "[A"),
+        ("keep[", 'B', "[B"),
+        ("keep[", 'C', "[C"),
+        ("keep[", 'D', "[D"),
+        ("keep[", 'H', "[H"),
+        ("keep[", 'F', "[F"),
+        ("keep[5", '~', "[5~"),
+        ("keep[6", '~', "[6~"),
+    ] {
+        let mut harness = IdleHarness::new();
+        harness.type_text(typed).await;
+        harness.send(press_char(incoming)).await;
+        assert!(
+            !harness.ui.input.buffer.contains(forbidden),
+            "typed {typed:?}+{incoming:?} left {forbidden:?} in {}",
+            harness.ui.input.buffer
+        );
+        assert_eq!(harness.ui.input.buffer, "keep", "{typed:?}+{incoming:?}");
+    }
+}
+
+#[tokio::test]
+async fn idle_oa_stays_literal_letters() {
+    let mut harness = IdleHarness::new();
+    harness.type_text("OA").await;
+    assert_eq!(harness.ui.input.buffer, "OA");
+    harness.type_text(" GOAL BOARD CODE").await;
+    assert_eq!(harness.ui.input.buffer, "OA GOAL BOARD CODE");
+    assert!(!harness.ui.input.buffer.contains('['));
+}
+
+#[test]
+fn shell_helpers_classify_bang_without_eating_plain_text() {
+    assert!(super::is_shell_input("!echo hi"));
+    assert!(!super::is_shell_input("echo hi"));
+    assert_eq!(super::shell_command("!echo hi"), Some("echo hi"));
+    assert_eq!(super::shell_command("!"), None);
+    assert_eq!(super::shell_command("echo"), None);
+    assert_eq!(
+        super::shell_input_title(" Input (Enter send)".into(), "!ls"),
+        " SHELL (Enter send)"
+    );
+}
+
+#[tokio::test]
+async fn bang_echo_runs_local_shell_without_starting_task() {
+    let mut harness = IdleHarness::new();
+    harness.type_text("!echo ridge-bang-ok").await;
+    harness.send(enter_press()).await;
+    assert_eq!(
+        harness.pending_submit.as_deref(),
+        Some("!echo ridge-bang-ok")
+    );
+    assert!(!harness.consume_submit().await);
+    assert!(harness.task.is_none());
+    assert!(harness.history.is_empty());
+    let notes = commit_texts(&harness.ui);
+    assert!(
+        notes
+            .iter()
+            .any(|text| text.contains("> ! echo ridge-bang-ok")),
+        "{notes:?}"
+    );
+    assert!(
+        notes
+            .iter()
+            .any(|text| text.contains("ridge-bang-ok") && text.contains("exit 0")),
+        "{notes:?}"
+    );
+}
+
+fn sample_panel() -> Panel {
+    Panel::new(
+        PanelKind::Models,
+        "Models".into(),
+        vec![
+            PanelRow {
+                key: "one".into(),
+                value: "first".into(),
+                ctx: None,
+            },
+            PanelRow {
+                key: "two".into(),
+                value: "second".into(),
+                ctx: None,
+            },
+            PanelRow {
+                key: "three".into(),
+                value: "third".into(),
+                ctx: None,
+            },
+        ],
+    )
+}
+
+#[tokio::test]
+async fn panel_leftover_csi_arrows_select_instead_of_filtering() {
+    let mut harness = IdleHarness::new();
+    harness.ui.panel = Some(sample_panel());
+    assert_eq!(harness.ui.panel.as_ref().unwrap().sel, 0);
+    harness.send(press_char('[')).await;
+    harness.send(press_char('B')).await;
+    let panel = harness.ui.panel.as_ref().expect("panel stays open");
+    assert!(
+        !panel.query.contains("[B") && !panel.query.contains('['),
+        "CSI leftover in filter: {}",
+        panel.query
+    );
+    assert_eq!(panel.sel, 1);
+    harness.send(press_char('[')).await;
+    harness.send(press_char('B')).await;
+    let panel = harness.ui.panel.as_ref().expect("panel stays open");
+    assert!(
+        panel.query.is_empty(),
+        "second CSI leftover in filter: {}",
+        panel.query
+    );
+    assert_eq!(panel.sel, 2, "second Down must advance again");
+    harness.send(press_char('[')).await;
+    harness.send(press_char('A')).await;
+    let panel = harness.ui.panel.as_ref().expect("panel stays open");
+    assert!(
+        !panel.query.contains("[A"),
+        "CSI leftover in filter: {}",
+        panel.query
+    );
+    assert_eq!(panel.sel, 1);
+}
+
+#[tokio::test]
+async fn panel_literal_bracket_filter_is_replayed_when_not_csi() {
+    let mut harness = IdleHarness::new();
+    harness.ui.panel = Some(sample_panel());
+    harness.send(press_char('[')).await;
+    harness.send(press_char('x')).await;
+    let panel = harness.ui.panel.as_ref().expect("panel stays open");
+    assert_eq!(panel.query, "[x");
+}
+
+#[tokio::test]
+async fn popup_right_accepts_selected_completion() {
+    let mut harness = IdleHarness::new();
+    harness.type_text("/h").await;
+    assert!(harness.ui.popup.is_some(), "slash popup should open");
+    harness
+        .send(Event::Key(KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+        )))
+        .await;
+    assert!(harness.ui.popup.is_none());
+    assert!(
+        harness.ui.input.buffer.starts_with("/h"),
+        "right should complete: {}",
+        harness.ui.input.buffer
+    );
+    assert_ne!(harness.ui.input.buffer, "/h");
+}
+
+#[tokio::test]
+async fn popup_leftover_csi_down_moves_selection() {
+    let mut harness = IdleHarness::new();
+    harness.type_text("/").await;
+    let start = harness
+        .ui
+        .popup
+        .as_ref()
+        .map(|popup| popup.selected)
+        .expect("slash popup");
+    harness.send(press_char('[')).await;
+    harness.send(press_char('B')).await;
+    assert!(
+        !harness.ui.input.buffer.contains("[B"),
+        "CSI leftover in input: {}",
+        harness.ui.input.buffer
+    );
+    let popup = harness.ui.popup.as_ref().expect("popup stays");
+    assert_ne!(popup.selected, start);
+}
+
+#[tokio::test]
+async fn bang_without_command_shows_usage() {
+    let mut harness = IdleHarness::new();
+    harness.type_text("!").await;
+    harness.send(enter_press()).await;
+    assert!(!harness.consume_submit().await);
+    assert!(harness.task.is_none());
+    assert!(commit_texts(&harness.ui)
+        .iter()
+        .any(|text| text.contains("usage: !<command>")));
+}
+
+#[tokio::test]
+async fn submitted_prompt_is_marked_ask_line() {
+    let mut harness = IdleHarness::new();
+    harness.type_text("可见提问").await;
+    harness.send(enter_press()).await;
+    assert!(!harness.consume_submit().await);
+    assert!(
+        commit_texts(&harness.ui)
+            .iter()
+            .any(|text| text.contains("¶ ASK · 可见提问")),
+        "{:?}",
+        commit_texts(&harness.ui)
+    );
 }

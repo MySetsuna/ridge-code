@@ -91,6 +91,13 @@ pub struct AgentState {
     /// **Durable State**:上一次工具调用的核心错误摘要(去噪后首行)。事实块据它「重锚定」模型注意力,
     /// 免其在被压缩的模糊历史里遗忘卡在哪。成功时清空。
     pub last_error: Option<String>,
+    /// Recently read file paths. Compact drops tool noise; this keeps the
+    /// already-located edit target in the fact block.
+    #[serde(default)]
+    pub last_read_paths: Vec<String>,
+    /// Parked `run_shell` job ids. A live job blocks successful completion.
+    #[serde(default)]
+    pub live_shell_jobs: Vec<String>,
     /// **信号复利**:run 启动时从 `.ridge/signals` 载入的「继承信号」有界注入块(上个会话留下的未决发现/
     /// 摩擦/待办)。run 中不变,由 CLI 在建 state 时经 [`load_signal_block`] 注入;无则 `None`。
     pub signal_block: Option<String>,
@@ -195,6 +202,9 @@ pub enum Patch {
     PushHistory(Message),
     SetTodos(Vec<Todo>),
     RecordModified(String),
+    RecordRead(String),
+    AddLiveShellJob(String),
+    RemoveLiveShellJob(String),
     SetLastError(Option<String>),
     BumpStep,
     Batch(Vec<Patch>),
@@ -237,6 +247,23 @@ impl GraphState for AgentState {
             Patch::SetTodos(t) => self.todos = t,
             Patch::RecordModified(p) => {
                 self.modified_files.insert(p);
+            }
+            Patch::RecordRead(path) => {
+                self.last_read_paths.retain(|existing| existing != &path);
+                self.last_read_paths.push(path);
+                const MAX_READ_PATHS: usize = 8;
+                if self.last_read_paths.len() > MAX_READ_PATHS {
+                    let drop = self.last_read_paths.len() - MAX_READ_PATHS;
+                    self.last_read_paths.drain(..drop);
+                }
+            }
+            Patch::AddLiveShellJob(id) => {
+                if !self.live_shell_jobs.iter().any(|existing| existing == &id) {
+                    self.live_shell_jobs.push(id);
+                }
+            }
+            Patch::RemoveLiveShellJob(id) => {
+                self.live_shell_jobs.retain(|existing| existing != &id);
             }
             Patch::SetLastError(e) => self.last_error = e,
             Patch::BumpStep => self.steps += 1,

@@ -337,21 +337,16 @@ pub fn save_goal(path: impl AsRef<Path>, goal: &Goal) -> Result<(), GoalError> {
 
 pub fn create_goal(path: impl AsRef<Path>, title: &str) -> Result<Goal, GoalError> {
     let path = path.as_ref();
-    if path.exists() {
-        return Err(GoalError::AlreadyExists(path.to_path_buf()));
-    }
     let goal = Goal::new(title)?;
     save_goal(path, &goal)?;
     Ok(goal)
 }
 
 /// Create a goal from an interactive command and put it into the running
-/// state in one durable write sequence.
+/// state in one durable write sequence. A new `/goal` title replaces any
+/// existing file at `path` instead of refusing the replacement.
 pub fn create_and_start_goal(path: impl AsRef<Path>, title: &str) -> Result<Goal, GoalError> {
     let path = path.as_ref();
-    if path.exists() {
-        return Err(GoalError::AlreadyExists(path.to_path_buf()));
-    }
     let mut goal = Goal::new(title)?;
     goal.start()?;
     goal.advance(
@@ -813,6 +808,10 @@ mod tests {
         assert!(goal.running);
         assert_eq!(load_goal(&path).unwrap().title, "ship from tui");
         assert!(load_goal(&path).unwrap().running);
+        let replaced = create_and_start_goal(&path, "replace the locked goal").unwrap();
+        assert_eq!(replaced.title, "replace the locked goal");
+        assert!(replaced.running);
+        assert_eq!(load_goal(&path).unwrap().title, "replace the locked goal");
         let _ = fs::remove_file(path);
     }
 
@@ -863,7 +862,9 @@ mod tests {
             .unwrap()
             .contains("no goal at"));
         goal_command_at(&path, &args(&["create", "quality", "gate"])).unwrap();
-        assert!(goal_command_at(&path, &args(&["create", "again"])).is_err());
+        assert!(goal_command_at(&path, &args(&["create", "again"]))
+            .unwrap()
+            .contains("again"));
         goal_command_at(&path, &args(&["start"])).unwrap();
         goal_command_at(&path, &args(&["stop"])).unwrap();
         goal_command_at(

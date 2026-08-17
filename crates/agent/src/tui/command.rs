@@ -1221,6 +1221,42 @@ pub(crate) struct CommandStats {
     pub(crate) turns: usize,
 }
 
+fn handle_bang_shell(input: &str, ui: &mut Ui) -> bool {
+    if !input.starts_with('!') {
+        return false;
+    }
+    let Some(cmd) = super::shell_command(input) else {
+        ui.note("usage: !<command>", role_color(Role::Warn));
+        return true;
+    };
+    if let Some(why) = tools::is_dangerous_command(cmd) {
+        ui.note(format!("BLOCKED · {why}"), role_color(Role::Error));
+        return true;
+    }
+    ui.note(format!("> ! {cmd}"), role_color(Role::Command));
+    match tools::run_shell_in(None, cmd) {
+        Ok(result) => {
+            let body = format!("{}{}", result.stdout, result.stderr);
+            let body = body.trim();
+            let text = if body.is_empty() {
+                format!("exit {}", result.code)
+            } else {
+                format!("{body}\nexit {}", result.code)
+            };
+            ui.note(
+                text,
+                role_color(if result.code == 0 {
+                    Role::Answer
+                } else {
+                    Role::Error
+                }),
+            );
+        }
+        Err(error) => ui.note(format!("shell error: {error}"), role_color(Role::Error)),
+    }
+    true
+}
+
 pub(crate) async fn run_command(
     input: &str,
     ui: &mut Ui,
@@ -1230,9 +1266,12 @@ pub(crate) async fn run_command(
     catalog: &CommandCatalog<'_>,
     stats: CommandStats,
 ) -> anyhow::Result<bool> {
+    if handle_bang_shell(input, ui) {
+        return Ok(false);
+    }
     if input == "/help" {
         ui.note(
-            "/exit /model /provider /config /effort /find [query] /goal [status|create|start|advance|resume|complete|block|cancel] /activity /inspect /transcript /audit /reasoning /answer /answers /queue /steer <guidance> /tools /history /login /agent /mcp /skills /commands; /provider opens the model catalog; /answer opens the latest full answer; /answers opens the searchable answer archive; Enter queues while busy; Ctrl+Enter front-queues without interrupting; Ctrl+Shift+Enter or /steer sends guidance to the active agent without interrupting; Ctrl+F opens non-blocking live search; Ctrl+Q opens the queue and Delete removes a pending item; Ctrl+I/Alt+I inspects live blocks in Transcript Audit; Ctrl+A opens the latest full answer; Ctrl+R toggles live reasoning or opens Reasoning history; Ctrl+O toggles live tool details or opens Tool history; Ctrl+T opens recent Agent activity; Ctrl-C hands input back.",
+            "/exit /model /provider /config /effort /find [query] /goal [status|create|start|advance|resume|complete|block|cancel] /activity /inspect /transcript /audit /reasoning /answer /answers /sessions /new /queue /steer <guidance> /tools /history /login /agent /mcp /skills /commands; !command runs a local shell; /provider opens the model catalog; /answer opens the latest full answer; /answers opens the searchable answer archive; /sessions lists resume ids; /new starts a fresh session id; Enter queues while busy; empty Enter sends the next queued item; queued items auto-send when the current turn finishes; Ctrl+Enter front-queues without interrupting; Ctrl+Shift+Enter or /steer steers the active turn; Ctrl+F opens non-blocking live search; Ctrl+Q opens the queue and Delete removes a pending item; Ctrl+I/Alt+I inspects live blocks in Transcript Audit; Ctrl+A opens the latest full answer; Ctrl+R toggles live reasoning or opens Reasoning history; Ctrl+O toggles live tool details or opens Tool history; Ctrl+T opens recent Agent activity; Ctrl-C hands input back.",
             role_color(Role::Muted),
         );
         return Ok(false);
@@ -1330,6 +1369,32 @@ fn handle_context_navigation(
     turns: usize,
 ) -> bool {
     match input {
+        "/sessions" => {
+            ui.note(
+                format!(
+                    "session {} · resume with ridgecode --resume <id>\n{}",
+                    agent::current_session_id(),
+                    agent::format_session_list(&agent::list_records())
+                ),
+                role_color(Role::Muted),
+            );
+        }
+        "/new" => {
+            history.clear();
+            ui.reasoning_history.clear();
+            ui.answer_history.clear();
+            ui.panel = None;
+            let cwd = std::env::current_dir()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+            let record = agent::SessionRecord::new("session", cwd, Vec::new());
+            let id = record.id.clone();
+            let _ = agent::save_record(&record);
+            agent::set_current_session_id(id.clone());
+            ui.session_id = id.clone();
+            save_session(&session_path(), history);
+            ui.note(format!("new session {id}"), role_color(Role::Warn));
+        }
         "/reset" => {
             history.clear();
             ui.reasoning_history.clear();

@@ -103,7 +103,10 @@ fn handle_meta_flags() -> bool {
              Usage:\n  \
              ridgecode                      interactive TUI (no key required to open; use /login inside; non-TTY falls back to headless)\n  \
              ridgecode \"task\"               one-shot task\n  \
-             ridgecode --resume             resume the last session (continue after kill-9 / reopen)\n\n\
+             ridgecode --resume             resume the last session (continue after kill-9 / reopen)\n  \
+             ridgecode --resume <id>        resume a named session id\n  \
+             ridgecode --session <id>       same as --resume <id>\n  \
+             ridgecode sessions             list saved session ids\n\n\
              ridgecode goal ...             persist and advance one long-running goal\n  \
              ridgecode goal run             execute the active goal with durable recovery\n  \
              ridgecode a2a serve            serve a bounded agent peer over stdio JSON-RPC\n  \
@@ -114,7 +117,8 @@ fn handle_meta_flags() -> bool {
              --every <30s|5m|1h>            time trigger: re-run the task on an interval (resident; reloads compounding signals each round, Ctrl-C to stop)\n  \
              --yolo/--skip-permissions      skip-danger: auto-approve tools without [y/N] (disaster commands still blocked)\n  \
              --read-only                    read-only mode: only offer read/search/research tools, reject all write/shell side effects\n  \
-             --resume/--continue            resume the last session\n  \
+             --resume/--continue [id]       resume the last session, or a named session id\n  \
+             --session <id>                 resume a named session\n  \
              -h/--help, -V/--version        this help / version\n\n\
              In the TUI: slash commands /model /provider /config /agent /compact etc.; @path to reference a file, Ctrl-C interrupts; press twice within 2 seconds to exit.\
              Pipe/non-TTY: stdin lines are run as tasks (headless, no slash commands).\n\n\
@@ -217,7 +221,8 @@ fn tui_fixture_provider(fallback: Arc<dyn LlmProvider>) -> Arc<dyn LlmProvider> 
                     ..Default::default()
                 },
                 Completion {
-                    text: "fixture answer: final response reached scrollback".into(),
+                    text: "fixture answer: final response reached scrollback\n\n## Render fixture\n\n| 项目 | 状态 | 说明 |\n| --- | --- | --- |\n| Table 🚀 | **PASS** | 中文自适应 |\n| Tool output | folded | Ctrl+T transcript |\n\nUse `ridgecode` and [docs](https://example.test/ridgecode).\n\n```rust\nlet rendered = true;\n```"
+                        .into(),
                     ..Default::default()
                 },
             ]))
@@ -246,9 +251,11 @@ async fn run_cli() -> anyhow::Result<()> {
         cwd,
         skip_danger: cli_skip_danger,
         resume,
+        resume_id,
         read_only,
         every,
     } = parse_args();
+    bind_session(resume, resume_id);
     if let Some(dir) = &cwd {
         std::env::set_current_dir(dir)?;
     }
@@ -314,6 +321,10 @@ async fn handle_special_command(raw: &[String]) -> Option<anyhow::Result<()>> {
             Err(error) => Err(anyhow::anyhow!(error)),
         }),
         "a2a" => Some(run_a2a_command(&raw[1..]).await),
+        "sessions" => {
+            println!("{}", agent::format_session_list(&agent::list_records()));
+            Some(Ok(()))
+        }
         _ => None,
     }
 }
@@ -789,7 +800,7 @@ async fn run_interactive(run: InteractiveRun<'_>) -> anyhow::Result<()> {
         effort,
     } = run;
     let initial = if resume {
-        load_session(&session_path())
+        load_resume_history()
     } else {
         Vec::new()
     };
@@ -872,7 +883,7 @@ async fn run_without_provider(
     configure_runtime(cfg);
     let agents = Arc::new(build_agents(cfg, auth));
     let initial = if resume {
-        load_session(&session_path())
+        load_resume_history()
     } else {
         Vec::new()
     };
@@ -1020,6 +1031,45 @@ fn save_session(path: &str, history: &[Message]) {
     if let Ok(json) = serde_json::to_string(history) {
         let _ = std::fs::write(path, json);
     }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let id = agent::current_session_id();
+    if !id.is_empty() {
+        agent::persist_history(&id, history, None, &cwd);
+    }
+}
+
+fn bind_session(resume: bool, resume_id: Option<String>) {
+    if let Some(id) = resume_id {
+        agent::set_current_session_id(id);
+        return;
+    }
+    if resume {
+        if let Some(id) = agent::last_session_id() {
+            agent::set_current_session_id(id);
+            return;
+        }
+        let history = load_session(&session_path());
+        let cwd = std::env::current_dir()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        let title = history
+            .iter()
+            .find(|message| message.role == provider::Role::User)
+            .map(|message| message.content.chars().take(72).collect::<String>())
+            .unwrap_or_else(|| "session".into());
+        let record = agent::SessionRecord::new(title, cwd, history);
+        let id = record.id.clone();
+        let _ = agent::save_record(&record);
+        agent::set_current_session_id(id);
+        return;
+    }
+    let cwd = std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let record = agent::SessionRecord::new("session", cwd, Vec::new());
+    let id = record.id.clone();
+    let _ = agent::save_record(&record);
+    agent::set_current_session_id(id);
 }
 
 /// 读回落盘的对话 history(读不到/坏 → 空)。
@@ -1028,6 +1078,15 @@ fn load_session(path: &str) -> Vec<Message> {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
+}
+
+fn load_resume_history() -> Vec<Message> {
+    let named = agent::load_history(&agent::current_session_id());
+    if named.is_empty() {
+        load_session(&session_path())
+    } else {
+        named
+    }
 }
 
 const MAX_PROMPT_HISTORY: usize = 200;
@@ -1235,6 +1294,7 @@ fn parse_args() -> ParsedArgs {
     let mut task = String::new();
     let mut cwd = None;
     let mut resume = false;
+    let mut resume_id = None;
     let mut skip_danger = std::env::var("RIDGE_SKIP_PERMISSIONS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -1242,7 +1302,7 @@ fn parse_args() -> ParsedArgs {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     let mut every = None;
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--cwd" => cwd = args.next(),
@@ -1251,7 +1311,19 @@ fn parse_args() -> ParsedArgs {
                 skip_danger = true
             }
             "--read-only" | "--readonly" => read_only = true,
-            "--resume" | "--continue" => resume = true,
+            "--session" => {
+                resume = true;
+                resume_id = args.next();
+            }
+            "--resume" | "--continue" => {
+                resume = true;
+                if args
+                    .peek()
+                    .is_some_and(|next| agent::looks_like_session_id(next))
+                {
+                    resume_id = args.next();
+                }
+            }
             _ => {
                 if !task.is_empty() {
                     task.push(' ');
@@ -1266,6 +1338,7 @@ fn parse_args() -> ParsedArgs {
         cwd,
         skip_danger,
         resume,
+        resume_id,
         read_only,
         every,
     }
@@ -1293,6 +1366,7 @@ struct ParsedArgs {
     cwd: Option<String>,
     skip_danger: bool,
     resume: bool,
+    resume_id: Option<String>,
     read_only: bool,
     /// `--every <dur>`:设了 → 时间触发器,按此间隔重跑任务(仅一次性任务模式)。
     every: Option<std::time::Duration>,
@@ -1489,16 +1563,12 @@ fn real_provider(
                 return None;
             }
             if let Some(key) = profile.resolve_key_with(auth) {
+                let (kind, model, base) = resolve_model_info(cfg);
                 eprintln!(
                     "[ridgecode] starting with config provider profile \"{}\" ({} · {})",
-                    profile.name, profile.kind, profile.model
+                    profile.name, kind, model
                 );
-                return Some(make_provider(
-                    &profile.kind,
-                    &profile.model,
-                    &profile.base_url,
-                    key,
-                ));
+                return Some(make_provider(&kind, &model, &base, key));
             }
             return None;
         }

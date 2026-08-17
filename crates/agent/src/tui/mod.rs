@@ -13,7 +13,7 @@ use crossterm::{
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, size},
+    terminal::{disable_raw_mode, enable_raw_mode, size, SetTitle},
 };
 use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal, TerminalOptions, Viewport};
 
@@ -126,6 +126,57 @@ fn mark_submit_dirty(had_pending_submit: bool, dirty: &mut bool) {
 }
 
 /// Opt-in lifecycle trace for isolated terminal harnesses; normal TUI does no file I/O.
+fn terminal_title_enabled() -> bool {
+    std::env::var("RIDGE_DISABLE_TERMINAL_TITLE")
+        .ok()
+        .as_deref()
+        != Some("1")
+}
+
+pub(crate) fn compose_terminal_title(ui: &Ui, phase: &str) -> String {
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| ".".into());
+    let id = if ui.session_id.is_empty() {
+        "session"
+    } else {
+        ui.session_id.as_str()
+    };
+    format!("ridgecode · {cwd} · {phase} · {id}")
+}
+
+fn apply_terminal_title(title: &str) {
+    if !terminal_title_enabled() {
+        return;
+    }
+    let _ = execute!(io::stdout(), SetTitle(title));
+}
+
+fn refresh_terminal_title(ui: &Ui) {
+    let phase = if ui.busy {
+        if ui
+            .pending_call
+            .as_ref()
+            .is_some_and(|call| call.name == "run_shell")
+        {
+            "shell"
+        } else if ui.transcript.has_answer() {
+            "answer"
+        } else if ui.transcript.has_reasoning() {
+            "think"
+        } else {
+            "run"
+        }
+    } else {
+        "idle"
+    };
+    apply_terminal_title(&compose_terminal_title(ui, phase));
+}
+
 fn tui_trace(stage: &str) {
     let Some(path) = std::env::var_os("RIDGE_TUI_TRACE") else {
         return;
@@ -482,6 +533,9 @@ impl Drop for TerminalGuard {
             let _ = execute!(stdout, event::DisableMouseCapture);
         }
         let _ = execute!(io::stdout(), event::DisableBracketedPaste);
+        if terminal_title_enabled() {
+            let _ = execute!(io::stdout(), SetTitle("ridgecode"));
+        }
         let _ = disable_raw_mode();
         // `native_selection_guard` now drops and restores the exact pre-TUI
         // mode, including any caller-owned Quick Edit setting.
@@ -492,6 +546,7 @@ impl Drop for TerminalGuard {
 mod app;
 mod clipboard;
 mod command;
+mod csi;
 mod draw;
 mod eventfmt;
 #[cfg(test)]
@@ -504,10 +559,14 @@ mod status;
 #[cfg(test)]
 mod tests;
 mod transcript;
+#[cfg(test)]
+mod turn_chrome_tests;
+mod turn_view;
 
 pub(crate) use app::*;
 pub(crate) use clipboard::*;
 pub(crate) use command::*;
+pub(crate) use csi::*;
 pub(crate) use draw::*;
 pub(crate) use eventfmt::*;
 pub(crate) use input::*;
@@ -516,6 +575,7 @@ pub(crate) use presentation::*;
 pub(crate) use render::*;
 pub(crate) use status::*;
 pub(crate) use transcript::*;
+pub(crate) use turn_view::*;
 
 /// Route attention shortcuts through one presentation-only fallback path.
 /// Panel and editor contexts must tell the user when no matching history or
@@ -588,6 +648,22 @@ async fn handle_key_event(
     let Some(key) = decide_key(context.pressed, &key) else {
         return Ok(KeyEventResult::Continue);
     };
+    let key = match feed_nav_key(&mut context.ui.csi_pending, &key) {
+        NavFeed::Hold => return Ok(KeyEventResult::Continue),
+        NavFeed::PrefixThen(prefix, key) => {
+            insert_active_text(context.ui, &prefix);
+            key
+        }
+        NavFeed::Event(key) => key,
+    };
+    if (context.ui.popup.is_some() || context.ui.panel.is_some())
+        && matches!(key.code, KeyCode::Char('['))
+        && context.ui.csi_pending.is_empty()
+    {
+        context.ui.csi_pending.push('[');
+        return Ok(KeyEventResult::Continue);
+    }
+    let key = absorb_active_csi(context.ui, key);
     if live_hold_release_action(&key, context.ui.popup.is_some()) {
         if *context.momentary_hold {
             *context.momentary_hold = false;
@@ -774,9 +850,9 @@ fn interrupt_task(
     context.ui.mark_takeover_ready();
     let kept = context.ui.queued.len();
     let tail = if kept > 0 {
-        format!("interrupted current task 路 takeover ready 路 {kept} queued kept")
+        format!("interrupted current task · takeover ready · {kept} queued kept")
     } else {
-        "interrupted current task 路 takeover ready".into()
+        "interrupted current task · takeover ready".into()
     };
     context.ui.note(tail, role_color(Role::Warn));
 }
@@ -792,7 +868,7 @@ fn handle_approval_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> boo
                     context.ui.resume_after_approval();
                 }
             }
-            context.ui.note("鉁?approved", role_color(Role::Success));
+            context.ui.note("▣ approved", role_color(Role::Success));
         }
         ApprovalAction::Reject => {
             if let Some(request) = context.pending.take() {
@@ -800,7 +876,7 @@ fn handle_approval_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> boo
                     context.ui.resume_after_approval();
                 }
             }
-            context.ui.note("鉁?rejected", role_color(Role::Error));
+            context.ui.note("▣ rejected", role_color(Role::Error));
         }
         ApprovalAction::Scroll(delta) => context.ui.scroll = apply_scroll(context.ui.scroll, delta),
         ApprovalAction::Ignore => {
@@ -863,6 +939,8 @@ async fn handle_panel_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> 
         PanelAction::SendNow => send_queue_selection_now(context.ui, context.pending_submit),
         PanelAction::Up
         | PanelAction::Down
+        | PanelAction::Left
+        | PanelAction::Right
         | PanelAction::DetailPageUp
         | PanelAction::DetailPageDown
         | PanelAction::PageUp
@@ -928,11 +1006,7 @@ fn remove_panel_selection(ui: &mut Ui, allow_edit: bool) {
         if ui.remove_queued(index).is_some() {
             ui.record_activity(ActivityKind::Queue, "removed queued message");
             ui.note(
-                format!(
-                    "removed pending item ({} left): {}",
-                    ui.queued.len(),
-                    "queued message"
-                ),
+                format!("removed pending item ({} left)", ui.queued.len()),
                 role_color(Role::Warn),
             );
             if from_live_panel {
@@ -983,14 +1057,18 @@ pub(crate) fn send_queue_selection_now(ui: &mut Ui, pending_submit: &mut Option<
     };
     // A pending submission wins over the FIFO. Preserve that older pending
     // item by putting it back at the front after the selected item.
-    if let Some(previous) = pending_submit.replace(message) {
+    if let Some(previous) = pending_submit.replace(message.clone()) {
         ui.queued.push_front(previous);
     }
     ui.panel = None;
     ui.refresh_queue_panel();
-    ui.record_activity(ActivityKind::Queue, "sending selected queued message next");
+    let preview = queue_preview(&message, 72);
+    ui.record_activity(
+        ActivityKind::Queue,
+        format!("sending selected queued · {preview}"),
+    );
     ui.note(
-        "sending selected queued message next · current turn continues",
+        format!("sending selected queued · {preview} · current turn continues"),
         role_color(Role::Primary),
     );
 }
@@ -1000,21 +1078,41 @@ fn navigate_panel(ui: &mut Ui, action: PanelAction) {
     if panel.editing.is_some() {
         return;
     }
-    let action = match action {
-        // Once detail is open, PageUp/PageDown operate on the full-screen
-        // document. Alt+PageUp/PageDown keep the same explicit path.
-        PanelAction::PageUp if panel.detail_open => PanelAction::DetailPageUp,
-        PanelAction::PageDown if panel.detail_open => PanelAction::DetailPageDown,
-        action => action,
-    };
+    if panel.detail_open && panel.supports_detail() {
+        match action {
+            PanelAction::Up | PanelAction::DetailPageUp => {
+                let _ = panel.scroll_detail_by(-4);
+            }
+            PanelAction::Down | PanelAction::DetailPageDown => {
+                let _ = panel.scroll_detail_by(4);
+            }
+            PanelAction::PageUp => {
+                let _ = panel.scroll_detail_by(-16);
+            }
+            PanelAction::PageDown => {
+                let _ = panel.scroll_detail_by(16);
+            }
+            PanelAction::Left => panel.move_up(),
+            PanelAction::Right => panel.move_down(),
+            PanelAction::First => panel.detail_scroll = 0,
+            PanelAction::Last => {
+                panel.detail_scroll = panel.detail_scroll.saturating_add(10_000);
+            }
+            _ => return,
+        }
+        ui.sync_live_panel_focus();
+        return;
+    }
     match action {
         PanelAction::Up => panel.move_up(),
         PanelAction::Down => panel.move_down(),
+        PanelAction::Left => panel.move_up(),
+        PanelAction::Right => panel.move_down(),
         PanelAction::DetailPageUp => {
-            let _ = panel.scroll_detail(-1);
+            let _ = panel.scroll_detail_by(-4);
         }
         PanelAction::DetailPageDown => {
-            let _ = panel.scroll_detail(1);
+            let _ = panel.scroll_detail_by(4);
         }
         PanelAction::PageUp => panel.page_up(),
         PanelAction::PageDown => panel.page_down(),
@@ -1146,7 +1244,7 @@ fn handle_live_focus_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> b
         let _ = context.ui.move_semantic_focus(delta);
         context
             .ui
-            .note("Alt+鈫?鈫?路 semantic focus", role_color(Role::Info));
+            .note("Alt+← → · semantic focus", role_color(Role::Info));
         return true;
     }
     if let Some(delta) = tool_detail_scroll_action(
@@ -1184,7 +1282,7 @@ fn handle_live_view_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> bo
         let _ = context.ui.toggle_focused_semantic();
         context
             .ui
-            .note("Space 路 semantic block toggled", role_color(Role::Info));
+            .note("Space · semantic block toggled", role_color(Role::Info));
         return true;
     }
     let Some(action) = live_scroll_action(
@@ -1219,6 +1317,61 @@ fn handle_live_view_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> bo
         }
     }
     true
+}
+
+fn absorb_active_csi(ui: &mut Ui, key: KeyEvent) -> KeyEvent {
+    if ui.panel.is_some() && ui.input_editor_scroll.is_none() {
+        return absorb_panel_csi(ui, key);
+    }
+    if let Some((nav, consume)) = apply_csi_buffer_nav(&ui.input.buffer, ui.input.cursor, key) {
+        for _ in 0..consume {
+            ui.input.backspace();
+        }
+        return nav;
+    }
+    key
+}
+
+fn insert_active_text(ui: &mut Ui, text: &str) {
+    if ui.panel.is_some() && ui.input_editor_scroll.is_none() {
+        for c in text.chars() {
+            edit_panel(ui, PanelAction::Char(c));
+        }
+        return;
+    }
+    ui.input.insert_str(text);
+    ui.popup = build_popup(&ui.input);
+}
+
+fn absorb_panel_csi(ui: &mut Ui, key: KeyEvent) -> KeyEvent {
+    let Some(panel) = ui.panel.as_mut() else {
+        return key;
+    };
+    let prefix = panel.editing.as_deref().unwrap_or(panel.query.as_str());
+    let KeyCode::Char(incoming) = key.code else {
+        return key;
+    };
+    let Some((code, consume)) = csi_insert_override(prefix, incoming) else {
+        return key;
+    };
+    let sel = panel.sel;
+    match &mut panel.editing {
+        Some(buffer) => {
+            for _ in 0..consume {
+                buffer.pop();
+            }
+        }
+        None => {
+            for _ in 0..consume {
+                panel.query.pop();
+            }
+            panel.retype();
+            if sel < panel.view.len() {
+                panel.sel = sel;
+            }
+        }
+    }
+    KeyEvent::new_with_kind(code, key.modifiers, KeyEventKind::Press)
 }
 
 fn handle_input_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) {
@@ -1505,6 +1658,15 @@ fn handle_submission_action(
 ) {
     let input = ui.input.take().trim().to_owned();
     if input.is_empty() {
+        send_next_queued_now(ui, pending_submit);
+        return;
+    }
+    if input.starts_with('!') {
+        if active_task {
+            queue_input(ui, input);
+        } else {
+            *pending_submit = Some(input);
+        }
         return;
     }
     let explicit_steer = steer_text(&input);
@@ -1566,29 +1728,45 @@ fn display_submission(input: &str) -> String {
 }
 
 fn queue_input(ui: &mut Ui, input: String) {
-    ui.queued.push_back(input);
+    ui.queued.push_back(input.clone());
     ui.refresh_queue_panel();
-    ui.record_activity(ActivityKind::Queue, "queued message");
+    let preview = queue_preview(&input, 72);
+    ui.record_activity(ActivityKind::Queue, format!("queued · {preview}"));
     ui.note(
         format!(
-            "鈴?queued ({} pending; current turn continues): {}",
-            ui.queued.len(),
-            "queued message"
+            "▸ queued ({} pending; current turn continues): {preview}",
+            ui.queued.len()
         ),
         role_color(Role::Muted),
     );
 }
 
 fn push_queue_front(ui: &mut Ui, input: String) {
-    ui.queued.push_front(input);
+    ui.queued.push_front(input.clone());
     ui.refresh_queue_panel();
-    ui.record_activity(ActivityKind::Queue, "front-queued message");
+    let preview = queue_preview(&input, 72);
+    ui.record_activity(ActivityKind::Queue, format!("front-queued · {preview}"));
     ui.note(
         format!(
-            "鈴?front-queued ({} pending; current turn continues): {}",
-            ui.queued.len(),
-            "queued message"
+            "▸ front-queued ({} pending; current turn continues): {preview}",
+            ui.queued.len()
         ),
+        role_color(Role::Primary),
+    );
+}
+
+fn send_next_queued_now(ui: &mut Ui, pending_submit: &mut Option<String>) {
+    let Some(message) = ui.queued.pop_front() else {
+        return;
+    };
+    if let Some(previous) = pending_submit.replace(message.clone()) {
+        ui.queued.push_front(previous);
+    }
+    ui.refresh_queue_panel();
+    let preview = queue_preview(&message, 72);
+    ui.record_activity(ActivityKind::Queue, format!("sending queued · {preview}"));
+    ui.note(
+        format!("sending queued · {preview} · starts at the next model gap"),
         role_color(Role::Primary),
     );
 }
@@ -1626,12 +1804,12 @@ fn session_input_history(history: &[Message]) -> Vec<String> {
 
 fn note_initial_ui(ui: &mut Ui, skip_danger: bool, history: &[Message]) {
     ui.note(
-        "RidgeCode  路  inline mode: output lands in terminal history (native scroll/select) 路 Enter send/queue 路 Ctrl+Enter front-queue without interrupt 路 Ctrl+I/Alt+I live inspect 路 Ctrl+Q queue 路 Ctrl+Space hold/follow 路 Ctrl+A answers 路 Ctrl+T activity 路 Ctrl+J newline 路 Esc/Ctrl-C takeover; press Ctrl-C twice to exit 路 /help",
+        "RidgeCode  ·  inline mode: output lands in terminal history (native scroll/select) · Enter send/queue · Ctrl+Enter front-queue without interrupt · Ctrl+I/Alt+I live inspect · Ctrl+Q queue · Ctrl+Space hold/follow · Ctrl+A answers · Ctrl+T activity · Ctrl+J newline · Esc/Ctrl-C takeover; press Ctrl-C twice to exit · /help",
         role_color(Role::Info),
     );
     if skip_danger {
         ui.note(
-            "鈿?skip-danger: tools auto-approved (disaster commands still hard-blocked)",
+            "⚠ skip-danger: tools auto-approved (disaster commands still hard-blocked)",
             role_color(Role::Error),
         );
     }
@@ -1997,7 +2175,7 @@ async fn process_pending_submit(context: &mut PendingSubmitContext<'_>) -> anyho
         },
     )
     .await?;
-    let starts_session = !input.starts_with('/') || context.ui.run_task.is_some();
+    let starts_session = !is_direct_command(&input) || context.ui.run_task.is_some();
     if starts_session && !context.ui.input.session_mode {
         context.ui.input.drop_last_history_if(&input);
         save_global_input_history(&context.ui.input.history);
@@ -2012,16 +2190,20 @@ async fn process_pending_submit(context: &mut PendingSubmitContext<'_>) -> anyho
     if should_exit {
         return Ok(true);
     }
-    let task_input = if input.starts_with('/') {
+    let task_input = if is_direct_command(&input) {
         context.ui.run_task.take()
     } else {
         Some(input.clone())
     };
     if let Some(task_input) = task_input {
-        context.ui.note(
-            format!("鈥?{}", display_submission(&input)),
-            role_color(Role::Command),
-        );
+        let shown = if input.starts_with('/') {
+            display_submission(&input)
+        } else {
+            input.clone()
+        };
+        context
+            .ui
+            .note(user_prompt_line(&shown), role_color(Role::Command));
         context
             .history
             .push(Message::user(expand_mentions(&task_input)));
@@ -2158,6 +2340,12 @@ async fn prepare_loop(context: &mut LoopPrepareContext<'_>) -> anyhow::Result<bo
         *context.dirty = true;
     }
     let had_pending_submit = context.pending_submit.is_some();
+    if can_start_task(context.ui.busy, context.task.is_some()) && context.pending_submit.is_none() {
+        if let Some(next) = context.ui.queued.pop_front() {
+            *context.pending_submit = Some(next);
+            context.ui.refresh_queue_panel();
+        }
+    }
     if can_start_task(context.ui.busy, context.task.is_some())
         && process_pending_submit(&mut PendingSubmitContext {
             ui: context.ui,
@@ -2226,8 +2414,8 @@ fn handle_token_chunk(
 
 fn set_token_activity(ui: &mut Ui, chunk: &provider::StreamChunk) {
     ui.set_activity(match chunk {
-        provider::StreamChunk::Answer(_) => "model 路 answering",
-        provider::StreamChunk::Reasoning(_) => "model 路 thinking",
+        provider::StreamChunk::Answer(_) => "model · answering",
+        provider::StreamChunk::Reasoning(_) => "model · thinking",
     });
 }
 
@@ -2259,7 +2447,7 @@ fn handle_stream_event(event: StreamEvent<AgentState>, context: &mut StreamEvent
             context.ui.phase = node_label(&node);
             context
                 .ui
-                .set_activity(format!("node 路 {}", context.ui.phase));
+                .set_activity(format!("node · {}", context.ui.phase));
             context.ui.busy = true;
         }
         StreamEvent::Superstep {
@@ -2331,11 +2519,11 @@ fn visible_stream_messages(state: &AgentState) -> &[String] {
 
 fn superstep_activity(active_label: &str, pending_call: Option<&provider::ToolCall>) -> String {
     if let Some(call) = pending_call {
-        format!("tool 路 {}", call.name)
+        format!("tool · {}", call.name)
     } else if active_label.is_empty() {
         "settling result".to_owned()
     } else {
-        format!("next 路 {active_label}")
+        format!("next · {active_label}")
     }
 }
 
@@ -2351,6 +2539,9 @@ fn present_stream_message(
         return;
     }
     let is_final = is_final_event(message);
+    if is_process_noise(message) {
+        return;
+    }
     for (line, color) in summarize_event(message) {
         if is_final {
             ui.note_markdown_with_meta(line, answer_step, answer_elapsed_s, answer_tokens);
@@ -2414,8 +2605,13 @@ fn schedule_next_after_done(context: &mut DoneEventContext<'_>) {
         }
         *context.pending_submit = context.ui.queued.pop_front();
         context.ui.refresh_queue_panel();
+        let preview = context
+            .pending_submit
+            .as_deref()
+            .map(|text| queue_preview(text, 72))
+            .unwrap_or_default();
         context.ui.note(
-            "steer arrived at turn boundary · continuing as follow-up",
+            format!("steer arrived at turn boundary · sending {preview}"),
             role_color(Role::Primary),
         );
         return;
@@ -2423,6 +2619,12 @@ fn schedule_next_after_done(context: &mut DoneEventContext<'_>) {
     if context.pending_submit.is_none() {
         *context.pending_submit = context.ui.queued.pop_front();
         context.ui.refresh_queue_panel();
+        if let Some(text) = context.pending_submit.as_deref() {
+            context.ui.note(
+                format!("model gap · sending queued · {}", queue_preview(text, 72)),
+                role_color(Role::Primary),
+            );
+        }
     }
 }
 
@@ -2471,11 +2673,11 @@ fn handle_successful_run(output: AgentState, context: &mut DoneEventContext<'_>)
         (!complete).then_some(halt_reason_display(reason)),
     );
     let (status, color) = if complete {
-        ("鉁?approved".to_string(), role_color(Role::Success))
+        ("▣ approved".to_string(), role_color(Role::Success))
     } else {
         (
             format!(
-                "鉁?not approved ({}) 路 {}",
+                "▣ not approved ({}) · {}",
                 halt_reason_display(reason),
                 halt_reason_guidance(reason)
             ),
@@ -2484,7 +2686,7 @@ fn handle_successful_run(output: AgentState, context: &mut DoneEventContext<'_>)
     };
     context.ui.note(
         format!(
-            "{status} 路 steps={} 路 tokens={}",
+            "{status} · steps={} · tokens={}",
             output.steps, output.total_tokens
         ),
         color,
@@ -2522,7 +2724,7 @@ fn handle_failed_run(error: String, context: &mut DoneEventContext<'_>) {
         context.ui.phase = "reasoning".into();
         context
             .ui
-            .set_activity(format!("retrying 路 reasoning {retry}/{TUI_MAX_RETRIES}"));
+            .set_activity(format!("retrying · reasoning {retry}/{TUI_MAX_RETRIES}"));
         context.ui.superstep = 0;
         context.ui.stall = 0;
         context.ui.err_streak = 0;
@@ -2571,10 +2773,11 @@ fn handle_tick(
     last_activity: &Option<Instant>,
     pending: &Option<ApprovalRequest>,
 ) -> bool {
+    refresh_terminal_title(ui);
     let was_waiting = ui.waiting;
     ui.waiting = ui.busy && last_activity.is_some_and(|at| at.elapsed() >= Duration::from_secs(8));
     if ui.waiting && !was_waiting {
-        ui.record_activity(ActivityKind::Waiting, "waiting 路 no stream for 8s");
+        ui.record_activity(ActivityKind::Waiting, "waiting · no stream for 8s");
     }
     if ui.splash >= SPLASH_TICKS || ui.busy || pending.is_some() {
         return false;
@@ -2783,8 +2986,10 @@ pub(super) async fn run(
     let mut ui = Ui {
         effort: Some(initial_effort),
         mcp_statuses,
+        session_id: agent::current_session_id(),
         ..Ui::default()
     };
+    apply_terminal_title(&compose_terminal_title(&ui, "idle"));
     let commands_fixture = std::env::var("RIDGE_TUI_FIXTURE").ok().as_deref() == Some("commands");
     if commands_fixture {
         ui.model_catalog = Some(vec![

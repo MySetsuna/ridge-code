@@ -173,15 +173,21 @@ impl Panel {
     }
     /// Move the expanded detail view around its search anchor.
     pub(crate) fn scroll_detail(&mut self, delta: i8) -> bool {
-        if !self.supports_detail() || !self.detail_open {
+        if delta > 0 {
+            self.scroll_detail_by(DETAIL_SCROLL_STEP)
+        } else if delta < 0 {
+            self.scroll_detail_by(-DETAIL_SCROLL_STEP)
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn scroll_detail_by(&mut self, delta_rows: i32) -> bool {
+        if !self.supports_detail() || !self.detail_open || delta_rows == 0 {
             return false;
         }
         let before = self.detail_scroll;
-        if delta > 0 {
-            self.detail_scroll = self.detail_scroll.saturating_add(DETAIL_SCROLL_STEP);
-        } else if delta < 0 {
-            self.detail_scroll = self.detail_scroll.saturating_sub(DETAIL_SCROLL_STEP);
-        }
+        self.detail_scroll = self.detail_scroll.saturating_add(delta_rows).max(0);
         self.detail_scroll != before
     }
 
@@ -368,7 +374,7 @@ pub(crate) fn answer_history_panel(history: &std::collections::VecDeque<AnswerEn
         .collect();
     Panel::new(
         PanelKind::AnswerHistory,
-        "Answer archive · completed + partial · ↑↓/PgUp/PgDn select · Enter expand · type to filter · Esc close".into(),
+        "Answer archive · completed + partial · Enter expand · ↑↓/Pg scroll the open answer · ←→ switch · Esc close".into(),
         rows,
     )
 }
@@ -391,14 +397,14 @@ pub(crate) fn live_history_panel_with_queue(
         });
         actions.push(PanelRowAction::FocusLiveBlock(entry.focus));
     }
-    for (index, _message) in queue.iter().enumerate() {
+    for (index, message) in queue.iter().enumerate() {
         rows.push(PanelRow {
             key: if index == 0 {
                 "⏭ pending · next".into()
             } else {
                 format!("⏳ pending · #{}", index + 1)
             },
-            value: "queued message".into(),
+            value: super::queue_preview(message, 64),
             ctx: None,
         });
         actions.push(PanelRowAction::RemoveQueued(index));
@@ -457,13 +463,13 @@ pub(crate) fn queue_panel(queue: &std::collections::VecDeque<String>) -> Panel {
         queue
             .iter()
             .enumerate()
-            .map(|(index, _message)| PanelRow {
+            .map(|(index, message)| PanelRow {
                 key: if index == 0 {
                     "⏭ next".into()
                 } else {
                     format!("⏳ #{}", index + 1)
                 },
-                value: "queued message".into(),
+                value: super::queue_preview(message, 64),
                 ctx: None,
             })
             .collect()
@@ -726,6 +732,8 @@ pub(crate) fn skills_panel(skills: &[agent::Skill]) -> Panel {
 pub(crate) enum PanelAction {
     Up,
     Down,
+    Left,
+    Right,
     PageUp,
     PageDown,
     DetailPageUp,
@@ -758,6 +766,8 @@ pub(crate) fn panel_action(key: &KeyEvent) -> PanelAction {
     match key.code {
         KeyCode::Up => PanelAction::Up,
         KeyCode::Down => PanelAction::Down,
+        KeyCode::Left => PanelAction::Left,
+        KeyCode::Right => PanelAction::Right,
         KeyCode::PageUp => PanelAction::PageUp,
         KeyCode::PageDown => PanelAction::PageDown,
         KeyCode::Home => PanelAction::First,

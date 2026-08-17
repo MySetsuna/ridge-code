@@ -30,6 +30,8 @@ pub use rich_output::{
 
 mod state;
 pub use state::*;
+mod session;
+pub use session::*;
 mod observe;
 pub use observe::*;
 mod knowledge;

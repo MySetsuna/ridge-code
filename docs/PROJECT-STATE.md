@@ -1,11 +1,11 @@
-# RidgeCode PROJECT-STATE(2026-08-14 · iter-52)
+# RidgeCode PROJECT-STATE(2026-08-16 · iter-53)
 
 > 本文是 NotebookLM 中**唯一**的 RidgeCode 来源,每轮迭代覆盖式更新并替换。
 > 结构:A. 项目定位与北极星(稳定段)→ B. 近期迭代与验证证据 → C. 能力对照与差距 → D. 开放问题与请 NotebookLM 定夺的问题 → E. 已落地架构详情(codegraph 生成的代码事实全文)。
 
 ## A. 项目定位与北极星(稳定段,少改)
 
-RidgeCode 是一个**模块化、跨领域可扩展的通用 agent 框架**(单二进制 `ridgecode`,Rust workspace,当前 v0.4.0+,住 `crates/agent`)。既能像 Claude Code 写代码,又能做编程以外的事。**加新能力 = 加一个 MCP server 配置或一个 SKILL.md,而不是改 Rust 源码。**
+RidgeCode 是一个**模块化、跨领域可扩展的通用 agent 框架**(单二进制 `ridgecode`,Rust workspace,当前 v0.5.21,住 `crates/agent`)。既能像 Claude Code 写代码,又能做编程以外的事。**加新能力 = 加一个 MCP server 配置或一个 SKILL.md,而不是改 Rust 源码。**
 
 四层解耦(已全部落地):
 1. **内核** —— `langgraph` 纯图引擎(StateGraph + Pregel BSP 超步 + checkpoint 时间旅行,零 LLM 依赖);
@@ -17,6 +17,12 @@ RidgeCode 是一个**模块化、跨领域可扩展的通用 agent 框架**(单�
 **已锁定决策(不变量,改码前须知)**:maker≠checker;reducer 显式;引擎零 LLM;外置能力走 MCP/SKILL 不进内核;provider 边界(第三方 SDK 包在 trait 后);一切注入块有界截断;危险命令拦截不可绕过、sub-agent 恒只读;注入块有序稳态利 prompt 缓存。内核 token 节约四判据已收束:历史有界自动压缩 / 静态底噪极小 / Lean 输出 / durable-state 事实驱动。
 
 ## B. 近期迭代与验证证据
+
+- **iter-53 · Grok Build 全量接手与可用性收敛**：已审计本地 Grok 会话 `01a0035b-084b-7fa1-8c6a-0f7d828c23b8`，其终态为 `infra_paused`（402）且五项计划未完成；用户“批准所有需求”已固化为 `REQ-20260816-GROK-HANDOFF-01` 与 `REQ-20260816-TUI-ANSWER-OUTPUT-01`，并显式修订旧 read_file 可见性条款：主 scrollback 仅显示摘要/准确 `… +N lines`，Ctrl+T 审计保存完整 observation，assistant answer 永不折叠。
+- **执行闭环**：变更任务 completion gate 要求匹配目标写入；两次匹配编辑拒绝后有界 wrapup，避免伪完成或无限 reason；parked shell 可由 shipped `cancel_job_id` 入口取消并清 `live_shell_jobs`；命名 provider 运行时尊重 `RIDGE_MODEL/RIDGE_BASE_URL`，但仍取所选 profile 凭证；sub-agent 缺 profile/model、401、429、不可达时逐任务回退调度时主 provider/model；`search.path` 可为文件或目录，消除 Windows `os error 267`。
+- **TUI 输出与控制**：宽端 GFM 表格按显示 cell 排列，窄端降级键值堆叠；CJK/emoji、标题、链接、粗斜体、行内/围栏代码语义高亮；工具长输出在主视图折叠，Ctrl+T 可看完整审计，答案详情全文可滚动。忙时普通输入与 bang 均 FIFO 入队；Ctrl+Enter 置前，空输入 Enter 优先发送队首；Inspector 可展开/折叠、End 选末项、Delete 删除、Ctrl+Q/Alt+I 往返。ConPTY 残余 Kitty CSI-u 与 `[3~` Delete 均归一，不向编辑框漏字。
+- **真实 provider 证据**：已安装 `ridgecode 0.5.21` 用真实 `glm-5-2-260617` 走通 search/read/edit/build 至编译反馈；随后真实 `doubao-seed-2-0-code-preview-260215` 在 7 步内重写 parked-job cancel 测试、运行精确测试 exit 0，并由确定性 verify 判 approved。该链直接走发布入口，非 mock/另写 runner。
+- **最终验证**：`cargo test --workspace` 全绿（agent lib 192、ridgecode bin/TUI 435、eval 1、langgraph 9、mcp 2、provider 55、tools 27 + 1 ignored、doctest）；fmt、clippy `-D warnings`、build、`git diff --check` 全绿。安装版 PTY completion（表格/高亮/tool fold/answer full）、busy queue/Inspector/Kitty、commands 均 PASS；180 秒真实 park 测试与 cancel 测试通过。质量脚本的本地阶段及 `llvm-cov --fail-under-lines 80` 通过并生成 `target/quality/lcov.info`；仅 Sonar 服务端因本 shell 无 `SONAR_TOKEN` 无法认证，故不宣称远端 gate 通过。
 
 - **iter-52 · Codex 式 live steer**：忙碌任务支持 `Ctrl+Shift+Enter` 或 `/steer <guidance>` 将引导写入有界 `SteerBus`；不取消当前 provider 回合，`reason` 在下一次请求前消费，provider 失败回队，回合边界自动 follow-up，中断清空。新增队列上限与 history 顺序回归，保留 Enter 队尾、Ctrl+Enter 队首的既有语义。
 - **本轮验证**：图层 steer 注入/回队/边界、TUI 发送与真实 Windows PTY busy/queue/resize 回归通过；workspace 全量质量门、release 刷新和本机安装待本轮收尾。

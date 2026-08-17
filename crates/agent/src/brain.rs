@@ -1,6 +1,7 @@
 use crate::knowledge::Skill;
 use crate::state::{AgentState, Patch, MAX_ERR_STREAK, MAX_EXPLORE, MAX_STALL, MAX_STEPS};
 use langgraph::{CompiledGraph, GraphError, StateGraph, END};
+use provider::Role;
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -27,8 +28,10 @@ pub(crate) const BASE_SYSTEM: &str =
      otherwise report the supported answer. If a search/read adds no new fact, do not repeat it; \
      switch to the smallest next action or report the concrete blocker. Do not use a no-op tool call \
      merely to reset exploration counters. \
-     Completion contract: before claiming done, complete every todo item. Any pending/in_progress todo \
-     or pending tool call blocks the success gate. \
+     Long commands: run_shell parks after 180s and returns job_id — poll that job_id until exit; \
+     do not restart the same build/package command. Do not use run_shell as a file editor. \
+     Completion contract: before claiming done, complete every todo item. Any pending/in_progress todo, \
+     pending tool call, or live shell job blocks the success gate. \
      Reply concisely: no filler or restating the task; when changing code, emit only the minimal \
      edit (unique-match replace / diff), not a full-file rewrite. When done, stop.";
 
@@ -126,6 +129,94 @@ pub(crate) fn is_land_edit_tool(name: &str) -> bool {
     matches!(name, "write_file" | "edit_file" | "apply_edits")
 }
 
+/// Change-intent in the user task (or an already-fired explore handoff).
+pub(crate) fn looks_like_change_task(s: &AgentState) -> bool {
+    const MARKERS: &[&str] = &[
+        "edit",
+        "fix",
+        "write",
+        "implement",
+        "change",
+        "patch",
+        "apply",
+        "create",
+        "delete",
+        "migrate",
+        "refactor",
+        "remove",
+        "rename",
+        "update",
+        "改",
+        "修",
+        "写",
+        "创建",
+        "新建",
+        "删除",
+        "移除",
+        "重构",
+        "升级",
+        "动手",
+        "替换",
+        "编码",
+    ];
+    let blob = s.task.to_ascii_lowercase();
+    let hit = |text: &str, lower: &str| {
+        MARKERS.iter().any(|marker| {
+            if marker.is_ascii() {
+                lower.contains(marker)
+            } else {
+                text.contains(marker)
+            }
+        })
+    };
+    let imperative_add = |lower: &str| {
+        let lower = lower.trim_start();
+        lower.starts_with("add ")
+            || lower.contains(" add a ")
+            || lower.contains(" add the ")
+            || lower.contains(" add support")
+            || lower.contains(" add feature")
+    };
+    hit(&s.task, &blob)
+        || imperative_add(&blob)
+        || s.todos.iter().any(|todo| {
+            let lower = todo.content.to_ascii_lowercase();
+            hit(&todo.content, &lower) || imperative_add(&lower)
+        })
+}
+
+fn normalized_target(value: &str) -> String {
+    value
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .to_ascii_lowercase()
+}
+
+fn targeted_edit_landed(s: &AgentState) -> bool {
+    let stated_targets = std::iter::once(s.task.as_str())
+        .chain(s.todos.iter().map(|todo| todo.content.as_str()))
+        .map(normalized_target)
+        .collect::<Vec<_>>()
+        .join("\n");
+    s.modified_files.iter().any(|modified| {
+        let modified = normalized_target(modified);
+        stated_targets.contains(&modified)
+            || s.last_read_paths.iter().any(|read| {
+                let read = normalized_target(read);
+                modified == read || modified.starts_with(&format!("{read}/"))
+            })
+    })
+}
+
+/// A change task cannot finish without a landed edit. Once files were
+/// inspected, at least one modified path must also match the stated or read
+/// target; editing an unrelated file cannot unlock approval.
+pub(crate) fn needs_land_edit(s: &AgentState) -> bool {
+    looks_like_change_task(s)
+        && (s.modified_files.is_empty()
+            || (!s.last_read_paths.is_empty() && !targeted_edit_landed(s)))
+}
+
 /// 确定性**成功**信号(编码任务:shell `exit 0` 或测试 `passed`)。
 /// shell 成功恒以 harness 产出的前缀 `"exit 0:"` 打头 —— 用 `starts_with` 而非 `contains`:
 /// ①修正确性 bug(失败命令 `exit 7: ...` 正文若含 "exit 0" 文本会被 `contains` 误判成功);
@@ -152,19 +243,59 @@ pub fn tool_output_failed(o: &str) -> bool {
 ///
 /// 编码任务仍严格卡 `exit 0`;只对「模型自己收尾且无客观失败」放行,兼顾通用性与 maker≠checker。
 pub(crate) fn verify_ok(s: &AgentState) -> bool {
-    if completion_blocked(s) || (s.explore_handoff && !s.explore_action_used) {
+    if completion_blocked(s) || (s.explore_handoff && !s.explore_action_used) || needs_land_edit(s)
+    {
         return false;
     }
     let out = s.tool_output.as_deref();
     out.is_some_and(tool_output_ok)
+        || historical_shell_ok(s)
         || (s.last_action.as_deref() == Some("finish") && !out.is_some_and(tool_output_failed))
+}
+
+fn historical_shell_ok(s: &AgentState) -> bool {
+    let mut ok = false;
+    for message in s
+        .history
+        .iter()
+        .filter(|message| message.role == Role::Tool)
+    {
+        let Some(call_id) = message.tool_call_id.as_deref() else {
+            continue;
+        };
+        let is_shell = s.history.iter().any(|candidate| {
+            candidate
+                .tool_calls
+                .iter()
+                .any(|call| call.id == call_id && call.name == "run_shell")
+        });
+        if !is_shell {
+            continue;
+        }
+        if tool_output_failed(&message.content) {
+            ok = false;
+        } else if tool_output_ok(&message.content) {
+            ok = true;
+        }
+    }
+    ok
 }
 
 /// A run may only enter the successful terminal state after all durable work
 /// is settled. This is intentionally independent of model prose: a final
 /// answer while a todo or tool call remains live is an interrupted run.
 pub fn completion_blocked(s: &AgentState) -> bool {
-    s.pending_call.is_some() || s.todos.iter().any(|todo| todo.status.trim() != "completed")
+    s.pending_call.is_some()
+        || s.todos.iter().any(|todo| todo.status.trim() != "completed")
+        || !s.live_shell_jobs.is_empty()
+        || needs_land_edit(s)
+}
+
+fn matching_edit_rejections(s: &AgentState) -> usize {
+    s.messages
+        .iter()
+        .filter(|message| message.contains("verify: FAIL (target known, matching edit not landed)"))
+        .count()
 }
 
 /// Deterministic reason shown when the checker rejects a turn. Keep this
@@ -175,6 +306,10 @@ pub(crate) fn verify_failure_reason(s: &AgentState) -> &'static str {
         "pending tool call"
     } else if s.todos.iter().any(|todo| todo.status.trim() != "completed") {
         "unfinished todo"
+    } else if !s.live_shell_jobs.is_empty() {
+        "live shell job"
+    } else if needs_land_edit(s) {
+        "target known, matching edit not landed"
     } else if s.tool_output.as_deref().is_some_and(tool_output_failed) {
         "tool output failed"
     } else if s.last_action.as_deref() == Some("finish") {
@@ -229,6 +364,7 @@ pub(crate) fn reason_route(s: &AgentState) -> Vec<String> {
     }
     match s.last_action.as_deref() {
         Some("finish") => vec!["verify".to_string()],
+        Some("retry") => vec!["reason".to_string()],
         _ => vec!["act".to_string()],
     }
 }
@@ -250,12 +386,16 @@ pub(crate) fn act_route(s: &AgentState) -> Vec<String> {
 /// verify 之后的路由(**scripted 路径**):通过或需停机 → END,否则回 reason。
 /// (scripted 图无 `wrapup` 节点、大脑也不会写自然语言总结,故直接 END。)
 pub(crate) fn verify_route(s: &AgentState) -> Vec<String> {
-    if must_stop(s) {
+    if completion_blocked(s) && !hard_stop(s) {
+        if s.pending_call.is_some() {
+            vec!["act".to_string()]
+        } else {
+            vec!["reason".to_string()]
+        }
+    } else if must_stop(s) {
         vec![END.to_string()]
     } else if s.pending_call.is_some() {
         vec!["act".to_string()]
-    } else if completion_blocked(s) {
-        vec!["reason".to_string()]
     } else if s.approved
         || (s.explore_handoff
             && (s.explore_action_used || s.last_action.as_deref() == Some("finish")))
@@ -276,12 +416,18 @@ pub(crate) fn verify_route(s: &AgentState) -> Vec<String> {
 /// 白烧 token 空转收尾。收 wrapup:出一段诚实交接后隐式 END,不成环、不伪装成功。
 /// (下面 `reason` 分支在真实图中不可达 —— verify 前必为 finish/must_stop —— 保留仅为函数完备与防御。)
 pub(crate) fn verify_route_llm(s: &AgentState) -> Vec<String> {
-    if must_stop(s) {
+    if needs_land_edit(s) && !hard_stop(s) && matching_edit_rejections(s) >= 2 {
+        vec!["wrapup".to_string()]
+    } else if completion_blocked(s) && !hard_stop(s) {
+        if s.pending_call.is_some() {
+            vec!["act".to_string()]
+        } else {
+            vec!["reason".to_string()]
+        }
+    } else if must_stop(s) {
         vec!["wrapup".to_string()]
     } else if s.pending_call.is_some() {
         vec!["act".to_string()]
-    } else if completion_blocked(s) {
-        vec!["reason".to_string()]
     } else if s.approved {
         vec![END.to_string()]
     } else if (s.explore_handoff && s.explore_action_used)
@@ -414,11 +560,60 @@ mod tests {
     use super::{
         act_route, build_system_prompt, build_system_prompt_with_mode, completion_blocked,
         explore_exhausted, explore_handoff_patch, is_explore_tool, is_land_edit_tool, must_stop,
-        reason_route, tool_output_failed, verify_failure_reason, verify_node, verify_route,
-        verify_route_llm, AgentState, BASE_SYSTEM,
+        needs_land_edit, reason_route, tool_output_failed, verify_failure_reason, verify_node,
+        verify_ok, verify_route, verify_route_llm, AgentState, BASE_SYSTEM,
     };
     use crate::state::{Todo, MAX_EXPLORE};
     use langgraph::GraphState;
+
+    #[test]
+    fn historical_shell_success_survives_todo_update_but_not_a_later_failure() {
+        let mut state = AgentState::new("run the test");
+        state
+            .history
+            .push(
+                provider::Message::assistant("").with_tool_calls(vec![provider::ToolCall {
+                    id: "test-ok".into(),
+                    name: "run_shell".into(),
+                    arguments: serde_json::json!({"cmd":"cargo test"}),
+                }]),
+            );
+        state.history.push(provider::Message::tool_result(
+            "test-ok",
+            "exit 0: 1 passed; 0 failed",
+        ));
+        state
+            .history
+            .push(
+                provider::Message::assistant("").with_tool_calls(vec![provider::ToolCall {
+                    id: "todos".into(),
+                    name: "todo_write".into(),
+                    arguments: serde_json::json!({}),
+                }]),
+            );
+        state.history.push(provider::Message::tool_result(
+            "todos",
+            "all todos completed",
+        ));
+        state.tool_output = Some("all todos completed".into());
+        state.last_action = Some("retry".into());
+        assert!(verify_ok(&state));
+
+        state
+            .history
+            .push(
+                provider::Message::assistant("").with_tool_calls(vec![provider::ToolCall {
+                    id: "test-failed".into(),
+                    name: "run_shell".into(),
+                    arguments: serde_json::json!({"cmd":"cargo test"}),
+                }]),
+            );
+        state.history.push(provider::Message::tool_result(
+            "test-failed",
+            "exit 1: test failed",
+        ));
+        assert!(!verify_ok(&state));
+    }
 
     /// 输出端省钱:BASE_SYSTEM 含 Lean-output 约束(简洁作答 + 只出最小编辑)。
     #[test]
@@ -468,6 +663,12 @@ mod tests {
         assert!(!tool_output_failed("grep 命中: src/x.rs 处理 error 分支"));
         assert!(!tool_output_failed(
             "build log: 0 errors, 0 failed — all good"
+        ));
+        assert!(!tool_output_failed(
+            "exec.rs:268: Err(error) => tool_result(format!(\"shell error: {error}\"))"
+        ));
+        assert!(!tool_output_failed(
+            "fn example() {\n    return format!(\"read error: {error}\");\n}"
         ));
         assert!(!tool_output_failed("exit 0: ok"));
         // 结构信号仍判失败(不可伪造)。
@@ -565,6 +766,48 @@ mod tests {
         };
         assert_eq!(verify_route(&call), vec!["act"]);
         assert_eq!(verify_route_llm(&call), vec!["act"]);
+
+        let mut missing_edit = AgentState {
+            task: "edit crates/agent/src/exec.rs".into(),
+            last_action: Some("finish".into()),
+            last_read_paths: vec!["crates/agent/src/exec.rs".into()],
+            messages: vec![
+                "verify: FAIL (target known, matching edit not landed) -> back to reason".into(),
+            ],
+            ..Default::default()
+        };
+        assert!(completion_blocked(&missing_edit));
+        assert_eq!(verify_route_llm(&missing_edit), vec!["reason"]);
+        missing_edit
+            .messages
+            .push("verify: FAIL (target known, matching edit not landed) -> back to reason".into());
+        assert_eq!(
+            verify_route_llm(&missing_edit),
+            vec!["wrapup"],
+            "two rejected finish attempts must converge instead of looping to step cap"
+        );
+
+        let live_job = AgentState {
+            last_action: Some("finish".into()),
+            live_shell_jobs: vec!["sh-1-1".into()],
+            ..Default::default()
+        };
+        assert!(completion_blocked(&live_job));
+        assert_eq!(verify_failure_reason(&live_job), "live shell job");
+        assert_eq!(verify_route(&live_job), vec!["reason"]);
+        assert_eq!(verify_route_llm(&live_job), vec!["reason"]);
+
+        let explore_with_todo = AgentState {
+            explore_streak: MAX_EXPLORE,
+            todos: vec![Todo {
+                content: "edit then pack".into(),
+                status: "pending".into(),
+            }],
+            ..Default::default()
+        };
+        assert!(super::explore_exhausted(&explore_with_todo));
+        assert_eq!(verify_route_llm(&explore_with_todo), vec!["reason"]);
+        assert!(!super::verify_ok(&explore_with_todo));
     }
 
     #[tokio::test]
@@ -624,6 +867,42 @@ mod tests {
         assert!(is_explore_tool("codegraph__codegraph_explore"));
         assert!(!is_explore_tool("run_shell"));
         assert!(is_land_edit_tool("edit_file"));
+        let located = AgentState {
+            task: "edit Cargo.toml then pack".into(),
+            last_read_paths: vec!["Cargo.toml".into()],
+            ..Default::default()
+        };
+        assert!(needs_land_edit(&located));
+        assert_eq!(
+            verify_failure_reason(&located),
+            "target known, matching edit not landed"
+        );
+        assert!(!super::verify_ok(&located));
+    }
+
+    #[test]
+    fn change_gate_recognizes_refactors_and_rejects_unrelated_edits() {
+        let wrong = AgentState {
+            task: "refactor src/lib.rs".into(),
+            last_read_paths: vec!["src/lib.rs".into()],
+            modified_files: ["README.md".into()].into_iter().collect(),
+            ..Default::default()
+        };
+        assert!(super::looks_like_change_task(&wrong));
+        assert!(needs_land_edit(&wrong));
+
+        let matching = AgentState {
+            modified_files: ["src/lib.rs".into()].into_iter().collect(),
+            ..wrong.clone()
+        };
+        assert!(!needs_land_edit(&matching));
+
+        let created = AgentState {
+            task: "create src/new.rs".into(),
+            modified_files: ["src/new.rs".into()].into_iter().collect(),
+            ..Default::default()
+        };
+        assert!(!needs_land_edit(&created));
     }
 
     #[test]

@@ -316,9 +316,10 @@ pub struct RoutedProvider {
 }
 
 impl Agents {
-    /// Select a usable provider deterministically. If preferences cannot be
-    /// satisfied, retry selection without them before using the caller's main
-    /// provider; the decision always explains which fallback occurred.
+    /// Select a usable provider deterministically. An unavailable explicit
+    /// preference falls straight back to the caller's current provider/model;
+    /// silently choosing a different routed profile would violate dispatch
+    /// identity and make per-task failures hard to audit.
     pub fn select_provider(
         &self,
         request: &RouteRequest,
@@ -330,19 +331,6 @@ impl Agents {
             .map(|candidate| candidate.profile.clone())
             .collect();
         let mut decision = choose_route(request, &profiles);
-        if decision.selected.is_none()
-            && (request.preferred_provider.is_some() || request.preferred_model.is_some())
-        {
-            let mut fallback_decision = choose_route(&request.without_preferences(), &profiles);
-            if fallback_decision.selected.is_some() {
-                fallback_decision.used_fallback = true;
-                fallback_decision.reason = format!(
-                    "{}; explicit preference unavailable, automatic fallback: {}",
-                    decision.reason, fallback_decision.reason
-                );
-                decision = fallback_decision;
-            }
-        }
         if let Some(selected) = decision.selected.as_ref() {
             if let Some(candidate) = self
                 .route_candidates
@@ -701,7 +689,7 @@ async fn dispatch_one_obs_with_timeout(
         Err(first_failure) if decision.selected.is_some() => {
             decision.used_fallback = true;
             decision.reason = format!(
-                "{}; selected provider failed ({first_failure}), deterministic main-provider fallback",
+                "{}; selected provider failed ({first_failure}), using main agent provider/model",
                 decision.reason
             );
             match run_subagent_bounded(
@@ -881,6 +869,7 @@ mod tests {
     #[test]
     fn route_registry_reports_preference_fallback_without_exposing_secrets() {
         let provider: Arc<dyn LlmProvider> = Arc::new(provider::ScriptedProvider::new(Vec::new()));
+        let main: Arc<dyn LlmProvider> = Arc::new(provider::ScriptedProvider::new(Vec::new()));
         let profile = crate::ModelProfile {
             provider: "fast".into(),
             model: "small".into(),
@@ -907,12 +896,20 @@ mod tests {
             Some("missing"),
             None,
         );
-        let routed = agents.select_provider(&request, provider.clone());
-        assert_eq!(
-            routed.decision.selected_key().as_deref(),
-            Some("fast::small")
-        );
+        let routed = agents.select_provider(&request, main.clone());
+        assert_eq!(routed.decision.selected_key(), None);
         assert!(routed.decision.used_fallback);
+        assert!(routed
+            .decision
+            .reason
+            .contains("caller main provider fallback"));
+        assert!(Arc::ptr_eq(&routed.provider, &main));
+
+        let missing_model = RouteRequest::from_task("read the file", RouteRole::Subagent)
+            .with_overrides(None, None, None, Some("fast"), Some("missing"));
+        let routed = agents.select_provider(&missing_model, main.clone());
+        assert_eq!(routed.decision.selected_key(), None);
+        assert!(Arc::ptr_eq(&routed.provider, &main));
         assert!(!routed.decision.reason.contains("api_key"));
     }
 
@@ -1025,7 +1022,7 @@ mod tests {
         assert!(out.contains("read-only result"));
     }
 
-    struct FailingProvider;
+    struct FailingProvider(&'static str);
 
     #[async_trait::async_trait]
     impl LlmProvider for FailingProvider {
@@ -1033,13 +1030,13 @@ mod tests {
             &self,
             _req: &CompletionRequest,
         ) -> Result<provider::Completion, provider::ProviderError> {
-            Err("http 429: secret-api-body".into())
+            Err(self.0.into())
         }
     }
 
     #[tokio::test]
     async fn dispatch_agent_falls_back_once_after_selected_provider_failure() {
-        let failing: Arc<dyn LlmProvider> = Arc::new(FailingProvider);
+        let failing: Arc<dyn LlmProvider> = Arc::new(FailingProvider("http 429: secret-api-body"));
         let main: Arc<dyn LlmProvider> = Arc::new(provider::ScriptedProvider::new(vec![
             provider::Completion {
                 text: "main fallback result".into(),
@@ -1078,8 +1075,108 @@ mod tests {
 
         let out = dispatch_obs(&agents, &main, &call).await;
         assert!(out.contains("selected provider failed (http 429)"), "{out}");
-        assert!(out.contains("deterministic main-provider fallback"));
+        assert!(out.contains("using main agent provider/model"), "{out}");
         assert!(out.contains("main fallback result"));
+        assert!(!out.contains("secret-api-body"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_agent_falls_back_on_auth_and_unreachable_failures() {
+        for failure in [
+            "http 401: private-auth-body",
+            "connection refused: private-host",
+        ] {
+            let main: Arc<dyn LlmProvider> = Arc::new(provider::ScriptedProvider::new(vec![
+                provider::Completion {
+                    text: "main recovered".into(),
+                    ..Default::default()
+                },
+            ]));
+            let agents = Agents {
+                defs: vec![test_agent("explorer")],
+                providers: HashMap::new(),
+                route_candidates: vec![AgentProvider {
+                    profile: crate::ModelProfile {
+                        provider: "broken".into(),
+                        model: "unavailable".into(),
+                        kind: "openai".into(),
+                        context_window: Some(64_000),
+                        cost_tier: Some(1),
+                        latency_tier: Some(1),
+                        supports_tools: Some(true),
+                        supports_reasoning: Some(false),
+                        tags: vec![],
+                    },
+                    provider: Arc::new(FailingProvider(failure)),
+                }],
+            };
+            let call = ToolCall {
+                id: "route-recovery".into(),
+                name: "dispatch_agent".into(),
+                arguments: serde_json::json!({
+                    "agent":"explorer",
+                    "task":"inspect target",
+                    "provider":"broken",
+                    "model":"unavailable"
+                }),
+            };
+            let out = dispatch_obs(&agents, &main, &call).await;
+            assert!(out.contains("using main agent provider/model"), "{out}");
+            assert!(out.contains("main recovered"), "{out}");
+            assert!(!out.contains("private-auth-body"), "{out}");
+            assert!(!out.contains("private-host"), "{out}");
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_agents_fall_back_independently_to_main_provider() {
+        let failing: Arc<dyn LlmProvider> = Arc::new(FailingProvider("http 429: secret-api-body"));
+        let main: Arc<dyn LlmProvider> = Arc::new(provider::ScriptedProvider::new(vec![
+            provider::Completion {
+                text: "main-a".into(),
+                ..Default::default()
+            },
+            provider::Completion {
+                text: "main-b".into(),
+                ..Default::default()
+            },
+        ]));
+        let agents = Agents {
+            defs: vec![test_agent("explorer"), test_agent("reviewer")],
+            providers: HashMap::new(),
+            route_candidates: vec![AgentProvider {
+                profile: crate::ModelProfile {
+                    provider: "broken".into(),
+                    model: "gone".into(),
+                    kind: "openai".into(),
+                    context_window: Some(64_000),
+                    cost_tier: Some(1),
+                    latency_tier: Some(1),
+                    supports_tools: Some(true),
+                    supports_reasoning: Some(false),
+                    tags: vec![],
+                },
+                provider: failing,
+            }],
+        };
+        let call = ToolCall {
+            id: "batch-fallback".into(),
+            name: "dispatch_agents".into(),
+            arguments: serde_json::json!({
+                "tasks":[
+                    {"agent":"explorer","task":"inspect left","provider":"broken","model":"gone"},
+                    {"agent":"reviewer","task":"inspect right","provider":"broken","model":"gone"}
+                ]
+            }),
+        };
+        let out = dispatch_batch_obs(&agents, &main, &call).await;
+        assert!(
+            out.contains("parallel sub-agent wave (2/2 completed)"),
+            "{out}"
+        );
+        assert_eq!(out.matches("using main agent provider/model").count(), 2);
+        assert!(out.contains("main-a"), "{out}");
+        assert!(out.contains("main-b"), "{out}");
         assert!(!out.contains("secret-api-body"));
     }
 

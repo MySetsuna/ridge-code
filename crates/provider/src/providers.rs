@@ -34,12 +34,36 @@ impl OpenAiProvider {
         self.http = http;
         self
     }
+
+    fn request_body(&self, req: &CompletionRequest) -> Value {
+        let mut body = openai::build_request(&self.model, req);
+        let retry = req
+            .messages
+            .iter()
+            .any(|message| message.content.contains("<provider_retry>"));
+        let action_required = req.messages.iter().any(|message| {
+            message
+                .content
+                .contains("<action_required>true</action_required>")
+        });
+        if retry && self.base_url.to_ascii_lowercase().contains("volces.com") {
+            // Volc reasoning models can spend the entire completion on hidden
+            // thinking and return neither text nor a tool call. A retry is an
+            // atomic action-selection turn, so disable thinking only there.
+            body["thinking"] = serde_json::json!({ "type": "disabled" });
+            if action_required && !req.tools.is_empty() {
+                body["tool_choice"] = Value::String("required".to_string());
+                body["parallel_tool_calls"] = Value::Bool(false);
+            }
+        }
+        body
+    }
 }
 
 #[async_trait::async_trait]
 impl LlmProvider for OpenAiProvider {
     async fn complete(&self, req: &CompletionRequest) -> Result<Completion, ProviderError> {
-        let body = openai::build_request(&self.model, req);
+        let body = self.request_body(req);
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let headers = [
             (
@@ -57,7 +81,7 @@ impl LlmProvider for OpenAiProvider {
         req: &CompletionRequest,
         on_token: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<Completion, ProviderError> {
-        let mut body = openai::build_request(&self.model, req);
+        let mut body = self.request_body(req);
         body["stream"] = Value::Bool(true);
         body["stream_options"] = serde_json::json!({ "include_usage": true });
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));

@@ -8,13 +8,13 @@
 
 ### REQ-20260801-01 · TUI 视觉、交互与展示层迭代
 
-- 批准依据:`批准`
+- 批准依据:`批准；后续批准所有需求`
 - 状态:`ACTIVE`
-- 版本:`v0.2.0`
-- 行为:`RidgeCode TUI 以清晰、科技感强且终端主题友好的界面呈现实际收到且允许展示的模型输出与最终回答；Answer 与实际 reasoning_content 分层呈现，不伪造隐藏推理；模型回复、调查结论、等待/执行状态与当前 Agent 活动须持续可见，长内容先展示摘要并可通过显式入口进入全屏详情，以滚动查看完整源文本；普通工具输出默认合并为可折叠摘要，展开时保留完整有效细节；read_file 为用户侧隐私/控制例外，仅确认已读取/失败与文件路径，不在摘要、详情或 scrollback 列出文件正文，完整 observation 仍留在 provider/model context；详情按终端宽度换行并由视口控制可见行数；支持有界、无外部解析依赖的行级 Markdown 展示（bold、code、header）与主题色语义角色；关键交互可发现、可操作，长任务期间保持响应并允许用户取消当前执行后接管输入；底部状态区明确区分输入 token 与输出 token；忙碌时待提交消息粘性显示于输入框上方，Enter 追加至队尾，Ctrl+Enter 立即推至队首且不打断当前模型回合。`
+- 版本:`v0.2.1`
+- 行为:`RidgeCode TUI 以清晰、科技感强且终端主题友好的界面呈现实际收到且允许展示的模型输出与最终回答；Answer 与实际 reasoning_content 分层呈现，不伪造隐藏推理；模型回复、调查结论、等待/执行状态与当前 Agent 活动须持续可见，长内容先展示摘要并可通过显式入口进入全屏详情，以滚动查看完整源文本；普通工具输出默认合并为可折叠摘要，展开时保留完整有效细节；read_file 主视图仅确认已读取/失败与文件路径，不在摘要或原生 scrollback 列出文件正文，完整 observation 保留于 provider/model context，并依 REQ-20260816-TUI-ANSWER-OUTPUT-01 仅在用户显式打开 Ctrl+T transcript 时展示；详情按终端宽度换行并由视口控制可见行数；支持有界、无外部解析依赖的行级 Markdown 展示（bold、code、header）与主题色语义角色；关键交互可发现、可操作，长任务期间保持响应并允许用户取消当前执行后接管输入；底部状态区明确区分输入 token 与输出 token；忙碌时待提交消息粘性显示于输入框上方，Enter 追加至队尾，Ctrl+Enter 立即推至队首且不打断当前模型回合。`
 - 边界:`范围限于 crates/agent/src/tui 及其直接交互/渲染依赖、展示状态模型、布局、事件处理、渲染与测试，以及为展示完整实际观察而增加的展示事件保留接缝；不改变模型上下文的有界压缩、langgraph 核心语义，不把具体 LLM/MCP SDK 耦合进 TUI，不牺牲安全门、确定性验证、跨平台终端兼容或数据完整性，不升级无关依赖；保留 maker/checker、权限门、危险命令拦截、输入排队/取消、事件驱动主环、Viewport::Inline、insert_before 原生 scrollback 与开场动画主题色语义适配方向；不覆盖 samples/config.json 与 test_codegraph.ps1。工具摘要须保留，工具详情默认折叠；Markdown 仅作展示层解析，完整详情仅由用户主动打开并在有界视口中浏览。`
-- 验收:`通过 cargo fmt --all --check、cargo test --workspace、cargo clippy --workspace --all-targets -- -D warnings；TUI 纯逻辑测试覆盖 Markdown span、语义色角色、折叠/展开、状态迁移、窄终端布局、CJK/emoji 宽度、长行物理换行、完整回答与完整多行 Diff 滚动浏览、Ctrl+R/Ctrl+O、输入/输出 token 分栏、Agent 活动状态、取消后接管与待提交队列预览/队首推送；证明静态提交文本无 ANSI 逃逸残留、read_file 仅显示路径/完成确认且正文不出现在任何用户侧投影、普通工具详情默认折叠且展开可访问全部行、模型上下文仍有界、LiveTranscript 64 块上限有效；完成真实终端或可复现渲染验收，证明长输出按宽度换行不刷屏、模型回复/调查结论/等待/当前活动可见、摘要可展开为全屏详情并滚动至尾部、工具默认收起且可展开、待提交消息不遮挡当前输入，Enter/Ctrl+Enter 不打断当前回合，Ctrl-C 可交还输入控制，且单帧刷新无明显卡顿；NotebookLM 建议经 CodeGraph、当前代码与测试核验后方可落地。`
-- 追踪:`REQ → crates/agent/src/tui/*.rs 的状态/事件/渲染符号 → crates/agent/src/tui/tests.rs 与 workspace 质量闸；NLM 建议证据存于 .iteration/notebooklm-response.json；Note 清理以本轮迭代 ID、闭环证据与本地 archive 记录为准。
+- 验收:`通过 cargo fmt --all --check、cargo test --workspace、cargo clippy --workspace --all-targets -- -D warnings；TUI 纯逻辑测试覆盖 Markdown span、语义色角色、折叠/展开、状态迁移、窄终端布局、CJK/emoji 宽度、长行物理换行、完整回答与完整多行 Diff 滚动浏览、Ctrl+R/Ctrl+O、输入/输出 token 分栏、Agent 活动状态、取消后接管与待提交队列预览/队首推送；证明静态提交文本无 ANSI 逃逸残留、read_file 主视图仅显示路径/完成确认且正文不进入摘要或原生 scrollback、Ctrl+T transcript 可逐字访问完整 observation、普通工具详情默认折叠且展开可访问全部行、模型上下文仍有界、LiveTranscript 64 块上限有效；完成真实终端或可复现渲染验收，证明长输出按宽度换行不刷屏、模型回复/调查结论/等待/当前活动可见、摘要可展开为全屏详情并滚动至尾部、工具默认收起且可展开、待提交消息不遮挡当前输入，Enter/Ctrl+Enter 不打断当前回合，Ctrl-C 可交还输入控制，且单帧刷新无明显卡顿；NotebookLM 建议经 CodeGraph、当前代码与测试核验后方可落地。`
+- 追踪:`REQ → crates/agent/src/tui/*.rs 的状态/事件/渲染符号 → crates/agent/src/tui/tests.rs 与 workspace 质量闸；NLM 建议证据存于 .iteration/notebooklm-response.json；Note 清理以本轮迭代 ID、闭环证据与本地 archive 记录为准。`
 
 ### REQ-20260802-02 · ReRelease 稳定包与 GitHub README
 
@@ -119,13 +119,35 @@
 
 ### REQ-20260814-TUI-CONTROL-01 · TUI 主题、目标启动、队列控制与正文收束
 
-- Approval evidence:`用户明确批准当前迭代`
+- Approval evidence:`用户明确批准当前迭代；后续批准所有需求`
+- Status:`ACTIVE`
+- Version:`v0.1.1`
+- Behavior:`TUI 语义色与开场动画共享 RidgeCode olive/violet/blue/ice 主题；交互式 /goal 设置目标时显示用户原始输入并立即进入执行；队列面板支持选择后 Enter 编辑、Ctrl+Enter 置前发送、Delete 移除，均不打断当前回合；普通提交、队列状态与文件读取在主视图只显示任务标签/计数或已读取文件路径，文件/任务正文不进入状态或原生 scrollback；显式编辑时才将完整排队消息恢复到输入框，显式 Ctrl+T transcript 可依 REQ-20260816-TUI-ANSWER-OUTPUT-01 查看完整 read observation，provider/model context 始终保留完整 observation。`
+- Boundary:`范围限于 crates/agent/src/tui、goal 接缝及直接测试/文档；不改变模型上下文、权限门、确定性 verify、队列 FIFO/取消和终端 scrollback 基础语义，不升级版本/tag。`
+- Acceptance:`角色色、/goal running 持久化与原始输入回显、队列编辑/置前/不打断、read_file 主视图路径摘要且正文不进入原生 scrollback、Ctrl+T transcript 完整可读、窄端/resize/真实 PTY 通过；workspace tests、clippy、build、fmt/diff 与既有 bounded soak 通过。`
+- Traceability:`REQ → tui/render.rs、goal.rs、tui/command.rs、tui/mod.rs、tui/panel.rs、tui/eventfmt.rs、tui/transcript.rs → 单元/PTY/soak evidence。`
+
+### REQ-20260816-GROK-HANDOFF-01 · Grok 已批准可用性缺口接手
+
+- Approval evidence:`批准所有需求`
 - Status:`ACTIVE`
 - Version:`v0.1.0`
-- Behavior:`TUI 语义色与开场动画共享 RidgeCode olive/violet/blue/ice 主题；交互式 /goal 设置目标时显示用户原始输入并立即进入执行；队列面板支持选择后 Enter 编辑、Ctrl+Enter 置前发送、Delete 移除，均不打断当前回合；普通提交、队列状态与文件读取只显示任务标签/计数或已读取文件路径，文件/任务正文不进入状态或 scrollback；显式编辑时才将完整排队消息恢复到输入框，provider/model context 仍保留完整 read observation。`
-- Boundary:`范围限于 crates/agent/src/tui、goal 接缝及直接测试/文档；不改变模型上下文、权限门、确定性 verify、队列 FIFO/取消和终端 scrollback 基础语义，不升级版本/tag。`
-- Acceptance:`角色色、/goal running 持久化与原始输入回显、队列编辑/置前/不打断、read_file 路径摘要且正文不泄露、窄端/resize/真实 PTY 通过；workspace tests、clippy、build、fmt/diff 与既有 bounded soak 通过。`
-- Traceability:`REQ → tui/render.rs、goal.rs、tui/command.rs、tui/mod.rs、tui/panel.rs、tui/eventfmt.rs、tui/transcript.rs → 单元/PTY/soak evidence。`
+- Behavior:`接手本地 Grok Build 会话 01a0035b-084b-7fa1-8c6a-0f7d828c23b8 中全部已批准而未完成工作。复杂变更任务在目标定位后必须进入 edit_file、write_file、apply_edits 或明确可审计阻塞；全库 search、文件探测 shell、只读预算耗尽或 wrapup 不得冒充完成，未完成 todos、live jobs 或未落盘变更任务不得 approved。长命令越过 180 秒切片后有界 park/poll，并由 hard timeout 收敛；压缩保留 todos、目标、jobs 与完成闸事实。修复 CJK cell 宽、粘贴标记与功能/方向键残余、中文解码、goal replacement、Rect/resize 越界、答案换行与详情滚动、终端标题、session ID/resume/commands。dispatch_agent 与 dispatch_agents 遇缺 profile/model、401、429 或不可达时，每个子任务退回主 agent 当时 provider/model。忙时输入仍排队并显示内容；空输入 Enter 优先发送队首，provider 安全空隙自动发送，保持 FIFO、编辑、删除、置前且不中断当前回合。`
+- Boundary:`范围限于 crates/agent 的 reason/act/verify/wrapup、durable state、tool dispatch、shell job、session/goal/route/subagent、TUI input/queue/render/transcript/geometry，crates/tools 的编辑与编码/长命令接缝，以及直接测试、PTY、真实复杂任务 harness、文档与 NLM 迭代证据。运行事实、当前代码与测试高于会话摘要；保留用户脏改动。队列自动发送只发生在安全边界，不取消在途 provider，不乱序、不重复、不丢消息。回退取调度当时真实主 agent provider/model。后台任务有界、可取消、可恢复且不遗失 goal。`
+- Non-goals:`不保证任意开放任务在 glm-5-2 上均聪明；不更换默认模型；不实现原样本所求 red/green diff、Grok OAuth 或正式 GitHub Release/tag；不引入无界后台、无界重试或 rg 内核工具；不放松 jail、危险命令、maker/checker、确定性 verify、langgraph BSP、provider/MCP/A2A 边界；不重做整套 TUI 视觉。`
+- Acceptance:`建立 Grok 会话→需求→代码→测试矩阵及 session-steer-map。scripted 真图先只读定位、再收到“目标已明”，下一动作须 edit/write/apply 或明确阻塞；全库 search 与文件探测 shell 不得满足 handoff，未改文件不得 approved。长命令 fixture 越过 180 秒仍持续进展并由 hard timeout/cancel 收敛。测试覆盖 CJK cell 宽、[200~/[201~、功能/方向键残余、中文文件读取、goal replacement、Rect {x:0,y:16,width:118,height:14}/index (1,13) 无 panic、答案折行/详情滚动、session/title/resume；队列覆盖内容可见、忙时入队、空输入 Enter 发送队首、安全空隙自动发送、FIFO/编辑/删除/置前、取消/错误/恢复无重复丢失；route 覆盖缺 profile/model、401、429、不可达及单/并发回退。再以已安装 ridgecode 和实际 provider 完成一项本仓真实复杂变更的定位→写入→验证→确定性收敛，不得只用另写 runner 或 mock。通过 cargo fmt --all -- --check、cargo test --workspace --locked、cargo clippy --workspace --all-targets --locked -- -D warnings、cargo build --workspace --locked、git diff --check、现有质量阀与无密钥 launch smoke，保存脱敏证据。`
+- Traceability:`Grok session/goal/plan/chat → REQ → graph/tool/TUI/session/route/queue symbols → scripted/unit/PTY/live-complex evidence → workspace gates 与最终可用性审计。
+
+### REQ-20260816-TUI-ANSWER-OUTPUT-01 · 回答表格高亮、工具输出折叠与完整 answer
+
+- Approval evidence:`批准所有需求`
+- Status:`ACTIVE`
+- Version:`v0.1.0`
+- Behavior:`TUI 对 assistant 回答中的 GFM/CommonMark 表格按内容区宽度、Unicode 显示宽度与 resize 结构化分列/换行，窄端不越界且可读降级；标题、强调、行内代码、代码块、链接、表头与 fenced code 使用现有 RidgeCode 主题作稳定语义/轻量词法高亮。查文件、目录、search、read_file 及同类长 tool observation 在主视图保留命令/路径/表头/首因，余文折为准确“... +N lines (Ctrl+T to view transcript)”；Ctrl+T transcript 保留完整原始 tool output。assistant answer 不折叠，Live 与 committed answer 全文可见、正确换行并可滚动/翻页至末尾；复制与持久化完整。`
+- Boundary:`范围限于 crates/agent 的 TUI Markdown/answer/tool event/transcript/render/theme/width/resize 与直接单元、snapshot、PTY 测试；先复用现有依赖。assistant 原文、tool observation、复制、会话持久化与 provider 上下文不得丢失或改写；仅主视图折叠 tool output，headless 语义不受视觉样式污染；按消息角色/事件类型判定，不以内容猜测。`
+- Non-goals:`不改模型提示词强迫回答含表格；不把 tool 原文塞回主 scrollback；不删 transcript；不改模型上下文、provider/MCP/A2A/langgraph、安全门或确定性 verify；不嵌入图片、不引入浏览器式完整 Markdown/CSS、不重写整体 TUI。`
+- Acceptance:`表格测试覆盖宽/窄端、resize、中文/emoji、长词/长单元格、多行、缺列/畸形，所有渲染行不超内容区且列序/正文不丢、无 panic。样式测试断言标题、强调、行内代码、代码块、链接、表头与 fenced-code token，无色终端仍保留文本。tool 测试覆盖查目录/search/read_file 短输出不折叠、长输出准确 +N lines、路径/首因保留、Ctrl+T transcript 逐字完整。长 answer 含表格/代码/CJK 且超过工具折叠阈值，主视图与 committed transcript 均可首行滚至末行、无 +N lines 替代、resize 后完整；复制/持久化 round-trip 不变。以两张参考图同类离线 fixture 做真实 PTY smoke，并通过 workspace fmt/test/clippy/build、git diff --check 与现有质量阀。`
+- Traceability:`PENDING-REQ-20260816-TUI-ANSWER-OUTPUT-01 → TUI markdown/table/highlight + tool summary/transcript + answer scrollback symbols → unit/snapshot/PTY → workspace gates。
 ## 修订账本 (Revision Ledger)
 
 关闭的 Pending、历史修订与审批证据写入 `docs/archive/events-YYYY-MM.jsonl`；本文件仅保留当前 Active 条款。

@@ -266,13 +266,6 @@ impl RouteRequest {
         self.preferred_model = non_empty(model);
         self
     }
-
-    pub(crate) fn without_preferences(&self) -> Self {
-        let mut request = self.clone();
-        request.preferred_provider = None;
-        request.preferred_model = None;
-        request
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

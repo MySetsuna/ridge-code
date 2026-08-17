@@ -11,8 +11,8 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "run_shell".to_string(),
-            description: "运行一条 shell 命令,返回退出码与输出".to_string(),
-            schema: serde_json::json!({"type":"object","properties":{"cmd":{"type":"string"},"shell":{"type":"string","enum":["cmd","powershell","pwsh","bash","sh"],"description":"可选:执行用的 shell;省=宿主默认(见 host_env)"}},"required":["cmd"]}),
+            description: "Run host build/test/pack. Not for files (use search/read/edit). >180s parks; poll or cancel job_id.".to_string(),
+            schema: serde_json::json!({"type":"object","properties":{"cmd":{"type":"string","description":"Command to start; omit when polling job_id"},"shell":{"type":"string","enum":["cmd","powershell","pwsh","bash","sh"],"description":"可选:执行用的 shell;省=宿主默认(见 host_env)"},"job_id":{"type":"string","description":"Poll a parked job from a previous run_shell"},"cancel_job_id":{"type":"string","description":"Cancel a parked job and return its bounded settlement"}},"required":[]}),
         },
         ToolSpec {
             name: "write_file".to_string(),
@@ -21,7 +21,7 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "edit_file".to_string(),
-            description: "精准编辑:把文件里**唯一**出现的 old_string 换成 new_string(需带足够上下文保证唯一)。改动已有文件优先用它,而非整文件覆写".to_string(),
+            description: "精准编辑:唯一 old_string→new_string。CRLF 对齐;失败用观察里的锚点再 edit。".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"]}),
         },
         ToolSpec {
@@ -36,7 +36,7 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "search".to_string(),
-            description: "在目录树下按文件名 glob(如 *.rs)搜含 pattern 子串的行,返回 路径:行号:内容。找代码/定位用它,别 run_shell grep(不可移植)".to_string(),
+            description: "按 glob+pattern 搜 路径:行号:内容；path 可为文件或目录。定位用它,目标已明勿全库搜。".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"}},"required":["pattern"]}),
         },
         ToolSpec {
@@ -64,7 +64,22 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
 
 /// 从 `apply_edits` 的参数里抽出 `edits` 数组 → [`tools::Edit`] 列表(字段缺失→跳过)。
 pub(crate) fn parse_edits(call: &ToolCall) -> Vec<tools::Edit> {
-    let Some(arr) = call.arguments.get("edits").and_then(|v| v.as_array()) else {
+    let value = call.arguments.get("edits").cloned().or_else(|| {
+        let path = call.arguments.get("path")?.as_str()?;
+        Some(serde_json::json!([{
+            "path": path,
+            "old_string": call.arguments.get("old_string")?.as_str()?,
+            "new_string": call.arguments.get("new_string")?.as_str()?,
+        }]))
+    });
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    let parsed = match value {
+        serde_json::Value::String(text) => serde_json::from_str(&text).ok(),
+        other => Some(other),
+    };
+    let Some(arr) = parsed.as_ref().and_then(|v| v.as_array()) else {
         return Vec::new();
     };
     arr.iter()
@@ -83,48 +98,93 @@ pub(crate) fn parse_edits(call: &ToolCall) -> Vec<tools::Edit> {
 /// 观察到工具错误(前缀 ` error:` / `BLOCKED` / `permission denied`)→ 置 `last_error` 首行;
 /// 写类工具成功(write_file/edit_file/apply_edits)→ 记入 `modified_files` 并清 `last_error`;
 /// 其余工具不动 durable 状态。这样长任务只凭「当前事实」推理,不必靠全量历史。
-/// 工具观察是否为**错误**(` error:` / `BLOCKED` / `permission denied` / **非零 `exit N`**)。单一真相:
+/// 工具观察是否为**错误**(工具名前缀 ` error:` / `BLOCKED` / `permission denied` / **非零 `exit N`**)。单一真相:
 /// Durable State 回填与熔断计数(`err_streak`)共用,免两处判据漂移。**非零 exit 必判错**(iter-51):
 /// 此前漏判 —— 本地化(如中文 GBK)shell 报错正文无 ASCII " error:",致 `exit 1` 逃熔断计数、
 /// `last_error` 亦不回填。与 verify 侧 [`tool_output_failed`] 对齐,免判据分叉。
 pub(crate) fn is_error_observation(obs: &str) -> bool {
-    obs.contains(" error:")
-        || obs.starts_with("BLOCKED")
-        || obs.starts_with("permission denied")
-        || (obs.starts_with("exit ") && !obs.starts_with("exit 0"))
+    let first = obs.lines().next().unwrap_or(obs).trim_start();
+    let named_error = first.split_once(" error:").is_some_and(|(name, _)| {
+        !name.is_empty()
+            && name.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+            })
+    });
+    named_error
+        || first.starts_with("BLOCKED")
+        || first.starts_with("permission denied")
+        || (first.starts_with("exit ") && !first.starts_with("exit 0"))
 }
 
 pub(crate) fn durable_updates(call: &ToolCall, observation: &str) -> Vec<Patch> {
+    let mut patches = Vec::new();
     if is_error_observation(observation) {
         let line = observation
             .lines()
             .next()
             .unwrap_or(observation)
             .to_string();
-        return vec![Patch::SetLastError(Some(line))];
+        patches.push(Patch::SetLastError(Some(line)));
     }
     let arg = |k: &str| call.arguments.get(k).and_then(|v| v.as_str());
     match call.name.as_str() {
-        "write_file" | "edit_file" => arg("path")
-            .map(|p| {
-                vec![
-                    Patch::RecordModified(p.to_string()),
-                    Patch::SetLastError(None),
-                ]
-            })
-            .unwrap_or_default(),
-        "apply_edits" => {
-            let mut ps: Vec<Patch> = parse_edits(call)
-                .into_iter()
-                .map(|e| Patch::RecordModified(e.path))
-                .collect();
-            if !ps.is_empty() {
-                ps.push(Patch::SetLastError(None));
+        "write_file" | "edit_file" if !is_error_observation(observation) => {
+            if let Some(path) = arg("path") {
+                patches.push(Patch::RecordModified(path.to_string()));
+                patches.push(Patch::SetLastError(None));
             }
-            ps
         }
-        _ => Vec::new(),
+        "apply_edits" if !is_error_observation(observation) => {
+            let edits = parse_edits(call);
+            if !edits.is_empty() {
+                patches.extend(edits.into_iter().map(|e| Patch::RecordModified(e.path)));
+                patches.push(Patch::SetLastError(None));
+            }
+        }
+        "read_file" if !is_error_observation(observation) => {
+            if let Some(path) = arg("path") {
+                patches.push(Patch::RecordRead(path.to_string()));
+            }
+        }
+        "run_shell" => patches.extend(shell_job_updates(call, observation)),
+        _ => {}
     }
+    patches
+}
+
+fn shell_job_updates(call: &ToolCall, observation: &str) -> Vec<Patch> {
+    if let Some(id) = parse_running_job_id(observation) {
+        return vec![Patch::AddLiveShellJob(id)];
+    }
+    settled_job_id(call, observation)
+        .map(Patch::RemoveLiveShellJob)
+        .into_iter()
+        .collect()
+}
+
+fn settled_job_id(call: &ToolCall, observation: &str) -> Option<String> {
+    let from_arg = call
+        .arguments
+        .get("job_id")
+        .or_else(|| call.arguments.get("cancel_job_id"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim();
+    if !from_arg.is_empty() {
+        return Some(from_arg.to_string());
+    }
+    observation
+        .split("unknown job ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+pub(crate) fn parse_running_job_id(observation: &str) -> Option<String> {
+    let rest = observation.strip_prefix("job ")?;
+    let id = rest.split_whitespace().next()?;
+    rest.contains(" running").then(|| id.to_string())
 }
 
 /// 从 `todo_write` 的参数里抽出 `todos` 数组 → [`Todo`] 列表(status 缺省 `pending`)。
@@ -204,7 +264,32 @@ fn blocked_result(observation: String) -> ToolResult {
 }
 
 fn execute_shell_tool(call: &ToolCall) -> ToolResult {
+    let cancel_job_id = tool_arg(call, "cancel_job_id").trim();
+    if !cancel_job_id.is_empty() {
+        return match tools::cancel_shell_job(cancel_job_id) {
+            Ok(observation) => tool_result(format_shell_observation(
+                observation,
+                "",
+                tools::default_shell(),
+            )),
+            Err(error) => tool_result(format!("shell error: {error}")),
+        };
+    }
+    let job_id = tool_arg(call, "job_id").trim();
+    if !job_id.is_empty() {
+        return match tools::poll_shell_job(job_id) {
+            Ok(observation) => tool_result(format_shell_observation(
+                observation,
+                "",
+                tools::default_shell(),
+            )),
+            Err(error) => tool_result(format!("shell error: {error}")),
+        };
+    }
     let cmd = tool_arg(call, "cmd");
+    if cmd.is_empty() {
+        return blocked_result("run_shell error: 缺少 cmd 或 job_id".into());
+    }
     if let Some(why) = tools::is_dangerous_command(cmd) {
         tracing::warn!(tool = %call.name, reason = %why, "blocked dangerous command");
         return blocked_result(format!("BLOCKED (dangerous: {why}) — 拒绝执行 `{cmd}`"));
@@ -212,43 +297,94 @@ fn execute_shell_tool(call: &ToolCall) -> ToolResult {
     if let Some(message) = constraint_guard_shell(cmd) {
         return blocked_result(message);
     }
-    let result = match active_sandbox_cmd() {
-        Some(sandbox) => {
-            let cwd = std::env::current_dir()
-                .map(|path| path.display().to_string())
-                .unwrap_or_default();
-            tracing::debug!(sandbox = %sandbox, "run_shell via sandbox");
-            tools::run_argv(&sandbox_argv(&sandbox, cmd, &cwd))
-        }
-        None => {
-            let shell = tool_arg(call, "shell");
-            tools::run_shell_in((!shell.is_empty()).then_some(shell), cmd)
-        }
+    if let Some(sandbox) = active_sandbox_cmd() {
+        let cwd = std::env::current_dir()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        tracing::debug!(sandbox = %sandbox, "run_shell via sandbox");
+        return match tools::run_argv(&sandbox_argv(&sandbox, cmd, &cwd)) {
+            Ok(result) => tool_result(format_finished_shell(result, cmd, tools::default_shell())),
+            Err(error) => tool_result(format!("shell error: {error}")),
+        };
+    }
+    let shell = tool_arg(call, "shell");
+    let used = if shell.is_empty() {
+        tools::default_shell()
+    } else {
+        shell
     };
-    match result {
-        Ok(result) => {
-            let mut observation = format!(
-                "exit {}: {}{}",
-                result.code,
-                result.stdout.trim(),
-                result.stderr.trim()
-            );
-            if result.code != 0 {
-                let shell = tool_arg(call, "shell").to_lowercase();
-                let used = if shell.is_empty() {
-                    tools::default_shell()
-                } else {
-                    shell.as_str()
-                };
-                if let Some(hint) = unix_syntax_hint(cmd, used) {
-                    observation.push('\n');
-                    observation.push_str(hint);
-                }
-            }
-            tool_result(observation)
-        }
+    match tools::run_or_park_shell((!shell.is_empty()).then_some(shell), cmd) {
+        Ok(observation) => tool_result(format_shell_observation(observation, cmd, used)),
         Err(error) => tool_result(format!("shell error: {error}")),
     }
+}
+
+fn format_shell_observation(
+    observation: tools::ShellObservation,
+    cmd: &str,
+    used_shell: &str,
+) -> String {
+    match observation {
+        tools::ShellObservation::Finished(result) => format_finished_shell(result, cmd, used_shell),
+        tools::ShellObservation::Running(progress) => {
+            format!(
+                "job {} running elapsed={}s\nstdout_tail:\n{}\nstderr_tail:\n{}\nCall run_shell with job_id=\"{}\" to poll. Do not restart this command. A live job blocks completion.",
+                progress.id,
+                progress.elapsed_ms / 1000,
+                tail_text(&progress.stdout, 2000),
+                tail_text(&progress.stderr, 1000),
+                progress.id
+            )
+        }
+    }
+}
+
+fn format_finished_shell(result: tools::ShellResult, cmd: &str, used_shell: &str) -> String {
+    let mut observation = format!(
+        "exit {}: {}{}",
+        result.code,
+        result.stdout.trim(),
+        result.stderr.trim()
+    );
+    if result.code != 0 {
+        if let Some(hint) = unix_syntax_hint(cmd, used_shell) {
+            observation.push('\n');
+            observation.push_str(hint);
+        }
+    }
+    if let Some(hint) = file_editor_shell_hint(cmd) {
+        observation.push('\n');
+        observation.push_str(hint);
+    }
+    observation
+}
+
+fn tail_text(text: &str, max_chars: usize) -> String {
+    let total = text.chars().count();
+    if total <= max_chars {
+        return text.to_string();
+    }
+    text.chars().skip(total - max_chars).collect()
+}
+
+fn file_editor_shell_hint(cmd: &str) -> Option<&'static str> {
+    let lower = cmd.to_ascii_lowercase();
+    const MARKERS: [&str; 8] = [
+        "get-content",
+        "set-content",
+        "select-string",
+        "rg ",
+        "rg.exe",
+        "[io.file]::",
+        "out-file",
+        "add-content",
+    ];
+    MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+        .then_some(
+            "  💡 Use search/read_file/edit_file for source; run_shell is for build/test/package.",
+        )
 }
 
 fn execute_write_file_tool(call: &ToolCall) -> ToolResult {
@@ -284,7 +420,10 @@ fn execute_edit_file_tool(call: &ToolCall) -> ToolResult {
 fn execute_apply_edits_tool(call: &ToolCall) -> ToolResult {
     let edits = parse_edits(call);
     if edits.is_empty() {
-        return blocked_result("apply_edits error: 缺少 edits".to_string());
+        return blocked_result(format!(
+            "apply_edits error: 缺少 edits —— 传 edits: [{{path, old_string, new_string}}]; 失败后从最近 read 的锚点原样复制,勿重启全库侦察. args={}",
+            call.arguments
+        ));
     }
     for edit in &edits {
         if let Err(message) = jail(&edit.path) {
@@ -386,7 +525,7 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
     }
     tracing::debug!(
         tool = %call.name,
-        ok = !result.observation.contains(" error:"),
+        ok = !is_error_observation(&result.observation),
         "tool done"
     );
     result.observation
@@ -745,5 +884,143 @@ mod tests {
 
         assert!(out.messages.iter().any(|m| m.contains("permission denied")));
         assert!(!out.approved, "被拒的工具没真跑,拿不到 exit 0");
+    }
+
+    #[test]
+    fn execute_edit_file_reports_reusable_anchor_then_succeeds() {
+        let path = std::env::current_dir()
+            .unwrap()
+            .join(format!("ridge-edit-exec-{}.txt", std::process::id()));
+        std::fs::write(&path, "alpha\r\nbeta\r\ngamma\r\n").unwrap();
+        let path_str = path.to_string_lossy().to_string();
+        let miss = execute_tool_call(&ToolCall {
+            id: "e1".into(),
+            name: "edit_file".into(),
+            arguments: serde_json::json!({
+                "path": path_str,
+                "old_string": "nope",
+                "new_string": "x"
+            }),
+        });
+        assert!(miss.contains("file anchor"), "{miss}");
+        assert!(miss.contains("beta"), "{miss}");
+        let hit = execute_tool_call(&ToolCall {
+            id: "e2".into(),
+            name: "edit_file".into(),
+            arguments: serde_json::json!({
+                "path": path_str,
+                "old_string": "beta\ngamma",
+                "new_string": "BETA\nGAMMA"
+            }),
+        });
+        assert!(hit.contains("edited"), "{hit}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "alpha\r\nBETA\r\nGAMMA\r\n"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn execute_run_shell_polls_parked_job_through_shipped_entry() {
+        #[cfg(windows)]
+        let cmd = "Start-Sleep -Seconds 1; Write-Output exec-park";
+        #[cfg(not(windows))]
+        let cmd = "sleep 1; echo exec-park";
+        #[cfg(windows)]
+        let shell = Some("powershell");
+        #[cfg(not(windows))]
+        let shell = Some("sh");
+        let first = tools::run_or_park_shell_with_limits(
+            shell,
+            cmd,
+            std::time::Duration::from_millis(200),
+            std::time::Duration::from_secs(10),
+        )
+        .unwrap();
+        let id = match first {
+            tools::ShellObservation::Running(progress) => progress.id,
+            tools::ShellObservation::Finished(result) => {
+                assert_eq!(result.code, 0, "{}{}", result.stdout, result.stderr);
+                return;
+            }
+        };
+        let started = std::time::Instant::now();
+        let done = loop {
+            let obs = execute_tool_call(&ToolCall {
+                id: "s2".into(),
+                name: "run_shell".into(),
+                arguments: serde_json::json!({ "job_id": id }),
+            });
+            if obs.starts_with("exit ") {
+                break obs;
+            }
+            assert!(!obs.contains("timed out after 180000ms"), "{obs}");
+            if started.elapsed() > std::time::Duration::from_secs(8) {
+                panic!("poll did not finish: {obs}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert!(done.starts_with("exit 0:"), "{done}");
+        assert!(done.contains("exec-park"), "{done}");
+    }
+
+    /// 30 秒任务超时上限 -> parked;shipped `execute_tool_call` 的 `cancel_job_id` 入口能取消它;
+    /// 取消观察(非 error)驱动 [`durable_updates`] 回 RemoveLiveShellJob,`apply` 后 live 表清空。
+    #[test]
+    fn execute_run_shell_cancels_parked_job_through_shipped_entry_and_clears_state() {
+        #[cfg(windows)]
+        let cmd = "Start-Sleep -Seconds 30; Write-Output exec-cancel";
+        #[cfg(not(windows))]
+        let cmd = "sleep 30; echo exec-cancel";
+        #[cfg(windows)]
+        let shell = "powershell";
+        #[cfg(not(windows))]
+        let shell = "sh";
+        let first = tools::run_or_park_shell_with_limits(
+            Some(shell),
+            cmd,
+            std::time::Duration::from_millis(200),
+            std::time::Duration::from_secs(10),
+        )
+        .unwrap();
+        let id = match first {
+            tools::ShellObservation::Running(progress) => progress.id,
+            tools::ShellObservation::Finished(result) => {
+                // 30 秒命令在 200ms 内就结束 = 环境根本没起真 shell,取消路径无从谈起。
+                panic!("30s command finished early: {}", result.stdout);
+            }
+        };
+
+        // 构造 run_shell 起始调用与 shipped 格式一致的 running 观察,
+        // 逐个 apply durable_updates 后 live_shell_jobs 应有该 id。
+        let start_call = ToolCall {
+            id: "s1".into(),
+            name: "run_shell".into(),
+            arguments: serde_json::json!({ "cmd": cmd, "shell": shell }),
+        };
+        let running = format!("job {id} running elapsed=0s");
+        let mut state = AgentState::new("cancel-job");
+        for patch in durable_updates(&start_call, &running) {
+            state.apply(patch);
+        }
+        assert_eq!(state.live_shell_jobs, vec![id.clone()]);
+
+        // shipped 入口取消:canceled 观察非 error,不下 last_error;
+        // durable_updates 以 cancel_job_id 参数定位 RemoveLiveShellJob。
+        let cancel_call = ToolCall {
+            id: "s3".into(),
+            name: "run_shell".into(),
+            arguments: serde_json::json!({ "cancel_job_id": id.clone() }),
+        };
+        let observation = execute_tool_call(&cancel_call);
+        assert!(
+            observation.contains("command cancelled"),
+            "取消观察应含 command cancelled: {observation}"
+        );
+        for patch in durable_updates(&cancel_call, &observation) {
+            state.apply(patch);
+        }
+        assert!(state.live_shell_jobs.is_empty(), "取消后 live 表应清空");
     }
 }

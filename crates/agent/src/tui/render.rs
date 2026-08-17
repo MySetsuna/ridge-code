@@ -163,9 +163,25 @@ pub(crate) fn commit_height(text: &str, width: u16) -> u16 {
     wrapped_rows(text, width).min(u16::MAX as usize).max(1) as u16
 }
 
+/// Preview a queued prompt in chrome, notes, and the queue panel.
+pub(crate) fn queue_preview(text: &str, width: u16) -> String {
+    let cleaned = sanitize_display_text(text);
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() {
+        return "(empty)".into();
+    }
+    clip_display_cells(cleaned, width.max(1))
+}
+
 /// 粘贴净化(iter-24):CRLF/CR 归一 LF,滤除其余控制字符(留 \n \t),防转义序列注入输入框。
 pub(crate) fn sanitize_paste(s: &str) -> String {
-    s.replace("\r\n", "\n")
+    let stripped = s
+        .replace("\u{1b}[200~", "")
+        .replace("\u{1b}[201~", "")
+        .replace("[200~", "")
+        .replace("[201~", "");
+    stripped
+        .replace("\r\n", "\n")
         .chars()
         .map(|c| if c == '\r' { '\n' } else { c })
         .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
@@ -303,14 +319,14 @@ pub(crate) enum Role {
     DiffDel,
 }
 
-// Exact highlight/base tones used by `splash_base` and
-// `splash_foreground_tone`, plus dark derivatives for chrome and muted text.
-pub(crate) const THEME_OLIVE: Color = Color::Rgb(205, 180, 92);
-pub(crate) const THEME_VIOLET: Color = Color::Rgb(112, 62, 196);
-pub(crate) const THEME_BLUE: Color = Color::Rgb(40, 148, 244);
-pub(crate) const THEME_ICE: Color = Color::Rgb(225, 235, 255);
-pub(crate) const THEME_BORDER: Color = Color::Rgb(64, 45, 104);
-pub(crate) const THEME_MUTED: Color = Color::Rgb(128, 112, 158);
+// Renaissance chrome: gold / wine / bronze / parchment / ink.
+// Splash pixel contract keeps its own hardcoded RGB.
+pub(crate) const THEME_OLIVE: Color = Color::Rgb(201, 162, 39);
+pub(crate) const THEME_VIOLET: Color = Color::Rgb(122, 42, 50);
+pub(crate) const THEME_BLUE: Color = Color::Rgb(184, 124, 48);
+pub(crate) const THEME_ICE: Color = Color::Rgb(244, 232, 204);
+pub(crate) const THEME_BORDER: Color = Color::Rgb(92, 64, 40);
+pub(crate) const THEME_MUTED: Color = Color::Rgb(148, 120, 88);
 
 pub(crate) fn role_color(r: Role) -> Color {
     match r {
@@ -352,7 +368,7 @@ pub(crate) fn inline_md_spans(text: &str) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut rest = text;
     loop {
-        let Some((pos, is_tick)) = next_inline_marker(rest) else {
+        let Some((pos, marker)) = next_inline_marker(rest) else {
             if !rest.is_empty() {
                 spans.push(Span::raw(rest.to_owned()));
             }
@@ -361,43 +377,99 @@ pub(crate) fn inline_md_spans(text: &str) -> Vec<Span<'static>> {
         if pos > 0 {
             spans.push(Span::raw(rest[..pos].to_owned()));
         }
-        let Some((span, next)) = consume_inline_marker(rest, pos, is_tick) else {
-            spans.push(Span::raw(rest[pos..].to_owned()));
-            break;
+        let Some((mut marked, next)) = consume_inline_marker(rest, pos, marker) else {
+            let marker_len = rest[pos..].chars().next().map(char::len_utf8).unwrap_or(0);
+            spans.push(Span::raw(rest[pos..pos + marker_len].to_owned()));
+            rest = &rest[pos + marker_len..];
+            continue;
         };
-        spans.push(span);
+        spans.append(&mut marked);
         rest = &rest[next..];
     }
     spans
 }
 
-fn next_inline_marker(text: &str) -> Option<(usize, bool)> {
-    match (text.find(char::from(96)), text.find("**")) {
-        (None, None) => None,
-        (Some(tick), Some(bold)) if tick <= bold => Some((tick, true)),
-        (Some(tick), None) => Some((tick, true)),
-        (_, Some(bold)) => Some((bold, false)),
+#[derive(Clone, Copy)]
+enum InlineMarker {
+    Code,
+    Bold,
+    Link,
+    Emphasis(char),
+}
+
+fn next_inline_marker(text: &str) -> Option<(usize, InlineMarker)> {
+    let mut candidates = Vec::with_capacity(5);
+    if let Some(position) = text.find('`') {
+        candidates.push((position, 0, InlineMarker::Code));
     }
+    if let Some(position) = text.find("**") {
+        candidates.push((position, 1, InlineMarker::Bold));
+    }
+    if let Some(position) = text.find('[') {
+        candidates.push((position, 2, InlineMarker::Link));
+    }
+    if let Some(position) = text.find('*') {
+        candidates.push((position, 3, InlineMarker::Emphasis('*')));
+    }
+    if let Some(position) = text.find('_') {
+        candidates.push((position, 4, InlineMarker::Emphasis('_')));
+    }
+    candidates
+        .into_iter()
+        .min_by_key(|(position, priority, _)| (*position, *priority))
+        .map(|(position, _, marker)| (position, marker))
 }
 
 fn consume_inline_marker(
     text: &str,
     position: usize,
-    is_tick: bool,
-) -> Option<(Span<'static>, usize)> {
-    let delimiter_len = usize::from(!is_tick) + 1;
+    marker: InlineMarker,
+) -> Option<(Vec<Span<'static>>, usize)> {
+    if matches!(marker, InlineMarker::Link) {
+        let suffix = &text[position + 1..];
+        let middle = suffix.find("](")?;
+        let url_start = position + 1 + middle + 2;
+        let url_end = text[url_start..].find(')')? + url_start;
+        let label = &suffix[..middle];
+        let url = &text[url_start..url_end];
+        if label.is_empty() || url.is_empty() {
+            return None;
+        }
+        return Some((
+            vec![
+                Span::styled(
+                    label.to_owned(),
+                    Style::default()
+                        .fg(role_color(Role::Info))
+                        .add_modifier(Modifier::UNDERLINED),
+                ),
+                Span::raw(" ("),
+                Span::styled(url.to_owned(), Style::default().fg(role_color(Role::Muted))),
+                Span::raw(")"),
+            ],
+            url_end + 1,
+        ));
+    }
+    let (delimiter, style) = match marker {
+        InlineMarker::Code => ("`", Style::default().fg(role_color(Role::Success))),
+        InlineMarker::Bold => ("**", Style::default().add_modifier(Modifier::BOLD)),
+        InlineMarker::Emphasis(delimiter) => (
+            if delimiter == '*' { "*" } else { "_" },
+            Style::default().add_modifier(Modifier::ITALIC),
+        ),
+        InlineMarker::Link => unreachable!("link handled above"),
+    };
+    let delimiter_len = delimiter.len();
     let suffix = &text[position + delimiter_len..];
-    let end = if is_tick {
-        suffix.find(char::from(96))?
-    } else {
-        suffix.find("**")?
-    };
+    let end = suffix.find(delimiter)?;
+    if end == 0 {
+        return None;
+    }
     let inner = suffix[..end].to_owned();
-    let span = match is_tick {
-        true => Span::styled(inner, Style::default().fg(role_color(Role::Warn))),
-        false => Span::styled(inner, Style::default().add_modifier(Modifier::BOLD)),
-    };
-    Some((span, position + delimiter_len + end + delimiter_len))
+    Some((
+        vec![Span::styled(inner, style)],
+        position + delimiter_len + end + delimiter_len,
+    ))
 }
 
 fn markdown_quote_prefix(line: &str) -> Option<(String, &str)> {
@@ -1056,25 +1128,217 @@ pub(crate) fn fence_without_language(text: &str) -> String {
 
 /// 最终回答静态提交的行级渲染：首行徽标走 Primary，其余内容沿用 Markdown 语义角色。
 /// 代码围栏状态跨行传递，故不会因中间换行把代码块误当普通回答。
+#[cfg(test)]
 pub(crate) fn markdown_lines(text: &str) -> Vec<Line<'static>> {
+    markdown_lines_with_width(text, 120)
+}
+
+fn table_cells(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.strip_prefix("🤖 ").unwrap_or(line).trim();
+    if !trimmed.contains('|') {
+        return None;
+    }
+    let body = trimmed
+        .strip_prefix('|')
+        .unwrap_or(trimmed)
+        .strip_suffix('|')
+        .unwrap_or_else(|| trimmed.strip_prefix('|').unwrap_or(trimmed));
+    let cells = body
+        .split('|')
+        .map(|cell| cell.trim().to_owned())
+        .collect::<Vec<_>>();
+    (cells.len() >= 2).then_some(cells)
+}
+
+fn table_delimiter(cells: &[String]) -> bool {
+    cells.iter().all(|cell| {
+        let marker = cell.trim().trim_start_matches(':').trim_end_matches(':');
+        marker.len() >= 3 && marker.bytes().all(|byte| byte == b'-')
+    })
+}
+
+fn table_widths(header: &[String], rows: &[Vec<String>], width: usize) -> Option<Vec<usize>> {
+    let columns = header.len();
+    let separators = columns.saturating_sub(1).saturating_mul(3);
+    let available = width.saturating_sub(separators);
+    if available < columns.saturating_mul(8) {
+        return None;
+    }
+    let mut desired = header
+        .iter()
+        .map(|cell| str_cells(cell).max(1))
+        .collect::<Vec<_>>();
+    for row in rows {
+        for (index, cell) in row.iter().enumerate() {
+            desired[index] = desired[index].max(str_cells(cell).max(1));
+        }
+    }
+    let mut widths = vec![8; columns];
+    let mut remaining = available.saturating_sub(columns * 8);
+    while remaining > 0 {
+        let mut grew = false;
+        for index in 0..columns {
+            if remaining == 0 {
+                break;
+            }
+            if widths[index] < desired[index] {
+                widths[index] += 1;
+                remaining -= 1;
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    Some(widths)
+}
+
+fn table_cell_lines(cell: &str, width: usize, header: bool) -> Vec<Vec<Span<'static>>> {
+    let mut spans = inline_md_spans(cell);
+    if spans.is_empty() {
+        spans.push(Span::raw(String::new()));
+    }
+    if header {
+        for span in &mut spans {
+            span.style = span
+                .style
+                .fg(role_color(Role::Primary))
+                .add_modifier(Modifier::BOLD);
+        }
+    }
+    wrap_live_spans_greedy(spans, width.max(1) as u16)
+}
+
+fn table_row_lines(cells: &[String], widths: &[usize], header: bool) -> Vec<Line<'static>> {
+    let wrapped = cells
+        .iter()
+        .zip(widths)
+        .map(|(cell, width)| table_cell_lines(cell, *width, header))
+        .collect::<Vec<_>>();
+    let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+    (0..height)
+        .map(|row_index| {
+            let mut spans = Vec::new();
+            for (column, width) in widths.iter().enumerate() {
+                let cell = wrapped[column].get(row_index).cloned().unwrap_or_default();
+                let used = cell
+                    .iter()
+                    .map(|span| str_cells(span.content.as_ref()))
+                    .sum::<usize>();
+                spans.extend(cell);
+                if used < *width {
+                    spans.push(Span::raw(" ".repeat(*width - used)));
+                }
+                if column + 1 < widths.len() {
+                    spans.push(Span::styled(
+                        " │ ",
+                        Style::default().fg(role_color(Role::Border)),
+                    ));
+                }
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn stacked_table_lines(
+    header: &[String],
+    rows: &[Vec<String>],
+    width: usize,
+) -> Vec<Line<'static>> {
+    let rows = if rows.is_empty() {
+        vec![vec![String::new(); header.len()]]
+    } else {
+        rows.to_vec()
+    };
+    let mut lines = Vec::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        if row_index > 0 {
+            lines.push(Line::default());
+        }
+        for (label, value) in header.iter().zip(row) {
+            let mut spans = vec![Span::styled(
+                format!("{label}: "),
+                Style::default()
+                    .fg(role_color(Role::Primary))
+                    .add_modifier(Modifier::BOLD),
+            )];
+            spans.extend(inline_md_spans(value));
+            lines.extend(
+                wrap_live_spans_greedy(spans, width.max(1) as u16)
+                    .into_iter()
+                    .map(Line::from),
+            );
+        }
+    }
+    lines
+}
+
+fn render_table(header: &[String], rows: &[Vec<String>], width: usize) -> Vec<Line<'static>> {
+    let Some(widths) = table_widths(header, rows, width) else {
+        return stacked_table_lines(header, rows, width);
+    };
+    let mut lines = table_row_lines(header, &widths, true);
+    let divider = widths
+        .iter()
+        .map(|width| "─".repeat(*width))
+        .collect::<Vec<_>>()
+        .join("─┼─");
+    lines.push(Line::from(Span::styled(
+        divider,
+        Style::default().fg(role_color(Role::Border)),
+    )));
+    for row in rows {
+        lines.extend(table_row_lines(row, &widths, false));
+    }
+    lines
+}
+
+pub(crate) fn markdown_lines_with_width(text: &str, width: u16) -> Vec<Line<'static>> {
     let mut in_code = false;
     let mut alert_role = None;
     let source_lines = text.lines().collect::<Vec<_>>();
     let edges = alert_edges(source_lines.iter().copied());
-    source_lines
-        .into_iter()
-        .enumerate()
-        .map(|(index, line)| {
-            let (spans, next) = answer_line_spans(
-                line,
-                in_code,
-                &mut alert_role,
-                edges.get(index).copied().flatten(),
-            );
-            in_code = next;
-            Line::from(spans)
-        })
-        .collect()
+    let mut rendered = Vec::new();
+    let mut index = 0;
+    while index < source_lines.len() {
+        let table = if !in_code && index + 1 < source_lines.len() {
+            table_cells(source_lines[index]).and_then(|header| {
+                let delimiter = table_cells(source_lines[index + 1])?;
+                (delimiter.len() == header.len() && table_delimiter(&delimiter)).then_some(header)
+            })
+        } else {
+            None
+        };
+        if let Some(header) = table {
+            let mut end = index + 2;
+            let mut rows = Vec::new();
+            while end < source_lines.len() {
+                let Some(row) = table_cells(source_lines[end]) else {
+                    break;
+                };
+                if row.len() != header.len() || table_delimiter(&row) {
+                    break;
+                }
+                rows.push(row);
+                end += 1;
+            }
+            rendered.extend(render_table(&header, &rows, width.max(1) as usize));
+            index = end;
+            continue;
+        }
+        let (spans, next) = answer_line_spans(
+            source_lines[index],
+            in_code,
+            &mut alert_role,
+            edges.get(index).copied().flatten(),
+        );
+        in_code = next;
+        rendered.push(Line::from(spans));
+        index += 1;
+    }
+    rendered
 }
 
 /// Stable presentation rail for an answer that has left the live viewport.
@@ -1139,12 +1403,23 @@ fn answer_commit_meta(metrics: PresentationMetrics) -> String {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn answer_commit_lines_with_status_and_metrics(
     text: &str,
     partial: bool,
     metrics: Option<PresentationMetrics>,
 ) -> Vec<Line<'static>> {
-    let lines = markdown_lines(text);
+    answer_commit_lines_with_status_and_metrics_at_width(text, partial, metrics, 120)
+}
+
+pub(crate) fn answer_commit_lines_with_status_and_metrics_at_width(
+    text: &str,
+    partial: bool,
+    metrics: Option<PresentationMetrics>,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let text = super::tighten_answer_spacing(text);
+    let lines = markdown_lines_with_width(&text, width.saturating_sub(2).max(1));
     let last_index = lines.len().saturating_sub(1);
     lines
         .into_iter()
@@ -1370,7 +1645,7 @@ pub(crate) fn activity_commit_lines(
 }
 
 pub(crate) fn static_tool_lines(tool: &ToolBlock, width: u16) -> Vec<(String, Color)> {
-    let lines = tool.commit_lines();
+    let lines = tool.collapsed_lines();
     lines
         .into_iter()
         .enumerate()
@@ -1414,8 +1689,8 @@ pub(crate) fn commit_lines_with_answer_metrics(
     // source text here and let the terminal viewport/wrap provide navigation.
     let mut lines: Vec<Line> = vec![Line::default()];
     if markdown {
-        lines.extend(answer_commit_lines_with_status_and_metrics(
-            &text, partial, metrics,
+        lines.extend(answer_commit_lines_with_status_and_metrics_at_width(
+            &text, partial, metrics, width,
         ));
     } else {
         lines.extend(text.lines().map(|line| {
@@ -1622,6 +1897,22 @@ fn append_commit_fragments(
     prefix_style: Style,
 ) {
     for fragment in fragments {
+        if fragment.cells > width.saturating_sub(continuation_cells.max(1))
+            && fragment.text.chars().count() > 1
+        {
+            for grapheme in fragment.text.graphemes(true) {
+                let used = str_cells(grapheme);
+                if *row_cells > 0 && row_cells.saturating_add(used) > width {
+                    push_commit_continuation(rows, continuation, prefix_style);
+                    *row_cells = continuation_cells;
+                }
+                rows.last_mut()
+                    .expect("semantic commit wrap owns one row")
+                    .push(Span::styled(grapheme.to_owned(), fragment.style));
+                *row_cells = row_cells.saturating_add(used);
+            }
+            continue;
+        }
         if *row_cells > 0 && row_cells.saturating_add(fragment.cells) > width {
             push_commit_continuation(rows, continuation, prefix_style);
             *row_cells = continuation_cells;
@@ -1740,6 +2031,35 @@ fn wrap_semantic_commit_line(spans: Vec<Span<'static>>, width: u16) -> Option<Ve
     wrap_semantic_commit_line_with_prefix(spans, prefix.first, prefix.continuation, width)
 }
 
+fn process_bundle_wrap_prefix(text: &str) -> Option<&str> {
+    const TITLE: &str = "§ ACTA · ";
+    if text.starts_with(TITLE) {
+        return Some(TITLE);
+    }
+    let rest = text.strip_prefix("  ")?;
+    let (tag, _) = rest.split_once(" · ")?;
+    if !matches!(
+        tag,
+        "SYS"
+            | "RUN"
+            | "PLAN"
+            | "THK"
+            | "ANS"
+            | "TLS"
+            | "CHK"
+            | "SUM"
+            | "WAIT"
+            | "ASK"
+            | "QUE"
+            | "TAKE"
+            | "DONE"
+            | "ERR"
+    ) {
+        return None;
+    }
+    text.get(..2 + tag.len() + " · ".len())
+}
+
 fn wrap_commit_line(line: Line<'static>, width: u16) -> Vec<Line<'static>> {
     let spans = line.spans.into_iter().collect::<Vec<_>>();
     let activity_prefix = spans
@@ -1747,6 +2067,17 @@ fn wrap_commit_line(line: Line<'static>, width: u16) -> Vec<Line<'static>> {
         .and_then(|span| activity_commit_prefix(span.content.as_ref()))
         .map(str::to_owned);
     if let Some(prefix) = activity_prefix.as_deref() {
+        if let Some(wrapped) =
+            wrap_semantic_commit_line_with_prefix(spans.clone(), prefix, "│ ", width)
+        {
+            return wrapped;
+        }
+    }
+    let bundle_prefix = spans
+        .first()
+        .and_then(|span| process_bundle_wrap_prefix(span.content.as_ref()))
+        .map(str::to_owned);
+    if let Some(prefix) = bundle_prefix.as_deref() {
         if let Some(wrapped) =
             wrap_semantic_commit_line_with_prefix(spans.clone(), prefix, "│ ", width)
         {

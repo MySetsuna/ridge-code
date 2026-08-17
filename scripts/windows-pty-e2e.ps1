@@ -391,8 +391,11 @@ $snapshotCompletionRaw = ''
 $snapshotCompletionJson = $null
 $sentInterrupt = $false
 $sentFront = $false
+$sentQueueTail = $false
 $sentInspect = $false
 $sentInspectSpace = $false
+$sentInspectCollapse = $false
+$inspectCollapsedObserved = $false
 $sentInspectEnd = $false
 $sentInspectDelete = $false
 $sentQueueSwitch = $false
@@ -401,6 +404,7 @@ $sentReasoning = $false
 $reasoningObserved = $false
 $sentAnswerInspect = $false
 $sentAnswerArchiveInspect = $false
+$sentAnswerInspectEnd = $false
 $answerInspectObserved = $false
 $sentHold = $false
 $holdObserved = $false
@@ -443,7 +447,7 @@ $snapshotInspectJson = $null
 $snapshotAnswerInspectRaw = ''
 $snapshotAnswerInspectJson = $null
 $effectiveInterruptAfterMs = if ($BusyFixture) {
-    [Math]::Max($InterruptAfterMs, $(if ($InspectQueue) { 3600 } elseif ($InspectLive) { 3200 } elseif ($InspectReasoning -or $InspectHold) { 2800 } else { 2200 }))
+    [Math]::Max($InterruptAfterMs, $(if ($InspectQueue) { 6000 } elseif ($InspectLive) { 3200 } elseif ($InspectReasoning -or $InspectHold) { 2800 } else { 2200 }))
 } elseif ($CompletionFixture) {
     [Math]::Max($InterruptAfterMs, $(if ($InspectAnswer) { 9000 } else { 7000 }))
 } elseif ($stressFixtureRequested) {
@@ -527,9 +531,22 @@ try {
             -1
         }
         if (-not $sentHelp -and $elapsed -ge $EnterAfterMs) {
-            $session.Send([Text.Encoding]::UTF8.GetBytes('/help'))
-            $session.Send([byte[]](0x0d))
-            $sentHelp = $true
+            $busyReady = -not $BusyFixture
+            if ($BusyFixture -and (Test-Path -LiteralPath $isolatedSnapshot)) {
+                try {
+                    $busyProbe = [IO.File]::ReadAllText($isolatedSnapshot) | ConvertFrom-Json
+                    $busyReady = $null -ne $busyProbe.state -and $busyProbe.state.busy
+                } catch {
+                    # Retry after the fixture's first busy frame is durable.
+                }
+            }
+            if ($busyReady) {
+                $initialProbe = if ($BusyFixture) { 'queued tail message' } else { '/help' }
+                $session.Send([Text.Encoding]::UTF8.GetBytes($initialProbe))
+                $session.Send([byte[]](0x0d))
+                $sentHelp = $true
+                $sentQueueTail = [bool]$BusyFixture
+            }
         }
         if ($commandsMode) {
             $commandsSnapshot = $null
@@ -658,6 +675,23 @@ try {
             $session.Send([byte[]](0x01))
             $sentAnswerArchiveInspect = $true
         }
+        if ($InspectAnswer -and $completionObserved -and -not $sentAnswerInspectEnd -and
+            (Test-Path -LiteralPath $isolatedSnapshot)) {
+            try {
+                $candidate = [IO.File]::ReadAllText($isolatedSnapshot)
+                $parsed = $candidate | ConvertFrom-Json
+                if ($null -ne $parsed.panel -and $parsed.panel.kind -eq 'Answers' -and
+                    $parsed.panel.detail_open) {
+                    # End scrolls an expanded answer detail to its retained tail;
+                    # the raw ConPTY stream must therefore expose middle/tail
+                    # table and fenced-code content, not only archive metadata.
+                    $session.Send([byte[]](0x1b, 0x5b, 0x46))
+                    $sentAnswerInspectEnd = $true
+                }
+            } catch {
+                # Retry after the frame writer leaves its transient state.
+            }
+        }
         if ($completionMode -and $completionTaskSent -and -not $completionObserved -and (Test-Path -LiteralPath $isolatedSnapshot)) {
             try {
                 $candidate = [IO.File]::ReadAllText($isolatedSnapshot)
@@ -674,14 +708,22 @@ try {
                 # Retry after the frame write completes.
             }
         }
-        if ($BusyFixture -and -not $sentFront -and $elapsed -ge 850) {
+        if ($BusyFixture -and $sentHelp -and -not $sentFront -and $elapsed -ge 850) {
             $session.Send([Text.Encoding]::UTF8.GetBytes('/front'))
             # BusyFixture opts into Kitty disambiguation.  Exercise the real
             # physical Ctrl+Enter spelling instead of relying on a platform's
             # CR/LF-to-KeyCode fallback; input.rs still normalizes that fallback
             # for legacy Windows terminals.
-            $session.Send([byte[]](0x1b, 0x5b, 0x31, 0x33, 0x3b, 0x35, 0x75))
+            # ConPTY may expose Kitty CSI-u without its ESC byte after host
+            # translation. Exercise that real residual spelling; a literal
+            # prefix must never leak into the editor or trigger takeover.
+            $session.Send([byte[]](0x5b, 0x31, 0x33, 0x3b, 0x35, 0x75))
             $sentFront = $true
+        }
+        if ($BusyFixture -and $sentFront -and -not $sentQueueTail -and $elapsed -ge 1000) {
+            $session.Send([Text.Encoding]::UTF8.GetBytes('queued tail message'))
+            $session.Send([byte[]](0x0d))
+            $sentQueueTail = $true
         }
         if ($BusyFixture -and $InspectReasoning -and $sentFront -and -not $sentReasoning -and $elapsed -ge 1400) {
             # Ctrl+R is the physical control byte used by Windows ConPTY;
@@ -757,11 +799,11 @@ try {
                 # Retry after the frame write completes.
             }
         }
-        if ($BusyFixture -and $InspectLive -and $sentFront -and -not $sentInspect -and $elapsed -ge 1700) {
-            # Alt+I is the byte-safe spelling of the live inspector.  Ctrl+I
-            # is accepted interactively too, but raw 0x09 can be indistinguishable
-            # from Tab on hosts that collapse Ctrl+I to the completion key.
-            $session.Send([byte[]](0x1b, 0x69))
+        if ($BusyFixture -and $InspectLive -and $sentFront -and -not $sentInspect -and
+            $elapsed -ge 1700 -and (-not $InspectQueue -or $null -ne $snapshotMidJson -or $elapsed -ge 3600)) {
+            # Exercise the residual Kitty spelling because raw Alt+I may lose
+            # its modifier when Windows emits separate INPUT_RECORD entries.
+            $session.Send([Text.Encoding]::ASCII.GetBytes('[105;3u'))
             $sentInspect = $true
         }
         if ($sentInspect -and -not $inspectObserved -and (Test-Path -LiteralPath $isolatedSnapshot)) {
@@ -795,7 +837,25 @@ try {
                 # Retry after the frame write completes.
             }
         }
-        if ($InspectQueue -and $inspectExpandedObserved -and -not $sentInspectEnd -and $elapsed -ge 2250) {
+        if ($InspectQueue -and $inspectExpandedObserved -and -not $sentInspectCollapse -and $elapsed -ge 2150) {
+            # Collapse details before End; while details are open End scrolls
+            # the detail body instead of selecting the last actionable row.
+            $session.Send([byte[]](0x20))
+            $sentInspectCollapse = $true
+        }
+        if ($sentInspectCollapse -and -not $inspectCollapsedObserved -and (Test-Path -LiteralPath $isolatedSnapshot)) {
+            try {
+                $candidate = [IO.File]::ReadAllText($isolatedSnapshot)
+                $parsed = $candidate | ConvertFrom-Json
+                if ($null -ne $parsed.panel -and $parsed.panel.kind -match '^(Live|Audit)$' -and
+                    -not $parsed.panel.detail_open) {
+                    $inspectCollapsedObserved = $true
+                }
+            } catch {
+                # Retry after the frame write completes.
+            }
+        }
+        if ($InspectQueue -and $inspectCollapsedObserved -and -not $sentInspectEnd -and $elapsed -ge 2250) {
             # End selects the last mixed row, which is the last pending message
             # in the Inspector's actionable FIFO rail.
             $session.Send([byte[]](0x1b, 0x5b, 0x46))
@@ -810,7 +870,15 @@ try {
             try {
                 $candidate = [IO.File]::ReadAllText($isolatedSnapshot)
                 $parsed = $candidate | ConvertFrom-Json
-                if ($null -ne $parsed.state -and $parsed.state.queued -eq 1 -and $null -ne $parsed.panel -and $parsed.panel.kind -match '^(Live|Audit)$') {
+                $expectedQueued = if ($null -ne $snapshotMidJson -and $null -ne $snapshotMidJson.state) {
+                    [Math]::Max(0, [int]$snapshotMidJson.state.queued - 1)
+                } elseif ($null -ne $snapshotInspectJson -and $null -ne $snapshotInspectJson.state) {
+                    [Math]::Max(0, [int]$snapshotInspectJson.state.queued - 1)
+                } else {
+                    -1
+                }
+                if ($null -ne $parsed.state -and $parsed.state.queued -eq $expectedQueued -and
+                    $null -ne $parsed.panel -and $parsed.panel.kind -match '^(Live|Audit)$') {
                     $inspectQueueRemovedObserved = $true
                 }
             } catch {
@@ -834,8 +902,9 @@ try {
             }
         }
         if ($InspectQueue -and $attentionQueueObserved -and -not $sentInspectReturn -and $elapsed -ge 2750) {
-            # Alt+I is the byte-safe Inspector toggle from the queue panel.
-            $session.Send([byte[]](0x1b, 0x69))
+            # Reuse the residual Kitty spelling so Queue -> Inspector retains
+            # Alt and never inserts a literal `i` into panel search.
+            $session.Send([Text.Encoding]::ASCII.GetBytes('[105;3u'))
             $sentInspectReturn = $true
         }
         if ($InspectQueue -and $sentInspectReturn -and -not $attentionLiveObserved -and (Test-Path -LiteralPath $isolatedSnapshot)) {
@@ -855,8 +924,11 @@ try {
                     $candidate = [IO.File]::ReadAllText($isolatedSnapshot)
                     $parsed = $candidate | ConvertFrom-Json
                     $history = if ($null -ne $parsed.state) { @($parsed.state.activity_history) } else { @() }
-                    $frontAction = $history | Where-Object { $_.text -eq 'front-queued message' }
-                    if ($null -ne $parsed.state -and $parsed.state.busy -and $parsed.state.queued -ge 2 -and $null -ne $frontAction) {
+                    $frontAction = $history | Where-Object { $_.text -like 'front-queued*' }
+                    $queue = if ($null -ne $parsed.state) { @($parsed.state.queue) } else { @() }
+                    if ($null -ne $parsed.state -and $parsed.state.busy -and
+                        $parsed.state.queued -ge 2 -and $queue -contains '/front' -and
+                        $queue -contains 'queued tail message' -and $null -ne $frontAction) {
                         $snapshotMidRaw = $candidate
                         $snapshotMidJson = $parsed
                     }
@@ -865,7 +937,7 @@ try {
                 }
             }
         }
-        if ($BusyFixture -and $sentFront -and -not $frontFallbackSent -and $elapsed -ge 1200) {
+        if ($BusyFixture -and $sentFront -and -not $frontFallbackSent -and $elapsed -ge 2200) {
             # Some Windows ConPTY/INPUT_RECORD hosts consume CSI-u without
             # surfacing a crossterm KeyEvent.  Keep the attempt observable, then
             # fall back to the physical CR/LF spelling that those hosts expose
@@ -875,8 +947,8 @@ try {
                 try {
                     $probe = [IO.File]::ReadAllText($isolatedSnapshot) | ConvertFrom-Json
                     $probeHistory = if ($null -ne $probe.state) { @($probe.state.activity_history) } else { @() }
-                    $frontAction = $probeHistory | Where-Object { $_.text -eq 'front-queued message' }
-                    $frontSeen = $null -ne $probe.state -and $probe.state.busy -and $probe.state.queued -ge 2 -and $null -ne $frontAction
+                    $frontAction = $probeHistory | Where-Object { $_.text -like 'front-queued*' }
+                    $frontSeen = $null -ne $probe.state -and $null -ne $frontAction
                 } catch {
                     # Retry once more after the writer leaves its transient state.
                 }
@@ -971,11 +1043,23 @@ try {
     $busyFixtureFrontObserved = if (-not $BusyFixture) {
         $true
     } elseif ($null -ne $snapshotMidState -and $snapshotMidState.queued -ge 2) {
-        @($snapshotMidState.activity_history | Where-Object { $_.text -eq 'front-queued message' }).Count -gt 0
+        @($snapshotMidState.activity_history | Where-Object { $_.text -like 'front-queued*' }).Count -gt 0
     } else {
         $false
     }
-    $queueAffordanceObserved = $snapshotRows -match '(?i)next'
+    $snapshotMidRows = if ($null -ne $snapshotMidJson -and $null -ne $snapshotMidJson.rows) {
+        @($snapshotMidJson.rows) -join "`n"
+    } else {
+        ''
+    }
+    $visibleQueued = if ($null -ne $snapshotMidState) {
+        @($snapshotMidState.queue | Where-Object {
+                $snapshotMidRows -match [regex]::Escape([string]$_)
+            }).Count
+    } else {
+        0
+    }
+    $queueAffordanceObserved = $visibleQueued -gt 0 -or ($snapshotRows -match '(?i)next')
     $queueEvidenceSatisfied = -not $BusyFixture -or $queueAffordanceObserved
     $inspectEvidenceSatisfied = -not $InspectLive -or ($inspectObserved -and $inspectExpandedObserved)
     $inspectQueueEvidenceSatisfied = -not $InspectQueue -or ($inspectQueueRemovedObserved -and $attentionQueueObserved -and $attentionLiveObserved)
@@ -993,6 +1077,18 @@ try {
     # chunk boundary.
     $ansiPattern = '\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))'
     $plain = [regex]::Replace($text.ToString(), $ansiPattern, '')
+    if ($BusyFixture -and -not $busyFixtureFrontObserved -and
+        $plain -match 'front-queued' -and $plain -match '/front') {
+        # Cursor-addressed output is authoritative when the replace-on-write
+        # frame snapshot misses the short Queue[2] transition.
+        $busyFixtureFrontObserved = $true
+    }
+    if ($BusyFixture -and -not $queueAffordanceObserved -and
+        $plain -match 'Queue\s*\[2\]' -and $plain -match 'queued tail message' -and
+        $plain -match '/front') {
+        $queueAffordanceObserved = $true
+        $queueEvidenceSatisfied = $true
+    }
     # Startup contract: the standalone reference canvas must be the first
     # application surface.  Host-generated ConPTY setup bytes may precede it,
     # but config/provider logs must follow the animation hand-off marker.
@@ -1081,13 +1177,24 @@ try {
     $diffAddedObserved = ($plain -match 'fixture\s+new\s+line') -or ($probePlain -match 'fixturenewline')
     $diffRemovedTailObserved = ($plain -match 'fixture\s+old\s+tail\s+marker') -or ($probePlain -match 'fixtureoldtailmarker')
     $diffAddedTailObserved = ($plain -match 'fixture\s+new\s+tail\s+marker') -or ($probePlain -match 'fixturenewtailmarker')
+    $toolFoldObserved = ($plain -match '\+\s*\d+\s+lines\s*\(Ctrl\+T\s+to\s+view\s+transcript\)') -or
+        ($probePlain -match '\+\d+lines\(Ctrl\+Ttoviewtranscript\)')
+    # Ratatui/ConPTY may serialize the continuation cell of each wide glyph as
+    # a blank; accept those display-cell blanks without weakening text order.
+    $answerTableObserved = (($plain -match '\u9879\s*\u76EE') -and ($plain -match '\u4E2D\s*\u6587\s*\u81EA\s*\u9002\s*\u5E94')) -or
+        (($probePlain -match '\u9879\s*\u76EE') -and ($probePlain -match '\u4E2D\s*\u6587\s*\u81EA\s*\u9002\s*\u5E94'))
+    $answerHighlightObserved = (($plain -match 'ridgecode') -and ($plain -match 'rendered\s*=\s*true')) -or
+        (($probePlain -match 'ridgecode') -and ($probePlain -match 'rendered=true'))
+    $answerPresentationEvidenceSatisfied = -not $diffMode -or (
+        $answerTableObserved -and $answerHighlightObserved
+    )
     $diffEvidenceSatisfied = -not $diffMode -or (
-        $diffPathObserved -and $diffRemovedObserved -and $diffAddedObserved -and
-        $diffRemovedTailObserved -and $diffAddedTailObserved
+        $diffPathObserved -and $toolFoldObserved
     )
     $completionEvidenceSatisfied = -not $completionMode -or (
         $completionTaskSent -and $completionObserved -and $completionTextObserved -and
-        $completionReasoningTailObserved -and $diffEvidenceSatisfied
+        $completionReasoningTailObserved -and $diffEvidenceSatisfied -and
+        $answerPresentationEvidenceSatisfied
     )
     $commandsHelpObserved = -not $commandsMode -or ($text.ToString() -match '(?i)/login')
     $commandsEvidenceSatisfied = -not $commandsMode -or (
@@ -1199,6 +1306,9 @@ try {
         diff_added_observed = $diffAddedObserved
         diff_removed_tail_observed = $diffRemovedTailObserved
         diff_added_tail_observed = $diffAddedTailObserved
+        tool_fold_observed = $toolFoldObserved
+        answer_table_observed = $answerTableObserved
+        answer_highlight_observed = $answerHighlightObserved
         diff_evidence_satisfied = $diffEvidenceSatisfied
         completion_evidence_satisfied = $completionEvidenceSatisfied
         commands_fixture_requested = $commandsMode
@@ -1218,6 +1328,7 @@ try {
         crossterm_events_observed = $crosstermEventsObserved
         raw_enter_sent = $sentHelp
         busy_fixture_front_sent = $sentFront
+        busy_fixture_tail_sent = $sentQueueTail
         busy_fixture_front_fallback_sent = $frontFallbackSent
         busy_fixture_front_transport = if (-not $BusyFixture) { 'not-applicable' } elseif ($frontFallbackSent) { 'csi-u→legacy-crlf' } else { 'csi-u' }
         busy_fixture_front_observed = $busyFixtureFrontObserved
@@ -1228,6 +1339,7 @@ try {
         answer_inspect_requested = [bool]$InspectAnswer
         answer_inspect_sent = $sentAnswerInspect
         answer_archive_inspect_sent = $sentAnswerArchiveInspect
+        answer_inspect_end_sent = $sentAnswerInspectEnd
         answer_inspect_observed = $answerInspectObserved
         answer_inspect_evidence_satisfied = $answerInspectEvidenceSatisfied
         hold_requested = [bool]$InspectHold
@@ -1248,6 +1360,8 @@ try {
         live_inspector_observed = $inspectObserved
         live_inspector_space_sent = $sentInspectSpace
         live_inspector_expanded_observed = $inspectExpandedObserved
+        live_inspector_collapse_sent = $sentInspectCollapse
+        live_inspector_collapsed_observed = $inspectCollapsedObserved
         live_inspector_queue_requested = [bool]$InspectQueue
         live_inspector_end_sent = $sentInspectEnd
         live_inspector_delete_sent = $sentInspectDelete

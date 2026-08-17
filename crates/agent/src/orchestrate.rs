@@ -87,6 +87,15 @@ async fn run_teammate_via_protocol(
                 .invoke(AgentState::new(payload.task))
                 .await
                 .map_err(|error| AgentProtocolError::Handler(error.to_string()))?;
+            if halt_reason(&outcome) == HaltReason::CircuitBroken {
+                if let Some(error) = outcome
+                    .last_error
+                    .as_deref()
+                    .filter(|error| error.starts_with("provider error:"))
+                {
+                    return Err(AgentProtocolError::Handler(error.to_string()));
+                }
+            }
             Ok(AgentEnvelope::response(
                 format!("{correlation_id}:response"),
                 from,

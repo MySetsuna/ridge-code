@@ -271,12 +271,13 @@ fn popup_action(key: &KeyEvent, code: KeyCode) -> InputAction {
     // 浮窗态:↑↓选、Tab 接受但不提交、Enter 接受并提交、Esc 关;
     // 字符/退格穿透继续编辑(主环先关浮窗)。
     match code {
-        KeyCode::Tab => InputAction::PopupAccept,
+        KeyCode::Tab | KeyCode::Right => InputAction::PopupAccept,
         KeyCode::Down => InputAction::PopupNext,
         KeyCode::Up => InputAction::PopupPrev,
         KeyCode::Enter => InputAction::PopupSubmit,
         KeyCode::Char(c) => InputAction::Insert(c),
         KeyCode::Backspace => InputAction::Backspace,
+        KeyCode::Null | KeyCode::F(_) => InputAction::Ignore,
         _ => InputAction::PopupClose,
     }
 }
@@ -310,7 +311,7 @@ fn normal_input_action(key: &KeyEvent, code: KeyCode, busy: bool) -> InputAction
         KeyCode::Char('v' | 'V') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             InputAction::PasteClipboard
         }
-        // busy 时 Enter → 入队(iter-33),空闲 → 立即提交。
+        // busy 时 Enter → 入队;空闲 → 提交。空输入由提交路径发队首。
         KeyCode::Enter if busy => InputAction::Queue,
         KeyCode::Enter => InputAction::Submit,
         KeyCode::Tab => InputAction::PopupOpen,
@@ -721,6 +722,51 @@ impl InputState {
     }
 }
 
+/// Prompt painted before the first input line.
+pub(crate) const INPUT_PROMPT: &str = "> ";
+
+pub(crate) fn is_shell_input(buffer: &str) -> bool {
+    buffer.starts_with('!')
+}
+
+pub(crate) fn is_direct_command(input: &str) -> bool {
+    input.starts_with('/') || input.starts_with('!')
+}
+
+pub(crate) fn shell_command(input: &str) -> Option<&str> {
+    input
+        .strip_prefix('!')
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+}
+
+pub(crate) fn shell_input_title(title: String, buffer: &str) -> String {
+    if !is_shell_input(buffer) {
+        return title;
+    }
+    if let Some(rest) = title.strip_prefix(" Input") {
+        format!(" SHELL{rest}")
+    } else if let Some(rest) = title.strip_prefix(" In ") {
+        format!(" SH {rest}")
+    } else {
+        format!(" SHELL · {title}")
+    }
+}
+
+pub(crate) fn prompt_input_lines(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if index == 0 {
+                format!("{INPUT_PROMPT}{line}")
+            } else {
+                format!("  {line}")
+            }
+        })
+        .collect()
+}
+
 // ───────────────────────── 补全浮窗(iter-27)─────────────────────────
 
 /// 斜杠命令静态表(补全数据源,与 `run_command` 分支对齐;有序稳态)。
@@ -744,11 +790,13 @@ pub(crate) const SLASH_COMMANDS: &[&str] = &[
     "/login",
     "/mcp",
     "/model",
+    "/new",
     "/provider",
     "/quit",
     "/queue",
     "/reasoning",
     "/reset",
+    "/sessions",
     "/skills",
     "/steer",
     "/tools",

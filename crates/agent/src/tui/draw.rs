@@ -5,12 +5,12 @@ use super::{
     alert_edges, char_cells, clip_display_cells, compact_status_line, context_pressure_role,
     ctx_percent, cwd_name, fence_language, fence_without_language, fmt_busy_phase, fmt_busy_signal,
     fmt_progress_diagnostic, input_chrome, input_height, live_markdown_spans_with_alert_edge,
-    render_status_template, role_color, sanitize_display_text, selection_style,
-    status_line_projection, str_cells, stream_channel_badge, tail_display_cells, telemetry_surface,
-    todo_progress, wrap_input, wrapped_rows, ActivityEntry, ActivityKind, AlertEdge, AnswerEntry,
-    ApprovalRequest, InputChromeArgs, LiveBlockFocus, LiveChannel, LiveLine, LiveLineAnchor,
-    LiveLineKind, LiveTranscript, Panel, PanelKind, PanelRow, ReasoningEntry, ReplMeta, Role,
-    StatusVars, Ui, Vitals,
+    prompt_input_lines, queue_preview, render_status_template, role_color, sanitize_display_text,
+    selection_style, shell_input_title, status_line_projection, str_cells, stream_channel_badge,
+    tail_display_cells, telemetry_surface, todo_progress, wrap_input, wrapped_rows, ActivityEntry,
+    ActivityKind, AlertEdge, AnswerEntry, ApprovalRequest, InputChromeArgs, LiveBlockFocus,
+    LiveChannel, LiveLine, LiveLineAnchor, LiveLineKind, LiveTranscript, Panel, PanelKind,
+    PanelRow, ReasoningEntry, ReplMeta, Role, StatusVars, Ui, Vitals, INPUT_PROMPT,
 };
 use ratatui::buffer::Buffer;
 use ratatui::{
@@ -262,15 +262,8 @@ fn snapshot_payload(buffer: &Buffer, render_us: u128, ui: &Ui, vitals: &Vitals) 
 fn snapshot_queue_labels(queue: &std::collections::VecDeque<String>) -> Vec<String> {
     queue
         .iter()
-        .enumerate()
         .take(4)
-        .map(|(index, _)| {
-            if index == 0 {
-                "next queued message".to_owned()
-            } else {
-                format!("queued message #{}", index + 1)
-            }
-        })
+        .map(|message| queue_preview(message, 48))
         .collect()
 }
 
@@ -435,7 +428,7 @@ fn panel_full_hint(panel: &Panel) -> &'static str {
                 "Ctrl+Space hold/follow · ↑↓ select · PgUp/PgDn scroll detail · Alt+PgUp/PgDn fine scroll · Enter/Space close · Esc close"
             }
             _ => {
-                "↑↓ select · PgUp/PgDn scroll detail · Alt+PgUp/PgDn fine scroll · Enter close · Esc close"
+                "↑↓/PgUp/PgDn scroll this answer · ←→ switch answer · Enter close · Esc close"
             }
         };
     }
@@ -808,13 +801,17 @@ pub(crate) fn pending_queue_lines(
     let preview_rows = MAX_PENDING_PREVIEW_ROWS.saturating_sub(1).max(1);
     let shown = queue.len().min(preview_rows);
     for index in 0..shown {
-        let (label, role) = if index == 0 {
-            ("⏭ next queued message", Role::Primary)
-        } else {
-            ("⏳ queued message", Role::Muted)
+        let Some(message) = queue.get(index) else {
+            break;
         };
+        let (prefix, role) = if index == 0 {
+            ("⏭ ", Role::Primary)
+        } else {
+            ("⏳ ", Role::Muted)
+        };
+        let body = queue_preview(message, width.saturating_sub(str_cells(prefix) as u16));
         lines.push(Line::from(Span::styled(
-            clip_display_cells(label, width),
+            clip_display_cells(&format!("{prefix}{body}"), width),
             Style::default().fg(role_color(role)),
         )));
     }
@@ -3864,6 +3861,32 @@ pub(crate) fn responsive_live_layout(
     [slots[0], slots[1], slots[2], slots[3]]
 }
 
+pub(crate) fn clamp_rect(area: Rect, rect: Rect) -> Rect {
+    let x = rect.x.max(area.x);
+    let y = rect.y.max(area.y);
+    let right = area.right().max(x);
+    let bottom = area.bottom().max(y);
+    Rect {
+        x,
+        y,
+        width: rect.width.min(right.saturating_sub(x)),
+        height: rect.height.min(bottom.saturating_sub(y)),
+    }
+}
+
+pub(crate) fn clamp_position(area: Rect, x: u16, y: u16) -> Position {
+    if area.width == 0 || area.height == 0 {
+        return Position {
+            x: area.x,
+            y: area.y,
+        };
+    }
+    Position {
+        x: x.clamp(area.x, area.right().saturating_sub(1)),
+        y: y.clamp(area.y, area.bottom().saturating_sub(1)),
+    }
+}
+
 /// Immutable presentation plan for the live surface.
 ///
 /// Measurement and slot allocation are kept together so the renderer consumes
@@ -3894,9 +3917,15 @@ impl LiveFramePlan {
         } else {
             Vec::new()
         };
-        let input_rows = input_height(&ui.input.buffer, area.width.saturating_sub(2), 3, 8)
-            .saturating_add(queue_preview.len() as u16)
-            .min(12);
+        let input_rows = input_height(
+            &ui.input.buffer,
+            area.width
+                .saturating_sub(2 + str_cells(INPUT_PROMPT) as u16),
+            3,
+            8,
+        )
+        .saturating_add(queue_preview.len() as u16)
+        .min(12);
         let ctx = ctx_percent(vitals.ctx_used, meta.ctx_window as usize);
         // The configured bottom bar may wrap; its height is part of the same
         // geometry pass as the input and live-output slots.
@@ -4097,10 +4126,13 @@ fn draw_compact_input_surface(
     } else {
         String::new()
     };
+    let prompt_cells = str_cells(INPUT_PROMPT) as u16;
     let (input_lines, cur_row, cur_col) = wrap_input(
         &ui.input.buffer,
         ui.input.cursor,
-        area.width.saturating_sub(str_cells(&queue_prefix) as u16),
+        area.width
+            .saturating_sub(str_cells(&queue_prefix) as u16)
+            .saturating_sub(prompt_cells),
     );
     let (visible_input_lines, visible_cur_row) = input_viewport(
         &input_lines,
@@ -4128,10 +4160,10 @@ fn draw_compact_input_surface(
         && area.width > 0
         && area.height > 0
     {
-        let x = (area.x + str_cells(&queue_prefix) as u16 + cur_col)
+        let x = (area.x + str_cells(&queue_prefix) as u16 + prompt_cells + cur_col)
             .min(area.right().saturating_sub(1));
         let y = (area.y + pending_rows + visible_cur_row).min(area.bottom().saturating_sub(1));
-        frame.set_cursor_position(Position { x, y });
+        frame.set_cursor_position(clamp_position(area, x, y));
     }
 }
 
@@ -4142,16 +4174,25 @@ fn compact_input_lines(
     width: u16,
 ) -> Vec<Line<'static>> {
     let mut content = Vec::with_capacity(visible_input_lines.len() + 1);
-    if pending_message.is_some() {
-        content.push(Line::from(clip_display_cells("⏭ queued message", width)));
+    if let Some(message) = pending_message {
+        let preview = queue_preview(message, width.saturating_sub(2));
+        content.push(Line::from(clip_display_cells(
+            &format!("⏭ {preview}"),
+            width,
+        )));
     }
-    content.extend(visible_input_lines.iter().enumerate().map(|(index, line)| {
-        if index == 0 && !queue_prefix.is_empty() {
-            Line::from(format!("{queue_prefix}{line}"))
-        } else {
-            Line::from(line.clone())
-        }
-    }));
+    content.extend(
+        prompt_input_lines(visible_input_lines)
+            .into_iter()
+            .enumerate()
+            .map(|(index, line)| {
+                if index == 0 && !queue_prefix.is_empty() {
+                    Line::from(format!("{queue_prefix}{line}"))
+                } else {
+                    Line::from(line)
+                }
+            }),
+    );
     content
 }
 
@@ -4162,10 +4203,11 @@ fn draw_bordered_input_surface(
     area: Rect,
     queue_preview: Vec<Line<'static>>,
 ) {
+    let prompt_cells = str_cells(INPUT_PROMPT) as u16;
     let (input_lines, cur_row, cur_col) = wrap_input(
         &ui.input.buffer,
         ui.input.cursor,
-        area.width.saturating_sub(2),
+        area.width.saturating_sub(2).saturating_sub(prompt_cells),
     );
     let input_capacity = area.height.saturating_sub(2) as usize;
     // Reserve one row for the editor before showing additional queue rows:
@@ -4184,13 +4226,14 @@ fn draw_bordered_input_surface(
     );
     let mut input_content = queue_visible;
     input_content.extend(
-        visible_input_lines
-            .iter()
-            .map(|line| Line::from(line.as_str())),
+        prompt_input_lines(&visible_input_lines)
+            .into_iter()
+            .map(Line::from),
     );
     frame.render_widget(
         Paragraph::new(Text::from(input_content)).block({
             let (mut input_title, input_role) = input_chrome(input_chrome_args(ui, area.width));
+            input_title = shell_input_title(input_title, &ui.input.buffer);
             if ui.input.is_long() {
                 input_title.push_str(" · Ctrl+E edit");
             }
@@ -4217,9 +4260,9 @@ fn draw_bordered_input_surface(
         && area.width >= 3
         && area.height >= 3
     {
-        let x = (area.x + 1 + cur_col).min(area.right().saturating_sub(2));
+        let x = (area.x + 1 + prompt_cells + cur_col).min(area.right().saturating_sub(2));
         let y = (area.y + 1 + queue_rows + visible_cur_row).min(area.bottom().saturating_sub(2));
-        frame.set_cursor_position(Position { x, y });
+        frame.set_cursor_position(clamp_position(area, x, y));
     }
 }
 
@@ -4784,10 +4827,15 @@ fn empty_state_content(ui: &Ui, width: u16, rows: usize) -> EmptyStateContent {
         };
     }
     if !ui.queued.is_empty() {
+        let preview = ui
+            .queued
+            .front()
+            .map(|text| queue_preview(text, width.saturating_sub(8) as u16))
+            .unwrap_or_default();
         return EmptyStateContent::Text {
             headline: empty_state_headline(width, "QUEUE", &format!("{} pending", ui.queued.len())),
             role: Role::Warn,
-            details: vec![empty_state_actions(width, "QUEUE")],
+            details: vec![preview, empty_state_actions(width, "QUEUE")],
         };
     }
     if let Some(summary) = idle_result_summary(ui, width, rows) {
@@ -4877,12 +4925,15 @@ fn render_live_cursor(
     ));
     frame.render_widget(
         Paragraph::new(cursor),
-        Rect {
-            x: area.x + col,
-            y: area.y + row,
-            width: 1,
-            height: 1,
-        },
+        clamp_rect(
+            area,
+            Rect {
+                x: area.x + col,
+                y: area.y + row,
+                width: 1,
+                height: 1,
+            },
+        ),
     );
 }
 
@@ -5002,16 +5053,17 @@ fn draw_input_editor(frame: &mut ratatui::Frame, area: Rect, ui: &Ui) {
     );
     let (_, cursor_row, cursor_col) = wrap_input(&ui.input.buffer, ui.input.cursor, width);
     if cursor_row >= scroll && cursor_row < scroll.saturating_add(inner.height) {
-        frame.set_cursor_position(Position {
-            x: inner
+        frame.set_cursor_position(clamp_position(
+            inner,
+            inner
                 .x
                 .saturating_add(cursor_col)
                 .min(inner.right().saturating_sub(1)),
-            y: inner
+            inner
                 .y
                 .saturating_add(cursor_row.saturating_sub(scroll))
                 .min(inner.bottom().saturating_sub(1)),
-        });
+        ));
     }
 }
 
@@ -5066,13 +5118,16 @@ pub(crate) fn draw_with_cache(
             .min(48) as u16
             + 4;
         let x = outer[2].x + 1;
-        let y = outer[2].y.saturating_sub(h);
-        let rect = Rect {
-            x,
-            y,
-            width: w.min(area.width.saturating_sub(x)),
-            height: h.min(area.height),
-        };
+        let y = outer[2].y.saturating_sub(h).max(area.y);
+        let rect = clamp_rect(
+            area,
+            Rect {
+                x,
+                y,
+                width: w.min(area.width.saturating_sub(x.saturating_sub(area.x))),
+                height: h,
+            },
+        );
         frame.render_widget(Clear, rect);
         let items: Vec<ListItem> = p.items.iter().map(|s| ListItem::new(s.as_str())).collect();
         let mut state = ListState::default();
@@ -5310,8 +5365,8 @@ mod snapshot_tests {
         assert_eq!(value["panel"]["selected"], "⏭ next");
         assert_eq!(value["panel"]["visible_rows"], 1);
         assert_eq!(value["state"]["live_view"], "follow");
-        assert_eq!(value["state"]["queue"][0], "next queued message");
-        assert!(!snapshot_payload(&buffer, 11, &ui, &vitals).contains("first pending request"));
+        assert_eq!(value["state"]["queue"][0], "first pending request");
+        assert!(snapshot_payload(&buffer, 11, &ui, &vitals).contains("first pending request"));
     }
 
     #[test]
@@ -5629,7 +5684,7 @@ mod snapshot_tests {
         ui.push_chunk(provider::StreamChunk::Answer(
             "stream tail remains visible".into(),
         ));
-        ui.set_activity("waiting 路 no stream");
+        ui.set_activity("waiting · no stream");
         ui.waiting = true;
         let vitals = Vitals {
             step: 3,

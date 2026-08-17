@@ -119,9 +119,6 @@ fn summarize_observation(m: &str) -> Option<Vec<(String, Color)>> {
     let rest = m.strip_prefix("act: ")?;
     let (name, obs) = rest.split_once(" -> ")?;
     if name == "read_file" {
-        // Keep both successful and failed reads on the same privacy boundary:
-        // the model/provider retains the observation, while the TUI confirms
-        // only the operation outcome and never renders its body.
         let failed = tool_output_failed(obs);
         let marker = if failed { "✗" } else { "✓" };
         let label = if failed {
@@ -134,7 +131,11 @@ fn summarize_observation(m: &str) -> Option<Vec<(String, Color)>> {
         } else {
             role_color(Role::Success)
         };
-        return Some(vec![(format!("  {marker} {label}"), color)]);
+        let mut out = vec![(format!("  {marker} {label}"), color)];
+        // Main transcript stays collapsed, while Ctrl+T retains the exact
+        // observation lines for explicit inspection and copying.
+        out.extend(preview_lines(obs, usize::MAX));
+        return Some(out);
     }
     if tool_output_failed(obs) {
         return Some(format_failed_observation(name, obs));
@@ -171,12 +172,13 @@ pub(crate) fn tool_preview(m: &str) -> Option<ToolBlock> {
         return ToolBlock::from_lines_with_phase(summarize_event(m), ToolPhase::Call, Some(name));
     }
     let rest = m.strip_prefix("act: ")?;
-    let (name, _) = rest.split_once(" -> ")?;
+    let (name, observation) = rest.split_once(" -> ")?;
     ToolBlock::from_lines_with_phase(
         summarize_event(m),
         ToolPhase::Observation,
         Some(name.to_owned()),
     )
+    .map(|block| block.with_audit_text(observation))
 }
 
 const MAX_BATCH_EDIT_SUMMARY_PATHS: usize = 3;

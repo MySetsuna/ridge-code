@@ -606,6 +606,48 @@ async fn openai_provider_sends_bearer_auth_and_correct_url() {
     assert_eq!(seen.body["messages"][0]["role"], "user");
 }
 
+#[tokio::test]
+async fn volc_provider_retry_disables_thinking_without_affecting_other_endpoints() {
+    let reply = json!({"choices":[{"message":{"content":"ok"}}]});
+    let retry_request = CompletionRequest {
+        messages: vec![
+            Message::user("continue"),
+            Message::system(
+                "<provider_retry><action_required>true</action_required>choose exactly one tool</provider_retry>",
+            ),
+        ],
+        tools: vec![ToolSpec {
+            name: "search".into(),
+            description: "search one file".into(),
+            schema: json!({"type":"object"}),
+        }],
+    };
+    let volc_http = Arc::new(CapturingHttp::new(reply.clone()));
+    OpenAiProvider::new(
+        "https://ark.cn-beijing.volces.com/api/coding/v3",
+        "deepseek-v4-flash",
+        "key",
+    )
+    .with_http(volc_http.clone())
+    .complete(&retry_request)
+    .await
+    .unwrap();
+    let volc_body = volc_http.seen().body;
+    assert_eq!(volc_body["thinking"]["type"], "disabled");
+    assert_eq!(volc_body["tool_choice"], "required");
+    assert_eq!(volc_body["parallel_tool_calls"], false);
+
+    let generic_http = Arc::new(CapturingHttp::new(reply));
+    OpenAiProvider::new("https://api.example.com", "gpt-x", "key")
+        .with_http(generic_http.clone())
+        .complete(&retry_request)
+        .await
+        .unwrap();
+    let generic_body = generic_http.seen().body;
+    assert!(generic_body.get("thinking").is_none());
+    assert!(generic_body.get("tool_choice").is_none());
+}
+
 #[test]
 fn reasoning_effort_accepts_canonical_values_case_insensitively() {
     assert_eq!(normalize_reasoning_effort(" HIGH "), Some("high"));

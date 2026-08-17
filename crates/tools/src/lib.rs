@@ -13,6 +13,13 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod job;
+pub use job::{
+    cancel_shell_job, has_live_shell_jobs, live_shell_job_ids, poll_shell_job, run_or_park_shell,
+    run_or_park_shell_with_limits, shell_hard_timeout, shell_slice_timeout, JobProgress,
+    ShellObservation, DEFAULT_SHELL_HARD_TIMEOUT_SECS,
+};
+
 const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 180;
 const SHELL_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -62,10 +69,22 @@ pub fn decode_bytes_with_encoding(bytes: &[u8], explicit: Option<&str>) -> Strin
     if let Ok(text) = std::str::from_utf8(bytes) {
         return text.to_owned();
     }
-    let fallback = explicit
-        .and_then(|label| encoding_rs::Encoding::for_label(label.trim().as_bytes()))
-        .unwrap_or_else(system_legacy_encoding);
-    fallback.decode(bytes).0.into_owned()
+    if let Some(label) = explicit {
+        if let Some(encoding) = encoding_rs::Encoding::for_label(label.trim().as_bytes()) {
+            return encoding.decode(bytes).0.into_owned();
+        }
+    }
+    // Invalid UTF-8: prefer GB18030 over a UTF-8 OEM code page (Windows
+    // Terminal is often 65001). Otherwise GBK source files become mojibake.
+    let (gb, _, had_errors) = encoding_rs::GB18030.decode(bytes);
+    if !had_errors {
+        return gb.into_owned();
+    }
+    let system = system_legacy_encoding();
+    if system != encoding_rs::UTF_8 {
+        return system.decode(bytes).0.into_owned();
+    }
+    gb.into_owned()
 }
 
 #[cfg(windows)]
@@ -99,17 +118,72 @@ pub fn write_file(path: impl AsRef<Path>, contents: &str) -> io::Result<()> {
 /// 0 处或多处匹配都报错 —— 逼调用方带足够上下文保证唯一,避免整文件覆写丢内容、省 token。
 pub fn edit_file(path: impl AsRef<Path>, old: &str, new: &str) -> io::Result<()> {
     let content = read_file(&path)?;
-    match content.matches(old).count() {
-        0 => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "old_string 未找到 —— 从最近一次该 path 的 read 结果原样复制锚点再 edit;勿重启全库侦察",
-        )),
-        1 => write_file(path, &content.replacen(old, new, 1)),
-        n => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("old_string 匹配 {n} 处,需唯一 —— 加长锚点上下文保证唯一;勿另开一轮全库搜索"),
-        )),
+    match apply_unique_replace(&content, old, new) {
+        Ok(next) => write_file(path, &next),
+        Err(message) => Err(io::Error::new(io::ErrorKind::InvalidInput, message)),
     }
+}
+
+fn normalize_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn apply_unique_replace(content: &str, old: &str, new: &str) -> Result<String, String> {
+    match content.matches(old).count() {
+        1 => return Ok(content.replacen(old, new, 1)),
+        n if n > 1 => return Err(edit_ambiguous_message(content, n)),
+        _ => {}
+    }
+    let norm_content = normalize_newlines(content);
+    let norm_old = normalize_newlines(old);
+    if norm_old.is_empty() {
+        return Err(edit_missing_message(content, old));
+    }
+    match norm_content.matches(&norm_old).count() {
+        1 => {
+            let replaced = norm_content.replacen(&norm_old, &normalize_newlines(new), 1);
+            if content.contains("\r\n") {
+                Ok(replaced.replace('\n', "\r\n"))
+            } else {
+                Ok(replaced)
+            }
+        }
+        0 => Err(edit_missing_message(content, old)),
+        n => Err(edit_ambiguous_message(content, n)),
+    }
+}
+
+fn edit_missing_message(content: &str, old: &str) -> String {
+    format!(
+        "old_string 未找到 —— 从下面可复用锚点原样复制再 edit;勿重启全库侦察\n--- file anchor ---\n{}\n--- end ---",
+        reusable_edit_anchor(content, old)
+    )
+}
+
+fn edit_ambiguous_message(content: &str, n: usize) -> String {
+    format!(
+        "old_string 匹配 {n} 处,需唯一 —— 加长锚点上下文保证唯一;勿另开一轮全库搜索\n--- file anchor ---\n{}\n--- end ---",
+        reusable_edit_anchor(content, "")
+    )
+}
+
+fn reusable_edit_anchor(content: &str, old: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let needle = normalize_newlines(old)
+        .lines()
+        .next()
+        .unwrap_or(old)
+        .trim()
+        .to_string();
+    if let Some(index) = lines
+        .iter()
+        .position(|line| !needle.is_empty() && (line.contains(&needle) || line.trim() == needle))
+    {
+        let start = index.saturating_sub(2);
+        let end = (index + 3).min(lines.len());
+        return lines[start..end].join("\n");
+    }
+    lines.into_iter().take(12).collect::<Vec<_>>().join("\n")
 }
 
 /// 批量编辑里的一处:某文件的一次唯一匹配替换(同 [`edit_file`] 语义)。
@@ -148,10 +222,9 @@ pub fn apply_edits(edits: &[Edit]) -> Result<usize, String> {
     // 按序把每处编辑叠加到对应文件内容(同文件多处 = 顺序 apply)。全体校验唯一匹配。
     for e in edits {
         let c = content.get_mut(e.path.as_str()).unwrap();
-        match c.matches(&e.old).count() {
-            1 => *c = c.replacen(&e.old, &e.new, 1),
-            0 => return Err(format!("{}: old_string 未找到", e.path)),
-            n => return Err(format!("{}: old_string 匹配 {n} 处,需唯一", e.path)),
+        match apply_unique_replace(c, &e.old, &e.new) {
+            Ok(next) => *c = next,
+            Err(message) => return Err(format!("{}: {message}", e.path)),
         }
     }
     // 全 OK → 落盘;任一写失败 → 回滚已写的,报错。
@@ -206,13 +279,25 @@ const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".codegraph"];
 /// 单次搜索最多返回的命中行数,防爆上下文。
 const SEARCH_CAP: usize = 200;
 
-/// 跨平台代码搜索:在 `root` 下递归找**文件名匹配 `glob`**(如 `*.rs`)、**内容含 `needle` 子串**
-/// 的行,返回 `相对路径:行号:内容`。Windows 无 grep,这是 agent 找代码的可移植接缝。
+/// 跨平台代码搜索:若 `root` 是文件则只搜该文件,否则递归找**文件名匹配 `glob`**(如 `*.rs`)、
+/// **内容含 `needle` 子串**的行,返回 `相对路径:行号:内容`。Windows 无 grep,这是 agent 找代码的可移植接缝。
 /// ponytail: 子串匹配非正则、glob 只认单个前/后缀 `*`;命中上限 [`SEARCH_CAP`] 行,超出截断。
 pub fn search(root: impl AsRef<Path>, needle: &str, glob: &str) -> io::Result<String> {
     let root = root.as_ref();
     let mut out = Vec::new();
-    search_dir(root, root, needle, glob, &mut out)?;
+    if root.is_file() {
+        let name = root.file_name().unwrap_or_default().to_string_lossy();
+        if glob_match(glob, &name) {
+            append_file_matches(
+                root.parent().unwrap_or(Path::new(".")),
+                root,
+                needle,
+                &mut out,
+            );
+        }
+    } else {
+        search_dir(root, root, needle, glob, &mut out)?;
+    }
     let truncated = out.len() > SEARCH_CAP;
     out.truncate(SEARCH_CAP);
     if truncated {
@@ -427,7 +512,7 @@ pub const SHELLS: [&str; 5] = ["cmd", "powershell", "pwsh", "bash", "sh"];
 /// 按选定 shell 构造 `Command`(纯映射,不执行)。未知/空 → 宿主默认。
 /// PowerShell 分支强制 `OutputEncoding=UTF8`:令 `from_utf8_lossy` 见到 UTF-8、不再产 `U+FFFD` 乱码
 /// (Windows 中文机 cmd 输出为 GBK/936,是先前报错乱码之根)。
-fn shell_command(shell: Option<&str>, cmd: &str) -> Command {
+pub(crate) fn shell_command(shell: Option<&str>, cmd: &str) -> Command {
     let lowered = shell.map(|s| s.trim().to_lowercase());
     let sel = lowered.as_deref().filter(|s| !s.is_empty());
     let sel = match sel {
@@ -565,7 +650,7 @@ fn run_command_with_timeout(mut command: Command, timeout: Duration) -> io::Resu
 }
 
 #[cfg(unix)]
-fn configure_process_group(command: &mut Command) {
+pub(crate) fn configure_process_group(command: &mut Command) {
     use std::os::unix::process::CommandExt;
 
     // Shells commonly spawn descendants. Put the command in its own process
@@ -574,9 +659,9 @@ fn configure_process_group(command: &mut Command) {
 }
 
 #[cfg(not(unix))]
-fn configure_process_group(_command: &mut Command) {}
+pub(crate) fn configure_process_group(_command: &mut Command) {}
 
-fn terminate_process_tree(child: &mut std::process::Child) {
+pub(crate) fn terminate_process_tree(child: &mut std::process::Child) {
     #[cfg(unix)]
     {
         let group = format!("-{}", child.id());
@@ -669,6 +754,18 @@ mod tests {
     }
 
     #[test]
+    fn read_file_decodes_gbk_chinese_from_disk() {
+        let dir = std::env::temp_dir().join("ridge-gbk-read-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("gbk.txt");
+        let (encoded, _, _) = encoding_rs::GBK.encode("中文读档");
+        std::fs::write(&path, &encoded).expect("write gbk fixture");
+        let got = read_file(&path).expect("read gbk fixture");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(got, "中文读档");
+    }
+
+    #[test]
     fn shell_timeout_returns_failure_observation() {
         let started = Instant::now();
         #[cfg(windows)]
@@ -721,6 +818,32 @@ mod tests {
         write_file(&path, "let x = 1;\nlet y = 2;\n").unwrap();
         edit_file(&path, "let x = 1;", "let x = 42;").unwrap();
         assert_eq!(read_file(&path).unwrap(), "let x = 42;\nlet y = 2;\n");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn edit_file_matches_crlf_anchor_from_lf_old_string() {
+        let mut path = std::env::temp_dir();
+        path.push("ridge_edit_crlf.txt");
+        write_file(&path, "alpha\r\nbeta\r\ngamma\r\n").unwrap();
+        edit_file(&path, "beta\ngamma", "BETA\nGAMMA").unwrap();
+        assert_eq!(read_file(&path).unwrap(), "alpha\r\nBETA\r\nGAMMA\r\n");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn edit_file_missing_includes_reusable_anchor() {
+        let mut path = std::env::temp_dir();
+        path.push("ridge_edit_anchor.txt");
+        write_file(&path, "fn target() {\n    let x = 1;\n}\n").unwrap();
+        let err = edit_file(&path, "let x = 2;", "let x = 3;").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("file anchor"), "{message}");
+        assert!(message.contains("let x = 1;"), "{message}");
+        assert_eq!(
+            read_file(&path).unwrap(),
+            "fn target() {\n    let x = 1;\n}\n"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -815,6 +938,19 @@ mod tests {
         assert!(hits.contains("a.rs:1:"), "命中 .rs 行: {hits}");
         assert!(!hits.contains("b.txt"), "glob 应过滤掉 .txt: {hits}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_accepts_an_explicit_file_path() {
+        let path = std::env::temp_dir().join("ridge_search_file_test.rs");
+        write_file(&path, "fn target() {}\nother\n").unwrap();
+        let hits = search(&path, "target", "*.rs").unwrap();
+        assert!(
+            hits.contains("ridge_search_file_test.rs:1:"),
+            "文件路径应直接搜索而非按目录打开: {hits}"
+        );
+        assert!(search(&path, "target", "*.txt").unwrap().is_empty());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

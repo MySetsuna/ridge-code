@@ -16,13 +16,13 @@ use super::{
     activity_commit_lines, activity_panel, answer_history_panel, colored_commit_lines,
     commit_lines, commit_lines_with_answer_metrics,
     input::{ApprovalRequest, InputState, Popup},
-    live_history_panel_with_queue,
+    is_process_activity, is_process_noise, is_user_prompt_line, live_history_panel_with_queue,
     panel::{Panel, PanelKind, PanelRowAction},
     presentation::{
         PresentationChannel, PresentationId, PresentationLedger, PresentationMetrics,
         PresentationStatus,
     },
-    queue_panel, reasoning_commit_lines, reasoning_history_panel,
+    process_bundle_commit_lines, queue_panel, reasoning_commit_lines, reasoning_history_panel,
     render::{sanitize_display_text, SPLASH_TICKS},
     role_color, static_tool_lines, tool_history_panel,
     transcript::{LiveBlockFocus, LiveChannel, LiveTranscript, ToolBlock},
@@ -175,6 +175,15 @@ impl ActivityKind {
         )
     }
 
+    /// Lifecycle chatter stays in Ctrl+T history; only user-actionable
+    /// boundaries occupy native scrollback.
+    fn is_scrollback_signal(self) -> bool {
+        matches!(
+            self,
+            Self::Plan | Self::Approval | Self::Takeover | Self::Error
+        )
+    }
+
     /// Existing activity text remains the single source of truth for the
     /// displayed transition; this classifier only adds presentation metadata.
     fn from_text(text: &str) -> Self {
@@ -289,6 +298,8 @@ pub(crate) struct ActivityEntry {
 #[derive(Default)]
 pub(crate) struct Ui {
     pub(crate) input: InputState,
+    /// Accumulates a Windows/ConPTY CSI tail after Esc so `[A` is navigation.
+    pub(crate) csi_pending: String,
     /// 补全浮窗(iter-27):Some = 浮窗开(键位模态优先级:审批 > 浮窗 > 输入)。
     pub(crate) popup: Option<Popup>,
     /// Fullscreen draft editor; `Some(scroll)` owns only the modal viewport.
@@ -312,6 +323,7 @@ pub(crate) struct Ui {
     /// cursor prevents an append-only terminal from receiving duplicate text.
     pub(crate) reasoning_scrollback: StreamScrollbackCursor,
     pub(crate) todos: Vec<Todo>,
+    pub(crate) session_id: String,
     pub(crate) scroll: u16,
     pub(crate) busy: bool,
     /// No event/stream chunk arrived for the stale threshold; render an explicit
@@ -401,10 +413,11 @@ impl Ui {
     }
 
     pub(crate) fn note(&mut self, text: impl Into<String>, color: Color) {
-        self.commits.push(CommitBlock::Text {
-            text: text.into(),
-            color,
-        });
+        let text = text.into();
+        if is_process_noise(&text) && !is_user_prompt_line(&text) {
+            return;
+        }
+        self.commits.push(CommitBlock::Text { text, color });
     }
     #[cfg(test)]
     pub(crate) fn note_markdown(&mut self, text: impl Into<String>) {
@@ -590,7 +603,7 @@ impl Ui {
             kind,
             text: text.clone(),
         });
-        if kind.is_retained_signal() {
+        if kind.is_scrollback_signal() {
             self.commits.push(CommitBlock::Activity {
                 sequence: self.activity_sequence,
                 kind,
@@ -1328,7 +1341,7 @@ impl Ui {
 /// 即成原生历史,永不参与后续帧的差分重绘 —— Live 视口恒小,闪烁根因根除。
 pub(crate) fn apply_paste(ui: &mut Ui, text: &str) {
     ui.popup = None;
-    ui.input.insert_str(text);
+    ui.input.insert_str(&super::sanitize_paste(text));
     if ui.input.is_long() {
         ui.note(
             format!(
@@ -1345,7 +1358,13 @@ pub(crate) fn flush_commits<B: Backend>(terminal: &mut Terminal<B>, ui: &mut Ui)
     let width = terminal.size()?.width;
     let blocks = ui.drain_commit_blocks();
     let mut lines = Vec::new();
+    let mut process = Vec::new();
     for block in &blocks {
+        if let Some(step) = foldable_process_step(block) {
+            process.push(step);
+            continue;
+        }
+        flush_process_bundle(&mut process, &mut lines, width);
         match block {
             CommitBlock::Text { text, color } => {
                 lines.extend(commit_lines(
@@ -1398,11 +1417,43 @@ pub(crate) fn flush_commits<B: Backend>(terminal: &mut Terminal<B>, ui: &mut Ui)
             }
         }
     }
+    flush_process_bundle(&mut process, &mut lines, width);
     let result = insert_bounded_commit_lines(terminal, lines);
     if result.is_err() {
         ui.commits.splice(0..0, blocks);
     }
     result
+}
+
+fn foldable_process_step(block: &CommitBlock) -> Option<(String, ActivityKind)> {
+    match block {
+        CommitBlock::Activity { kind, text, .. }
+            if (is_process_activity(*kind) || is_process_noise(text))
+                && !is_user_prompt_line(text) =>
+        {
+            Some((text.clone(), *kind))
+        }
+        CommitBlock::Text { text, .. } if is_process_noise(text) && !is_user_prompt_line(text) => {
+            Some((text.clone(), ActivityKind::System))
+        }
+        _ => None,
+    }
+}
+
+fn flush_process_bundle(
+    process: &mut Vec<(String, ActivityKind)>,
+    lines: &mut Vec<Line<'static>>,
+    width: u16,
+) {
+    if process.is_empty() {
+        return;
+    }
+    let refs: Vec<(&str, ActivityKind)> = process
+        .iter()
+        .map(|(text, kind)| (text.as_str(), *kind))
+        .collect();
+    lines.extend(process_bundle_commit_lines(&refs, width));
+    process.clear();
 }
 
 const MAX_COMMIT_INSERT_ROWS: usize = 8;
