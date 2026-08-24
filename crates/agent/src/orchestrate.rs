@@ -1,9 +1,11 @@
 use crate::brain::{circuit_broken, completion_blocked, explore_exhausted, over_budget, stalled};
 use crate::communication::{
-    in_process_exchange, AgentEnvelope, AgentError, AgentHello, AgentMessage, AgentProtocolError,
-    AgentResponse, AgentRole, AgentStatus, AgentTask,
+    in_process_exchange, in_process_exchange_with_cancellation, AgentCancellation, AgentEnvelope,
+    AgentError, AgentHello, AgentMessage, AgentProtocolError, AgentResponse, AgentRole,
+    AgentStatus, AgentTask,
 };
 use crate::context::context_rotted;
+use crate::dispatch_budget::{default_dispatch_budget, dispatch_budget_error, DispatchBudget};
 use crate::graph::{build_llm_agent, build_llm_agent_read_only};
 use crate::knowledge::{provider_failure_label, Agents};
 use crate::route::{RouteAudit, RouteRequest, RouteRole};
@@ -13,8 +15,32 @@ use provider::{CompletionRequest, LlmProvider, Message, Role};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// 规划器(M5 起步):让 provider 把一个目标拆成有序子任务(JSON 数组)。
+const MAX_PLANNED_SUBTASKS: usize = 5;
+const DEFAULT_PLANNER_TIMEOUT_SECS: u64 = 30;
+const MAX_PLANNER_TIMEOUT_SECS: u64 = 300;
+
+fn planner_timeout() -> Duration {
+    let max = Duration::from_secs(MAX_PLANNER_TIMEOUT_SECS);
+    if let Some(milliseconds) = std::env::var("RIDGE_PLANNER_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+    {
+        return Duration::from_millis(milliseconds).min(max);
+    }
+    if let Some(seconds) = std::env::var("RIDGE_PLANNER_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+    {
+        return Duration::from_secs(seconds).min(max);
+    }
+    Duration::from_secs(DEFAULT_PLANNER_TIMEOUT_SECS)
+}
+
 /// 解析失败/模型出错 → **降级**为把整个目标当单个子任务(绝不返回空,循环有活干)。
 ///
 /// 子任务本身可交给 [`build_llm_agent`] 逐个执行;彼此独立的还能靠引擎的 fan-out 并行跑。
@@ -50,11 +76,17 @@ struct TeammateOutcome {
     tokens: usize,
 }
 
-async fn run_teammate_via_protocol(
+async fn run_teammate_via_protocol_with_cancellation(
     provider: Arc<dyn LlmProvider>,
     task: &str,
     correlation_id: &str,
+    budget: Arc<DispatchBudget>,
+    cancellation: Option<AgentCancellation>,
 ) -> Result<TeammateOutcome, GraphError> {
+    let _permit = budget
+        .acquire(cancellation.as_ref(), "routed.teammate.a2a")
+        .await
+        .map_err(dispatch_budget_error)?;
     let request = AgentEnvelope::task(
         format!("{correlation_id}:task"),
         "main",
@@ -67,53 +99,68 @@ async fn run_teammate_via_protocol(
             MAX_STEPS,
         ),
     );
-    let response = in_process_exchange(
-        AgentHello::guarded("main", AgentRole::Planner),
-        AgentHello::read_only("teammate", AgentRole::Worker),
-        request,
-        |incoming| async move {
-            let correlation_id = incoming.correlation_id.clone();
-            let parent_id = incoming.message_id.clone();
-            let from = incoming.to.clone();
-            let to = incoming.from.clone();
-            let AgentMessage::Task(payload) = incoming.message else {
-                return Err(AgentProtocolError::Invalid(
-                    "teammate expected Task".to_string(),
-                ));
-            };
-            let app = build_llm_agent_read_only(provider)
-                .map_err(|error| AgentProtocolError::Handler(error.to_string()))?;
-            let outcome = app
-                .invoke(AgentState::new(payload.task))
-                .await
-                .map_err(|error| AgentProtocolError::Handler(error.to_string()))?;
-            if halt_reason(&outcome) == HaltReason::CircuitBroken {
-                if let Some(error) = outcome
-                    .last_error
-                    .as_deref()
-                    .filter(|error| error.starts_with("provider error:"))
-                {
-                    return Err(AgentProtocolError::Handler(error.to_string()));
-                }
+    let handler = |incoming: AgentEnvelope| async move {
+        let correlation_id = incoming.correlation_id.clone();
+        let parent_id = incoming.message_id.clone();
+        let from = incoming.to.clone();
+        let to = incoming.from.clone();
+        let AgentMessage::Task(payload) = incoming.message else {
+            return Err(AgentProtocolError::Invalid(
+                "teammate expected Task".to_string(),
+            ));
+        };
+        let app = build_llm_agent_read_only(provider)
+            .map_err(|error| AgentProtocolError::Handler(error.to_string()))?;
+        let outcome = app
+            .invoke(AgentState::new(payload.task))
+            .await
+            .map_err(|error| AgentProtocolError::Handler(error.to_string()))?;
+        if halt_reason(&outcome) == HaltReason::CircuitBroken {
+            if let Some(error) = outcome
+                .last_error
+                .as_deref()
+                .filter(|error| error.starts_with("provider error:"))
+            {
+                return Err(AgentProtocolError::Handler(error.to_string()));
             }
-            Ok(AgentEnvelope::response(
-                format!("{correlation_id}:response"),
-                from,
-                to,
-                correlation_id,
-                AgentResponse {
-                    status: AgentStatus::Done,
-                    approved: outcome.approved,
-                    steps: outcome.steps,
-                    tokens: outcome.total_tokens,
-                    summary: outcome.messages.last().cloned().unwrap_or_default(),
-                    modified_files: outcome.modified_files.into_iter().collect(),
-                },
+        }
+        Ok(AgentEnvelope::response(
+            format!("{correlation_id}:response"),
+            from,
+            to,
+            correlation_id,
+            AgentResponse {
+                status: AgentStatus::Done,
+                approved: outcome.approved,
+                steps: outcome.steps,
+                tokens: outcome.total_tokens,
+                summary: outcome.messages.last().cloned().unwrap_or_default(),
+                modified_files: outcome.modified_files.into_iter().collect(),
+            },
+        )
+        .with_parent(parent_id))
+    };
+    let response: AgentEnvelope = match cancellation {
+        Some(cancellation) => {
+            in_process_exchange_with_cancellation(
+                AgentHello::guarded("main", AgentRole::Planner),
+                AgentHello::read_only("teammate", AgentRole::Worker),
+                request,
+                handler,
+                cancellation,
             )
-            .with_parent(parent_id))
-        },
-    )
-    .await
+            .await
+        }
+        None => {
+            in_process_exchange(
+                AgentHello::guarded("main", AgentRole::Planner),
+                AgentHello::read_only("teammate", AgentRole::Worker),
+                request,
+                handler,
+            )
+            .await
+        }
+    }
     .map_err(|error| GraphError::Join(error.to_string()))?;
     match response.message {
         AgentMessage::Response(result) => Ok(TeammateOutcome {
@@ -709,7 +756,13 @@ fn parse_subtasks(text: &str) -> Option<Vec<String>> {
     let start = text.find('[')?;
     let end = text.rfind(']')?;
     let arr: Vec<String> = serde_json::from_str(text.get(start..=end)?).ok()?;
-    (!arr.is_empty()).then_some(arr)
+    let subtasks = arr
+        .into_iter()
+        .map(|subtask| subtask.trim().to_string())
+        .filter(|subtask| !subtask.is_empty())
+        .take(MAX_PLANNED_SUBTASKS)
+        .collect::<Vec<_>>();
+    (!subtasks.is_empty()).then_some(subtasks)
 }
 
 /// 一个子任务的执行结果。
@@ -746,7 +799,31 @@ pub async fn run_planned(
     worker: Arc<dyn LlmProvider>,
     task: &str,
 ) -> Result<PlanReport, GraphError> {
-    let subtasks = plan(planner.as_ref(), task).await;
+    run_planned_with_budget(
+        planner,
+        worker,
+        task,
+        Arc::new(default_dispatch_budget().scope()),
+    )
+    .await
+}
+
+/// Legacy planned execution with an explicitly shared dispatch budget.
+///
+/// Supplying the same budget to multiple calls makes the concurrency ceiling
+/// and attempt/retry cap span a session, not merely the loop inside one call.
+/// Use [`DispatchBudget::scope`] for a fresh run while retaining shared
+/// concurrency.
+pub async fn run_planned_with_budget(
+    planner: Arc<dyn LlmProvider>,
+    worker: Arc<dyn LlmProvider>,
+    task: &str,
+    budget: Arc<DispatchBudget>,
+) -> Result<PlanReport, GraphError> {
+    let subtasks =
+        plan_attempt_with_budget(planner.as_ref(), task, &budget, None, "planned.planner")
+            .await?
+            .unwrap_or_else(|_| vec![task.to_string()]);
     let mut results = Vec::with_capacity(subtasks.len());
     let mut total_tokens = 0;
     let mut total_steps = 0;
@@ -754,6 +831,10 @@ pub async fn run_planned(
 
     for sub in subtasks {
         let app = build_llm_agent(worker.clone())?;
+        let _permit = budget
+            .acquire(None, "planned.worker")
+            .await
+            .map_err(dispatch_budget_error)?;
         let out = app.invoke(AgentState::new(sub.clone())).await?;
         approved &= out.approved;
         total_tokens += out.total_tokens;
@@ -776,27 +857,225 @@ pub async fn run_planned(
     })
 }
 
+async fn plan_attempt_with_budget(
+    provider: &dyn LlmProvider,
+    task: &str,
+    budget: &DispatchBudget,
+    cancellation: Option<&AgentCancellation>,
+    operation: &'static str,
+) -> Result<Result<Vec<String>, String>, GraphError> {
+    plan_attempt_with_timeout_and_budget(
+        provider,
+        task,
+        budget,
+        cancellation,
+        operation,
+        planner_timeout(),
+    )
+    .await
+}
+
+async fn plan_attempt_with_timeout_and_budget(
+    provider: &dyn LlmProvider,
+    task: &str,
+    budget: &DispatchBudget,
+    cancellation: Option<&AgentCancellation>,
+    operation: &'static str,
+    timeout: Duration,
+) -> Result<Result<Vec<String>, String>, GraphError> {
+    let _permit = budget
+        .acquire(cancellation, operation)
+        .await
+        .map_err(dispatch_budget_error)?;
+    let attempt = async {
+        match tokio::time::timeout(timeout, plan_attempt(provider, task)).await {
+            Ok(result) => result,
+            Err(_) => Err(format!("planner timed out after {}ms", timeout.as_millis())),
+        }
+    };
+    match cancellation {
+        Some(cancellation) => tokio::select! {
+            result = attempt => Ok(result),
+            _ = cancellation.cancelled() => Err(GraphError::Join(
+                "routed orchestration cancelled".to_string(),
+            )),
+        },
+        None => Ok(attempt.await),
+    }
+}
+
+const MAX_ROUTED_TEAMMATE_CONCURRENCY: usize = 3;
+
+async fn run_routed_teammate(
+    agents: &Agents,
+    main: Arc<dyn LlmProvider>,
+    task: &str,
+    index: usize,
+    budget: Arc<DispatchBudget>,
+    cancellation: Option<&AgentCancellation>,
+) -> Result<SubtaskResult, GraphError> {
+    let worker_request = RouteRequest::from_task(task, RouteRole::Teammate);
+    let worker = agents.select_provider(&worker_request, main.clone());
+    let mut worker_route = worker.decision.audit(RouteRole::Teammate);
+    let out = match run_teammate_via_protocol_with_cancellation(
+        worker.provider.clone(),
+        task,
+        &format!("teammate:{index}"),
+        budget.clone(),
+        cancellation.cloned(),
+    )
+    .await
+    {
+        Ok(out) => out,
+        Err(first_failure) if worker_route.selected.is_some() => {
+            if matches!(&first_failure, GraphError::DispatchBudget { .. }) {
+                return Err(first_failure);
+            }
+            if cancellation.is_some_and(AgentCancellation::is_cancelled) {
+                return Err(GraphError::Join(
+                    "routed orchestration cancelled".to_string(),
+                ));
+            }
+            worker_route.used_fallback = true;
+            worker_route.reason = format!(
+                "{}; selected provider failed ({}), deterministic main-provider fallback",
+                worker_route.reason,
+                provider_failure_label(&first_failure)
+            );
+            run_teammate_via_protocol_with_cancellation(
+                main,
+                task,
+                &format!("teammate:{index}:fallback"),
+                budget,
+                cancellation.cloned(),
+            )
+            .await?
+        }
+        Err(error) => return Err(error),
+    };
+
+    Ok(SubtaskResult {
+        task: task.to_string(),
+        approved: out.approved,
+        steps: out.steps,
+        tokens: out.tokens,
+        route: Some(worker_route),
+    })
+}
+
 /// Routed planner/teammate execution. Selection happens before each bounded
-/// graph invocation; execution remains the existing serial, verified loop.
+/// graph invocation; independent read-only teammate runs execute in waves of
+/// at most three, while each wave is aggregated in planner order.
 pub async fn run_planned_routed(
     agents: &Agents,
     main: Arc<dyn LlmProvider>,
     task: &str,
 ) -> Result<PlanReport, GraphError> {
+    run_planned_routed_with_budget(
+        agents,
+        main,
+        task,
+        Arc::new(default_dispatch_budget().scope()),
+    )
+    .await
+}
+
+/// Routed orchestration using an explicitly shared session budget. Use
+/// [`DispatchBudget::scope`] for a fresh run while retaining shared
+/// concurrency.
+pub async fn run_planned_routed_with_budget(
+    agents: &Agents,
+    main: Arc<dyn LlmProvider>,
+    task: &str,
+    budget: Arc<DispatchBudget>,
+) -> Result<PlanReport, GraphError> {
+    run_planned_routed_inner(agents, main, task, None, budget).await
+}
+
+/// Cancellable routed orchestration for TUI takeover, goal cancellation, and
+/// external A2A callers. The same token reaches planner, every teammate wave,
+/// and the in-process protocol handler; cancellation never falls through to a
+/// provider fallback.
+pub async fn run_planned_routed_with_cancellation(
+    agents: &Agents,
+    main: Arc<dyn LlmProvider>,
+    task: &str,
+    cancellation: AgentCancellation,
+) -> Result<PlanReport, GraphError> {
+    run_planned_routed_with_cancellation_and_budget(
+        agents,
+        main,
+        task,
+        cancellation,
+        Arc::new(default_dispatch_budget().scope()),
+    )
+    .await
+}
+
+/// Cancellable routed orchestration with an explicitly shared budget.
+pub async fn run_planned_routed_with_cancellation_and_budget(
+    agents: &Agents,
+    main: Arc<dyn LlmProvider>,
+    task: &str,
+    cancellation: AgentCancellation,
+    budget: Arc<DispatchBudget>,
+) -> Result<PlanReport, GraphError> {
+    run_planned_routed_inner(agents, main, task, Some(cancellation), budget).await
+}
+
+async fn run_planned_routed_inner(
+    agents: &Agents,
+    main: Arc<dyn LlmProvider>,
+    task: &str,
+    cancellation: Option<AgentCancellation>,
+    budget: Arc<DispatchBudget>,
+) -> Result<PlanReport, GraphError> {
     let planner_request = RouteRequest::from_task(task, RouteRole::Planner);
     let planner = agents.select_provider(&planner_request, main.clone());
     let mut planner_route = planner.decision.audit(RouteRole::Planner);
-    let subtasks = match plan_attempt(planner.provider.as_ref(), task).await {
+    let planner_result = plan_attempt_with_budget(
+        planner.provider.as_ref(),
+        task,
+        &budget,
+        cancellation.as_ref(),
+        "routed.planner",
+    )
+    .await?;
+    let subtasks = match planner_result {
         Ok(subtasks) => subtasks,
         Err(first_failure) if planner_route.selected.is_some() => {
+            if cancellation
+                .as_ref()
+                .is_some_and(AgentCancellation::is_cancelled)
+            {
+                return Err(GraphError::Join(
+                    "routed orchestration cancelled".to_string(),
+                ));
+            }
             planner_route.used_fallback = true;
             planner_route.reason = format!(
                 "{}; selected provider failed ({first_failure}), deterministic main-provider fallback",
                 planner_route.reason
             );
-            match plan_attempt(main.as_ref(), task).await {
+            let fallback_result = plan_attempt_with_budget(
+                main.as_ref(),
+                task,
+                &budget,
+                cancellation.as_ref(),
+                "routed.planner.fallback",
+            )
+            .await?;
+            match fallback_result {
                 Ok(subtasks) => subtasks,
                 Err(fallback_failure) => {
+                    if cancellation
+                        .as_ref()
+                        .is_some_and(AgentCancellation::is_cancelled)
+                    {
+                        return Err(GraphError::Join(
+                            "routed orchestration cancelled".to_string(),
+                        ));
+                    }
                     planner_route.reason = format!(
                         "{}; main-provider fallback failed ({fallback_failure}), using original task",
                         planner_route.reason
@@ -805,51 +1084,112 @@ pub async fn run_planned_routed(
                 }
             }
         }
-        Err(_) => vec![task.to_string()],
+        Err(_) => {
+            if cancellation
+                .as_ref()
+                .is_some_and(AgentCancellation::is_cancelled)
+            {
+                return Err(GraphError::Join(
+                    "routed orchestration cancelled".to_string(),
+                ));
+            }
+            vec![task.to_string()]
+        }
     };
     let mut results = Vec::with_capacity(subtasks.len());
     let mut total_tokens = 0;
     let mut total_steps = 0;
     let mut approved = true;
 
-    for sub in subtasks {
-        let worker_request = RouteRequest::from_task(&sub, RouteRole::Teammate);
-        let worker = agents.select_provider(&worker_request, main.clone());
-        let mut worker_route = worker.decision.audit(RouteRole::Teammate);
-        let out = match run_teammate_via_protocol(
-            worker.provider.clone(),
-            &sub,
-            &format!("teammate:{index}", index = results.len()),
-        )
-        .await
+    for (wave, chunk) in subtasks.chunks(MAX_ROUTED_TEAMMATE_CONCURRENCY).enumerate() {
+        if cancellation
+            .as_ref()
+            .is_some_and(AgentCancellation::is_cancelled)
         {
-            Ok(out) => out,
-            Err(first_failure) if worker_route.selected.is_some() => {
-                worker_route.used_fallback = true;
-                worker_route.reason = format!(
-                    "{}; selected provider failed ({}), deterministic main-provider fallback",
-                    worker_route.reason,
-                    provider_failure_label(&first_failure)
-                );
-                run_teammate_via_protocol(
+            return Err(GraphError::Join(
+                "routed orchestration cancelled".to_string(),
+            ));
+        }
+        let wave_results = match chunk {
+            [first] => vec![
+                run_routed_teammate(
+                    agents,
                     main.clone(),
-                    &sub,
-                    &format!("teammate:{}:fallback", results.len()),
+                    first,
+                    wave * MAX_ROUTED_TEAMMATE_CONCURRENCY,
+                    budget.clone(),
+                    cancellation.as_ref(),
                 )
-                .await?
+                .await,
+            ],
+            [first, second] => {
+                let (first, second) = tokio::join!(
+                    run_routed_teammate(
+                        agents,
+                        main.clone(),
+                        first,
+                        wave * MAX_ROUTED_TEAMMATE_CONCURRENCY,
+                        budget.clone(),
+                        cancellation.as_ref(),
+                    ),
+                    run_routed_teammate(
+                        agents,
+                        main.clone(),
+                        second,
+                        wave * MAX_ROUTED_TEAMMATE_CONCURRENCY + 1,
+                        budget.clone(),
+                        cancellation.as_ref(),
+                    ),
+                );
+                vec![first, second]
             }
-            Err(error) => return Err(error),
+            [first, second, third] => {
+                let (first, second, third) = tokio::join!(
+                    run_routed_teammate(
+                        agents,
+                        main.clone(),
+                        first,
+                        wave * MAX_ROUTED_TEAMMATE_CONCURRENCY,
+                        budget.clone(),
+                        cancellation.as_ref(),
+                    ),
+                    run_routed_teammate(
+                        agents,
+                        main.clone(),
+                        second,
+                        wave * MAX_ROUTED_TEAMMATE_CONCURRENCY + 1,
+                        budget.clone(),
+                        cancellation.as_ref(),
+                    ),
+                    run_routed_teammate(
+                        agents,
+                        main.clone(),
+                        third,
+                        wave * MAX_ROUTED_TEAMMATE_CONCURRENCY + 2,
+                        budget.clone(),
+                        cancellation.as_ref(),
+                    ),
+                );
+                vec![first, second, third]
+            }
+            _ => unreachable!("routed teammate wave exceeds concurrency bound"),
         };
-        approved &= out.approved;
-        total_tokens += out.tokens;
-        total_steps += out.steps;
-        results.push(SubtaskResult {
-            task: sub,
-            approved: out.approved,
-            steps: out.steps,
-            tokens: out.tokens,
-            route: Some(worker_route),
-        });
+
+        for result in wave_results {
+            let result = result?;
+            if cancellation
+                .as_ref()
+                .is_some_and(AgentCancellation::is_cancelled)
+            {
+                return Err(GraphError::Join(
+                    "routed orchestration cancelled".to_string(),
+                ));
+            }
+            approved &= result.approved;
+            total_tokens += result.tokens;
+            total_steps += result.steps;
+            results.push(result);
+        }
     }
 
     Ok(PlanReport {
@@ -867,6 +1207,8 @@ mod tests {
     use crate::context::CONTEXT_ROT_TOKENS;
     use crate::*;
     use provider::ToolCall;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     struct AlwaysFailProvider;
 
@@ -877,6 +1219,119 @@ mod tests {
             _req: &CompletionRequest,
         ) -> Result<provider::Completion, provider::ProviderError> {
             Err("http 503: unavailable-body".into())
+        }
+    }
+
+    struct HangingPlannerProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for HangingPlannerProvider {
+        async fn complete(
+            &self,
+            _req: &CompletionRequest,
+        ) -> Result<provider::Completion, provider::ProviderError> {
+            std::future::pending::<Result<provider::Completion, provider::ProviderError>>().await
+        }
+    }
+
+    struct WaveProvider {
+        calls: AtomicUsize,
+        active: AtomicUsize,
+        max_active: AtomicUsize,
+    }
+
+    impl WaveProvider {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                active: AtomicUsize::new(0),
+                max_active: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for WaveProvider {
+        async fn complete(
+            &self,
+            _req: &CompletionRequest,
+        ) -> Result<provider::Completion, provider::ProviderError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(provider::Completion {
+                    text: r#"["first", " ", "second", "third", "", "fourth", "fifth", "sixth"]"#
+                        .into(),
+                    ..Default::default()
+                });
+            }
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(provider::Completion {
+                text: "done".into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    struct PlannerThenDoneProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for PlannerThenDoneProvider {
+        async fn complete(
+            &self,
+            _req: &CompletionRequest,
+        ) -> Result<provider::Completion, provider::ProviderError> {
+            let text = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                r#"["first", "second", "third"]"#
+            } else {
+                "done"
+            };
+            Ok(provider::Completion {
+                text: text.into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    struct CountingFailProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for CountingFailProvider {
+        async fn complete(
+            &self,
+            _req: &CompletionRequest,
+        ) -> Result<provider::Completion, provider::ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err("http 503: unavailable-body".into())
+        }
+    }
+
+    struct CancellableWaveProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for CancellableWaveProvider {
+        async fn complete(
+            &self,
+            _req: &CompletionRequest,
+        ) -> Result<provider::Completion, provider::ProviderError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(provider::Completion {
+                    text: r#"["first", "second"]"#.into(),
+                    ..Default::default()
+                });
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Ok(provider::Completion {
+                text: "done".into(),
+                ..Default::default()
+            })
         }
     }
 
@@ -914,6 +1369,31 @@ mod tests {
             "budget熔断应早于回合上限: steps={}",
             out.steps
         );
+    }
+
+    #[tokio::test]
+    async fn planner_timeout_releases_permit_and_returns_explicit_failure() {
+        let budget = DispatchBudget::new_with_attempt_limit(1, 4).unwrap();
+        let provider = HangingPlannerProvider;
+        let started = std::time::Instant::now();
+        let result = plan_attempt_with_timeout_and_budget(
+            &provider,
+            "hang",
+            &budget,
+            None,
+            "test.planner",
+            Duration::from_millis(5),
+        )
+        .await
+        .expect("timeout is a planner result, not a budget failure");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(
+            result.unwrap_err(),
+            "planner timed out after 5ms",
+            "timeout must remain diagnosable"
+        );
+        assert_eq!(budget.stats().active, 0, "planner timeout leaked permit");
+        assert_eq!(budget.stats().attempts, 1);
     }
 
     /// 无进展检测:工具输出连续 MAX_STALL 轮不变即熔断,不跑到回合上限。
@@ -1400,6 +1880,213 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["impl add", "test add"]
         );
+    }
+
+    #[tokio::test]
+    async fn planner_output_filters_blanks_and_caps_at_five() {
+        let planner = provider::ScriptedProvider::new(vec![provider::Completion {
+            text: r#"[" first ", " ", "second", "", "third", "fourth", "fifth", "sixth"]"#.into(),
+            ..Default::default()
+        }]);
+
+        assert_eq!(
+            plan(&planner, "fallback task").await,
+            ["first", "second", "third", "fourth", "fifth"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn routed_orchestrator_runs_bounded_waves_in_planner_order() {
+        let provider = Arc::new(WaveProvider::new());
+        let main: Arc<dyn LlmProvider> = provider.clone();
+        let agents = Agents::default();
+        let budget = Arc::new(DispatchBudget::new(3).unwrap());
+
+        let report =
+            run_planned_routed_with_budget(&agents, main, "run five independent checks", budget)
+                .await
+                .unwrap();
+
+        assert_eq!(report.subtasks.len(), MAX_PLANNED_SUBTASKS);
+        assert_eq!(
+            report
+                .subtasks
+                .iter()
+                .map(|subtask| subtask.task.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second", "third", "fourth", "fifth"]
+        );
+        assert!(report.approved);
+        assert_eq!(
+            provider.max_active.load(Ordering::SeqCst),
+            MAX_ROUTED_TEAMMATE_CONCURRENCY
+        );
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            1 + MAX_PLANNED_SUBTASKS,
+            "one planner call plus five teammate executions"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_dispatch_budget_caps_two_concurrent_runs() {
+        let budget = Arc::new(DispatchBudget::new(2).unwrap());
+        let first = Arc::new(WaveProvider::new());
+        let second = Arc::new(WaveProvider::new());
+        let first_agents = Agents::default();
+        let second_agents = Agents::default();
+        let (first_result, second_result) = tokio::join!(
+            run_planned_routed_with_budget(
+                &first_agents,
+                first,
+                "run first independent checks",
+                budget.clone(),
+            ),
+            run_planned_routed_with_budget(
+                &second_agents,
+                second,
+                "run second independent checks",
+                budget.clone(),
+            )
+        );
+
+        assert!(first_result.is_ok());
+        assert!(second_result.is_ok());
+        let stats = budget.stats();
+        assert!(stats.peak <= stats.limit, "budget overrun: {stats:?}");
+        assert_eq!(stats.limit, 2);
+        assert_eq!(stats.active, 0, "all permits must be released: {stats:?}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_budget_wait_cancels_without_deadlock() {
+        let budget = Arc::new(DispatchBudget::new(1).unwrap());
+        let holder = budget.acquire(None, "test.holder").await.unwrap();
+        let cancellation = AgentCancellation::new();
+        let waiter_budget = budget.clone();
+        let waiter_cancellation = cancellation.clone();
+        let waiter = tokio::spawn(async move {
+            waiter_budget
+                .acquire(Some(&waiter_cancellation), "test.waiter")
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        cancellation.cancel();
+        let result = tokio::time::timeout(Duration::from_millis(200), waiter)
+            .await
+            .expect("cancelled waiter must return promptly")
+            .expect("waiter task must not panic");
+        assert!(matches!(
+            result,
+            Err(DispatchBudgetError {
+                reason: DispatchBudgetRejection::Cancelled,
+                ..
+            })
+        ));
+        assert_eq!(budget.stats().active, 1);
+        drop(holder);
+        assert_eq!(budget.stats().active, 0);
+    }
+
+    #[tokio::test]
+    async fn dispatch_budget_releases_after_a2a_provider_error() {
+        let budget = Arc::new(DispatchBudget::new(1).unwrap());
+        let result = run_planned_routed_with_budget(
+            &Agents::default(),
+            Arc::new(AlwaysFailProvider),
+            "run a failing teammate",
+            budget.clone(),
+        )
+        .await;
+        assert!(result.is_err(), "provider failure must remain an error");
+        assert_eq!(budget.stats().active, 0, "error path leaked a permit");
+        let permit = budget
+            .acquire(None, "test.after-error")
+            .await
+            .expect("released permit must be reusable");
+        drop(permit);
+        assert_eq!(budget.stats().active, 0);
+    }
+
+    #[tokio::test]
+    async fn routed_orchestrator_cancellation_stops_teammates_without_fallback() {
+        let provider = Arc::new(CancellableWaveProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let cancellation = AgentCancellation::new();
+        let trigger = cancellation.clone();
+        let trigger_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            trigger.cancel();
+        });
+        let result = run_planned_routed_with_cancellation(
+            &Agents::default(),
+            provider.clone(),
+            "run two cancellable checks",
+            cancellation,
+        )
+        .await;
+        trigger_task.await.expect("cancellation trigger");
+        assert!(matches!(
+            result,
+            Err(GraphError::Join(message)) if message.contains("cancel")
+        ));
+        assert!(provider.calls.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[tokio::test]
+    async fn routed_orchestrator_falls_back_once_per_selected_teammate() {
+        let main_impl = Arc::new(PlannerThenDoneProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let main: Arc<dyn LlmProvider> = main_impl.clone();
+        let failing_impl = Arc::new(CountingFailProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let profile = ModelProfile {
+            provider: "limited".into(),
+            model: "unavailable".into(),
+            kind: "openai".into(),
+            context_window: Some(64_000),
+            cost_tier: Some(1),
+            latency_tier: Some(1),
+            supports_tools: Some(true),
+            supports_reasoning: Some(true),
+            tags: Vec::new(),
+        };
+        let agents = Agents {
+            defs: Vec::new(),
+            providers: std::collections::HashMap::new(),
+            route_candidates: vec![AgentProvider {
+                profile,
+                provider: failing_impl.clone(),
+            }],
+        };
+
+        let report = run_planned_routed(&agents, main, "run three independent checks")
+            .await
+            .unwrap();
+
+        assert!(report.approved);
+        assert!(report
+            .planner_route
+            .as_ref()
+            .is_some_and(|route| route.used_fallback));
+        assert_eq!(report.subtasks.len(), 3);
+        assert!(report.subtasks.iter().all(|subtask| subtask
+            .route
+            .as_ref()
+            .is_some_and(|route| route.used_fallback)));
+        assert_eq!(
+            main_impl.calls.load(Ordering::SeqCst),
+            1 + report.subtasks.len(),
+            "planner and each selected teammate get one main-provider fallback"
+        );
+        assert!(failing_impl.calls.load(Ordering::SeqCst) >= report.subtasks.len());
     }
 
     #[tokio::test]

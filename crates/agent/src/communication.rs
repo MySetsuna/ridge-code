@@ -17,6 +17,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWrite
 use tokio::sync::{mpsc, Notify};
 
 pub const AGENT_PROTOCOL_VERSION: u16 = 1;
+pub const AGENT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 pub const AGENT_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(300);
 pub const MAX_AGENT_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_AGENT_CONTEXT_ENTRIES: usize = 32;
@@ -44,7 +45,7 @@ impl AgentCancellation {
         self.cancelled.load(Ordering::Acquire)
     }
 
-    async fn cancelled(&self) {
+    pub(crate) async fn cancelled(&self) {
         if self.is_cancelled() {
             return;
         }
@@ -798,6 +799,93 @@ pub trait AgentTransport: Send {
     async fn recv(&mut self) -> Result<Option<AgentEnvelope>, AgentProtocolError>;
 }
 
+/// A client-side session that performs one handshake and then reuses the
+/// negotiated peer for multiple bounded tasks.  Reconnect is explicit:
+/// construct a new session with a newly opened transport after a peer drops.
+pub struct AgentClientSession<C> {
+    transport: C,
+    session: NegotiatedSession,
+    healthy: bool,
+}
+
+impl<C> AgentClientSession<C>
+where
+    C: AgentTransport,
+{
+    pub async fn connect(
+        mut transport: C,
+        client_hello: AgentHello,
+        server_hello: AgentHello,
+    ) -> Result<Self, AgentProtocolError> {
+        let session = client_handshake(&mut transport, &client_hello, &server_hello).await?;
+        Ok(Self {
+            transport,
+            session,
+            healthy: true,
+        })
+    }
+
+    pub async fn request(
+        &mut self,
+        request: AgentEnvelope,
+    ) -> Result<AgentEnvelope, AgentProtocolError> {
+        if !self.healthy {
+            return Err(AgentProtocolError::Transport(
+                "session unavailable; reconnect required".to_string(),
+            ));
+        }
+        let result = request_on_session(&mut self.transport, &self.session, request, None).await;
+        self.record_result(result)
+    }
+
+    pub async fn request_with_cancellation(
+        &mut self,
+        request: AgentEnvelope,
+        cancellation: AgentCancellation,
+    ) -> Result<AgentEnvelope, AgentProtocolError> {
+        if !self.healthy {
+            return Err(AgentProtocolError::Transport(
+                "session unavailable; reconnect required".to_string(),
+            ));
+        }
+        let result = request_on_session(
+            &mut self.transport,
+            &self.session,
+            request,
+            Some(cancellation),
+        )
+        .await;
+        self.record_result(result)
+    }
+
+    pub fn negotiated(&self) -> &NegotiatedSession {
+        &self.session
+    }
+
+    pub fn is_healthy(&self) -> bool {
+        self.healthy
+    }
+
+    pub fn into_transport(self) -> C {
+        self.transport
+    }
+
+    fn record_result<T>(
+        &mut self,
+        result: Result<T, AgentProtocolError>,
+    ) -> Result<T, AgentProtocolError> {
+        if matches!(
+            result,
+            Err(AgentProtocolError::Transport(_)
+                | AgentProtocolError::Cancelled
+                | AgentProtocolError::Timeout)
+        ) {
+            self.healthy = false;
+        }
+        result
+    }
+}
+
 pub struct InProcessAgentTransport {
     tx: mpsc::Sender<AgentEnvelope>,
     rx: mpsc::Receiver<AgentEnvelope>,
@@ -1057,66 +1145,91 @@ where
     C: AgentTransport,
     S: AgentTransport,
 {
-    client
-        .send(AgentEnvelope::hello(
-            "hello-client",
-            client_hello.agent_id.clone(),
-            server_hello.agent_id.clone(),
-            client_hello.clone(),
-        ))
-        .await?;
-    let incoming = server.recv().await?.ok_or_else(|| {
-        AgentProtocolError::Transport("server closed during handshake".to_string())
-    })?;
-    incoming.validate()?;
-    if incoming.message_id != "hello-client"
-        || incoming.correlation_id != "handshake"
-        || incoming.from != client_hello.agent_id
-        || incoming.to != server_hello.agent_id
-        || incoming.parent_id.is_some()
-    {
-        return Err(AgentProtocolError::Invalid(
-            "client Hello identity mismatch".to_string(),
-        ));
-    }
-    let AgentMessage::Hello(remote_hello) = incoming.message else {
-        return Err(AgentProtocolError::Invalid(
-            "expected client Hello".to_string(),
-        ));
-    };
-    let server_session = negotiate(&server_hello, &remote_hello)?;
-    server
-        .send(AgentEnvelope::hello(
-            "hello-server",
-            server_hello.agent_id.clone(),
-            client_hello.agent_id.clone(),
-            server_hello.clone(),
-        ))
-        .await?;
-    let response = client.recv().await?.ok_or_else(|| {
-        AgentProtocolError::Transport("client closed during handshake".to_string())
-    })?;
-    response.validate()?;
-    if response.message_id != "hello-server"
-        || response.correlation_id != "handshake"
-        || response.from != server_hello.agent_id
-        || response.to != client_hello.agent_id
-        || response.parent_id.is_some()
-    {
-        return Err(AgentProtocolError::Invalid(
-            "server Hello identity mismatch".to_string(),
-        ));
-    }
-    let AgentMessage::Hello(client_view_of_server) = response.message else {
-        return Err(AgentProtocolError::Invalid(
-            "expected server Hello".to_string(),
-        ));
-    };
-    let client_session = negotiate(&client_hello, &client_view_of_server)?;
-    if client_session.protocol_version != server_session.protocol_version {
-        return Err(AgentProtocolError::NoCommonVersion);
-    }
-    Ok(client_session)
+    handshake_with_timeout(
+        client,
+        server,
+        client_hello,
+        server_hello,
+        AGENT_HANDSHAKE_TIMEOUT,
+    )
+    .await
+}
+
+async fn handshake_with_timeout<C, S>(
+    client: &mut C,
+    server: &mut S,
+    client_hello: AgentHello,
+    server_hello: AgentHello,
+    deadline: Duration,
+) -> Result<NegotiatedSession, AgentProtocolError>
+where
+    C: AgentTransport,
+    S: AgentTransport,
+{
+    tokio::time::timeout(deadline, async {
+        client
+            .send(AgentEnvelope::hello(
+                "hello-client",
+                client_hello.agent_id.clone(),
+                server_hello.agent_id.clone(),
+                client_hello.clone(),
+            ))
+            .await?;
+        let incoming = server.recv().await?.ok_or_else(|| {
+            AgentProtocolError::Transport("server closed during handshake".to_string())
+        })?;
+        incoming.validate()?;
+        if incoming.message_id != "hello-client"
+            || incoming.correlation_id != "handshake"
+            || incoming.from != client_hello.agent_id
+            || incoming.to != server_hello.agent_id
+            || incoming.parent_id.is_some()
+        {
+            return Err(AgentProtocolError::Invalid(
+                "client Hello identity mismatch".to_string(),
+            ));
+        }
+        let AgentMessage::Hello(remote_hello) = incoming.message else {
+            return Err(AgentProtocolError::Invalid(
+                "expected client Hello".to_string(),
+            ));
+        };
+        let server_session = negotiate(&server_hello, &remote_hello)?;
+        server
+            .send(AgentEnvelope::hello(
+                "hello-server",
+                server_hello.agent_id.clone(),
+                client_hello.agent_id.clone(),
+                server_hello.clone(),
+            ))
+            .await?;
+        let response = client.recv().await?.ok_or_else(|| {
+            AgentProtocolError::Transport("client closed during handshake".to_string())
+        })?;
+        response.validate()?;
+        if response.message_id != "hello-server"
+            || response.correlation_id != "handshake"
+            || response.from != server_hello.agent_id
+            || response.to != client_hello.agent_id
+            || response.parent_id.is_some()
+        {
+            return Err(AgentProtocolError::Invalid(
+                "server Hello identity mismatch".to_string(),
+            ));
+        }
+        let AgentMessage::Hello(client_view_of_server) = response.message else {
+            return Err(AgentProtocolError::Invalid(
+                "expected server Hello".to_string(),
+            ));
+        };
+        let client_session = negotiate(&client_hello, &client_view_of_server)?;
+        if client_session.protocol_version != server_session.protocol_version {
+            return Err(AgentProtocolError::NoCommonVersion);
+        }
+        Ok(client_session)
+    })
+    .await
+    .map_err(|_| AgentProtocolError::Timeout)?
 }
 
 pub async fn exchange_once<C, S, F, Fut>(
@@ -1160,10 +1273,73 @@ where
     request_once_with_cancellation(transport, client_hello, server_hello, request, None).await
 }
 
-pub async fn request_once_with_cancellation<C>(
+async fn client_handshake<C>(
     transport: &mut C,
-    client_hello: AgentHello,
-    server_hello: AgentHello,
+    client_hello: &AgentHello,
+    server_hello: &AgentHello,
+) -> Result<NegotiatedSession, AgentProtocolError>
+where
+    C: AgentTransport,
+{
+    client_handshake_with_timeout(
+        transport,
+        client_hello,
+        server_hello,
+        AGENT_HANDSHAKE_TIMEOUT,
+    )
+    .await
+}
+
+async fn client_handshake_with_timeout<C>(
+    transport: &mut C,
+    client_hello: &AgentHello,
+    server_hello: &AgentHello,
+    deadline: Duration,
+) -> Result<NegotiatedSession, AgentProtocolError>
+where
+    C: AgentTransport,
+{
+    tokio::time::timeout(deadline, async {
+        transport
+            .send(AgentEnvelope::hello(
+                "hello-client",
+                client_hello.agent_id.clone(),
+                server_hello.agent_id.clone(),
+                client_hello.clone(),
+            ))
+            .await?;
+        let incoming = transport.recv().await?.ok_or_else(|| {
+            AgentProtocolError::Transport("server closed during handshake".to_string())
+        })?;
+        incoming.validate()?;
+        if incoming.message_id != "hello-server"
+            || incoming.correlation_id != "handshake"
+            || incoming.from != server_hello.agent_id
+            || incoming.to != client_hello.agent_id
+            || incoming.parent_id.is_some()
+        {
+            return Err(AgentProtocolError::Invalid(
+                "server Hello identity mismatch".to_string(),
+            ));
+        }
+        let AgentMessage::Hello(server_view) = incoming.message else {
+            return Err(AgentProtocolError::Invalid(
+                "expected server Hello".to_string(),
+            ));
+        };
+        let session = negotiate(client_hello, &server_view)?;
+        if session.protocol_version != negotiate(server_hello, client_hello)?.protocol_version {
+            return Err(AgentProtocolError::NoCommonVersion);
+        }
+        Ok(session)
+    })
+    .await
+    .map_err(|_| AgentProtocolError::Timeout)?
+}
+
+async fn request_on_session<C>(
+    transport: &mut C,
+    session: &NegotiatedSession,
     request: AgentEnvelope,
     cancellation: Option<AgentCancellation>,
 ) -> Result<AgentEnvelope, AgentProtocolError>
@@ -1176,96 +1352,75 @@ where
             "request must be Task".to_string(),
         ));
     };
-    let task = task.clone();
+    if request.from != session.local_id || request.to != session.remote_id {
+        return Err(AgentProtocolError::Invalid(
+            "task identity does not match negotiated session".to_string(),
+        ));
+    }
+    authorize_task(session, task)?;
+    if let Some(governance) = &request.governance {
+        authorize_governance(session, task, governance)?;
+    }
+    let expected_request = request.clone();
     let request_id = request.message_id.clone();
     let correlation_id = request.correlation_id.clone();
     let request_from = request.from.clone();
     let request_to = request.to.clone();
-    let client_id = client_hello.agent_id.clone();
-    let server_id = server_hello.agent_id.clone();
-
-    transport
-        .send(AgentEnvelope::hello(
-            "hello-client",
-            client_id.clone(),
-            server_id.clone(),
-            client_hello.clone(),
-        ))
-        .await?;
-    let incoming = transport.recv().await?.ok_or_else(|| {
-        AgentProtocolError::Transport("server closed during handshake".to_string())
-    })?;
-    incoming.validate()?;
-    if incoming.message_id != "hello-server"
-        || incoming.correlation_id != "handshake"
-        || incoming.from != server_id
-        || incoming.to != client_id
-        || incoming.parent_id.is_some()
-    {
-        return Err(AgentProtocolError::Invalid(
-            "server Hello identity mismatch".to_string(),
-        ));
-    }
-    let AgentMessage::Hello(server_view) = incoming.message else {
-        return Err(AgentProtocolError::Invalid(
-            "expected server Hello".to_string(),
-        ));
-    };
-    let session = negotiate(&client_hello, &server_view)?;
-    if session.protocol_version != negotiate(&server_hello, &client_hello)?.protocol_version {
-        return Err(AgentProtocolError::NoCommonVersion);
-    }
-    authorize_task(&session, &task)?;
-    if let Some(governance) = &request.governance {
-        authorize_governance(&session, &task, governance)?;
-    }
     transport.send(request).await?;
 
     let deadline = tokio::time::sleep(AGENT_EXCHANGE_TIMEOUT);
     tokio::pin!(deadline);
     tokio::select! {
-            incoming = transport.recv() => {
-                let response = incoming?.ok_or_else(|| AgentProtocolError::Transport(
-                    "server closed before Response".to_string(),
-                ))?;
-                validate_server_response(&response, &AgentEnvelope::task(
-                    request_id.clone(),
-                    request_from.clone(),
-                    request_to.clone(),
-                    correlation_id.clone(),
-                    task.clone(),
-                ))?;
-                Ok(response)
+        incoming = transport.recv() => {
+            let response = incoming?.ok_or_else(|| AgentProtocolError::Transport(
+                "server closed before Response".to_string(),
+            ))?;
+            validate_server_response(&response, &expected_request)?;
+            Ok(response)
+        }
+        _ = &mut deadline => {
+            let cancel = AgentEnvelope::cancel(
+                format!("{request_id}:cancel"),
+                request_from.clone(),
+                request_to.clone(),
+                correlation_id.clone(),
+                "caller timed out waiting for agent task",
+            ).with_parent(&request_id);
+            let _ = transport.send(cancel).await;
+            Err(AgentProtocolError::Timeout)
+        }
+        _ = async {
+            if let Some(cancellation) = &cancellation {
+                cancellation.cancelled().await;
+            } else {
+                std::future::pending::<()>().await;
             }
-            _ = &mut deadline => {
-                let cancel = AgentEnvelope::cancel(
-                    format!("{request_id}:cancel"),
-                    request_from.clone(),
-                    request_to.clone(),
-                    correlation_id.clone(),
-                    "caller timed out waiting for agent task",
-                ).with_parent(&request_id);
-                let _ = transport.send(cancel).await;
-                Err(AgentProtocolError::Timeout)
-            }
-            _ = async {
-                if let Some(cancellation) = &cancellation {
-                    cancellation.cancelled().await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            } => {
-                let cancel = AgentEnvelope::cancel(
-                    format!("{request_id}:cancel"),
-                    request_from.clone(),
-                    request_to.clone(),
-                    correlation_id.clone(),
-                    "caller cancelled agent task",
-                ).with_parent(&request_id);
-                let _ = transport.send(cancel).await;
-                Err(AgentProtocolError::Cancelled)
-            }
+        } => {
+            let cancel = AgentEnvelope::cancel(
+                format!("{request_id}:cancel"),
+                request_from,
+                request_to,
+                correlation_id,
+                "caller cancelled agent task",
+            ).with_parent(&request_id);
+            let _ = transport.send(cancel).await;
+            Err(AgentProtocolError::Cancelled)
+        }
     }
+}
+
+pub async fn request_once_with_cancellation<C>(
+    transport: &mut C,
+    client_hello: AgentHello,
+    server_hello: AgentHello,
+    request: AgentEnvelope,
+    cancellation: Option<AgentCancellation>,
+) -> Result<AgentEnvelope, AgentProtocolError>
+where
+    C: AgentTransport,
+{
+    let session = client_handshake(transport, &client_hello, &server_hello).await?;
+    request_on_session(transport, &session, request, cancellation).await
 }
 
 pub async fn exchange_once_with_cancellation<C, S, F, Fut>(
@@ -1475,35 +1630,8 @@ where
     F: FnMut(AgentEnvelope) -> Fut,
     Fut: Future<Output = Result<AgentEnvelope, AgentProtocolError>>,
 {
-    let incoming = transport.recv().await?.ok_or_else(|| {
-        AgentProtocolError::Transport("client closed during handshake".to_string())
-    })?;
-    incoming.validate()?;
-    let AgentMessage::Hello(remote_hello) = incoming.message.clone() else {
-        return Err(AgentProtocolError::Invalid(
-            "expected client Hello".to_string(),
-        ));
-    };
-    if incoming.message_id != "hello-client"
-        || incoming.correlation_id != "handshake"
-        || incoming.from != remote_hello.agent_id
-        || incoming.to != server_hello.agent_id
-        || incoming.parent_id.is_some()
-    {
-        return Err(AgentProtocolError::Invalid(
-            "client Hello identity mismatch".to_string(),
-        ));
-    }
-    let session = negotiate(&server_hello, &remote_hello)?;
-    let server_capability_session = negotiate(&remote_hello, &server_hello)?;
-    transport
-        .send(AgentEnvelope::hello(
-            "hello-server",
-            server_hello.agent_id.clone(),
-            remote_hello.agent_id,
-            server_hello,
-        ))
-        .await?;
+    let (session, server_capability_session) =
+        server_handshake_with_timeout(transport, server_hello, AGENT_HANDSHAKE_TIMEOUT).await?;
 
     let mut handled = 0;
     loop {
@@ -1536,6 +1664,50 @@ where
             return Ok(handled);
         }
     }
+}
+
+async fn server_handshake_with_timeout<C>(
+    transport: &mut C,
+    server_hello: AgentHello,
+    deadline: Duration,
+) -> Result<(NegotiatedSession, NegotiatedSession), AgentProtocolError>
+where
+    C: AgentTransport,
+{
+    tokio::time::timeout(deadline, async {
+        let incoming = transport.recv().await?.ok_or_else(|| {
+            AgentProtocolError::Transport("client closed during handshake".to_string())
+        })?;
+        incoming.validate()?;
+        let AgentMessage::Hello(remote_hello) = incoming.message.clone() else {
+            return Err(AgentProtocolError::Invalid(
+                "expected client Hello".to_string(),
+            ));
+        };
+        if incoming.message_id != "hello-client"
+            || incoming.correlation_id != "handshake"
+            || incoming.from != remote_hello.agent_id
+            || incoming.to != server_hello.agent_id
+            || incoming.parent_id.is_some()
+        {
+            return Err(AgentProtocolError::Invalid(
+                "client Hello identity mismatch".to_string(),
+            ));
+        }
+        let session = negotiate(&server_hello, &remote_hello)?;
+        let server_capability_session = negotiate(&remote_hello, &server_hello)?;
+        transport
+            .send(AgentEnvelope::hello(
+                "hello-server",
+                server_hello.agent_id.clone(),
+                remote_hello.agent_id,
+                server_hello,
+            ))
+            .await?;
+        Ok((session, server_capability_session))
+    })
+    .await
+    .map_err(|_| AgentProtocolError::Timeout)?
 }
 
 pub async fn in_process_exchange<F, Fut>(
@@ -1595,6 +1767,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct PendingTransport;
+
+    #[async_trait::async_trait]
+    impl AgentTransport for PendingTransport {
+        async fn send(&mut self, _envelope: AgentEnvelope) -> Result<(), AgentProtocolError> {
+            Ok(())
+        }
+
+        async fn recv(&mut self) -> Result<Option<AgentEnvelope>, AgentProtocolError> {
+            std::future::pending().await
+        }
+    }
 
     fn task() -> AgentEnvelope {
         AgentEnvelope::task(
@@ -1751,6 +1936,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn all_handshake_paths_time_out_on_silent_peer() {
+        let client_hello = AgentHello::guarded("main", AgentRole::Maker);
+        let server_hello = AgentHello::read_only("worker", AgentRole::Explorer);
+        let deadline = Duration::from_millis(5);
+
+        let mut client = PendingTransport;
+        let mut server = PendingTransport;
+        assert!(matches!(
+            handshake_with_timeout(
+                &mut client,
+                &mut server,
+                client_hello.clone(),
+                server_hello.clone(),
+                deadline,
+            )
+            .await,
+            Err(AgentProtocolError::Timeout)
+        ));
+
+        let mut client = PendingTransport;
+        assert!(matches!(
+            client_handshake_with_timeout(&mut client, &client_hello, &server_hello, deadline,)
+                .await,
+            Err(AgentProtocolError::Timeout)
+        ));
+
+        let mut server = PendingTransport;
+        assert!(matches!(
+            server_handshake_with_timeout(&mut server, server_hello, deadline).await,
+            Err(AgentProtocolError::Timeout)
+        ));
+    }
+
+    #[tokio::test]
     async fn json_rpc_transport_completes_same_exchange() {
         let (client, server) = json_rpc_loopback_pair();
         exercise_transport(client, server).await;
@@ -1798,6 +2017,131 @@ mod tests {
             matches!(response.message, AgentMessage::Response(_)),
             "response={response:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn client_session_reuses_handshake_and_reconnects_after_peer_exit() {
+        fn session_task(id: &str, correlation: &str) -> AgentEnvelope {
+            AgentEnvelope::task(
+                format!("task-{id}"),
+                "main",
+                "worker",
+                correlation,
+                AgentTask::new("read README", true, vec!["read_file".to_string()], 1),
+            )
+        }
+
+        let (client, server) = json_rpc_loopback_pair();
+        let client = AuthenticatedAgentTransport::new(client, "main", "shared", "secret")
+            .expect("authenticated client transport");
+        let mut server = AuthenticatedAgentTransport::new(server, "worker", "shared", "secret")
+            .expect("authenticated server transport");
+        let server_task = tokio::spawn(async move {
+            serve_agent(
+                &mut server,
+                AgentHello::read_only("worker", AgentRole::Explorer),
+                |incoming| async move {
+                    Ok(AgentEnvelope::response(
+                        format!("response-{}", incoming.correlation_id),
+                        "worker",
+                        "main",
+                        incoming.correlation_id.clone(),
+                        AgentResponse {
+                            status: AgentStatus::Done,
+                            approved: true,
+                            steps: 1,
+                            tokens: 1,
+                            summary: "persistent session".to_string(),
+                            modified_files: Vec::new(),
+                        },
+                    )
+                    .with_parent(incoming.message_id))
+                },
+                false,
+            )
+            .await
+        });
+        let mut session = AgentClientSession::connect(
+            client,
+            AgentHello::guarded("main", AgentRole::Maker),
+            AgentHello::read_only("worker", AgentRole::Explorer),
+        )
+        .await
+        .expect("initial session handshake");
+        assert_eq!(session.negotiated().remote_id, "worker");
+        let first = session
+            .request(session_task("one", "corr-one"))
+            .await
+            .expect("first session task");
+        let second = session
+            .request(session_task("two", "corr-two"))
+            .await
+            .expect("second session task without re-handshake");
+        assert_eq!(first.correlation_id, "corr-one");
+        assert_eq!(second.correlation_id, "corr-two");
+        drop(session);
+        assert_eq!(
+            server_task.await.expect("persistent server join").unwrap(),
+            2
+        );
+
+        let (client, server) = json_rpc_loopback_pair();
+        let client = AuthenticatedAgentTransport::new(client, "main", "shared", "secret")
+            .expect("authenticated reconnect client transport");
+        let mut server = AuthenticatedAgentTransport::new(server, "worker", "shared", "secret")
+            .expect("authenticated reconnect server transport");
+        let server_task = tokio::spawn(async move {
+            serve_agent(
+                &mut server,
+                AgentHello::read_only("worker", AgentRole::Explorer),
+                |incoming| async move {
+                    Ok(AgentEnvelope::response(
+                        "response-reconnect",
+                        "worker",
+                        "main",
+                        incoming.correlation_id.clone(),
+                        AgentResponse {
+                            status: AgentStatus::Done,
+                            approved: true,
+                            steps: 1,
+                            tokens: 1,
+                            summary: "reconnected session".to_string(),
+                            modified_files: Vec::new(),
+                        },
+                    )
+                    .with_parent(incoming.message_id))
+                },
+                true,
+            )
+            .await
+        });
+        let mut reconnected = AgentClientSession::connect(
+            client,
+            AgentHello::guarded("main", AgentRole::Maker),
+            AgentHello::read_only("worker", AgentRole::Explorer),
+        )
+        .await
+        .expect("reconnect handshake");
+        let response = reconnected
+            .request(session_task("reconnect", "corr-reconnect"))
+            .await
+            .expect("reconnected task");
+        assert_eq!(response.correlation_id, "corr-reconnect");
+        assert_eq!(
+            server_task.await.expect("reconnect server join").unwrap(),
+            1
+        );
+        let error = reconnected
+            .request(session_task("after-exit", "corr-after-exit"))
+            .await
+            .expect_err("closed peer must poison the session");
+        assert!(matches!(error, AgentProtocolError::Transport(_)));
+        assert!(!reconnected.is_healthy());
+        let error = reconnected
+            .request(session_task("after-poison", "corr-after-poison"))
+            .await
+            .expect_err("poisoned session must require reconnect");
+        assert!(matches!(error, AgentProtocolError::Transport(_)));
     }
 
     #[tokio::test]

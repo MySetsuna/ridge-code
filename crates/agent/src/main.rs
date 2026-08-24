@@ -2,11 +2,12 @@ use std::io::IsTerminal;
 use std::sync::Arc;
 
 use agent::{
-    auth_parse, builtin_tool_specs, load_commands, load_skills, mcp_error_summary, request_once,
-    resolve_mcp_with_statuses, serve_agent, AgentEnvelope, AgentHello, AgentMessage,
-    AgentProtocolError, AgentResponse, AgentRole, AgentStatus, AgentTask, AgentTransport,
-    AuthenticatedAgentTransport, Config, JsonRpcAgentTransport, McpServerState, McpServerStatus,
-    McpTools, Skill, SlashCommand,
+    auth_parse, builtin_tool_specs, discover_skill_scopes, load_commands_from_catalog,
+    load_skill_catalog, mcp_error_summary, resolve_mcp_with_statuses, serve_agent,
+    AgentClientSession, AgentEnvelope, AgentHello, AgentMessage, AgentProtocolError, AgentResponse,
+    AgentRole, AgentStatus, AgentTask, AgentTransport, AuthenticatedAgentTransport, Config,
+    JsonRpcAgentTransport, McpServerState, McpServerStatus, McpTools, Skill, SkillCatalog,
+    SlashCommand,
 };
 use mcp::{McpClient, McpError, StdioTransport};
 use provider::{
@@ -107,6 +108,7 @@ fn handle_meta_flags() -> bool {
              ridgecode --resume <id>        resume a named session id\n  \
              ridgecode --session <id>       same as --resume <id>\n  \
              ridgecode sessions             list saved session ids\n\n\
+             ridgecode terminal doctor      report terminal input capabilities and fallbacks\n  \
              ridgecode goal ...             persist and advance one long-running goal\n  \
              ridgecode goal run             execute the active goal with durable recovery\n  \
              ridgecode a2a serve            serve a bounded agent peer over stdio JSON-RPC\n  \
@@ -210,6 +212,16 @@ fn tui_fixture_provider(fallback: Arc<dyn LlmProvider>) -> Arc<dyn LlmProvider> 
                 Completion {
                     reasoning,
                     tool_calls: vec![ToolCall {
+                        id: "fixture-read".into(),
+                        name: "read_file".into(),
+                        arguments: serde_json::json!({
+                            "path": "src/fixture.rs"
+                        }),
+                    }],
+                    ..Default::default()
+                },
+                Completion {
+                    tool_calls: vec![ToolCall {
                         id: "fixture-diff".into(),
                         name: "edit_file".into(),
                         arguments: serde_json::json!({
@@ -227,6 +239,19 @@ fn tui_fixture_provider(fallback: Arc<dyn LlmProvider>) -> Arc<dyn LlmProvider> 
                 },
             ]))
         }
+        Some("input") => Arc::new(
+            ScriptedProvider::new(vec![
+                Completion {
+                    text: "input fixture completed".into(),
+                    ..Default::default()
+                },
+                Completion {
+                    text: "immediate paste fixture completed".into(),
+                    ..Default::default()
+                },
+            ])
+            .with_delay(std::time::Duration::from_millis(150)),
+        ),
         _ => fallback,
     }
 }
@@ -306,6 +331,10 @@ async fn run_cli() -> anyhow::Result<()> {
 async fn handle_special_command(raw: &[String]) -> Option<anyhow::Result<()>> {
     let command = raw.first()?.as_str();
     match command {
+        "terminal" if raw.get(1).map(String::as_str) == Some("doctor") => Some({
+            println!("{}", tui::terminal_doctor_report());
+            Ok(())
+        }),
         "login" => {
             apply_config_proxy(&load_config());
             Some(run_login(&raw[1..]).await)
@@ -492,10 +521,14 @@ async fn run_a2a_serve(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn a2a_fixture_provider() -> Arc<dyn LlmProvider> {
-    Arc::new(ScriptedProvider::new(vec![Completion {
-        text: "A2A fixture peer completed a bounded read-only task.".to_string(),
-        ..Default::default()
-    }]))
+    Arc::new(ScriptedProvider::new(
+        (0..4)
+            .map(|_| Completion {
+                text: "A2A fixture peer completed a bounded read-only task.".to_string(),
+                ..Default::default()
+            })
+            .collect(),
+    ))
 }
 
 async fn run_a2a_server_transport<T>(
@@ -582,6 +615,28 @@ async fn run_a2a_call(args: &[String]) -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    let result = run_a2a_call_inner(args).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    if !result.approved {
+        return Err(anyhow::anyhow!("A2A peer did not approve the task"));
+    }
+    Ok(())
+}
+
+async fn run_a2a_call_inner(args: &[String]) -> anyhow::Result<AgentResponse> {
+    let mut responses = run_a2a_call_batch_inner(args, 1).await?;
+    responses
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("A2A peer returned no response"))
+}
+
+async fn run_a2a_call_batch_inner(
+    args: &[String],
+    request_count: usize,
+) -> anyhow::Result<Vec<AgentResponse>> {
+    if request_count == 0 {
+        return Err(anyhow::anyhow!("A2A request batch must not be empty"));
+    }
     let peer = a2a_value(args, "--peer")?
         .ok_or_else(|| anyhow::anyhow!("a2a call requires --peer COMMAND"))?;
     let task = a2a_value(args, "--task")?
@@ -614,63 +669,71 @@ async fn run_a2a_call(args: &[String]) -> anyhow::Result<()> {
         .take()
         .ok_or_else(|| anyhow::anyhow!("A2A peer stdout unavailable"))?;
     let raw = JsonRpcAgentTransport::new(child_stdout, child_stdin);
-    let request = AgentEnvelope::task(
-        a2a_message_id("task"),
-        from.clone(),
-        to.clone(),
-        a2a_message_id("corr"),
-        AgentTask::new(
-            task,
-            true,
-            vec!["read_file".to_string(), "search".to_string()],
-            budget,
-        )
-        .with_context(context),
-    );
+    let requests = (0..request_count)
+        .map(|index| {
+            AgentEnvelope::task(
+                a2a_message_id(&format!("task-{index}")),
+                from.clone(),
+                to.clone(),
+                a2a_message_id(&format!("corr-{index}")),
+                AgentTask::new(
+                    task.clone(),
+                    true,
+                    vec!["read_file".to_string(), "search".to_string()],
+                    budget,
+                )
+                .with_context(context.clone()),
+            )
+        })
+        .collect::<Vec<_>>();
     let response = if let Some(secret) = a2a_secret() {
-        let transport = AuthenticatedAgentTransport::new(raw, from.clone(), a2a_key_id(), secret)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        run_a2a_client_transport(transport, from, to, request).await?
+        match AuthenticatedAgentTransport::new(raw, from.clone(), a2a_key_id(), secret) {
+            Ok(transport) => run_a2a_client_transport_many(transport, from, to, requests)
+                .await
+                .map_err(anyhow::Error::from),
+            Err(error) => Err(anyhow::anyhow!(error.to_string())),
+        }
     } else {
-        run_a2a_client_transport(raw, from, to, request).await?
+        run_a2a_client_transport_many(raw, from, to, requests)
+            .await
+            .map_err(anyhow::Error::from)
     };
     let _ = child.kill().await;
     let _ = child.wait().await;
-    match response.message {
-        AgentMessage::Response(result) => {
-            println!("{}", serde_json::to_string_pretty(&result)?);
-            if !result.approved {
-                return Err(anyhow::anyhow!("A2A peer did not approve the task"));
-            }
-        }
-        AgentMessage::Error(error) => {
-            return Err(anyhow::anyhow!(
+    response?
+        .into_iter()
+        .map(|response| match response.message {
+            AgentMessage::Response(result) => Ok(result),
+            AgentMessage::Error(error) => Err(anyhow::anyhow!(
                 "A2A peer error [{}]: {}",
                 error.code,
                 error.message
-            ));
-        }
-        _ => return Err(anyhow::anyhow!("A2A peer returned an unexpected message")),
-    }
-    Ok(())
+            )),
+            _ => Err(anyhow::anyhow!("A2A peer returned an unexpected message")),
+        })
+        .collect()
 }
 
-async fn run_a2a_client_transport<T>(
-    mut transport: T,
+async fn run_a2a_client_transport_many<T>(
+    transport: T,
     from: String,
     to: String,
-    request: AgentEnvelope,
-) -> Result<AgentEnvelope, AgentProtocolError>
+    requests: Vec<AgentEnvelope>,
+) -> Result<Vec<AgentEnvelope>, AgentProtocolError>
 where
     T: AgentTransport,
 {
-    request_once(
-        &mut transport,
+    let mut session = AgentClientSession::connect(
+        transport,
         AgentHello::guarded(from, AgentRole::Maker),
         AgentHello::read_only(to, AgentRole::Worker),
-        request,
     )
-    .await
+    .await?;
+    let mut responses = Vec::with_capacity(requests.len());
+    for request in requests {
+        responses.push(session.request(request).await?);
+    }
+    Ok(responses)
 }
 
 async fn run_a2a_smoke() -> anyhow::Result<()> {
@@ -683,15 +746,31 @@ async fn run_a2a_smoke() -> anyhow::Result<()> {
         "--peer-arg".to_string(),
         "serve".to_string(),
         "--peer-arg".to_string(),
-        "--once".to_string(),
-        "--peer-arg".to_string(),
         "--fixture".to_string(),
         "--task".to_string(),
         "cross-process A2A smoke".to_string(),
         "--budget".to_string(),
         "4".to_string(),
     ];
-    run_a2a_call(&args).await
+    let first_session = run_a2a_call_batch_inner(&args, 2).await?;
+    if first_session.len() != 2 || first_session.iter().any(|response| !response.approved) {
+        return Err(anyhow::anyhow!("A2A peer did not approve the smoke task"));
+    }
+    println!("{}", serde_json::to_string_pretty(&first_session[0])?);
+
+    // Reconnect through a fresh external peer/session after the long-lived
+    // peer was torn down. This covers both reuse and recovery in one smoke.
+    let mut reconnect_args = args;
+    reconnect_args.insert(6, "--peer-arg".to_string());
+    reconnect_args.insert(7, "--once".to_string());
+    let second = run_a2a_call_inner(&reconnect_args).await?;
+    if !second.approved {
+        return Err(anyhow::anyhow!(
+            "A2A peer did not approve the reconnect task"
+        ));
+    }
+    eprintln!("[ridgecode] a2a reconnect smoke passed (2 external sessions)");
+    Ok(())
 }
 
 struct ProviderRun<'a> {
@@ -721,7 +800,8 @@ async fn run_with_provider(run: ProviderRun<'_>) -> anyhow::Result<()> {
         goal_path,
     } = run;
     let mcp = resolve_configured_mcp(cfg).await;
-    let skills = load_configured_skills(cfg);
+    let skill_catalog = load_configured_skill_catalog(cfg);
+    let skills = skill_catalog.skills.clone();
     let budget = cfg.budget_tokens.unwrap_or(0);
     configure_runtime(cfg);
     let agents = Arc::new(build_agents(cfg, auth));
@@ -746,6 +826,7 @@ async fn run_with_provider(run: ProviderRun<'_>) -> anyhow::Result<()> {
                 provider,
                 mcp,
                 skills,
+                skill_catalog,
                 budget,
                 resume,
                 agents,
@@ -773,6 +854,7 @@ struct InteractiveRun<'a> {
     provider: Arc<dyn LlmProvider>,
     mcp: McpTools,
     skills: Vec<Skill>,
+    skill_catalog: SkillCatalog,
     budget: usize,
     resume: bool,
     agents: Arc<agent::Agents>,
@@ -789,6 +871,7 @@ async fn run_interactive(run: InteractiveRun<'_>) -> anyhow::Result<()> {
         provider,
         mcp,
         skills,
+        skill_catalog,
         budget,
         resume,
         agents,
@@ -806,7 +889,7 @@ async fn run_interactive(run: InteractiveRun<'_>) -> anyhow::Result<()> {
     };
     let meta = build_repl_meta(cfg, auth, &mcp, using_oauth);
     let swap = Arc::new(SwapProvider::new(tui_fixture_provider(provider)));
-    let commands = load_configured_commands(cfg, &skills);
+    let commands = load_configured_commands(cfg, &skill_catalog);
     if tui_requested() {
         tui::run(
             swap,
@@ -878,7 +961,8 @@ async fn run_without_provider(
         return run_demo().await;
     }
     let mcp = resolve_configured_mcp(cfg).await;
-    let skills = load_configured_skills(cfg);
+    let skill_catalog = load_configured_skill_catalog(cfg);
+    let skills = skill_catalog.skills.clone();
     let budget = cfg.budget_tokens.unwrap_or(0);
     configure_runtime(cfg);
     let agents = Arc::new(build_agents(cfg, auth));
@@ -891,7 +975,7 @@ async fn run_without_provider(
     let swap = Arc::new(SwapProvider::new(tui_fixture_provider(
         missing_key_provider(),
     )));
-    let commands = load_configured_commands(cfg, &skills);
+    let commands = load_configured_commands(cfg, &skill_catalog);
     tui::run(
         swap,
         mcp,
@@ -1246,36 +1330,99 @@ async fn resolve_configured_mcp(cfg: &Config) -> McpTools {
 }
 
 /// 加载 Skills:`RIDGE_SKILLS_DIR` env > config `skills_dir` > 默认 `~/.ridge/skills`。
-fn load_configured_skills(cfg: &Config) -> Vec<Skill> {
-    let dir = std::env::var("RIDGE_SKILLS_DIR")
-        .ok()
-        .or_else(|| cfg.skills_dir.clone())
-        .unwrap_or_else(|| format!("{}/skills", ridge_home()));
-    let mut skills = load_skills(&dir);
-    skills.extend(agent::builtin_skills()); // 内置 skill:agent-creator / skill-creator
-    let global_rules = std::path::PathBuf::from(format!("{}/AGENTS.md", ridge_home()));
-    if let Some(rules) = agent::load_project_rules(Some(&global_rules)) {
-        skills.push(rules); // ~/.ridge/AGENTS.md 全局规则 + cwd 的 CLAUDE.md / AGENTS.md 注入
+fn load_configured_skill_catalog(cfg: &Config) -> SkillCatalog {
+    let env_dir = std::env::var("RIDGE_SKILLS_DIR").ok();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let user_dir = std::path::PathBuf::from(format!("{}/skills", ridge_home()));
+    let scopes = discover_skill_scopes(
+        cwd,
+        user_dir,
+        cfg.skills_dir.as_ref().map(std::path::PathBuf::from),
+        env_dir.map(std::path::PathBuf::from),
+    );
+    let catalog = append_project_rules(load_skill_catalog(&scopes, agent::builtin_skills()));
+    if !catalog.collisions.is_empty() {
+        const MAX_COLLISION_LOGS: usize = 8;
+        for collision in catalog.collisions.iter().take(MAX_COLLISION_LOGS) {
+            let shadowed = collision
+                .shadowed
+                .iter()
+                .map(|source| source.summary())
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!(
+                "[ridgecode] skill override {}: {} wins over {}",
+                collision.name,
+                collision.winner.summary(),
+                shadowed
+            );
+        }
+        if catalog.collisions.len() > MAX_COLLISION_LOGS {
+            eprintln!(
+                "[ridgecode] skill override log truncated ({} collision(s))",
+                catalog.collisions.len()
+            );
+        }
     }
-    if !skills.is_empty() {
-        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+    if !catalog.skills.is_empty() {
+        let names = catalog
+            .skills
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect::<Vec<_>>();
         eprintln!(
             "[ridgecode] loaded {} skill(s): {}",
-            skills.len(),
+            catalog.skills.len(),
             names.join(", ")
         );
     }
-    skills
+    catalog
+}
+
+fn append_project_rules(mut catalog: SkillCatalog) -> SkillCatalog {
+    let global_rules = std::path::PathBuf::from(format!("{}/AGENTS.md", ridge_home()));
+    let Some(rules) = agent::load_project_rules(Some(&global_rules)) else {
+        return catalog;
+    };
+    let name = rules.name.clone();
+    let shadowed = catalog
+        .candidates
+        .iter_mut()
+        .filter(|candidate| candidate.skill.name == name)
+        .map(|candidate| {
+            candidate.selected = false;
+            candidate.source.clone()
+        })
+        .collect::<Vec<_>>();
+    catalog.skills.retain(|skill| skill.name != name);
+    let source = agent::SkillSource {
+        label: "project-rules".to_string(),
+        path: Some(global_rules),
+    };
+    catalog.candidates.push(agent::SkillCandidate {
+        skill: rules.clone(),
+        source: source.clone(),
+        selected: true,
+    });
+    catalog.skills.push(rules);
+    if !shadowed.is_empty() {
+        catalog.collisions.push(agent::SkillCollision {
+            name,
+            winner: source,
+            shadowed,
+        });
+    }
+    catalog
 }
 
 /// 加载自定义斜杠命令(iter-39):`RIDGE_COMMANDS_DIR` env > config `commands_dir` > `~/.ridge/commands`;
 /// 目录里 `*.md` 各成 `/名字` + 每个 skill 也暴露为同名命令。供 TUI 斜杠命令扩展。
-fn load_configured_commands(cfg: &Config, skills: &[Skill]) -> Vec<SlashCommand> {
+fn load_configured_commands(cfg: &Config, catalog: &SkillCatalog) -> Vec<SlashCommand> {
     let dir = std::env::var("RIDGE_COMMANDS_DIR")
         .ok()
         .or_else(|| cfg.commands_dir.clone())
         .unwrap_or_else(|| format!("{}/commands", ridge_home()));
-    let cmds = load_commands(&dir, skills);
+    let cmds = load_commands_from_catalog(&dir, catalog);
     if !cmds.is_empty() {
         let names: Vec<String> = cmds.iter().map(|c| format!("/{}", c.name)).collect();
         eprintln!(

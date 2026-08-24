@@ -241,23 +241,21 @@ pub(crate) fn multiline_shortcut_label(precise: bool) -> &'static str {
     }
 }
 
-/// TerminalGuard records the result of the best-effort KKP command once the
-/// terminal is actually entered. Tests and non-TUI callers retain the
-/// environment-based fallback until that runtime capability is known.
+/// TerminalGuard records the result of the capability-gated KKP command once
+/// the terminal is actually entered. Tests and non-TUI callers use the same
+/// pure environment policy, so the hint stays truthful before TUI startup.
 static PRECISE_MULTILINE_INPUT: OnceLock<bool> = OnceLock::new();
 
 pub(crate) fn set_precise_multiline_input_enabled(enabled: bool) {
     let _ = PRECISE_MULTILINE_INPUT.set(enabled);
 }
 
-fn precise_multiline_input_enabled() -> bool {
-    PRECISE_MULTILINE_INPUT.get().copied().unwrap_or_else(|| {
-        !cfg!(windows) || std::env::var("RIDGE_TUI_KITTY").ok().as_deref() == Some("1")
-    })
-}
-
 fn multiline_shortcut_hint() -> &'static str {
-    multiline_shortcut_label(precise_multiline_input_enabled())
+    PRECISE_MULTILINE_INPUT
+        .get()
+        .copied()
+        .map(multiline_shortcut_label)
+        .unwrap_or_else(|| super::terminal_keyboard_policy().newline_label())
 }
 
 /// Busy narrow chrome uses a packed action rail instead of dropping the

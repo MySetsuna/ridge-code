@@ -72,6 +72,83 @@ async fn swap_provider_hot_switches_inner() {
 }
 
 #[tokio::test]
+async fn scripted_stream_gates_exact_chunks_preserves_order_and_records_request() {
+    let (release, gate) = tokio::sync::oneshot::channel();
+    let provider = Arc::new(
+        ScriptedProvider::new(Vec::new()).with_streams(vec![ScriptedStream {
+            chunks: vec![
+                ScriptedStreamChunk::immediate(StreamChunk::Reasoning("plan".into())),
+                ScriptedStreamChunk::gated(StreamChunk::Answer("done".into()), gate),
+            ],
+            completion: Completion {
+                text: "done".into(),
+                reasoning: "plan".into(),
+                ..Default::default()
+            },
+        }]),
+    );
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let provider_for_task = Arc::clone(&provider);
+    let observed_for_task = Arc::clone(&observed);
+    let task = tokio::spawn(async move {
+        let request = CompletionRequest {
+            messages: vec![Message::user("secret body")],
+            tools: Vec::new(),
+        };
+        let callback = move |chunk| {
+            let text = match chunk {
+                StreamChunk::Reasoning(text) => format!("reasoning:{text}"),
+                StreamChunk::Answer(text) => format!("answer:{text}"),
+            };
+            observed_for_task.lock().unwrap().push(text);
+        };
+        provider_for_task
+            .complete_streaming(&request, &callback)
+            .await
+            .unwrap()
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while observed.lock().unwrap().len() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first chunk should arrive before gated tail");
+    assert_eq!(observed.lock().unwrap().as_slice(), ["reasoning:plan"]);
+    release.send(()).unwrap();
+    let completion = task.await.unwrap();
+    assert_eq!(completion.text, "done");
+    assert_eq!(
+        observed.lock().unwrap().as_slice(),
+        ["reasoning:plan", "answer:done"]
+    );
+    assert_eq!(provider.request_count(), 1);
+    assert_eq!(provider.recorded_requests()[0].message_count, 1);
+}
+
+#[tokio::test]
+async fn scripted_stream_closed_gate_fails_without_emitting_tail() {
+    let (release, gate) = tokio::sync::oneshot::channel::<()>();
+    drop(release);
+    let provider = ScriptedProvider::new(Vec::new()).with_streams(vec![ScriptedStream {
+        chunks: vec![ScriptedStreamChunk::gated(
+            StreamChunk::Answer("must not leak".into()),
+            gate,
+        )],
+        completion: Completion::default(),
+    }]);
+    let observed = Mutex::new(Vec::new());
+    let callback = |chunk| observed.lock().unwrap().push(chunk);
+    let error = provider
+        .complete_streaming(&CompletionRequest::default(), &callback)
+        .await
+        .expect_err("closed gate must fail");
+    assert!(error.to_string().contains("scripted stream gate closed"));
+    assert!(observed.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn scripted_delay_streams_reasoning_before_answer() {
     let provider = ScriptedProvider::new(vec![Completion {
         reasoning: "thinking".into(),

@@ -1,9 +1,11 @@
 use super::{
-    apply_clipboard_paste, edit_input, handle_device_oauth_event, handle_done_result,
-    handle_input_action, handle_key_event, handle_stream_event, handle_submission_action,
-    handle_tick, handle_token_chunk, keylog_path, log_key_event, note_initial_ui,
-    poll_device_oauth, poll_model_catalog, poll_oauth_callback, prepare_loop,
-    process_pending_submit, reset_task_ui, run_event_loop, run_event_step, session_input_history,
+    apply_clipboard_paste, coalesce_rapid_key_events, coalesce_rapid_key_events_with_policy,
+    collect_rapid_key_events, collect_rapid_key_events_with_policy, edit_input,
+    handle_device_oauth_event, handle_done_result, handle_input_action, handle_key_event,
+    handle_stream_event, handle_submission_action, handle_tick, handle_token_chunk, keylog_path,
+    log_key_event, normalize_key_event, note_initial_ui, poll_device_oauth, poll_model_catalog,
+    poll_oauth_callback, prepare_loop, process_pending_submit, rapid_paste_char, reset_task_ui,
+    run_event_loop, run_event_step, session_input_history, startup_canvas_width,
     superstep_activity, tui_approver, ClipboardPaste, CommitBlock, DoneEventContext,
     EventStepContext, KeyEventContext, KeyEventResult, LoopPrepareContext, PendingSubmitContext,
     StartTask, StreamEventContext, TuiLoopContext,
@@ -166,6 +168,7 @@ async fn extracted_key_handler_covers_priority_and_edit_paths() {
     let mut momentary_hold = false;
     let mut last_ctrl_c = None;
     let mut pressed = std::collections::HashSet::new();
+    let mut csi_pending_since = None;
     let keylog_path = None;
     macro_rules! dispatch {
         ($event:expr) => {{
@@ -184,6 +187,7 @@ async fn extracted_key_handler_covers_priority_and_edit_paths() {
                 momentary_hold: &mut momentary_hold,
                 last_ctrl_c: &mut last_ctrl_c,
                 pressed: &mut pressed,
+                csi_pending_since: &mut csi_pending_since,
                 keylog_path: &keylog_path,
                 guard: None,
             };
@@ -207,6 +211,7 @@ async fn extracted_key_handler_covers_priority_and_edit_paths() {
                 momentary_hold: &mut momentary_hold,
                 last_ctrl_c: &mut last_ctrl_c,
                 pressed: &mut pressed,
+                csi_pending_since: &mut csi_pending_since,
                 keylog_path: &keylog_path,
                 guard: None,
             };
@@ -445,6 +450,7 @@ async fn extracted_event_step_covers_stream_approval_done_and_tick_branches() {
     let mut momentary_hold = false;
     let mut last_ctrl_c = None;
     let mut pressed = std::collections::HashSet::new();
+    let mut csi_pending_since = None;
     let keylog_path = None;
     let mut last_activity = None;
     let mut history = Vec::new();
@@ -453,7 +459,7 @@ async fn extracted_event_step_covers_stream_approval_done_and_tick_branches() {
     let mut session_tokens = 0;
     let mut session_turns = 0;
     let start_task: StartTask = Box::new(|_, _| tokio::spawn(async {}));
-    let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (key_tx, mut key_rx) = tokio::sync::mpsc::channel(64);
     let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -478,6 +484,7 @@ async fn extracted_event_step_covers_stream_approval_done_and_tick_branches() {
                 momentary_hold: &mut momentary_hold,
                 last_ctrl_c: &mut last_ctrl_c,
                 pressed: &mut pressed,
+                csi_pending_since: &mut csi_pending_since,
                 keylog_path: &keylog_path,
                 last_activity: &mut last_activity,
                 history: &mut history,
@@ -501,7 +508,7 @@ async fn extracted_event_step_covers_stream_approval_done_and_tick_branches() {
         };
     }
 
-    key_tx.send(Event::Resize(80, 24)).expect("key event");
+    key_tx.send(Event::Resize(80, 24)).await.expect("key event");
     assert!(step!().dirty);
     token_tx
         .send(provider::StreamChunk::Answer("answer".into()))
@@ -768,9 +775,10 @@ async fn extracted_pending_submit_covers_command_and_task_paths() {
 
 #[tokio::test]
 async fn extracted_event_loop_exits_after_takeover_signal() {
-    let (key_tx, key_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (key_tx, key_rx) = tokio::sync::mpsc::channel(8);
     key_tx
         .send(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        .await
         .expect("first Ctrl-C");
     let (_approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel();
     let (_event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -5163,12 +5171,11 @@ fn input_chrome_exposes_submit_or_queue_mode() {
     assert!(wide_idle.contains("Alt+↑/↓ focus"));
 
     let (wide_idle_shortcuts, _) = chrome(false, 0, 120, false, false, false, false);
-    let expected_shortcut =
-        if cfg!(windows) && std::env::var("RIDGE_TUI_KITTY").ok().as_deref() != Some("1") {
-            "Alt+Enter/Ctrl+J newline"
-        } else {
-            "Shift/Alt+Enter newline"
-        };
+    let expected_shortcut = if super::terminal_keyboard_policy().keyboard_enhancement {
+        "Shift/Alt+Enter newline"
+    } else {
+        "Alt+Enter/Ctrl+J newline"
+    };
     assert_eq!(multiline_shortcut_label(true), "Shift/Alt+Enter newline");
     assert_eq!(multiline_shortcut_label(false), "Alt+Enter/Ctrl+J newline");
     assert!(wide_idle_shortcuts.contains(expected_shortcut));
@@ -6349,7 +6356,7 @@ fn decide_key_preserves_momentary_hold_press_and_release() {
 /// 根因回归:审批态下滚动键**不再误拒**,而是滚动;仅 y/Enter 批准、n/Esc 拒绝,余键忽略。
 #[test]
 fn terminal_event_router_separates_paste_and_resize() {
-    let paste = terminal_event_action(Event::Paste("a\r\nb".into()));
+    let paste = terminal_event_action(Event::Paste("a\r\nb\x1b[31mc\x1b]0;title\x07d".into()));
     let TerminalEventAction::Paste(text) = paste else {
         panic!("paste must stay outside key routing");
     };
@@ -6362,7 +6369,7 @@ fn terminal_event_router_separates_paste_and_resize() {
         ..Ui::default()
     };
     apply_paste(&mut ui, &text);
-    assert_eq!(ui.input.buffer, "a\nb");
+    assert_eq!(ui.input.buffer, "a\nbcd");
     assert!(ui.popup.is_none());
     assert!(matches!(
         terminal_event_action(Event::Resize(80, 24)),
@@ -6429,6 +6436,386 @@ fn terminal_input_normalizes_legacy_control_bytes_and_mouse() {
         })),
         TerminalEventAction::Mouse(_)
     ));
+}
+
+#[test]
+fn terminal_input_normalization_matrix_keeps_byte_and_shortcut_meanings() {
+    let cases = [
+        (KeyCode::Char('\r'), KeyModifiers::NONE, KeyCode::Enter),
+        (KeyCode::Char('\n'), KeyModifiers::NONE, KeyCode::Enter),
+        (KeyCode::Char('m'), KeyModifiers::CONTROL, KeyCode::Enter),
+        (
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL,
+            KeyCode::Char('j'),
+        ),
+        (KeyCode::Char('\t'), KeyModifiers::NONE, KeyCode::Tab),
+        (KeyCode::Tab, KeyModifiers::CONTROL, KeyCode::Char('i')),
+        (KeyCode::Char('\t'), KeyModifiers::ALT, KeyCode::Char('i')),
+        (KeyCode::Tab, KeyModifiers::SHIFT, KeyCode::BackTab),
+        (KeyCode::Char('\t'), KeyModifiers::SHIFT, KeyCode::BackTab),
+        (
+            KeyCode::Char('\x08'),
+            KeyModifiers::NONE,
+            KeyCode::Backspace,
+        ),
+        (
+            KeyCode::Char('\x7f'),
+            KeyModifiers::NONE,
+            KeyCode::Backspace,
+        ),
+        (
+            KeyCode::Char('h'),
+            KeyModifiers::CONTROL,
+            KeyCode::Backspace,
+        ),
+    ];
+    for (code, modifiers, expected) in cases {
+        assert_eq!(
+            normalize_key_event(&KeyEvent::new(code, modifiers)).code,
+            expected,
+            "raw {code:?} with {modifiers:?} must normalize deterministically"
+        );
+    }
+}
+
+#[test]
+fn rapid_unwrapped_multiline_paste_coalesces_and_keeps_final_submit() {
+    let events = "abc\n\tdef\n"
+        .chars()
+        .map(|ch| match ch {
+            // Raw C0 bytes are the only unwrapped-paste evidence. Semantic
+            // Enter/Tab events must retain submit/completion behavior.
+            '\n' | '\t' => key(KeyCode::Char(ch), KeyModifiers::NONE),
+            ch => key(KeyCode::Char(ch), KeyModifiers::NONE),
+        })
+        .collect();
+    let coalesced = coalesce_rapid_key_events(events);
+    assert_eq!(coalesced.len(), 2);
+    assert!(matches!(&coalesced[0], Event::Paste(text) if text == "abc\n\tdef"));
+    assert!(matches!(
+        coalesced[1],
+        Event::Key(KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn rapid_conpty_dangling_control_releases_recover_unwrapped_paste() {
+    let mut events = "abc"
+        .chars()
+        .map(|ch| key(KeyCode::Char(ch), KeyModifiers::NONE))
+        .collect::<Vec<_>>();
+    // Some ConPTY builds expose raw LF as Ctrl-Enter Release and raw TAB as
+    // Tab Release. Crossterm has already erased their byte provenance, so
+    // treating this as paste would swallow a real shortcut sequence.
+    events.push(release_key(KeyCode::Enter, KeyModifiers::CONTROL));
+    events.push(release_key(KeyCode::Tab, KeyModifiers::NONE));
+    events.extend(
+        "def"
+            .chars()
+            .map(|ch| key(KeyCode::Char(ch), KeyModifiers::NONE)),
+    );
+    events.push(release_key(KeyCode::Enter, KeyModifiers::CONTROL));
+    let coalesced = coalesce_rapid_key_events_with_policy(events, true);
+    assert_eq!(coalesced.len(), 2);
+    assert!(matches!(&coalesced[0], Event::Paste(text) if text == "abc\n\tdef"));
+    assert!(matches!(
+        coalesced[1],
+        Event::Key(KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            ..
+        })
+    ));
+
+    let semantic = vec![
+        key(KeyCode::Char('a'), KeyModifiers::NONE),
+        key(KeyCode::Enter, KeyModifiers::CONTROL),
+        release_key(KeyCode::Enter, KeyModifiers::CONTROL),
+        key(KeyCode::Char('b'), KeyModifiers::NONE),
+    ];
+    let semantic = coalesce_rapid_key_events_with_policy(semantic, true);
+    assert!(semantic.iter().all(|event| matches!(event, Event::Key(_))));
+
+    let mut paired = Vec::new();
+    for ch in "raw".chars() {
+        paired.push(key(KeyCode::Char(ch), KeyModifiers::NONE));
+        paired.push(release_key(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    paired.push(release_key(KeyCode::Enter, KeyModifiers::CONTROL));
+    paired.push(release_key(KeyCode::Tab, KeyModifiers::NONE));
+    for ch in "tail".chars() {
+        paired.push(key(KeyCode::Char(ch), KeyModifiers::NONE));
+        paired.push(release_key(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    let paired = coalesce_rapid_key_events_with_policy(paired, true);
+    assert!(matches!(&paired[..], [Event::Paste(text)] if text == "raw\n\ttail"));
+}
+
+#[test]
+fn rapid_conpty_paired_c0_events_remain_key_actions() {
+    let mut events = "abc"
+        .chars()
+        .map(|ch| key(KeyCode::Char(ch), KeyModifiers::NONE))
+        .collect::<Vec<_>>();
+    events.push(key(KeyCode::Enter, KeyModifiers::CONTROL));
+    events.push(release_key(KeyCode::Enter, KeyModifiers::CONTROL));
+    events.push(key(KeyCode::Tab, KeyModifiers::NONE));
+    events.push(release_key(KeyCode::Tab, KeyModifiers::NONE));
+    events.extend(
+        "def"
+            .chars()
+            .map(|ch| key(KeyCode::Char(ch), KeyModifiers::NONE)),
+    );
+    let coalesced = coalesce_rapid_key_events_with_policy(events, true);
+    assert!(coalesced.iter().all(|event| matches!(event, Event::Key(_))));
+}
+
+#[test]
+fn rapid_unix_legacy_c0_press_events_recover_unwrapped_paste() {
+    let mut events = "raw"
+        .chars()
+        .map(|ch| key(KeyCode::Char(ch), KeyModifiers::NONE))
+        .collect::<Vec<_>>();
+    // Linux PTYs commonly decode the raw LF/HT bytes as Ctrl-J/Tab Press
+    // events. Their provenance is gone, but the adjacent multiline shape is
+    // still recoverable inside the bounded rapid collector.
+    events.push(key(KeyCode::Char('j'), KeyModifiers::CONTROL));
+    events.push(key(KeyCode::Char('\t'), KeyModifiers::NONE));
+    events.extend(
+        "tail"
+            .chars()
+            .map(|ch| key(KeyCode::Char(ch), KeyModifiers::NONE)),
+    );
+    let legacy = coalesce_rapid_key_events_with_policy(events.clone(), true);
+    assert!(matches!(&legacy[..], [Event::Paste(text)] if text == "raw\n\ttail"));
+    let coalesced = coalesce_rapid_key_events(events);
+    assert!(coalesced.iter().all(|event| matches!(event, Event::Key(_))));
+
+    let semantic = vec![
+        key(KeyCode::Char('a'), KeyModifiers::NONE),
+        key(KeyCode::Char('j'), KeyModifiers::CONTROL),
+        key(KeyCode::Char('b'), KeyModifiers::NONE),
+    ];
+    let semantic = coalesce_rapid_key_events(semantic);
+    assert!(semantic.iter().all(|event| matches!(event, Event::Key(_))));
+}
+
+#[test]
+fn rapid_semantic_ctrl_enter_then_tab_stays_on_key_path() {
+    // The crossterm shape of a real Ctrl+Enter followed by Tab is identical
+    // to the paired ConPTY fallback used by the old unwrapped-paste heuristic.
+    // It must never be reclassified as pasted text: Enter submits/queues and
+    // Tab keeps completion semantics.
+    let events = vec![
+        key(KeyCode::Char('a'), KeyModifiers::NONE),
+        key(KeyCode::Enter, KeyModifiers::CONTROL),
+        release_key(KeyCode::Enter, KeyModifiers::CONTROL),
+        key(KeyCode::Tab, KeyModifiers::NONE),
+        release_key(KeyCode::Tab, KeyModifiers::NONE),
+        key(KeyCode::Char('b'), KeyModifiers::NONE),
+    ];
+    let coalesced = coalesce_rapid_key_events_with_policy(events, true);
+    assert!(coalesced.iter().all(|event| matches!(event, Event::Key(_))));
+}
+
+#[test]
+fn rapid_type_then_submit_stays_on_key_path() {
+    let events = "abc\n"
+        .chars()
+        .map(|ch| match ch {
+            '\n' => key(KeyCode::Enter, KeyModifiers::NONE),
+            ch => key(KeyCode::Char(ch), KeyModifiers::NONE),
+        })
+        .collect();
+    let coalesced = coalesce_rapid_key_events(events);
+    assert_eq!(coalesced.len(), 4);
+    assert!(coalesced.iter().all(|event| matches!(event, Event::Key(_))));
+}
+
+#[test]
+fn rapid_semantic_enter_then_next_text_stays_on_key_path() {
+    let events = vec![
+        key(KeyCode::Char('a'), KeyModifiers::NONE),
+        key(KeyCode::Enter, KeyModifiers::NONE),
+        key(KeyCode::Char('b'), KeyModifiers::NONE),
+    ];
+    let coalesced = coalesce_rapid_key_events(events);
+    assert_eq!(coalesced.len(), 3);
+    assert!(coalesced.iter().all(|event| matches!(event, Event::Key(_))));
+}
+
+#[tokio::test]
+async fn rapid_collector_does_not_delay_ordinary_character_or_space() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    tx.send(key(KeyCode::Char(' '), KeyModifiers::NONE))
+        .await
+        .expect("space event");
+    let first = rx.recv().await.expect("first event");
+    let collected =
+        collect_rapid_key_events(first, &mut rx, &std::collections::HashSet::new()).await;
+    assert_eq!(collected.len(), 1);
+    assert!(matches!(
+        collected[0],
+        Event::Key(KeyEvent {
+            code: KeyCode::Char(' '),
+            ..
+        })
+    ));
+
+    let mut pressed = std::collections::HashSet::new();
+    pressed.insert(KeyCode::Enter);
+    let paired_release = release_key(KeyCode::Enter, KeyModifiers::NONE);
+    let collected = collect_rapid_key_events(paired_release, &mut rx, &pressed).await;
+    assert_eq!(collected.len(), 1);
+}
+
+#[tokio::test]
+async fn rapid_collector_keeps_legacy_events_semantic_without_opt_in() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    tx.send(key(KeyCode::Char('j'), KeyModifiers::CONTROL))
+        .await
+        .expect("Ctrl-J event");
+    tx.send(key(KeyCode::Tab, KeyModifiers::NONE))
+        .await
+        .expect("Tab event");
+    tx.send(key(KeyCode::Char('t'), KeyModifiers::NONE))
+        .await
+        .expect("tail event");
+    let first = rx.recv().await.expect("first event");
+    let collected = collect_rapid_key_events_with_policy(
+        first,
+        &mut rx,
+        &std::collections::HashSet::new(),
+        false,
+    )
+    .await;
+    assert_eq!(collected.len(), 1);
+    assert!(matches!(
+        collected[0],
+        Event::Key(KeyEvent {
+            code: KeyCode::Char('j'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn rapid_collector_recovers_only_unmatched_conpty_enter_tab_releases() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    tx.send(release_key(KeyCode::Enter, KeyModifiers::CONTROL))
+        .await
+        .expect("dangling enter");
+    tx.send(release_key(KeyCode::Tab, KeyModifiers::NONE))
+        .await
+        .expect("dangling tab");
+    for ch in "tail".chars() {
+        tx.send(key(KeyCode::Char(ch), KeyModifiers::NONE))
+            .await
+            .expect("tail event");
+    }
+    let first = rx.recv().await.expect("first event");
+    let collected = collect_rapid_key_events_with_policy(
+        first,
+        &mut rx,
+        &std::collections::HashSet::new(),
+        true,
+    )
+    .await;
+    assert!(matches!(&collected[..], [Event::Paste(text)] if text == "\n\ttail"));
+}
+
+#[test]
+fn unmatched_legacy_release_requires_absent_press_provenance() {
+    use std::collections::HashSet;
+
+    let mut pressed = HashSet::new();
+    assert!(super::input::is_unmatched_legacy_release(
+        &pressed,
+        &release_key(KeyCode::Enter, KeyModifiers::CONTROL),
+    ));
+    pressed.insert(KeyCode::Enter);
+    assert!(!super::input::is_unmatched_legacy_release(
+        &pressed,
+        &release_key(KeyCode::Enter, KeyModifiers::CONTROL),
+    ));
+    assert!(!super::input::is_unmatched_legacy_release(
+        &pressed,
+        &release_key(KeyCode::Char('x'), KeyModifiers::NONE),
+    ));
+}
+
+#[test]
+fn raw_leading_newline_requires_tab_shape_before_paste_reclassification() {
+    let mut typed_after_enter = vec![key(KeyCode::Char('\n'), KeyModifiers::NONE)];
+    typed_after_enter.extend(
+        "tail"
+            .chars()
+            .map(|ch| key(KeyCode::Char(ch), KeyModifiers::NONE)),
+    );
+    let key_path = coalesce_rapid_key_events(typed_after_enter);
+    assert!(key_path.iter().all(|event| matches!(event, Event::Key(_))));
+
+    let mut pasted = vec![key(KeyCode::Char('\n'), KeyModifiers::NONE)];
+    pasted.push(key(KeyCode::Char('\t'), KeyModifiers::NONE));
+    pasted.extend(
+        "tail"
+            .chars()
+            .map(|ch| key(KeyCode::Char(ch), KeyModifiers::NONE)),
+    );
+    let pasted = coalesce_rapid_key_events(pasted);
+    assert!(matches!(&pasted[..], [Event::Paste(text)] if text == "\n\ttail"));
+}
+
+#[test]
+fn rapid_paste_candidate_rejects_shortcuts_and_keeps_control_bytes_safe() {
+    assert_eq!(
+        rapid_paste_char(&key(KeyCode::Char('a'), KeyModifiers::NONE)),
+        Some('a')
+    );
+    assert_eq!(
+        rapid_paste_char(&key(KeyCode::Char('\r'), KeyModifiers::NONE)),
+        Some('\n')
+    );
+    assert_eq!(
+        rapid_paste_char(&key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        None
+    );
+    assert_eq!(
+        rapid_paste_char(&release_key(KeyCode::Char('a'), KeyModifiers::NONE)),
+        Some('a')
+    );
+    assert_eq!(
+        rapid_paste_char(&key(KeyCode::Enter, KeyModifiers::NONE)),
+        None,
+        "decoded Enter press is semantic submit, not paste evidence"
+    );
+    assert_eq!(
+        rapid_paste_char(&key(KeyCode::Tab, KeyModifiers::NONE)),
+        None,
+        "decoded Tab press is semantic completion, not paste evidence"
+    );
+    assert_eq!(
+        rapid_paste_char(&key(KeyCode::Char('\n'), KeyModifiers::NONE)),
+        Some('\n'),
+        "literal LF remains the raw multiline boundary"
+    );
+    assert_eq!(
+        input_action(
+            &KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL),
+            false,
+            false,
+        ),
+        InputAction::Ignore,
+        "unhandled Ctrl+Space must not leak a literal space into the draft"
+    );
 }
 
 #[test]
@@ -6573,6 +6960,31 @@ fn input_action_routes_keys() {
         ),
         InputAction::NewLine
     );
+    // Legacy byte-shaped Tab shortcuts must not be mistaken for completion.
+    assert_eq!(
+        input_action(
+            &KeyEvent::new(KeyCode::Char('\t'), KeyModifiers::CONTROL),
+            false,
+            false
+        ),
+        InputAction::Ignore
+    );
+    assert_eq!(
+        input_action(
+            &KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT),
+            false,
+            false
+        ),
+        InputAction::Ignore
+    );
+    assert_eq!(
+        input_action(
+            &KeyEvent::new(KeyCode::Char('\t'), KeyModifiers::SHIFT),
+            false,
+            false
+        ),
+        InputAction::Ignore
+    );
     // 提交/忽略
     assert_eq!(
         input_action(&press(KeyCode::Enter), false, false),
@@ -6704,6 +7116,16 @@ fn input_action_routes_keys() {
     ));
     assert!(live_history_toggle_action(
         &KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT),
+        false,
+        true
+    ));
+    assert!(live_history_toggle_action(
+        &KeyEvent::new(KeyCode::Char('\t'), KeyModifiers::CONTROL),
+        false,
+        true
+    ));
+    assert!(live_history_toggle_action(
+        &KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT),
         false,
         true
     ));
@@ -6933,6 +7355,10 @@ fn input_action_routes_keys() {
         InputAction::PopupPrev
     );
     assert_eq!(
+        input_action(&press(KeyCode::BackTab), false, true),
+        InputAction::PopupPrev
+    );
+    assert_eq!(
         input_action(&press(KeyCode::Enter), false, true),
         InputAction::PopupSubmit
     );
@@ -7116,6 +7542,56 @@ fn decide_key_filters_windows_release_without_losing_ime_characters() {
 }
 
 #[test]
+fn decide_key_pairs_shifted_character_release_after_modifier_change() {
+    let mut pressed = std::collections::HashSet::new();
+    let down =
+        KeyEvent::new_with_kind(KeyCode::Char('A'), KeyModifiers::SHIFT, KeyEventKind::Press);
+    let up = KeyEvent::new_with_kind(
+        KeyCode::Char('a'),
+        KeyModifiers::NONE,
+        KeyEventKind::Release,
+    );
+    assert_eq!(
+        decide_key(&mut pressed, &down).map(|key| key.code),
+        Some(KeyCode::Char('A'))
+    );
+    assert!(
+        decide_key(&mut pressed, &up).is_none(),
+        "modifier-state change must not duplicate the shifted character"
+    );
+}
+
+#[test]
+fn decide_key_pairs_modifier_alias_release_without_stray_actions() {
+    let cases = [
+        (KeyCode::Tab, KeyModifiers::CONTROL, KeyCode::Tab),
+        (KeyCode::Tab, KeyModifiers::ALT, KeyCode::Tab),
+        (KeyCode::Tab, KeyModifiers::SHIFT, KeyCode::Tab),
+        (
+            KeyCode::Char('h'),
+            KeyModifiers::CONTROL,
+            KeyCode::Char('h'),
+        ),
+    ];
+    for (down_code, down_modifiers, up_code) in cases {
+        let mut pressed = std::collections::HashSet::new();
+        assert!(decide_key(
+            &mut pressed,
+            &KeyEvent::new_with_kind(down_code, down_modifiers, KeyEventKind::Press)
+        )
+        .is_some());
+        assert!(
+            decide_key(
+                &mut pressed,
+                &KeyEvent::new_with_kind(up_code, KeyModifiers::NONE, KeyEventKind::Release)
+            )
+            .is_none(),
+            "modifier alias release leaked: {down_code:?} -> {up_code:?}"
+        );
+    }
+}
+
+#[test]
 fn panel_attention_shortcuts_remain_global_while_browsing() {
     let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
     assert_eq!(
@@ -7196,6 +7672,11 @@ fn physical_enter_spellings_share_queue_and_front_queue_routing() {
             InputAction::PushNow,
             "{code:?} with Ctrl must front-queue while busy"
         );
+        assert_eq!(
+            input_action(&ctrl, true, true),
+            InputAction::PushNow,
+            "{code:?} with Ctrl must front-queue even with slash popup open"
+        );
     }
     for code in [KeyCode::Char('\r'), KeyCode::Char('\n')] {
         let plain = KeyEvent::new(code, KeyModifiers::NONE);
@@ -7222,6 +7703,155 @@ fn physical_enter_spellings_share_queue_and_front_queue_routing() {
         )
     )
     .is_none());
+}
+
+#[test]
+fn terminal_control_matrix_normalizes_without_literal_tab_or_space_residue() {
+    let cases = [
+        (
+            "cr",
+            KeyCode::Char('\r'),
+            KeyModifiers::NONE,
+            KeyCode::Enter,
+        ),
+        (
+            "lf",
+            KeyCode::Char('\n'),
+            KeyModifiers::NONE,
+            KeyCode::Enter,
+        ),
+        ("enter", KeyCode::Enter, KeyModifiers::NONE, KeyCode::Enter),
+        (
+            "raw tab",
+            KeyCode::Char('\t'),
+            KeyModifiers::NONE,
+            KeyCode::Tab,
+        ),
+        ("tab", KeyCode::Tab, KeyModifiers::NONE, KeyCode::Tab),
+        (
+            "ctrl-m",
+            KeyCode::Char('m'),
+            KeyModifiers::CONTROL,
+            KeyCode::Enter,
+        ),
+        (
+            "ctrl-enter",
+            KeyCode::Enter,
+            KeyModifiers::CONTROL,
+            KeyCode::Enter,
+        ),
+        (
+            "raw ctrl-i",
+            KeyCode::Char('\t'),
+            KeyModifiers::CONTROL,
+            KeyCode::Char('i'),
+        ),
+        (
+            "tab ctrl-i",
+            KeyCode::Tab,
+            KeyModifiers::CONTROL,
+            KeyCode::Char('i'),
+        ),
+        (
+            "raw alt-i",
+            KeyCode::Char('\t'),
+            KeyModifiers::ALT,
+            KeyCode::Char('i'),
+        ),
+        (
+            "shift-tab",
+            KeyCode::Char('\t'),
+            KeyModifiers::SHIFT,
+            KeyCode::BackTab,
+        ),
+    ];
+
+    for (label, code, modifiers, expected) in cases {
+        let mut pressed = std::collections::HashSet::new();
+        let press = KeyEvent::new(code, modifiers);
+        let normalized = decide_key(&mut pressed, &press)
+            .unwrap_or_else(|| panic!("{label} press was dropped: {press:?}"));
+        assert_eq!(normalized.code, expected, "{label} normalization");
+        assert_eq!(normalized.kind, KeyEventKind::Press, "{label} kind");
+        let release = KeyEvent::new_with_kind(code, modifiers, KeyEventKind::Release);
+        assert!(
+            decide_key(&mut pressed, &release).is_none(),
+            "{label} release leaked into routing"
+        );
+    }
+
+    assert_eq!(
+        input_action(
+            &KeyEvent::new(KeyCode::Char('\t'), KeyModifiers::NONE),
+            false,
+            false,
+        ),
+        InputAction::PopupOpen
+    );
+    assert!(live_history_toggle_action(
+        &KeyEvent::new(KeyCode::Char('\t'), KeyModifiers::CONTROL),
+        false,
+        true
+    ));
+}
+
+#[test]
+fn terminal_input_event_replay_preserves_semantic_actions() {
+    let replay = |events: Vec<KeyEvent>, busy: bool, popup: bool| {
+        let mut pressed = std::collections::HashSet::new();
+        events
+            .iter()
+            .filter_map(|event| decide_key(&mut pressed, event))
+            .map(|event| input_action(&event, busy, popup))
+            .collect::<Vec<_>>()
+    };
+    let press = |code, modifiers| KeyEvent::new(code, modifiers);
+    let release = |code, modifiers| KeyEvent::new_with_kind(code, modifiers, KeyEventKind::Release);
+
+    assert_eq!(
+        replay(
+            vec![
+                press(KeyCode::Char('A'), KeyModifiers::SHIFT),
+                release(KeyCode::Char('a'), KeyModifiers::NONE),
+                press(KeyCode::Char('\r'), KeyModifiers::NONE),
+            ],
+            false,
+            false,
+        ),
+        vec![InputAction::Insert('A'), InputAction::Submit]
+    );
+    assert_eq!(
+        replay(
+            vec![press(KeyCode::Char('\t'), KeyModifiers::NONE)],
+            false,
+            false,
+        ),
+        vec![InputAction::PopupOpen]
+    );
+    assert_eq!(
+        replay(
+            vec![press(KeyCode::BackTab, KeyModifiers::NONE)],
+            false,
+            true,
+        ),
+        vec![InputAction::PopupPrev]
+    );
+    assert_eq!(
+        replay(
+            vec![press(KeyCode::Char('\n'), KeyModifiers::CONTROL)],
+            true,
+            false,
+        ),
+        vec![InputAction::PushNow]
+    );
+    assert_eq!(
+        replay(
+            vec![press(KeyCode::Char('j'), KeyModifiers::CONTROL)],
+            false,
+            false,
+        ),
+        vec![InputAction::NewLine]
+    );
 }
 
 #[test]
@@ -7844,7 +8474,11 @@ fn commit_height_at_least_one_row() {
 fn sanitize_paste_normalizes_and_strips() {
     assert_eq!(sanitize_paste("a\r\nb"), "a\nb");
     assert_eq!(sanitize_paste("a\rb"), "a\nb");
-    assert_eq!(sanitize_paste("a\x1b[31mb"), "a[31mb"); // ESC 滤除,可见字符保留
+    assert_eq!(sanitize_paste("a\x1b[31mb"), "ab"); // CSI 残尾不可泄入输入框
+    assert_eq!(sanitize_paste("a[31mb"), "ab"); // ConPTY 丢 ESC 后仍不可泄漏 CSI 残尾
+    assert_eq!(sanitize_paste("a\x1b]0;title\x07b"), "ab"); // OSC 同样完整丢弃
+    assert_eq!(sanitize_paste("a]0;title\x07b"), "ab"); // 丢 ESC 的 OSC
+    assert_eq!(sanitize_paste("a\u{9b}31mb"), "ab"); // 8-bit CSI
     assert_eq!(sanitize_paste("a\tb\nc"), "a\tb\nc");
     assert_eq!(sanitize_paste("[200~hello[201~"), "hello");
     assert_eq!(sanitize_paste("\u{1b}[200~hi\u{1b}[201~"), "hi");
@@ -7867,9 +8501,9 @@ fn cjk_wrap_uses_two_cells_without_padding() {
 
 #[test]
 fn paste_and_fn_csi_do_not_insert_residue() {
-    assert_eq!(map_csi_seq("[200~"), Some(KeyCode::Null));
-    assert_eq!(map_csi_seq("[201~"), Some(KeyCode::Null));
-    assert_eq!(map_csi_seq("[15~"), Some(KeyCode::F(5)));
+    assert_eq!(map_csi_seq("\u{1b}[200~"), Some(KeyCode::Null));
+    assert_eq!(map_csi_seq("\u{1b}[201~"), Some(KeyCode::Null));
+    assert_eq!(map_csi_seq("\u{1b}[15~"), Some(KeyCode::F(5)));
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
     assert_eq!(
         input_action(&key(KeyCode::Null), false, false),
@@ -10639,6 +11273,13 @@ fn splash_canvas_matches_reference_contract() {
     for line in SPLASH {
         assert!(strip_sgr(&final_frame).contains(line));
     }
+}
+
+#[test]
+fn startup_canvas_reserves_wrap_column_at_narrow_widths() {
+    assert_eq!(startup_canvas_width(96), 95);
+    assert_eq!(startup_canvas_width(1), 1);
+    assert_eq!(startup_canvas_width(0), 1);
 }
 
 fn strip_sgr(text: &str) -> String {

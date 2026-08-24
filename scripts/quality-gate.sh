@@ -8,11 +8,13 @@ readonly LCOV_PATH="${QUALITY_DIR}/lcov.info"
 mkdir -p "${QUALITY_DIR}"
 cargo fmt --all -- --check
 git diff --check
+npm run spectree:check
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 mkdir -p "${QUALITY_DIR}"
 cargo clippy --workspace --all-targets --locked --message-format=json -- -D warnings > "${QUALITY_DIR}/clippy.json"
 cargo build --workspace --locked
+python3 scripts/linux-pty-input.py --binary target/debug/ridgecode
 
 if ! cargo llvm-cov --version >/dev/null 2>&1; then
   echo "cargo-llvm-cov is required; install it before running the quality gate" >&2

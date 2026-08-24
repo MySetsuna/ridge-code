@@ -300,6 +300,13 @@ pub(crate) struct Ui {
     pub(crate) input: InputState,
     /// Accumulates a Windows/ConPTY CSI tail after Esc so `[A` is navigation.
     pub(crate) csi_pending: String,
+    /// Bare Kitty CSI-u is accepted only after the terminal advertised the
+    /// keyboard protocol; otherwise literal text such as `[13;5u` must stay text.
+    pub(crate) allow_bare_kitty: bool,
+    /// Fallback for terminals that expose bracketed paste as raw Key events
+    /// instead of Crossterm's `Event::Paste`.
+    pub(crate) bracketed_paste_active: bool,
+    pub(crate) bracketed_paste_buffer: String,
     /// 补全浮窗(iter-27):Some = 浮窗开(键位模态优先级:审批 > 浮窗 > 输入)。
     pub(crate) popup: Option<Popup>,
     /// Fullscreen draft editor; `Some(scroll)` owns only the modal viewport.

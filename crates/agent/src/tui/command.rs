@@ -1271,7 +1271,7 @@ pub(crate) async fn run_command(
     }
     if input == "/help" {
         ui.note(
-            "/exit /model /provider /config /effort /find [query] /goal [status|create|start|advance|resume|complete|block|cancel] /activity /inspect /transcript /audit /reasoning /answer /answers /sessions /new /queue /steer <guidance> /tools /history /login /agent /mcp /skills /commands; !command runs a local shell; /provider opens the model catalog; /answer opens the latest full answer; /answers opens the searchable answer archive; /sessions lists resume ids; /new starts a fresh session id; Enter queues while busy; empty Enter sends the next queued item; queued items auto-send when the current turn finishes; Ctrl+Enter front-queues without interrupting; Ctrl+Shift+Enter or /steer steers the active turn; Ctrl+F opens non-blocking live search; Ctrl+Q opens the queue and Delete removes a pending item; Ctrl+I/Alt+I inspects live blocks in Transcript Audit; Ctrl+A opens the latest full answer; Ctrl+R toggles live reasoning or opens Reasoning history; Ctrl+O toggles live tool details or opens Tool history; Ctrl+T opens recent Agent activity; Ctrl-C hands input back.",
+            "/exit /model /provider /config /effort /find [query] /goal [status|create|start|advance|resume|complete|block|cancel] /activity /inspect /transcript /audit /reasoning /answer /answers /sessions /new /queue /steer <guidance> /doctor /tools /history /login /agent /mcp /skills /commands; !command runs a local shell; /provider opens the model catalog; /answer opens the latest full answer; /answers opens the searchable answer archive; /sessions lists resume ids; /new starts a fresh session id; /doctor reports terminal keyboard capability and safe fallbacks; Enter queues while busy; empty Enter sends the next queued item; queued items auto-send when the current turn finishes; Ctrl+Enter front-queues without interrupting; Ctrl+Shift+Enter or /steer steers the active turn; Ctrl+F opens non-blocking live search; Ctrl+Q opens the queue and Delete removes a pending item; Ctrl+I/Alt+I inspects live blocks in Transcript Audit; Ctrl+A opens the latest full answer; Ctrl+R toggles live reasoning or opens Reasoning history; Ctrl+O toggles live tool details or opens Tool history; Ctrl+T opens recent Agent activity; Ctrl-C hands input back.",
             role_color(Role::Muted),
         );
         return Ok(false);
@@ -1694,6 +1694,7 @@ fn handle_workspace_command_at(
         "/mcp" => show_mcp_panel(ui),
         "/skills" => show_skills_panel(ui, skills),
         "/commands" => show_commands(ui, commands),
+        "/doctor" => show_terminal_doctor(ui),
         _ => return false,
     }
     true
@@ -1761,6 +1762,25 @@ fn show_commands(ui: &mut Ui, commands: &[agent::SlashCommand]) {
         format!("commands ({}):\n{}", commands.len(), lines.join("\n")),
         role_color(Role::Muted),
     );
+}
+
+fn show_terminal_doctor(ui: &mut Ui) {
+    ui.note(super::terminal_doctor_report(), role_color(Role::Info));
+}
+
+#[cfg(test)]
+mod terminal_doctor_tests {
+    use super::*;
+
+    #[test]
+    fn doctor_command_emits_the_same_safe_report_surface() {
+        let mut ui = Ui::default();
+        show_terminal_doctor(&mut ui);
+        assert!(ui.commits.iter().any(|commit| matches!(
+            commit,
+            crate::tui::CommitBlock::Text { text, .. } if text.contains("terminal doctor")
+        )));
+    }
 }
 
 fn handle_custom_command(input: &str, ui: &mut Ui, commands: &[agent::SlashCommand]) -> bool {
@@ -1903,6 +1923,7 @@ mod tests {
             "/skills",
             "/commands",
             "/agent",
+            "/doctor",
             "/jailbreak",
             "/jailbreak on",
             "/jailbreak off",

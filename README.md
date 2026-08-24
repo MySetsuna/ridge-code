@@ -8,7 +8,7 @@ RidgeCode 是一个模块化、跨领域可扩展的通用 agent 框架，发布
 
 ### 其他 PC：通过 GitHub 快速安装（无需 Rust/Cargo）
 
-新 PC 无需 Rust/Cargo：复制当前平台的一条命令，安装器会从 GitHub Release 下载对应归档、校验 SHA256，并把 `ridgecode` 加入用户 PATH。当前稳定版为 `v0.5.22`；每个归档内同时带有完整 `README.md` 与安装脚本，便于离线转交和审计。
+新 PC 无需 Rust/Cargo：复制当前平台的一条命令，安装器会从 GitHub Release 下载对应归档、校验 SHA256，并把 `ridgecode` 加入用户 PATH。当前稳定版为 `v0.5.23`；每个归档内同时带有完整 `README.md` 与安装脚本，便于离线转交和审计。
 
 Windows PowerShell：
 
@@ -16,9 +16,9 @@ Windows PowerShell：
 # 最新稳定版：安装到 %LOCALAPPDATA%\Programs\ridgecode，并写入用户 PATH
 irm https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.ps1 | iex
 
-# 可复现安装：固定脚本与 Release 版本 v0.5.22
-$s = irm https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.22/scripts/install.ps1
-& ([scriptblock]::Create($s)) -Version v0.5.22
+# 可复现安装：固定脚本与 Release 版本 v0.5.23
+$s = irm https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.23/scripts/install.ps1
+& ([scriptblock]::Create($s)) -Version v0.5.23
 
 # 新开终端后验证
 ridgecode --version
@@ -31,8 +31,8 @@ Linux / macOS：
 # 最新稳定版：安装到 ~/.local/bin
 curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.sh | sh
 
-# 可复现安装：固定脚本与 Release 版本 v0.5.22
-curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.22/scripts/install.sh | sh -s -- --version v0.5.22
+# 可复现安装：固定脚本与 Release 版本 v0.5.23
+curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.23/scripts/install.sh | sh -s -- --version v0.5.23
 
 # 验证
 ridgecode --version
@@ -52,7 +52,7 @@ Linux / macOS 将 `$env:RIDGE_API_KEY` 改为 `export RIDGE_API_KEY="your-key"`�
 
 升级时重复执行对应平台的最新版安装命令即可；安装器会覆盖旧二进制，不改已有 `~/.ridge/config.json`。卸载仅需删除安装目录中的二进制（配置默认保留）：Windows 删除 `%LOCALAPPDATA%\Programs\ridgecode\ridgecode.exe`，Linux / macOS 删除 `~/.local/bin/ridgecode`。
 
-当前 Release：[v0.5.22](https://github.com/MySetsuna/ridge-code/releases/tag/v0.5.22)。手动下载时按平台选择：
+当前 Release：[v0.5.23](https://github.com/MySetsuna/ridge-code/releases/tag/v0.5.23)。手动下载时按平台选择：
 
 | 平台 | Release 资产 |
 | --- | --- |
@@ -65,7 +65,7 @@ Linux / macOS 将 `$env:RIDGE_API_KEY` 改为 `export RIDGE_API_KEY="your-key"`�
 若目标 PC 不能执行远程脚本，可用 GitHub CLI 下载完整归档，再离线传给目标 PC：
 
 ~~~bash
-gh release download v0.5.22 --repo MySetsuna/ridge-code --pattern 'ridgecode-*'
+gh release download v0.5.23 --repo MySetsuna/ridge-code --pattern 'ridgecode-*'
 ~~~
 
 归档内包含二进制、完整 `README.md` 与对应安装脚本；解压后可用 `--local` / `-Local` 安装，仍会校验归档旁的 `.sha256`。
@@ -81,7 +81,22 @@ cargo run -p agent --bin ridgecode -- --version
 cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
+npm run spectree:check
 ~~~
+
+### SpecTree 文档树
+
+规范源在 `specs/`，Obsidian 投影在 `obsidian-vault/`。修改代码或规范后运行：
+
+~~~bash
+npm install
+npm run spectree:export
+npm run spectree:check
+~~~
+
+`spectree:check` 会校验图与 vault 的 hash/sourceHash，并要求 `crates/**/*.rs`
+均落入至少一个 `code_targets`/`test_targets`；`spectree:export` 只重建投影，
+不把 Obsidian 反向当作规范源。
 
 ## 命令行用法
 
@@ -252,15 +267,33 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows-pty-e2e.ps
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows-pty-e2e.ps1 -BusyFixture -KeepDiagnostics
 ~~~
 
-`-BusyFixture` 使用无网络、延迟 30 秒的 `ScriptedProvider`，自动进入思考态，再发送 Enter 队列与 Ctrl+Enter 队首插入；夹具先写入 Kitty CSI-u `ESC[13;5u`，若 Windows ConPTY/`INPUT_RECORD` 不向 `crossterm` 暴露该序列，则回退写入物理 `LF`，应用层仍把 CR/LF/Ctrl-M 统一归一为 `Enter`。摘要中的 `snapshot_mid_queued=2`、`snapshot_mid_queue[0]="/front"`、`busy_fixture_front_observed=true` 与 `snapshot_has_next_queue=true` 表示内部队首和最终帧 `⏭ next` affordance 均已被应用接收/显示；`snapshot_live_focus`/`snapshot_inspector_live_focus` 会报告当前 Inspector 所选的 `answer`、`reasoning` 或 `tool:<id>`；忙态结束后的 `snapshot_has_reasoning_history=true` 表示已提交思考仍可检索；`busy_fixture_front_transport` 会记录采用 `csi-u` 或 `csi-u→legacy-crlf`，末尾仍验证双 Ctrl+C 接管退出。Windows `crossterm` 键事件未由原始字节管道复现时会明确报告 `status=partial`。
+`-BusyFixture` 使用无网络、延迟 30 秒的 `ScriptedProvider`，自动进入思考态，再发送 Enter 队列与 Ctrl+Enter 队首插入；夹具先写入 Kitty CSI-u `ESC[13;5u`，若 Windows ConPTY/`INPUT_RECORD` 不向 `crossterm` 暴露该序列，则回退写入物理 `LF`，应用层仍把 CR/LF/Ctrl-M 统一归一为 `Enter`。摘要若捕获到中间快照，则 `snapshot_mid_queued=2`、`snapshot_mid_queue[0]="/front"` 与 `busy_fixture_front_observed=true` 表示内部队首已被应用接收；若快照轮询恰好错过短暂的 Queue[2]，原始 ConPTY 帧中的 `Queue [2]`、`/front`、`queued tail message` 与最终 `snapshot_has_next_queue=true` 仍作为同一证据。`snapshot_live_focus`/`snapshot_inspector_live_focus` 会报告当前 Inspector 所选的 `answer`、`reasoning` 或 `tool:<id>`；忙态结束后的 `snapshot_has_reasoning_history=true` 表示已提交思考仍可检索；`busy_fixture_front_transport` 会记录采用 `csi-u` 或 `csi-u→legacy-crlf`，默认在队列显示后留出一帧再发送双 Ctrl+C 接管退出。Windows 传统模式/非 InputFixture 仍保留 Crossterm 证据要求；专门的 `InputFixture` 强制证明 raw-VT。
 
-需验证无网络完成态的完整收束链路，可使用 `-CompletionFixture`（与 `-BusyFixture` 互斥）：
+需专门验收原始输入字节时，可用 `-InputFixture`：
 
 ~~~powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows-pty-e2e.ps1 -CompletionFixture -TimeoutMs 10000 -KeepDiagnostics
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows-pty-e2e.ps1 -InputFixture -KeepDiagnostics
 ~~~
 
-该夹具使用即时 `ScriptedProvider`，自动提交一条任务，要求 Snapshot 同时出现 `busy=false`、`snapshot_has_reasoning_history=true`、`snapshot_has_answer_history=true`，并在 ConPTY 原始滚屏中出现 fixture reasoning 与最终 Answer 文本；随后仍验证两次 Ctrl+C 退出。`completion_evidence_satisfied=true` 才表示思考→回答→历史归档→滚屏完成态均已走通。`-KeepDiagnostics` 还会保留 `pty-output.bin`、`frame.json` 与 `tui-trace.log` 路径，便于复核原始字节与最终帧。
+该夹具逐段发送并等待快照确认：`a b` → BS 后 `a ` → 补回 `b` → DEL 后 `a ` → 清理为 `a` → TAB → Shift-Tab → 含 CSI/OSC 的原子 bracketed paste 后 `axyz`。Tab、Shift-Tab、paste 与最终独立物理 LF 各有独立 keylog 边界；首任务完成后，再于同一次 ConPTY 写入发送 bracketed paste + CRLF，keylog 必须恰有一个 Paste、一个 Enter，输入框为空且第二任务已进入 busy。结果必须含 `input_backend=raw-vt` 及 `input_backend_reason`，故最终缓冲不再反推此前动作皆成功。`InputFixture` 显式设置 `RIDGE_TUI_VT_INPUT=1`，不设置 `RIDGE_TUI_UNWRAPPED_BRIDGE=1`，也不注入或断言 `axyzraw\n\ttail`。Parser 识别完整 bracketed envelope 后将正文交给现有 `sanitize_paste`；未知/不完整 VT 序列有界回放，不以事件速度猜测粘贴。每次调用使用 GUID 隔离的临时 profile/config，输入正文只在夹具显式设置的 `RIDGE_TUI_INPUT_DIAGNOSTICS=1` 快照中出现。所有 PTY 模式默认受 `-MaxOutputBytes 4194304`、`-RenderP95BudgetUs 16000` 与 `-RenderMaxBudgetUs 50000` 约束；输出超限、draw-render 样本缺失/截断或延迟越界均失败。draw 闸不含快照序列化/写盘与事件循环延迟。
+
+若 Enter/Tab 在某个终端或 IDE PTY 中失真，可在无法进入 TUI 时运行
+`ridgecode terminal doctor`，或在 TUI 内运行 `/doctor`。两者共用同一终端能力策略：
+Windows 默认选择 raw-vt（`RIDGE_TUI_VT_INPUT` 未设或 `auto`）；`1` 强制 raw-vt，`0` 强制 Crossterm，激活失败报告 `crossterm` 及原因；
+两者仅报告白名单环境事实、桥接/复用器识别、Kitty keyboard/输入 backend 及安全回退建议，
+不会输出任意环境变量或密钥。
+PTY 验收的鼠标证据按 backend 分流：raw-vt 必须在完整字节流中出现 VT mouse disable；Crossterm/ConDrv 可能因输出句柄未开 VTP 而不发 ANSI disable，改由 native host-mode 清除 `ENABLE_MOUSE_INPUT`，且验收仍要求无 VT mouse enable。夹具不强行向 classic console 写 ANSI。
+终端名称或 `VTE_VERSION` 仅作识别，默认不自动打开 Kitty keyboard；确认 PTY
+逐字节保留协议后，才显式设置 `RIDGE_TUI_KITTY=1`，否则使用
+`Alt+Enter/Ctrl+J` 换行回退。
+
+需验证无网络完成态的完整收束链路，可使用 `-CompletionFixture`（与 `-BusyFixture` 互斥）；它可与 `-ResizeProbe` 组合：
+
+~~~powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows-pty-e2e.ps1 -CompletionFixture -ResizeProbe -TimeoutMs 12000 -KeepDiagnostics
+~~~
+
+该夹具每次运行创建 GUID 隔离的临时 workspace，并预置 `src/fixture.rs`；`main.rs` 中的 `ScriptedProvider` 对该文件真实执行 `read_file → edit_file → final`，不会写入仓库。要求 Snapshot 同时出现 `busy=false`、`snapshot_has_reasoning_history=true`、`snapshot_has_answer_history=true`，并在 ConPTY 原始滚屏中出现 fixture reasoning 与最终 Answer 文本；夹具随后自动打开 Answer archive、先捕获表格/高亮证据，再展开 Tool history；组合 `-ResizeProbe` 时首个 resize 等待 Answer archive 快照已可见，避免仅因中段表格尚未渲染而误报。随后仍验证两次 Ctrl+C 退出。`completion_evidence_satisfied=true` 才表示思考→回答→历史归档→滚屏完成态均已走通。`-KeepDiagnostics` 还会保留 `pty-output.bin`、`frame.json`、`tui-trace.log` 及 `workspace_path`，便于复核原始字节、最终帧与隔离文件。
 
 需验证流式块聚焦时追加 `-InspectLive`：夹具用 ConPTY 发送 Alt+I，再发送 Space，要求 `live_inspector_observed=true` 与 `live_inspector_expanded_observed=true`；Ctrl+I 仍是交互终端主快捷键。
 
@@ -277,7 +310,7 @@ $env:RIDGE_TUI_SNAPSHOT = "$pwd\ridgecode-frame.json"
 .\target\debug\ridgecode.exe
 ~~~
 
-快照为最后一次已绘制的 JSON 帧，`version=2`，含 `format`、`rect`、`render_us`、`state`、`telemetry`、按行排列的 `rows` 文本与压缩后的 `styled_rows` 样式 runs；`state` 提供 `busy`、`waiting`、`phase`、`activity`、`activity_kind`、有界 `activity_history`、`live_view`、`reasoning_expanded`、`live_focus`、`queued`/`queue`、输入/输出/流式 token、`rate`、`effort` 等诊断字段；`telemetry` 提供 `phase_duration_ms`、`token_velocity` 与 `last_render_us`。`styled_rows` 保留每段的 cell 起点、宽度、文本、前景/背景色、修饰符及候选语义角色，便于外部渲染器或 harness 复现“虚拟视网膜”。仅用于诊断/自动验收，路径由用户指定，文件会被下一帧覆盖。
+快照为最后一次已绘制的 JSON 帧，`version=2`，含 `format`、`rect`、`render_us`、`state`、`telemetry`、按行排列的 `rows` 文本与压缩后的 `styled_rows` 样式 runs；`state` 提供 `busy`、`waiting`、`phase`、`activity`、`activity_kind`、有界 `activity_history`、`live_view`、`reasoning_expanded`、`live_focus`、`queued`/`queue`、输入/输出/流式 token、`rate`、`effort` 等诊断字段；`telemetry` 提供 `phase_duration_ms`、`token_velocity`、`last_render_us`，以及至多 4096 帧 exact draw-render 样本所得 `frame_sequence`、`render_sample_count`、`render_p95_us`、`render_max_us`、`render_samples_truncated`。`styled_rows` 保留每段的 cell 起点、宽度、文本、前景/背景色、修饰符及候选语义角色，便于外部渲染器或 harness 复现“虚拟视网膜”。仅用于诊断/自动验收，路径由用户指定，文件会被下一帧覆盖。
 
 ### 斜杠命令
 
@@ -439,7 +472,7 @@ ridgecode a2a call --peer ridgecode --peer-arg a2a --peer-arg serve --peer-arg -
 ridgecode a2a smoke
 ~~~
 
-`serve` 执行握手、能力协商、只读/工具授权、上下文限制、关联 ID、超时与取消，并返回结构化 `AgentResponse`/`AgentError`。配置 `RIDGE_A2A_SECRET` 后，stdio transport 自动启用 HMAC、时间窗与 nonce replay 防护；密钥只从环境变量读取，不进入日志或消息正文。`--fixture` 仅用于无密钥确定性 smoke。
+`serve` 执行握手、能力协商、只读/工具授权、上下文限制、关联 ID、超时与取消，并返回结构化 `AgentResponse`/`AgentError`。握手完整 send/recv 阶段限 15 秒，静默 peer 返回 `Timeout`，不会占用 300 秒任务执行窗。配置 `RIDGE_A2A_SECRET` 后，stdio transport 自动启用 HMAC、时间窗与 nonce replay 防护；密钥只从环境变量读取，不进入日志或消息正文。`--fixture` 仅用于无密钥确定性 smoke。
 
 ### Hooks
 
@@ -468,11 +501,15 @@ Hook 子进程可读取 RIDGE_TOOL 与 RIDGE_TOOL_ARG。pre_tool 的 blocking ho
 
 ### Skills
 
-把目录放进 ~/.ridge/skills/<name>/SKILL.md，或用 RIDGE_SKILLS_DIR / skills_dir 指定目录。文件需含 name、description frontmatter，正文作为领域规则注入 system prompt。样例见 samples/skills。
+把目录放进 `~/.ridge/skills/<name>/SKILL.md`，或放进仓库/当前目录的
+`.ridge/skills`（兼容 `.agents/skills`）。发现优先级为
+`RIDGE_SKILLS_DIR` > `skills_dir` > cwd > repo > `~/.ridge/skills` > 内置；同名只把胜者正文注入 system prompt，冲突会在启动 stderr 显示来源。
+全部 scope 共用最多 256 个候选、每份 128 KiB；最终 Skills + 项目规则块仍受 24 Ki Unicode 字符/6000 估算 token 双限。
+被覆盖的 Skill 仍可用稳定限定命令（如 `/user:name`、`/repo:name`、`/env:name`）显式调用；此轮不提供 hot reload 或 progressive loading。样例见 samples/skills。
 
 ### 只读 sub-agent
 
-内置 fastcontext、explorer、reviewer；用户 agent 放在 ~/.ridge/agents/<name>.md，也可用 RIDGE_AGENTS_DIR 指定目录。主 agent 可调用 dispatch_agent，子 agent 独立上下文、只读、只返回结论。/agent 查看当前可用列表。
+内置 fastcontext、explorer、reviewer；用户 agent 放在 ~/.ridge/agents/<name>.md，也可用 RIDGE_AGENTS_DIR 指定目录。flat agents/commands 目录各最多保留路径字典序前 256 份、每份 64 KiB；重复 agent name 由最早路径胜出。全局及项目规则文件各限 128 KiB，超限保留头尾并带 marker。主 agent 可调用 dispatch_agent，子 agent 独立上下文、只读、只返回结论。/agent 查看当前可用列表。
 
 ### Agent route：按任务选择 provider/model
 
@@ -577,28 +614,31 @@ sh scripts/dist.sh
 维护者在稳定基线完成全量质量门后创建 v* 标签并推送；CI 会自动创建 GitHub Release、构建五个平台资产、生成 SHA256 并把 README/安装脚本放进归档：
 
 ~~~bash
-git tag v0.5.22
+git tag v0.5.23
 git push origin main
-git push origin v0.5.22
+git push origin v0.5.23
 ~~~
 
 也可用 GitHub CLI 下载指定版本：
 
 ~~~bash
-gh release download v0.5.22 --repo MySetsuna/ridge-code --pattern 'ridgecode-*'
+gh release download v0.5.23 --repo MySetsuna/ridge-code --pattern 'ridgecode-*'
 ~~~
 
 `.github/workflows/release.yml` 会为 Linux x86_64/aarch64、macOS x86_64/aarch64、Windows x86_64 构建并上传归档；发布前先执行以下质量门：
 
 ~~~bash
 cargo fmt --all -- --check
+npm run spectree:check
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --workspace --locked
 ~~~
 
 Full quality gate also runs line coverage (minimum 80%) and the local SonarQube
-quality gate. The repository targets `http://localhost:9000`; start the local
+quality gate. On Windows it first runs the bounded eval soak plus phased Input
+and Completion+Resize ConPTY fixtures; on Unix it runs the real Linux PTY
+replay. The repository targets `http://localhost:9000`; start the local
 SonarQube service, create a project token at
 `http://localhost:9000/account/security`, then run
 `pwsh -File scripts/configure-sonar-secret.ps1` and paste the token into the

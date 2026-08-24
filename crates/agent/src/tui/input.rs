@@ -105,20 +105,343 @@ fn canonical_key_code(key: &KeyEvent) -> KeyCode {
     match key.code {
         // ConPTY/legacy terminals may surface Enter as CR or LF instead of
         // KeyCode::Enter.  Normalize at the boundary so submit, queue and
-        // Ctrl+Enter front-queue share one routing path.
+        // Ctrl+Enter front-queue share one routing path.  Hosts that report
+        // Ctrl-J as `Char('j') + CONTROL` remain on the explicit multiline
+        // shortcut below; raw LF + CONTROL is reserved for Ctrl+Enter.
         KeyCode::Char('\r' | '\n') => KeyCode::Enter,
         // Ctrl-M is the byte-level CR spelling used by a few terminal/input
         // stacks for Enter.  Keep Ctrl-J as the explicit multiline shortcut.
         KeyCode::Char('m' | 'M') if key.modifiers.contains(KeyModifiers::CONTROL) => KeyCode::Enter,
+        // Raw terminals expose Tab as C0 HT instead of the decoded
+        // KeyCode::Tab. Ctrl-I stays a live-inspector shortcut; Alt-I is the
+        // explicit fallback when a host reports Ctrl-I as Tab. Shift-Tab is
+        // a reverse-completion key and must never become literal `\t` text.
+        KeyCode::Char('\t') | KeyCode::Tab
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            KeyCode::Char('i')
+        }
+        KeyCode::Char('\t') | KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::BackTab
+        }
+        KeyCode::Char('\t') => KeyCode::Tab,
         // ConPTY, legacy Win32 input and a few PTYs expose Backspace as the
         // raw BS/DEL bytes instead of KeyCode::Backspace.
         KeyCode::Char('\x08' | '\x7f') => KeyCode::Backspace,
+        KeyCode::Char('h' | 'H') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Backspace
+        }
         other => other,
     }
 }
 
 pub(crate) fn normalize_key_event(ev: &KeyEvent) -> KeyEvent {
     KeyEvent::new_with_kind(canonical_key_code(ev), ev.modifiers, ev.kind)
+}
+
+/// Return the text represented by one ordinary key event when it is safe to
+/// treat a rapid run as an unwrapped paste.  Shortcuts, releases and editing
+/// keys must stay on the normal key path; otherwise a fast `Ctrl-*` or
+/// backspace sequence could silently turn into text insertion.
+pub(crate) fn rapid_paste_char(event: &Event) -> Option<char> {
+    let Event::Key(key) = event else {
+        return None;
+    };
+    let literal_c0 =
+        key.modifiers.is_empty() && matches!(key.code, KeyCode::Char('\r' | '\n' | '\t'));
+    let code = canonical_key_code(key);
+    // A decoded Enter/Tab press is a semantic shortcut, not evidence of an
+    // unwrapped paste. Keeping it out of the rapid collector prevents a
+    // normal submit/completion key from waiting behind the paste timeout.
+    // Literal C0 bytes remain eligible because they are the only byte-level
+    // multiline evidence available on hosts without bracketed paste.
+    if !literal_c0
+        && key.kind == KeyEventKind::Press
+        && matches!(code, KeyCode::Enter | KeyCode::Tab)
+    {
+        return None;
+    }
+    let raw_release = key.kind == KeyEventKind::Release
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+        && (matches!(code, KeyCode::Enter | KeyCode::Tab)
+            || matches!(code, KeyCode::Char(_)) && !key.modifiers.contains(KeyModifiers::CONTROL));
+    let shortcut = key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+    if (key.kind != KeyEventKind::Press && !raw_release)
+        || (shortcut && !(raw_release && matches!(code, KeyCode::Enter | KeyCode::Tab)))
+    {
+        return None;
+    }
+    match code {
+        KeyCode::Char(ch) if !ch.is_control() => Some(ch),
+        KeyCode::Tab => Some('\t'),
+        KeyCode::Enter => Some('\n'),
+        _ => None,
+    }
+}
+
+/// Legacy Unix PTYs commonly decode raw LF/HT bytes as `Ctrl-J`/`Tab` Press
+/// events before Crossterm can preserve their C0 provenance.  Keep this bridge
+/// separate from [`rapid_paste_char`]: a standalone Ctrl-J/Tab must retain its
+/// explicit newline/completion meaning and never become paste evidence.
+pub(crate) fn rapid_paste_bridge_char(event: &Event) -> Option<char> {
+    let Event::Key(key) = event else {
+        return None;
+    };
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('j' | 'J'), modifiers) if modifiers == KeyModifiers::CONTROL => Some('\n'),
+        (KeyCode::Tab | KeyCode::Char('\t'), modifiers) if modifiers.is_empty() => Some('\t'),
+        _ => None,
+    }
+}
+
+/// Loss of raw-byte provenance is not enough to prove that a user pasted
+/// multiline text: Ctrl-J/Tab and an isolated key-up can be ordinary semantic
+/// input. Keep the compatibility bridge explicit so the default route never
+/// delays or swallows a real Enter/Tab action.
+pub(crate) fn legacy_unwrapped_bridge_enabled() -> bool {
+    std::env::var("RIDGE_TUI_UNWRAPPED_BRIDGE").is_ok_and(|value| value == "1")
+}
+
+fn rapid_event_char(event: &Event, allow_legacy_bridge: bool) -> Option<char> {
+    rapid_paste_char(event).or_else(|| {
+        allow_legacy_bridge
+            .then(|| rapid_paste_bridge_char(event))
+            .flatten()
+    })
+}
+
+fn has_legacy_unwrapped_bridge(run: &[Event], allow_legacy_bridge: bool) -> bool {
+    if !allow_legacy_bridge {
+        return false;
+    }
+    run.iter().any(|event| {
+        matches!(
+            event,
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('j' | 'J'),
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            }) if *modifiers == KeyModifiers::CONTROL
+        )
+    }) && run.iter().any(|event| {
+        matches!(
+            event,
+            Event::Key(KeyEvent {
+                code: KeyCode::Tab | KeyCode::Char('\t'),
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            }) if modifiers.is_empty()
+        )
+    })
+}
+
+fn logical_rapid_paste_chars(events: &[Event], allow_legacy_bridge: bool) -> Vec<char> {
+    use std::collections::HashSet;
+
+    let mut active = HashSet::new();
+    let mut chars = Vec::new();
+    for event in events {
+        let Event::Key(key) = event else {
+            continue;
+        };
+        let Some(ch) = rapid_event_char(event, allow_legacy_bridge) else {
+            continue;
+        };
+        let id = pressed_key_code(canonical_key_code(key));
+        match key.kind {
+            KeyEventKind::Press => {
+                active.insert(id);
+                chars.push(ch);
+            }
+            KeyEventKind::Release => {
+                // Windows ConPTY commonly sends ordinary characters as a
+                // Press/Release pair but raw LF/TAB only as a dangling
+                // Release.  Keep the latter, discard the former.
+                if !active.remove(&id) {
+                    chars.push(ch);
+                }
+            }
+            KeyEventKind::Repeat => chars.push(ch),
+        }
+    }
+    chars
+}
+
+/// Only raw C0 text bytes prove an unwrapped paste by default. The optional
+/// legacy policy also accepts a *dangling* C0 release pair. Semantic
+/// `Enter`/`Tab` press/release pairs must keep their normal submit/completion
+/// meaning even when the next character arrives immediately after them.
+fn is_raw_paste_boundary(run: &[Event], index: usize, allow_legacy_bridge: bool) -> bool {
+    let Some(Event::Key(key)) = run.get(index) else {
+        return false;
+    };
+    // A literal C0 byte is unambiguous evidence of an unwrapped paste. A few
+    // ConPTY builds translate raw LF/HT into a dangling release instead; only
+    // accept that fallback when this exact logical key has no Press anywhere
+    // in the burst. Paired Press/Release events remain semantic shortcuts.
+    if key.modifiers.is_empty() && matches!(key.code, KeyCode::Char('\r' | '\n' | '\t')) {
+        return true;
+    }
+    if !allow_legacy_bridge
+        || key.kind != KeyEventKind::Release
+        || !matches!(canonical_key_code(key), KeyCode::Enter | KeyCode::Tab)
+    {
+        return false;
+    }
+    !run.iter().any(|event| {
+        let Event::Key(other) = event else {
+            return false;
+        };
+        other.kind == KeyEventKind::Press
+            && canonical_key_code(other) == canonical_key_code(key)
+            && other.modifiers == key.modifiers
+    })
+}
+
+fn has_dangling_enter_and_tab(run: &[Event], allow_legacy_bridge: bool) -> bool {
+    let mut enter = false;
+    let mut tab = false;
+    for index in 0..run.len() {
+        if !is_raw_paste_boundary(run, index, allow_legacy_bridge) {
+            continue;
+        }
+        let Some(Event::Key(key)) = run.get(index) else {
+            continue;
+        };
+        match canonical_key_code(key) {
+            KeyCode::Enter if key.kind == KeyEventKind::Release => enter = true,
+            KeyCode::Tab if key.kind == KeyEventKind::Release => tab = true,
+            _ => {}
+        }
+    }
+    enter && tab
+}
+
+fn has_tab_after_enter(chars: &[char]) -> bool {
+    let Some(enter) = chars.iter().position(|ch| *ch == '\n') else {
+        return false;
+    };
+    chars.iter().skip(enter + 1).any(|ch| *ch == '\t')
+}
+
+/// Coalesce only the multiline-shaped part of a rapid key burst.  A normal
+/// `abc` followed by Enter must retain submit semantics; an unwrapped paste
+/// such as `abc\n\tdef\n` has text after its first Enter, so its body can safely
+/// take the same route as a bracketed paste while the final Enter still
+/// submits it.
+pub(crate) fn coalesce_rapid_key_events(events: Vec<Event>) -> Vec<Event> {
+    coalesce_rapid_key_events_with_policy(events, false)
+}
+
+pub(crate) fn coalesce_rapid_key_events_with_policy(
+    events: Vec<Event>,
+    allow_legacy_bridge: bool,
+) -> Vec<Event> {
+    const THRESHOLD: usize = 3;
+
+    let mut output = Vec::with_capacity(events.len());
+    let mut iter = events.into_iter().peekable();
+    while let Some(first) = iter.next() {
+        if rapid_event_char(&first, allow_legacy_bridge).is_none() {
+            output.push(first);
+            continue;
+        }
+
+        let mut run = vec![first];
+        while iter
+            .peek()
+            .is_some_and(|event| rapid_event_char(event, allow_legacy_bridge).is_some())
+        {
+            // `peek` established that the next event belongs to this run.
+            run.push(iter.next().expect("peeked rapid paste event"));
+        }
+
+        let chars = logical_rapid_paste_chars(&run, allow_legacy_bridge);
+        let first_enter = chars.iter().position(|ch| *ch == '\n');
+        let has_text_after_enter =
+            first_enter.is_some_and(|index| chars.iter().skip(index + 1).any(|ch| *ch != '\n'));
+        let literal_c0_boundary = (0..run.len()).any(|index| {
+            let Some(Event::Key(key)) = run.get(index) else {
+                return false;
+            };
+            key.modifiers.is_empty() && matches!(key.code, KeyCode::Char('\r' | '\n' | '\t'))
+        });
+        // A raw LF followed by ordinary text is still indistinguishable from
+        // a user pressing Enter and typing quickly. Require the additional
+        // raw/legacy Tab shape before treating a run that starts at LF as an
+        // unwrapped paste. Bracketed paste remains the lossless path for all
+        // other multiline text.
+        let multiline_shape =
+            first_enter.is_some_and(|index| index > 0 || has_tab_after_enter(&chars));
+        if run.len() >= THRESHOLD
+            && (literal_c0_boundary
+                || has_dangling_enter_and_tab(&run, allow_legacy_bridge)
+                || has_legacy_unwrapped_bridge(&run, allow_legacy_bridge))
+            && multiline_shape
+            && has_text_after_enter
+        {
+            let trailing_submit = chars.last() == Some(&'\n');
+            let body_len = chars.len().saturating_sub(usize::from(trailing_submit));
+            let body: String = chars.into_iter().take(body_len).collect();
+            if !body.is_empty() {
+                output.push(Event::Paste(body));
+            }
+            if trailing_submit {
+                output.push(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                )));
+            }
+        } else {
+            output.extend(run);
+        }
+    }
+    output
+}
+
+/// Return true only for a literal C0 byte that survived Crossterm decoding.
+/// Decoded `Enter`/`Tab` events are intentionally excluded: they carry no
+/// provenance that would distinguish a shortcut from pasted newlines/tabs.
+pub(crate) fn is_literal_rapid_paste_boundary(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Key(KeyEvent {
+            code: KeyCode::Char('\r' | '\n' | '\t'),
+            modifiers,
+            ..
+        }) if modifiers.is_empty()
+    )
+}
+
+/// A few ConPTY builds erase the raw C0 byte and expose only a key-up for
+/// Enter/Tab. The caller supplies the already-consumed press set so a normal
+/// Press/Release pair cannot be mistaken for this fallback.
+pub(crate) fn is_unmatched_legacy_release(
+    pressed: &std::collections::HashSet<KeyCode>,
+    event: &Event,
+) -> bool {
+    let Event::Key(key) = event else {
+        return false;
+    };
+    if key.kind != KeyEventKind::Release {
+        return false;
+    }
+    let code = canonical_key_code(key);
+    if !matches!(code, KeyCode::Enter | KeyCode::Tab) {
+        return false;
+    }
+    !pressed.contains(&pressed_key_code(code))
 }
 
 /// Ctrl+Space has a useful press/release pair on Windows and on terminals
@@ -143,6 +466,41 @@ fn is_legacy_function_release(code: KeyCode) -> bool {
     )
 }
 
+fn pressed_key_code(code: KeyCode) -> KeyCode {
+    match code {
+        // Some Windows/IME stacks report the key-down character while Shift
+        // is held and the key-up character after Shift has been released.
+        // Case-folding the bookkeeping identity prevents that release from
+        // becoming a second literal character, without changing the event
+        // delivered to the editor.
+        KeyCode::Char(ch) => KeyCode::Char(ch.to_ascii_lowercase()),
+        other => other,
+    }
+}
+
+fn remove_pressed_key(pressed: &mut std::collections::HashSet<KeyCode>, key: &KeyEvent) -> bool {
+    if pressed.remove(&pressed_key_code(key.code)) {
+        return true;
+    }
+    // A terminal may release the modifier before emitting the key-up record.
+    // The decoded key code then changes (Ctrl/Alt-Tab -> `i`, Shift-Tab ->
+    // `BackTab`, Ctrl-H -> Backspace). Try only those physical aliases so the
+    // release cannot leak as a fresh Tab, `h`, or Backspace action.
+    let aliases = match canonical_key_code(key) {
+        KeyCode::Tab | KeyCode::BackTab => [
+            Some(KeyCode::Char('i')),
+            Some(KeyCode::BackTab),
+            Some(KeyCode::Tab),
+        ],
+        KeyCode::Char('h' | 'H') => [Some(KeyCode::Backspace), None, None],
+        _ => [None, None, None],
+    };
+    aliases
+        .into_iter()
+        .flatten()
+        .any(|alias| pressed.remove(&alias))
+}
+
 pub(crate) fn is_momentary_hold_key(key: &KeyEvent) -> bool {
     let code = canonical_key_code(key);
     (key.modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char(' '))
@@ -161,13 +519,13 @@ pub(crate) fn decide_key(
     let ev = normalize_key_event(ev);
     let process = match ev.kind {
         KeyEventKind::Press | KeyEventKind::Repeat => {
-            pressed.insert(ev.code);
+            pressed.insert(pressed_key_code(ev.code));
             true
         }
         KeyEventKind::Release => {
             if is_momentary_hold_key(&ev) {
-                pressed.remove(&ev.code)
-            } else if pressed.remove(&ev.code) {
+                remove_pressed_key(pressed, &ev)
+            } else if remove_pressed_key(pressed, &ev) {
                 false // 正常松键:对应的 Press 已处理过
             } else {
                 matches!(ev.code, KeyCode::Char(_))
@@ -247,17 +605,20 @@ pub(crate) fn input_action(key: &KeyEvent, busy: bool, popup_open: bool) -> Inpu
     {
         return InputAction::Interrupt;
     }
-    if popup_open {
-        return popup_action(key, code);
-    }
-    if let Some(action) = global_attention_action(key) {
-        return action;
-    }
+    // Busy Ctrl+Enter is a global front-queue action.  Resolve it before the
+    // slash-command popup so typing `/front` cannot turn the same physical
+    // shortcut into PopupSubmit.
     if busy && key.modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Enter {
         if key.modifiers.contains(KeyModifiers::SHIFT) {
             return InputAction::Steer;
         }
         return InputAction::PushNow;
+    }
+    if popup_open {
+        return popup_action(key, code);
+    }
+    if let Some(action) = global_attention_action(key) {
+        return action;
     }
     normal_input_action(key, code, busy)
 }
@@ -273,7 +634,7 @@ fn popup_action(key: &KeyEvent, code: KeyCode) -> InputAction {
     match code {
         KeyCode::Tab | KeyCode::Right => InputAction::PopupAccept,
         KeyCode::Down => InputAction::PopupNext,
-        KeyCode::Up => InputAction::PopupPrev,
+        KeyCode::BackTab | KeyCode::Up => InputAction::PopupPrev,
         KeyCode::Enter => InputAction::PopupSubmit,
         KeyCode::Char(c) => InputAction::Insert(c),
         KeyCode::Backspace => InputAction::Backspace,
@@ -315,6 +676,16 @@ fn normal_input_action(key: &KeyEvent, code: KeyCode, busy: bool) -> InputAction
         KeyCode::Enter if busy => InputAction::Queue,
         KeyCode::Enter => InputAction::Submit,
         KeyCode::Tab => InputAction::PopupOpen,
+        // Unrecognized control/Alt/Super characters are shortcuts or terminal
+        // protocol bytes, never literal prompt text. Letting them fall
+        // through inserts stray letters/spaces (notably Ctrl+Space).
+        KeyCode::Char(_)
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
+        {
+            InputAction::Ignore
+        }
         KeyCode::Char(c) => InputAction::Insert(c),
         KeyCode::Backspace => InputAction::Backspace,
         KeyCode::Delete => InputAction::Delete,
@@ -366,12 +737,13 @@ pub(crate) fn live_history_toggle_action(
     popup_open: bool,
     has_history: bool,
 ) -> bool {
+    let code = canonical_key_code(key);
     key.kind == KeyEventKind::Press
         && !popup_open
         && has_history
         && (key.modifiers.contains(KeyModifiers::CONTROL)
             || key.modifiers.contains(KeyModifiers::ALT))
-        && matches!(key.code, KeyCode::Char('i' | 'I'))
+        && matches!(code, KeyCode::Char('i' | 'I'))
 }
 
 /// Live 工具焦点快捷键:仅在无浮窗且确有工具块时拦截 Alt+↑/↓,避免破坏输入编辑回退。
@@ -779,6 +1151,7 @@ pub(crate) const SLASH_COMMANDS: &[&str] = &[
     "/compact",
     "/config",
     "/cost",
+    "/doctor",
     "/exit",
     "/effort",
     "/find",

@@ -41,6 +41,22 @@ fn enter_press() -> Event {
     Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
 }
 
+fn raw_lf_release() -> Event {
+    Event::Key(KeyEvent::new_with_kind(
+        KeyCode::Char('\n'),
+        KeyModifiers::NONE,
+        KeyEventKind::Release,
+    ))
+}
+
+fn raw_tab_release() -> Event {
+    Event::Key(KeyEvent::new_with_kind(
+        KeyCode::Char('\t'),
+        KeyModifiers::NONE,
+        KeyEventKind::Release,
+    ))
+}
+
 fn commit_texts(ui: &super::Ui) -> Vec<&str> {
     ui.commits
         .iter()
@@ -106,6 +122,7 @@ impl IdleHarness {
 
     async fn send(&mut self, event: Event) {
         let last_task = self.last_task.clone();
+        let mut csi_pending_since = None;
         let mut context = KeyEventContext {
             ui: &mut self.ui,
             meta: &mut self.meta,
@@ -121,6 +138,7 @@ impl IdleHarness {
             momentary_hold: &mut self.momentary_hold,
             last_ctrl_c: &mut self.last_ctrl_c,
             pressed: &mut self.pressed,
+            csi_pending_since: &mut csi_pending_since,
             keylog_path: &self.keylog_path,
             guard: None,
         };
@@ -182,6 +200,22 @@ async fn idle_enter_press_submits_prompt_through_key_handler() {
     assert_eq!(harness.pending_submit.as_deref(), Some("typed prompt"));
     assert!(!harness.consume_submit().await);
     assert_eq!(harness.last_task.as_deref(), Some("typed prompt"));
+}
+
+#[tokio::test]
+async fn raw_lf_release_submits_prompt_through_key_handler() {
+    let mut harness = IdleHarness::new();
+    harness.type_text("raw lf").await;
+    harness.send(raw_lf_release()).await;
+    assert_eq!(harness.pending_submit.as_deref(), Some("raw lf"));
+}
+
+#[tokio::test]
+async fn raw_tab_release_routes_without_inserting_tab() {
+    let mut harness = IdleHarness::new();
+    harness.type_text("plain").await;
+    harness.send(raw_tab_release()).await;
+    assert_eq!(harness.ui.input.buffer, "plain");
 }
 
 #[tokio::test]
@@ -252,6 +286,105 @@ fn dangling_enter_release_becomes_press() {
     );
 }
 
+#[test]
+fn physical_input_boundary_matrix_dedups_releases() {
+    let cases = [
+        ("Enter", KeyCode::Enter, KeyModifiers::NONE, KeyCode::Enter),
+        (
+            "CR",
+            KeyCode::Char('\r'),
+            KeyModifiers::NONE,
+            KeyCode::Enter,
+        ),
+        (
+            "LF",
+            KeyCode::Char('\n'),
+            KeyModifiers::NONE,
+            KeyCode::Enter,
+        ),
+        (
+            "Ctrl-M",
+            KeyCode::Char('m'),
+            KeyModifiers::CONTROL,
+            KeyCode::Enter,
+        ),
+        (
+            "raw Tab",
+            KeyCode::Char('\t'),
+            KeyModifiers::NONE,
+            KeyCode::Tab,
+        ),
+        ("Tab", KeyCode::Tab, KeyModifiers::NONE, KeyCode::Tab),
+        (
+            "Space",
+            KeyCode::Char(' '),
+            KeyModifiers::NONE,
+            KeyCode::Char(' '),
+        ),
+        (
+            "Backspace",
+            KeyCode::Char('\x08'),
+            KeyModifiers::NONE,
+            KeyCode::Backspace,
+        ),
+        (
+            "Ctrl-H Backspace",
+            KeyCode::Char('h'),
+            KeyModifiers::CONTROL,
+            KeyCode::Backspace,
+        ),
+    ];
+
+    for (label, code, modifiers, expected) in cases {
+        let mut pressed = std::collections::HashSet::new();
+        let down = super::decide_key(
+            &mut pressed,
+            &KeyEvent::new_with_kind(code, modifiers, KeyEventKind::Press),
+        )
+        .unwrap_or_else(|| panic!("{label} Press dropped"));
+        assert_eq!(down.code, expected, "{label} Press normalization");
+        assert_eq!(down.kind, KeyEventKind::Press);
+        assert!(
+            super::decide_key(
+                &mut pressed,
+                &KeyEvent::new_with_kind(code, modifiers, KeyEventKind::Release),
+            )
+            .is_none(),
+            "{label} Release duplicated semantic event"
+        );
+
+        let mut no_press = std::collections::HashSet::new();
+        let dangling = super::decide_key(
+            &mut no_press,
+            &KeyEvent::new_with_kind(code, modifiers, KeyEventKind::Release),
+        )
+        .unwrap_or_else(|| panic!("{label} dangling Release dropped"));
+        assert_eq!(dangling.code, expected, "{label} dangling normalization");
+        assert_eq!(dangling.kind, KeyEventKind::Press);
+    }
+}
+
+#[test]
+fn raw_tab_and_ctrl_h_route_to_semantic_actions() {
+    for (code, expected) in [
+        (KeyCode::Char('\t'), super::InputAction::PopupOpen),
+        (KeyCode::Char('\x08'), super::InputAction::Backspace),
+        (KeyCode::Char('h'), super::InputAction::Backspace),
+    ] {
+        let modifiers = match code {
+            KeyCode::Char('h') => KeyModifiers::CONTROL,
+            _ => KeyModifiers::NONE,
+        };
+        let mut pressed = std::collections::HashSet::new();
+        let event = super::decide_key(
+            &mut pressed,
+            &KeyEvent::new_with_kind(code, modifiers, KeyEventKind::Press),
+        )
+        .expect("raw control spelling should produce one semantic event");
+        assert_eq!(super::input_action(&event, false, false), expected);
+    }
+}
+
 #[tokio::test]
 async fn empty_idle_enter_release_does_not_submit() {
     let mut harness = IdleHarness::new();
@@ -283,39 +416,37 @@ async fn idle_esc_bracket_a_is_history_nav_not_literal() {
 }
 
 #[tokio::test]
-async fn leftover_bracket_a_in_buffer_navigates() {
+async fn bracket_a_in_buffer_stays_literal() {
     let mut harness = IdleHarness::new();
     harness.type_text("hello[").await;
     harness.send(press_char('A')).await;
-    assert!(
-        !harness.ui.input.buffer.contains("[A"),
-        "leftover CSI inserted: {}",
-        harness.ui.input.buffer
-    );
-    assert_eq!(harness.ui.input.buffer, "hello");
+    assert_eq!(harness.ui.input.buffer, "hello[A");
 }
 
 #[tokio::test]
-async fn leftover_csi_tails_navigate_through_key_handler() {
-    for (typed, incoming, forbidden) in [
-        ("keep[", 'A', "[A"),
-        ("keep[", 'B', "[B"),
-        ("keep[", 'C', "[C"),
-        ("keep[", 'D', "[D"),
-        ("keep[", 'H', "[H"),
-        ("keep[", 'F', "[F"),
-        ("keep[5", '~', "[5~"),
-        ("keep[6", '~', "[6~"),
+async fn explicit_csi_tails_navigate_through_key_handler() {
+    for (tail, incoming, forbidden) in [
+        ("", 'A', "[A"),
+        ("", 'B', "[B"),
+        ("", 'C', "[C"),
+        ("", 'D', "[D"),
+        ("", 'H', "[H"),
+        ("", 'F', "[F"),
+        ("5", '~', "[5~"),
+        ("6", '~', "[6~"),
     ] {
         let mut harness = IdleHarness::new();
-        harness.type_text(typed).await;
+        harness.type_text("keep").await;
+        harness.send(esc()).await;
+        harness.send(press_char('[')).await;
+        harness.type_text(tail).await;
         harness.send(press_char(incoming)).await;
         assert!(
             !harness.ui.input.buffer.contains(forbidden),
-            "typed {typed:?}+{incoming:?} left {forbidden:?} in {}",
-            harness.ui.input.buffer
+            "CSI tail left {forbidden:?} in {}",
+            harness.ui.input.buffer,
         );
-        assert_eq!(harness.ui.input.buffer, "keep", "{typed:?}+{incoming:?}");
+        assert_eq!(harness.ui.input.buffer, "keep", "{tail:?}+{incoming:?}");
     }
 }
 
@@ -394,12 +525,13 @@ fn sample_panel() -> Panel {
 }
 
 #[tokio::test]
-async fn panel_leftover_csi_arrows_select_instead_of_filtering() {
+async fn panel_canonical_arrows_select_instead_of_filtering() {
     let mut harness = IdleHarness::new();
     harness.ui.panel = Some(sample_panel());
     assert_eq!(harness.ui.panel.as_ref().unwrap().sel, 0);
-    harness.send(press_char('[')).await;
-    harness.send(press_char('B')).await;
+    harness
+        .send(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)))
+        .await;
     let panel = harness.ui.panel.as_ref().expect("panel stays open");
     assert!(
         !panel.query.contains("[B") && !panel.query.contains('['),
@@ -407,8 +539,9 @@ async fn panel_leftover_csi_arrows_select_instead_of_filtering() {
         panel.query
     );
     assert_eq!(panel.sel, 1);
-    harness.send(press_char('[')).await;
-    harness.send(press_char('B')).await;
+    harness
+        .send(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)))
+        .await;
     let panel = harness.ui.panel.as_ref().expect("panel stays open");
     assert!(
         panel.query.is_empty(),
@@ -416,8 +549,9 @@ async fn panel_leftover_csi_arrows_select_instead_of_filtering() {
         panel.query
     );
     assert_eq!(panel.sel, 2, "second Down must advance again");
-    harness.send(press_char('[')).await;
-    harness.send(press_char('A')).await;
+    harness
+        .send(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)))
+        .await;
     let panel = harness.ui.panel.as_ref().expect("panel stays open");
     assert!(
         !panel.query.contains("[A"),
@@ -458,7 +592,7 @@ async fn popup_right_accepts_selected_completion() {
 }
 
 #[tokio::test]
-async fn popup_leftover_csi_down_moves_selection() {
+async fn popup_canonical_down_moves_selection() {
     let mut harness = IdleHarness::new();
     harness.type_text("/").await;
     let start = harness
@@ -467,8 +601,9 @@ async fn popup_leftover_csi_down_moves_selection() {
         .as_ref()
         .map(|popup| popup.selected)
         .expect("slash popup");
-    harness.send(press_char('[')).await;
-    harness.send(press_char('B')).await;
+    harness
+        .send(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)))
+        .await;
     assert!(
         !harness.ui.input.buffer.contains("[B"),
         "CSI leftover in input: {}",

@@ -1,3 +1,4 @@
+use crate::dispatch_budget::MAX_DISPATCH_ATTEMPTS;
 use langgraph::{GraphState, RunConfig};
 use provider::{Message, ToolCall, Usage};
 use serde::de::{self, Deserializer, Visitor};
@@ -76,6 +77,11 @@ pub struct AgentState {
         deserialize_with = "deserialize_dispatch_batches"
     )]
     pub dispatch_batches_used: usize,
+    /// Number of provider attempts consumed by dispatches in this agent run.
+    /// The graph restores this from checkpoints so retries/fallbacks cannot
+    /// reset the cumulative per-run ceiling.
+    #[serde(default, deserialize_with = "deserialize_dispatch_attempts")]
+    pub dispatch_attempts_used: usize,
     /// Session fact: the optional CodeGraph tool was unavailable, so the next
     /// reasoning turn must use the built-in bounded search/read tools.
     #[serde(default)]
@@ -180,6 +186,13 @@ where
     deserializer.deserialize_any(DispatchBatchVisitor)
 }
 
+fn deserialize_dispatch_attempts<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    usize::deserialize(deserializer).map(|value| value.min(MAX_DISPATCH_ATTEMPTS))
+}
+
 /// 节点产出的增量更新(delta)。`Batch` 让一个节点一次改多个字段。
 #[derive(Debug)]
 pub enum Patch {
@@ -198,6 +211,7 @@ pub enum Patch {
     SetExploreHandoff(bool),
     SetExploreActionUsed(bool),
     SetDispatchBatches(usize),
+    SetDispatchAttempts(usize),
     SetCodegraphUnavailable(bool),
     PushHistory(Message),
     SetTodos(Vec<Todo>),
@@ -242,6 +256,9 @@ impl GraphState for AgentState {
             Patch::SetExploreHandoff(value) => self.explore_handoff = value,
             Patch::SetExploreActionUsed(value) => self.explore_action_used = value,
             Patch::SetDispatchBatches(n) => self.dispatch_batches_used = n,
+            Patch::SetDispatchAttempts(n) => {
+                self.dispatch_attempts_used = n.min(MAX_DISPATCH_ATTEMPTS)
+            }
             Patch::SetCodegraphUnavailable(value) => self.codegraph_unavailable = value,
             Patch::PushHistory(m) => self.history.push(m),
             Patch::SetTodos(t) => self.todos = t,
@@ -331,6 +348,21 @@ mod tests {
 
         let restored: AgentState = serde_json::from_value(value).unwrap();
         assert_eq!(restored.dispatch_wave_count(), 1);
+    }
+
+    #[test]
+    fn dispatch_attempt_checkpoint_defaults_and_reducer_stays_bounded() {
+        let mut value = serde_json::to_value(AgentState::new("resume")).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("dispatch_attempts_used");
+        let restored: AgentState = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.dispatch_attempts_used, 0);
+
+        let mut state = AgentState::new("run");
+        state.apply(Patch::SetDispatchAttempts(usize::MAX));
+        assert_eq!(state.dispatch_attempts_used, MAX_DISPATCH_ATTEMPTS);
     }
 
     /// 只读工具(read_file / search / web_search / fetch_url)不走权限门;有副作用的走。

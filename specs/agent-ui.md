@@ -1,0 +1,42 @@
+---
+id: L3-AGENT-UI-001
+level: L3
+parent: L2-AGENT-001
+title: TUI state, panels, rendering, and presentation
+status: VALID
+code_targets:
+  - crates/agent/src/tui/app.rs
+  - crates/agent/src/tui/clipboard.rs
+  - crates/agent/src/tui/command.rs
+  - crates/agent/src/tui/draw.rs
+  - crates/agent/src/tui/eventfmt.rs
+  - crates/agent/src/tui/panel.rs
+  - crates/agent/src/tui/presentation.rs
+  - crates/agent/src/tui/render.rs
+  - crates/agent/src/tui/status.rs
+  - crates/agent/src/tui/transcript.rs
+  - crates/agent/src/tui/turn_view.rs
+  - crates/agent/src/main.rs
+  - scripts/windows-pty-e2e.ps1
+test_targets:
+  - crates/agent/src/tui/tests.rs
+  - crates/agent/src/tui/idle_submit_tests.rs
+  - crates/agent/src/tui/turn_chrome_tests.rs
+  - crates/agent/src/main.rs
+  - scripts/windows-pty-e2e.ps1
+public_interface:
+  - agent::tui::run
+  - agent::tui::Panel
+  - ridgecode TUI panel, transcript, and status rendering
+known_gap:
+  - Reusable frame-sequence/golden assertions remain outside the workspace gate; combined Completion+Resize evidence is covered by the hermetic PTY fixture.
+  - Snapshot serialization/write time, snapshot-byte percentiles, and end-to-end event-loop latency do not yet have hard gates.
+---
+
+# TUI state, panels, rendering, and presentation
+
+The hermetic `CompletionFixture + ResizeProbe` path covers combined evidence for the real `read_file -> edit_file -> final` sequence, folded tool output, answer table/highlight rendering, and runtime viewport changes. When `RIDGE_TUI_SNAPSHOT` is enabled, draw telemetry retains at most 4096 exact render samples and reports nearest-rank p95/max. The Windows ConPTY gate defaults to 16 ms p95 and 50 ms max, and fails on missing or truncated samples. This gate measures draw rendering only; reusable golden sequences, snapshot serialization/write and byte percentiles, and end-to-end event-loop latency remain open.
+
+TTY 交互由 app/panel/command 维护状态；draw/render/presentation/status 将其投影
+为稳定视口。剪贴板、事件格式化与 transcript/turn view 属同一显示边界，测试
+覆盖语义动作与布局纯函数；跨终端像素级验证另行由 PTY/截图闸门承担。

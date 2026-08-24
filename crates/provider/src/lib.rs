@@ -238,6 +238,34 @@ pub enum StreamChunk {
     Reasoning(String),
 }
 
+/// One deterministic streaming fragment for integration harnesses.
+///
+/// A gate lets a test pause delivery at an exact chunk boundary, matching the
+/// races of a real SSE connection without opening a socket or sleeping.
+pub struct ScriptedStreamChunk {
+    pub gate: Option<tokio::sync::oneshot::Receiver<()>>,
+    pub chunk: StreamChunk,
+}
+
+impl ScriptedStreamChunk {
+    pub fn immediate(chunk: StreamChunk) -> Self {
+        Self { gate: None, chunk }
+    }
+
+    pub fn gated(chunk: StreamChunk, gate: tokio::sync::oneshot::Receiver<()>) -> Self {
+        Self {
+            gate: Some(gate),
+            chunk,
+        }
+    }
+}
+
+/// Ordered stream plus the normalized completion returned after its last chunk.
+pub struct ScriptedStream {
+    pub chunks: Vec<ScriptedStreamChunk>,
+    pub completion: Completion,
+}
+
 /// 一次补全请求:对话历史 + 可用工具。
 pub const REASONING_EFFORTS: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
 pub const DEFAULT_REASONING_EFFORT: &str = "medium";
@@ -253,6 +281,42 @@ pub fn normalize_reasoning_effort(value: &str) -> Option<&'static str> {
 pub struct CompletionRequest {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolSpec>,
+}
+
+/// Bounded, body-free request metadata used by deterministic harnesses.
+///
+/// Keeping only structural counts is intentional: a provider request may
+/// contain credentials, cookies, or user source.  The scripted provider can
+/// therefore be inspected by tests without retaining or printing that data.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RequestRecord {
+    pub message_count: usize,
+    pub tool_count: usize,
+    pub content_bytes: usize,
+}
+
+/// Compatibility aliases for callers that prefer a summary-oriented name.
+pub type RecordedRequest = RequestRecord;
+pub type RequestSummary = RequestRecord;
+
+fn summarize_request(req: &CompletionRequest) -> RequestRecord {
+    const MAX_CONTENT_BYTES: usize = 64 * 1024;
+    let content_bytes = req.messages.iter().fold(0usize, |total, message| {
+        total
+            .saturating_add(message.content.len())
+            .min(MAX_CONTENT_BYTES)
+    });
+    let tool_count = req.tools.len().saturating_add(
+        req.messages
+            .iter()
+            .map(|message| message.tool_calls.len())
+            .sum::<usize>(),
+    );
+    RequestRecord {
+        message_count: req.messages.len(),
+        tool_count,
+        content_bytes,
+    }
 }
 
 /// 从正文**剥出** inline 思考,返回 `(净回答, 思考)`。覆盖思考模型三种漏法:
@@ -413,16 +477,22 @@ impl LlmProvider for SwapProvider {
 /// 离线脚本 provider:按顺序吐预设的 [`Completion`],零联网、确定性,用于 demo / 测试。
 pub struct ScriptedProvider {
     steps: std::sync::Mutex<std::collections::VecDeque<Completion>>,
+    streams: std::sync::Mutex<std::collections::VecDeque<ScriptedStream>>,
     delay: Option<std::time::Duration>,
     post_answer_delay: Option<std::time::Duration>,
+    requests: std::sync::Mutex<Vec<RequestRecord>>,
+    record_requests: bool,
 }
 
 impl ScriptedProvider {
     pub fn new(steps: Vec<Completion>) -> Self {
         Self {
             steps: std::sync::Mutex::new(steps.into()),
+            streams: std::sync::Mutex::new(std::collections::VecDeque::new()),
             delay: None,
             post_answer_delay: None,
+            requests: std::sync::Mutex::new(Vec::new()),
+            record_requests: true,
         }
     }
 
@@ -441,6 +511,59 @@ impl ScriptedProvider {
         self
     }
 
+    /// Supply exact, ordered streaming scripts for deterministic race tests.
+    /// Calls consume one script each; ordinary completion steps remain the
+    /// fallback when this queue is empty.
+    pub fn with_streams(mut self, streams: Vec<ScriptedStream>) -> Self {
+        self.streams = std::sync::Mutex::new(streams.into());
+        self
+    }
+
+    /// Enable or disable bounded, body-free request recording.
+    ///
+    /// Recording is enabled by default so deterministic fixtures can assert
+    /// request shape.  Only [`RequestRecord`] metadata is retained.
+    pub fn with_request_recording(mut self, enabled: bool) -> Self {
+        self.record_requests = enabled;
+        self
+    }
+
+    /// Return a snapshot of the recorded request metadata.
+    pub fn recorded_requests(&self) -> Vec<RequestRecord> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    /// Alias for [`ScriptedProvider::recorded_requests`].
+    pub fn request_records(&self) -> Vec<RequestRecord> {
+        self.recorded_requests()
+    }
+
+    /// Alias for [`ScriptedProvider::recorded_requests`].
+    pub fn requests(&self) -> Vec<RequestRecord> {
+        self.recorded_requests()
+    }
+
+    /// Number of retained request summaries.
+    pub fn request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+
+    /// Clear retained request summaries without touching the scripted steps.
+    pub fn clear_recorded_requests(&self) {
+        self.requests.lock().unwrap().clear();
+    }
+
+    fn record_request(&self, req: &CompletionRequest) {
+        const MAX_RECORDS: usize = 256;
+        if !self.record_requests {
+            return;
+        }
+        let mut requests = self.requests.lock().unwrap();
+        if requests.len() < MAX_RECORDS {
+            requests.push(summarize_request(req));
+        }
+    }
+
     fn next_step(&self) -> Completion {
         self.steps.lock().unwrap().pop_front().unwrap_or_default()
     }
@@ -448,7 +571,8 @@ impl ScriptedProvider {
 
 #[async_trait::async_trait]
 impl LlmProvider for ScriptedProvider {
-    async fn complete(&self, _req: &CompletionRequest) -> Result<Completion, ProviderError> {
+    async fn complete(&self, req: &CompletionRequest) -> Result<Completion, ProviderError> {
+        self.record_request(req);
         if let Some(delay) = self.delay {
             tokio::time::sleep(delay).await;
         }
@@ -457,9 +581,25 @@ impl LlmProvider for ScriptedProvider {
 
     async fn complete_streaming(
         &self,
-        _req: &CompletionRequest,
+        req: &CompletionRequest,
         on_token: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<Completion, ProviderError> {
+        self.record_request(req);
+        let scripted_stream = self.streams.lock().unwrap().pop_front();
+        if let Some(scripted_stream) = scripted_stream {
+            for mut scripted_chunk in scripted_stream.chunks {
+                if let Some(gate) = scripted_chunk.gate.take() {
+                    gate.await.map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "scripted stream gate closed",
+                        )
+                    })?;
+                }
+                on_token(scripted_chunk.chunk);
+            }
+            return Ok(scripted_stream.completion);
+        }
         let completion = self.next_step();
         if let Some(delay) = self.delay {
             if !completion.reasoning.is_empty() {

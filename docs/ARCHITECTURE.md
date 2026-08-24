@@ -15,7 +15,7 @@ crates/agent       装配层:ReAct 图(reason→act→verify)+ TUI/headless + �
 crates/eval        离线评测 harness(ScriptedProvider 场景:pass/stuck 等)
 ```
 
-依赖统一在根 `Cargo.toml [workspace.dependencies]`:tokio / thiserror / anyhow / serde(_json) / async-trait / reqwest(rustls-tls,无 openssl 系统依赖)/ tracing / ratatui 0.29 / crossterm 0.28。CI 门禁:`cargo test --workspace` + `clippy -D warnings` + `fmt --check` 全绿。
+依赖统一在根 `Cargo.toml [workspace.dependencies]`:tokio / thiserror / anyhow / serde(_json) / async-trait / reqwest(rustls-tls,无 openssl 系统依赖)/ tracing / ratatui 0.29 / crossterm 0.28（Unix 启用 `use-dev-tty` raw descriptor poll/select）。CI 门禁:`cargo test --workspace` + `clippy -D warnings` + `fmt --check` 全绿。
 
 ## 1. langgraph:图引擎
 

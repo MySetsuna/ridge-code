@@ -173,19 +173,102 @@ pub(crate) fn queue_preview(text: &str, width: u16) -> String {
     clip_display_cells(cleaned, width.max(1))
 }
 
-/// 粘贴净化(iter-24):CRLF/CR 归一 LF,滤除其余控制字符(留 \n \t),防转义序列注入输入框。
+fn skip_string_control(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while let Some(c) = chars.next() {
+        if matches!(c, '\u{7}' | '\u{9c}') {
+            break;
+        }
+        if c == '\u{1b}' && chars.next_if_eq(&'\\').is_some() {
+            break;
+        }
+    }
+}
+
+/// Windows hosts can strip the leading ESC from a raw bracketed-paste CSI.
+/// Recognize the remaining parameterized `[31m` shape without treating plain
+/// prose such as `[abc` as control text.
+fn skip_bare_csi(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+    let mut candidate = chars.clone();
+    let mut saw_parameter = false;
+    while let Some(&c) = candidate.peek() {
+        if c.is_ascii_digit() {
+            saw_parameter = true;
+            candidate.next();
+        } else if matches!(c, ';' | ':' | '?' | '>' | '<' | '=') {
+            candidate.next();
+        } else {
+            break;
+        }
+    }
+    if !saw_parameter {
+        return false;
+    }
+    let Some(final_byte) = candidate.next() else {
+        return false;
+    };
+    if !('@'..='~').contains(&final_byte) {
+        return false;
+    }
+    *chars = candidate;
+    true
+}
+
+/// Same fallback for an OSC/DCS-like sequence whose leading ESC was lost.
+/// Only consume it when a real BEL/ST terminator exists.
+fn skip_bare_string_control(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+    let mut candidate = chars.clone();
+    while let Some(c) = candidate.next() {
+        if matches!(c, '\u{7}' | '\u{9c}')
+            || (c == '\u{1b}' && candidate.next_if_eq(&'\\').is_some())
+        {
+            *chars = candidate;
+            return true;
+        }
+    }
+    false
+}
+
+/// 粘贴净化(iter-24):CRLF/CR 归一 LF,滤除控制字符(留 \n \t),完整丢弃
+/// CSI/OSC 等转义序列，防止终端控制码残尾变成可见输入。
 pub(crate) fn sanitize_paste(s: &str) -> String {
     let stripped = s
         .replace("\u{1b}[200~", "")
         .replace("\u{1b}[201~", "")
         .replace("[200~", "")
         .replace("[201~", "");
-    stripped
-        .replace("\r\n", "\n")
-        .chars()
-        .map(|c| if c == '\r' { '\n' } else { c })
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
-        .collect()
+    let normalized = stripped.replace("\r\n", "\n").replace('\r', "\n");
+    let mut output = String::with_capacity(normalized.len());
+    let mut chars = normalized.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    skip_csi(&mut chars);
+                }
+                Some(']' | 'P' | '^' | '_') => {
+                    chars.next();
+                    skip_string_control(&mut chars);
+                }
+                _ => {}
+            },
+            '\u{9b}' => skip_csi(&mut chars),
+            '\u{9d}' | '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => skip_string_control(&mut chars),
+            '[' => {
+                if !skip_bare_csi(&mut chars) {
+                    output.push('[');
+                }
+            }
+            ']' | 'P' | '^' | '_' => {
+                if !skip_bare_string_control(&mut chars) {
+                    output.push(c);
+                }
+            }
+            c if !c.is_control() || matches!(c, '\n' | '\t') => output.push(c),
+            _ => {}
+        }
+    }
+    output
 }
 
 /// Display sanitization: strip ANSI CSI/OSC and other control characters so

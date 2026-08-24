@@ -1,0 +1,10 @@
+{
+  "scripts": {
+    "spectree:export": "node scripts/spectree-export.mjs",
+    "spectree:check": "node scripts/spectree-check.mjs",
+    "eval:soak": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bounded-soak.ps1"
+  },
+  "dependencies": {
+    "@jackjiang18/spectree": "^0.1.0"
+  }
+}

@@ -4,7 +4,7 @@ members = ["crates/langgraph", "crates/agent", "crates/tools", "crates/provider"
 
 [workspace.package]
 edition = "2021"
-version = "0.5.22"
+version = "0.5.23"
 license = "MIT"
 
 # 依赖版本统一在此管理,子 crate 用 `dep.workspace = true`。
@@ -24,7 +24,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # portable append-lines implementation so `insert_before` reaches native
 # Windows Terminal scrollback.
 ratatui = { version = "0.29", features = ["unstable-rendered-line-info", "unstable-widget-ref"] }
-crossterm = "0.28"
+# Prefer Crossterm's raw `/dev/tty` descriptor poller on Unix; it avoids
+# mio/stdin bridge buffering in SSH, Jupyter, and IDE terminal hosts while
+# retaining the native Windows backend.
+crossterm = { version = "0.28", features = ["use-dev-tty"] }
 arboard = { version = "3.6.1", default-features = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 # 终端单元格宽度(wcwidth 口径):CJK/emoji 显示占 2 格,光标/折行按此精确落点。

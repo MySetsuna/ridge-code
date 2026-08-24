@@ -2,10 +2,14 @@ use crate::communication::{
     in_process_exchange, AgentEnvelope, AgentError, AgentHello, AgentMessage, AgentProtocolError,
     AgentResponse, AgentRole, AgentStatus, AgentTask,
 };
+use crate::dispatch_budget::{
+    default_dispatch_budget, DispatchBudget, DispatchBudgetError, DispatchBudgetRejection,
+};
 use crate::exec::{builtin_tool_specs, execute_tool_call};
 use crate::route::{choose_route, ModelProfile, RouteDecision, RouteRequest, RouteRole};
 use provider::{CompletionRequest, LlmProvider, Message, Role, ToolCall, ToolSpec};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,32 +22,369 @@ pub struct Skill {
     pub body: String,
 }
 
-/// 扫描一个技能目录(`<dir>/<skill>/SKILL.md`),解析成 [`Skill`] 列表。目录不存在 → 空。
-pub fn load_skills(dir: impl AsRef<std::path::Path>) -> Vec<Skill> {
-    let mut skills = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return skills;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path().join("SKILL.md");
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Some(s) = parse_skill(&text) {
-                skills.push(s);
-            }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkillScope {
+    pub label: String,
+    pub dir: PathBuf,
+}
+
+impl SkillScope {
+    pub fn new(label: impl Into<String>, dir: impl Into<PathBuf>) -> Self {
+        Self {
+            label: label.into(),
+            dir: dir.into(),
         }
     }
-    skills
+}
+
+/// Provenance only; diagnostics never include skill body text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkillSource {
+    pub label: String,
+    pub path: Option<PathBuf>,
+}
+
+impl SkillSource {
+    pub fn summary(&self) -> String {
+        match &self.path {
+            Some(path) => format!("{}:{}", self.label, path.display()),
+            None => self.label.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SkillCandidate {
+    pub skill: Skill,
+    pub source: SkillSource,
+    pub selected: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkillCollision {
+    pub name: String,
+    pub winner: SkillSource,
+    pub shadowed: Vec<SkillSource>,
+}
+
+/// Bounded result of multi-scope discovery. Only `skills` enter prompts;
+/// shadowed candidates exist solely for qualified slash-command aliases.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SkillCatalog {
+    pub skills: Vec<Skill>,
+    pub candidates: Vec<SkillCandidate>,
+    pub collisions: Vec<SkillCollision>,
+}
+
+impl SkillCatalog {
+    pub fn selected_source(&self, name: &str) -> Option<&SkillSource> {
+        self.candidates
+            .iter()
+            .find(|candidate| candidate.selected && candidate.skill.name == name)
+            .map(|candidate| &candidate.source)
+    }
+}
+
+const MAX_SKILLS: usize = 256;
+const MAX_SKILL_BYTES: u64 = 128 * 1024;
+const MAX_COMMAND_FILES: usize = 256;
+const MAX_COMMAND_BYTES: u64 = 64 * 1024;
+const MAX_AGENT_FILES: usize = 256;
+const MAX_AGENT_BYTES: u64 = 64 * 1024;
+const MAX_PROJECT_RULE_BYTES: u64 = 128 * 1024;
+const FILE_TRUNCATION_MARKER: &str = "\n… [file truncated: size limit] …\n";
+
+fn retain_sorted_path(paths: &mut Vec<std::path::PathBuf>, path: std::path::PathBuf, limit: usize) {
+    let position = paths
+        .partition_point(|candidate| skill_path_sort_key(candidate) < skill_path_sort_key(&path));
+    if position < limit {
+        paths.insert(position, path);
+        if paths.len() > limit {
+            paths.pop();
+        }
+    }
+}
+
+fn read_utf8_bounded(path: &std::path::Path, max_bytes: u64) -> Option<String> {
+    use std::io::Read;
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > max_bytes {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn utf8_prefix(bytes: &[u8]) -> &str {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => std::str::from_utf8(&bytes[..error.valid_up_to()]).unwrap_or_default(),
+    }
+}
+
+fn utf8_suffix(bytes: &[u8]) -> &str {
+    (0..bytes.len().min(4))
+        .find_map(|offset| std::str::from_utf8(&bytes[offset..]).ok())
+        .unwrap_or_default()
+}
+
+fn read_project_rule(path: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    if length <= MAX_PROJECT_RULE_BYTES {
+        return read_utf8_bounded(path, MAX_PROJECT_RULE_BYTES);
+    }
+
+    let retained =
+        (MAX_PROJECT_RULE_BYTES as usize).saturating_sub(FILE_TRUNCATION_MARKER.len()) / 2;
+    let mut head = vec![0; retained];
+    file.read_exact(&mut head).ok()?;
+    file.seek(SeekFrom::End(-(retained as i64))).ok()?;
+    let mut tail = vec![0; retained];
+    file.read_exact(&mut tail).ok()?;
+    Some(format!(
+        "{}{}{}",
+        utf8_prefix(&head),
+        FILE_TRUNCATION_MARKER,
+        utf8_suffix(&tail)
+    ))
+}
+
+/// 扫描一个技能目录(`<dir>/<skill>/SKILL.md`),解析成 [`Skill`] 列表。目录不存在 → 空。
+fn skill_paths(dir: &Path, limit: usize) -> Vec<PathBuf> {
+    // Keep startup discovery deterministic and bounded. The cap is applied by
+    // the caller across all scopes, not once per directory.
+    let mut paths = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return paths;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let path = entry.path().join("SKILL.md");
+        if path.is_file() {
+            retain_sorted_path(&mut paths, path, limit);
+        }
+    }
+    paths
+}
+
+fn load_scope_candidates(scope: &SkillScope, remaining: usize) -> Vec<SkillCandidate> {
+    skill_paths(&scope.dir, remaining)
+        .into_iter()
+        .filter_map(|path| {
+            let text = read_utf8_bounded(&path, MAX_SKILL_BYTES)?;
+            let skill = parse_skill(&text)?;
+            Some(SkillCandidate {
+                skill,
+                source: SkillSource {
+                    label: scope.label.clone(),
+                    path: Some(path),
+                },
+                selected: false,
+            })
+        })
+        .collect()
+}
+
+/// Compatibility API for a single directory. Multi-scope callers should use
+/// [`load_skill_catalog`] so precedence and collisions remain observable.
+pub fn load_skills(dir: impl AsRef<Path>) -> Vec<Skill> {
+    load_skill_catalog(
+        &[SkillScope::new("dir", dir.as_ref().to_path_buf())],
+        std::iter::empty(),
+    )
+    .skills
+}
+
+/// Merge scopes in explicit high-to-low order. The 256 candidate cap is
+/// global, preventing one cap-sized directory per scope from amplifying
+/// startup memory and prompt work.
+pub fn load_skill_catalog(
+    scopes: &[SkillScope],
+    fallback: impl IntoIterator<Item = Skill>,
+) -> SkillCatalog {
+    let mut candidates = Vec::new();
+    for scope in scopes {
+        let remaining = MAX_SKILLS.saturating_sub(candidates.len());
+        if remaining == 0 {
+            break;
+        }
+        candidates.extend(load_scope_candidates(scope, remaining));
+    }
+    let builtin_source = SkillSource {
+        label: "builtin".to_string(),
+        path: None,
+    };
+    for skill in fallback {
+        if candidates.len() >= MAX_SKILLS {
+            break;
+        }
+        candidates.push(SkillCandidate {
+            skill,
+            source: builtin_source.clone(),
+            selected: false,
+        });
+    }
+
+    let mut winners = BTreeMap::<String, usize>::new();
+    let mut collisions: Vec<SkillCollision> = Vec::new();
+    for index in 0..candidates.len() {
+        let name = candidates[index].skill.name.clone();
+        if let Some(&winner) = winners.get(&name) {
+            let source = candidates[index].source.clone();
+            if let Some(collision) = collisions.iter_mut().find(|entry| entry.name == name) {
+                collision.shadowed.push(source);
+            } else {
+                collisions.push(SkillCollision {
+                    name,
+                    winner: candidates[winner].source.clone(),
+                    shadowed: vec![source],
+                });
+            }
+        } else {
+            candidates[index].selected = true;
+            winners.insert(name, index);
+        }
+    }
+    let skills = candidates
+        .iter()
+        .filter(|candidate| candidate.selected)
+        .map(|candidate| candidate.skill.clone())
+        .collect();
+    SkillCatalog {
+        skills,
+        candidates,
+        collisions,
+    }
+}
+
+fn normalized_path_key(path: &Path) -> String {
+    let mut existing = path.to_path_buf();
+    let mut suffix = Vec::new();
+    while !existing.exists() {
+        let Some(name) = existing.file_name().map(|name| name.to_os_string()) else {
+            break;
+        };
+        suffix.push(name);
+        if !existing.pop() {
+            break;
+        }
+    }
+    let mut normalized = std::fs::canonicalize(&existing).unwrap_or(existing);
+    for name in suffix.iter().rev() {
+        normalized.push(name);
+    }
+    let text = normalized
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_start_matches("//?/")
+        .to_string();
+    if cfg!(windows) {
+        text.to_ascii_lowercase()
+    } else {
+        text
+    }
+}
+
+fn is_workspace_root(path: &Path) -> bool {
+    read_utf8_bounded(&path.join("Cargo.toml"), 128 * 1024)
+        .is_some_and(|text| text.lines().any(|line| line.trim() == "[workspace]"))
+}
+
+/// Find a repository marker in at most 64 ancestors.
+pub fn find_repo_root(start: impl AsRef<Path>) -> Option<PathBuf> {
+    let start = start.as_ref();
+    let mut current = std::fs::canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
+    if !current.is_dir() {
+        current.pop();
+    }
+    for _ in 0..64 {
+        if current.join(".git").exists()
+            || current.join(".codegraph").is_dir()
+            || is_workspace_root(&current)
+        {
+            return Some(current);
+        }
+        let parent = current.parent()?.to_path_buf();
+        if parent == current {
+            return None;
+        }
+        current = parent;
+    }
+    None
+}
+
+/// Build scopes high-to-low: `env > config > cwd > repo > user`.
+pub fn discover_skill_scopes(
+    cwd: impl AsRef<Path>,
+    user_skills: impl AsRef<Path>,
+    config_dir: Option<PathBuf>,
+    env_dir: Option<PathBuf>,
+) -> Vec<SkillScope> {
+    let cwd = cwd.as_ref();
+    let repo = find_repo_root(cwd);
+    let mut scopes = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut add = |label: &str, dir: PathBuf| {
+        if seen.insert(normalized_path_key(&dir)) {
+            scopes.push(SkillScope::new(label, dir));
+        }
+    };
+    if let Some(dir) = env_dir {
+        add("env", dir);
+    }
+    if let Some(dir) = config_dir {
+        add("config", dir);
+    }
+    add("cwd", cwd.join(".ridge/skills"));
+    add("cwd-agents", cwd.join(".agents/skills"));
+    if let Some(repo) = repo {
+        add("repo", repo.join(".ridge/skills"));
+        add("repo-agents", repo.join(".agents/skills"));
+    }
+    add("user", user_skills.as_ref().to_path_buf());
+    scopes
+}
+
+/// Merge skill sources with deterministic precedence: the first occurrence of
+/// a name wins. Callers can place user/project definitions before built-ins
+/// without injecting two competing bodies into the system prompt.
+pub fn merge_skills(
+    primary: impl IntoIterator<Item = Skill>,
+    fallback: impl IntoIterator<Item = Skill>,
+) -> Vec<Skill> {
+    let mut names = std::collections::BTreeSet::new();
+    primary
+        .into_iter()
+        .chain(fallback)
+        .filter(|skill| names.insert(skill.name.clone()))
+        .collect()
+}
+
+fn skill_path_sort_key(path: &std::path::Path) -> (String, String) {
+    let original = path.to_string_lossy().into_owned();
+    (original.to_ascii_lowercase(), original)
 }
 
 /// 解析 `SKILL.md`:YAML frontmatter(`name` / `description`)+ 正文。无 name → 无效。
 fn parse_skill(text: &str) -> Option<Skill> {
+    // `read_to_string` preserves a UTF-8 BOM and Windows line endings.  Strip
+    // only the BOM, then parse frontmatter by complete lines so `\r\n` and `\n`
+    // have identical semantics.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let rest = text.strip_prefix("---")?;
-    let end = rest.find("\n---")?;
-    let front = &rest[..end];
-    let body = rest[end + 4..]
-        .trim_start_matches(['-', '\n'])
-        .trim()
-        .to_string();
+    let (front, body) = split_skill_frontmatter(rest)?;
     let (mut name, mut description) = (String::new(), String::new());
     for line in front.lines() {
         let line = line.trim();
@@ -58,6 +399,23 @@ fn parse_skill(text: &str) -> Option<Skill> {
         description,
         body,
     })
+}
+
+fn split_skill_frontmatter(rest: &str) -> Option<(&str, String)> {
+    let mut offset = 0;
+    for line in rest.split_inclusive('\n') {
+        let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
+        let line_without_cr = line_without_newline
+            .strip_suffix('\r')
+            .unwrap_or(line_without_newline);
+        if line_without_cr.trim() == "---" {
+            let front = &rest[..offset];
+            let body = rest[offset + line.len()..].trim().to_string();
+            return Some((front, body));
+        }
+        offset += line.len();
+    }
+    None
 }
 
 // ───────────────────────── 斜杠命令:Prompt 模板 + Skills-as-命令(iter-39)─────────────────────────
@@ -137,23 +495,153 @@ pub fn load_commands(dir: impl AsRef<std::path::Path>, skills: &[Skill]) -> Vec<
     out
 }
 
+fn alias_label(label: &str) -> String {
+    let mut out = label
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    if out.is_empty() {
+        out.push_str("scope");
+    }
+    out
+}
+
+fn qualified_skill_name(candidate: &SkillCandidate, occupied: &BTreeSet<String>) -> String {
+    let base = format!(
+        "{}:{}",
+        alias_label(&candidate.source.label),
+        candidate.skill.name
+    );
+    if !occupied.contains(&base) {
+        return base;
+    }
+    let mut suffix = 2;
+    loop {
+        let name = format!("{base}:{suffix}");
+        if !occupied.contains(&name) {
+            return name;
+        }
+        suffix += 1;
+    }
+}
+
+// These commands are handled before the dynamic catalog by the TUI router.
+// Keeping the small reserved-name set here makes a colliding skill reachable
+// through its qualified alias while preserving that router precedence.
+const BUILTIN_UI_COMMANDS: &[&str] = &[
+    "help",
+    "exit",
+    "quit",
+    "model",
+    "provider",
+    "config",
+    "effort",
+    "find",
+    "goal",
+    "activity",
+    "inspect",
+    "live",
+    "transcript",
+    "audit",
+    "reasoning",
+    "thinking",
+    "answer",
+    "answers",
+    "sessions",
+    "new",
+    "queue",
+    "steer",
+    "doctor",
+    "tools",
+    "history",
+    "login",
+    "agent",
+    "mcp",
+    "skills",
+    "commands",
+    "compact",
+    "reset",
+    "jailbreak",
+    "cost",
+];
+
+/// Build commands from a catalog. The winning skill keeps `/name`; shadowed
+/// skills remain explicitly callable as deterministic `/<scope>:name` aliases
+/// without entering the system prompt. File commands retain their historical
+/// precedence over skills, followed by the built-in command fallback.
+pub fn load_commands_from_catalog(
+    dir: impl AsRef<Path>,
+    catalog: &SkillCatalog,
+) -> Vec<SlashCommand> {
+    let mut out = load_command_files(dir);
+    let mut occupied: BTreeSet<String> = out.iter().map(|command| command.name.clone()).collect();
+    let file_command_names = occupied.clone();
+
+    for skill in &catalog.skills {
+        if !BUILTIN_UI_COMMANDS.contains(&skill.name.as_str())
+            && occupied.insert(skill.name.clone())
+        {
+            out.push(SlashCommand {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+                body: skill.body.clone(),
+            });
+        }
+    }
+    for (name, text) in BUILTIN_COMMANDS {
+        if occupied.insert((*name).to_string()) {
+            out.push(parse_command_md(text, name));
+        }
+    }
+
+    for candidate in &catalog.candidates {
+        let selected_name_is_occupied_by_file =
+            candidate.selected && file_command_names.contains(&candidate.skill.name);
+        let selected_name_is_builtin =
+            candidate.selected && BUILTIN_UI_COMMANDS.contains(&candidate.skill.name.as_str());
+        if !candidate.selected || selected_name_is_occupied_by_file || selected_name_is_builtin {
+            let name = qualified_skill_name(candidate, &occupied);
+            occupied.insert(name.clone());
+            out.push(SlashCommand {
+                name,
+                description: format!(
+                    "{} ({})",
+                    candidate.skill.description, candidate.source.label
+                ),
+                body: candidate.skill.body.clone(),
+            });
+        }
+    }
+    out
+}
+
 fn load_command_files(dir: impl AsRef<std::path::Path>) -> Vec<SlashCommand> {
     let mut out = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|x| x.to_str()) != Some("md") {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            if !stem.is_empty() {
-                out.push(parse_command_md(&text, stem));
-            }
+    let mut paths = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|x| x.to_str()) == Some("md") {
+            retain_sorted_path(&mut paths, path, MAX_COMMAND_FILES);
+        }
+    }
+    for path in paths {
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some(text) = read_utf8_bounded(&path, MAX_COMMAND_BYTES) else {
+            continue;
+        };
+        if !stem.is_empty() {
+            out.push(parse_command_md(&text, stem));
         }
     }
     out
@@ -224,15 +712,22 @@ fn parse_agent(text: &str) -> Option<Agent> {
 /// 扫描扁平目录 `<dir>/*.md` 解析成 agent 定义列表。目录不存在 → 空。
 pub fn load_agents(dir: impl AsRef<std::path::Path>) -> Vec<Agent> {
     let mut out = Vec::new();
+    let mut paths = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return out;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                if let Some(a) = parse_agent(&text) {
-                    out.push(a);
+            retain_sorted_path(&mut paths, path, MAX_AGENT_FILES);
+        }
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for path in paths {
+        if let Some(text) = read_utf8_bounded(&path, MAX_AGENT_BYTES) {
+            if let Some(agent) = parse_agent(&text) {
+                if names.insert(agent.name.clone()) {
+                    out.push(agent);
                 }
             }
         }
@@ -280,11 +775,11 @@ pub fn load_project_rules(global: Option<&std::path::Path>) -> Option<Skill> {
             body.push_str(&format!("\n<!-- {label} -->\n{}\n", t.trim()));
         }
     };
-    if let Some(t) = global.and_then(|g| std::fs::read_to_string(g).ok()) {
+    if let Some(t) = global.and_then(read_project_rule) {
         push("全局规则", &t);
     }
     for f in ["CLAUDE.md", "AGENTS.md"] {
-        if let Ok(t) = std::fs::read_to_string(f) {
+        if let Some(t) = read_project_rule(std::path::Path::new(f)) {
             push(f, &t);
         }
     }
@@ -535,13 +1030,54 @@ async fn run_subagent_via_protocol(
     }
 }
 
-async fn run_subagent_bounded(
+#[derive(Debug)]
+enum DispatchFailure {
+    Budget(DispatchBudgetError),
+    Provider(String),
+    Timeout { millis: u128 },
+}
+
+impl DispatchFailure {
+    fn message(&self) -> String {
+        match self {
+            Self::Budget(error) => format!(
+                "dispatch_budget_rejected{{operation=\"{}\",limit={},reason=\"{}\"}}",
+                error.operation,
+                error.limit,
+                match error.reason {
+                    DispatchBudgetRejection::Cancelled => "cancelled",
+                    DispatchBudgetRejection::Closed => "closed",
+                    DispatchBudgetRejection::AttemptsExhausted => "attempts_exhausted",
+                }
+            ),
+            Self::Provider(message) => message.clone(),
+            Self::Timeout { millis } => format!("sub-agent timed out after {millis}ms"),
+        }
+    }
+
+    fn is_budget(&self) -> bool {
+        matches!(self, Self::Budget(_))
+    }
+}
+
+impl std::fmt::Display for DispatchFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
+async fn run_subagent_bounded_with_budget(
     def: &Agent,
     provider: Arc<dyn LlmProvider>,
     task: &str,
     correlation_id: &str,
     timeout: Duration,
-) -> Result<String, String> {
+    budget: Arc<DispatchBudget>,
+) -> Result<String, DispatchFailure> {
+    let _permit = budget
+        .acquire(None, "dispatch_agent.subagent")
+        .await
+        .map_err(DispatchFailure::Budget)?;
     let started = std::time::Instant::now();
     match tokio::time::timeout(
         timeout,
@@ -552,21 +1088,38 @@ async fn run_subagent_bounded(
         // Tokio's timeout may observe an already-ready inner future first when
         // both deadlines wake in one scheduler turn. Re-check elapsed time so
         // a late provider result cannot escape the bounded dispatch contract.
-        Ok(_) if started.elapsed() >= timeout => Err(format!(
-            "sub-agent timed out after {}ms",
-            timeout.as_millis()
-        )),
-        Ok(result) => result,
-        Err(_) => Err(format!(
-            "sub-agent timed out after {}ms",
-            timeout.as_millis()
-        )),
+        Ok(_) if started.elapsed() >= timeout => Err(DispatchFailure::Timeout {
+            millis: timeout.as_millis(),
+        }),
+        Ok(result) => result.map_err(DispatchFailure::Provider),
+        Err(_) => Err(DispatchFailure::Timeout {
+            millis: timeout.as_millis(),
+        }),
     }
 }
 
 /// Run a read-only sub-agent without exposing raw provider error payloads.
 pub async fn run_subagent(def: &Agent, provider: Arc<dyn LlmProvider>, task: &str) -> String {
-    match run_subagent_attempt(def, provider, task).await {
+    run_subagent_public_with_timeout(
+        def,
+        provider,
+        task,
+        subagent_timeout(),
+        Arc::new(default_dispatch_budget().scope()),
+    )
+    .await
+}
+
+async fn run_subagent_public_with_timeout(
+    def: &Agent,
+    provider: Arc<dyn LlmProvider>,
+    task: &str,
+    timeout: Duration,
+    budget: Arc<DispatchBudget>,
+) -> String {
+    match run_subagent_bounded_with_budget(def, provider, task, "public:subagent", timeout, budget)
+        .await
+    {
         Ok(out) => out,
         Err(reason) => format!("[{} 出错: {reason}]", def.name),
     }
@@ -639,29 +1192,64 @@ pub(crate) fn dispatch_batch_spec(agents: &Agents) -> Option<ToolSpec> {
 }
 
 /// 执行 `dispatch_agent`:按任务特性选择可用 provider/model → 跑只读 sub-agent → 回结论与路由原因。
+#[cfg(test)]
 pub(crate) async fn dispatch_obs(
     agents: &Agents,
     main: &Arc<dyn LlmProvider>,
     call: &ToolCall,
 ) -> String {
-    dispatch_one_obs(agents, main, &call.arguments, &call.id).await
+    dispatch_obs_with_budget(
+        agents,
+        main,
+        call,
+        Arc::new(default_dispatch_budget().scope()),
+    )
+    .await
 }
 
-async fn dispatch_one_obs(
+pub(crate) async fn dispatch_obs_with_budget(
     agents: &Agents,
     main: &Arc<dyn LlmProvider>,
-    arguments: &serde_json::Value,
-    correlation_id: &str,
+    call: &ToolCall,
+    budget: Arc<DispatchBudget>,
 ) -> String {
-    dispatch_one_obs_with_timeout(agents, main, arguments, correlation_id, subagent_timeout()).await
+    dispatch_one_obs_with_timeout_and_budget(
+        agents,
+        main,
+        &call.arguments,
+        &call.id,
+        subagent_timeout(),
+        budget,
+    )
+    .await
 }
 
+#[cfg(test)]
 async fn dispatch_one_obs_with_timeout(
     agents: &Agents,
     main: &Arc<dyn LlmProvider>,
     arguments: &serde_json::Value,
     correlation_id: &str,
     timeout: Duration,
+) -> String {
+    dispatch_one_obs_with_timeout_and_budget(
+        agents,
+        main,
+        arguments,
+        correlation_id,
+        timeout,
+        Arc::new(default_dispatch_budget().scope()),
+    )
+    .await
+}
+
+async fn dispatch_one_obs_with_timeout_and_budget(
+    agents: &Agents,
+    main: &Arc<dyn LlmProvider>,
+    arguments: &serde_json::Value,
+    correlation_id: &str,
+    timeout: Duration,
+    budget: Arc<DispatchBudget>,
 ) -> String {
     let name = arguments
         .get("agent")
@@ -683,43 +1271,70 @@ async fn dispatch_one_obs_with_timeout(
     );
     let routed = agents.select_provider(&request, main.clone());
     let mut decision = routed.decision;
-    let out = match run_subagent_bounded(def, routed.provider, task, correlation_id, timeout).await
+    let (out, completed) = match run_subagent_bounded_with_budget(
+        def,
+        routed.provider,
+        task,
+        correlation_id,
+        timeout,
+        budget.clone(),
+    )
+    .await
     {
-        Ok(out) => out,
-        Err(first_failure) if decision.selected.is_some() => {
+        Ok(out) => (out, true),
+        Err(first_failure) if decision.selected.is_some() && !first_failure.is_budget() => {
             decision.used_fallback = true;
             decision.reason = format!(
-                "{}; selected provider failed ({first_failure}), using main agent provider/model",
-                decision.reason
+                "{}; selected provider failed ({}), using main agent provider/model",
+                decision.reason,
+                first_failure.message()
             );
-            match run_subagent_bounded(
+            match run_subagent_bounded_with_budget(
                 def,
                 main.clone(),
                 task,
                 &format!("{correlation_id}:fallback"),
                 timeout,
+                budget,
             )
             .await
             {
-                Ok(out) => out,
-                Err(fallback_failure) => format!(
+                Ok(out) => (out, true),
+                Err(fallback_failure) => (format!(
                     "[{} 出错: selected provider failed ({first_failure}); main-provider fallback failed ({fallback_failure})]",
                     def.name
-                ),
+                ), false),
             }
         }
-        Err(failure) => format!("[{} 出错: {failure}]", def.name),
+        Err(failure) => (format!("[{} 出错: {failure}]", def.name), false),
     };
+    let status = if completed { "completed" } else { "failed" };
     format!(
-        "[sub-agent {name} route: {}]\n[sub-agent {name} 的结论]\n{out}",
+        "[dispatch_status={status}]\n[sub-agent {name} route: {}]\n[sub-agent {name} 的结论]\n{out}",
         decision
     )
 }
 
+#[cfg(test)]
 pub(crate) async fn dispatch_batch_obs(
     agents: &Agents,
     main: &Arc<dyn LlmProvider>,
     call: &ToolCall,
+) -> String {
+    dispatch_batch_obs_with_budget(
+        agents,
+        main,
+        call,
+        Arc::new(default_dispatch_budget().scope()),
+    )
+    .await
+}
+
+pub(crate) async fn dispatch_batch_obs_with_budget(
+    agents: &Agents,
+    main: &Arc<dyn LlmProvider>,
+    call: &ToolCall,
+    budget: Arc<DispatchBudget>,
 ) -> String {
     let Some(tasks) = call
         .arguments
@@ -741,8 +1356,22 @@ pub(crate) async fn dispatch_batch_obs(
             let first_id = format!("{}:0", call.id);
             let second_id = format!("{}:1", call.id);
             let (first, second) = tokio::join!(
-                dispatch_one_obs(agents, main, first, &first_id),
-                dispatch_one_obs(agents, main, second, &second_id),
+                dispatch_one_obs_with_timeout_and_budget(
+                    agents,
+                    main,
+                    first,
+                    &first_id,
+                    subagent_timeout(),
+                    budget.clone(),
+                ),
+                dispatch_one_obs_with_timeout_and_budget(
+                    agents,
+                    main,
+                    second,
+                    &second_id,
+                    subagent_timeout(),
+                    budget.clone(),
+                ),
             );
             vec![first, second]
         }
@@ -751,17 +1380,42 @@ pub(crate) async fn dispatch_batch_obs(
             let second_id = format!("{}:1", call.id);
             let third_id = format!("{}:2", call.id);
             let (first, second, third) = tokio::join!(
-                dispatch_one_obs(agents, main, first, &first_id),
-                dispatch_one_obs(agents, main, second, &second_id),
-                dispatch_one_obs(agents, main, third, &third_id),
+                dispatch_one_obs_with_timeout_and_budget(
+                    agents,
+                    main,
+                    first,
+                    &first_id,
+                    subagent_timeout(),
+                    budget.clone(),
+                ),
+                dispatch_one_obs_with_timeout_and_budget(
+                    agents,
+                    main,
+                    second,
+                    &second_id,
+                    subagent_timeout(),
+                    budget.clone(),
+                ),
+                dispatch_one_obs_with_timeout_and_budget(
+                    agents,
+                    main,
+                    third,
+                    &third_id,
+                    subagent_timeout(),
+                    budget,
+                ),
             );
             vec![first, second, third]
         }
         _ => unreachable!("task count is bounded above"),
     };
+    let completed = results
+        .iter()
+        .filter(|result| result.starts_with("[dispatch_status=completed]"))
+        .count();
+    let failed = results.len().saturating_sub(completed);
     format!(
-        "parallel sub-agent wave ({}/{} completed)\n{}",
-        results.len(),
+        "parallel sub-agent wave ({completed}/{} completed) failed={failed}\n{}",
         results.len(),
         results.join("\n\n")
     )
@@ -770,10 +1424,13 @@ pub(crate) async fn dispatch_batch_obs(
 #[cfg(test)]
 mod tests {
     use super::{
-        builtin_agents, dispatch_batch_obs, dispatch_obs, dispatch_one_obs_with_timeout,
-        expand_command, load_commands, load_project_rules, load_skills, parse_agent,
-        parse_command_md, readonly_tool_specs, resolve_command, Agent, AgentProvider, Agents,
-        Skill,
+        builtin_agents, discover_skill_scopes, dispatch_batch_obs, dispatch_batch_obs_with_budget,
+        dispatch_obs, dispatch_obs_with_budget, dispatch_one_obs_with_timeout, expand_command,
+        load_agents, load_commands, load_commands_from_catalog, load_project_rules,
+        load_skill_catalog, load_skills, merge_skills, parse_agent, parse_command_md,
+        readonly_tool_specs, resolve_command, run_subagent_public_with_timeout, Agent,
+        AgentProvider, Agents, Skill, SkillScope, FILE_TRUNCATION_MARKER, MAX_AGENT_BYTES,
+        MAX_AGENT_FILES, MAX_COMMAND_BYTES, MAX_COMMAND_FILES,
     };
     use crate::brain::{build_system_prompt, BASE_SYSTEM};
     use crate::route::{RouteRequest, RouteRole};
@@ -824,6 +1481,36 @@ mod tests {
         }
     }
 
+    struct ProbeProvider {
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for ProbeProvider {
+        async fn complete(
+            &self,
+            request: &CompletionRequest,
+        ) -> Result<provider::Completion, provider::ProviderError> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            let is_planner = request
+                .messages
+                .first()
+                .is_some_and(|message| message.content.contains("Break the user's goal"));
+            Ok(provider::Completion {
+                text: if is_planner {
+                    r#"["routed task"]"#.into()
+                } else {
+                    "done".into()
+                },
+                ..Default::default()
+            })
+        }
+    }
+
     #[test]
     fn parse_agent_reads_frontmatter_and_body() {
         let md = "---\nname: fc\ndescription: 检索\nprovider: fast\ntools: read_file, search\n---\n正文指令";
@@ -864,6 +1551,54 @@ mod tests {
             .iter()
             .any(|x| x.name == "fastcontext" && x.provider.as_deref() == Some("fast")));
         assert!(a.iter().any(|x| x.name == "reviewer"));
+    }
+
+    #[test]
+    fn load_agents_is_bounded_and_duplicate_precedence_is_deterministic() {
+        let dir = std::env::temp_dir().join(format!(
+            "ridge_agent_bounds_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for index in 0..300 {
+            std::fs::write(
+                dir.join(format!("agent-{index:03}.md")),
+                format!("---\nname: agent-{index:03}\n---\nbody"),
+            )
+            .unwrap();
+        }
+        let agents = load_agents(&dir);
+        assert_eq!(agents.len(), MAX_AGENT_FILES);
+        assert_eq!(agents.first().unwrap().name, "agent-000");
+        assert_eq!(agents.last().unwrap().name, "agent-255");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("a-first.md"),
+            "---\nname: duplicate\n---\nfirst body",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("z-last.md"),
+            "---\nname: duplicate\n---\nlast body",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("oversized.md"),
+            format!(
+                "---\nname: oversized\n---\n{}",
+                "x".repeat(MAX_AGENT_BYTES as usize)
+            ),
+        )
+        .unwrap();
+        let agents = load_agents(&dir);
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "duplicate");
+        assert_eq!(agents[0].body, "first body");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -946,6 +1681,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_subagent_entry_uses_budget_and_timeout_path() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(HangingProvider);
+        let budget = Arc::new(crate::DispatchBudget::new_with_attempt_limit(1, 2).unwrap());
+        let out = run_subagent_public_with_timeout(
+            &test_agent("explorer"),
+            provider,
+            "read README",
+            Duration::from_millis(5),
+            budget.clone(),
+        )
+        .await;
+        assert!(out.contains("timed out after 5ms"), "{out}");
+        assert_eq!(budget.stats().active, 0);
+        assert_eq!(budget.stats().attempts, 1);
+    }
+
+    #[tokio::test]
     async fn dispatch_batch_runs_two_subagents_concurrently_and_preserves_slots() {
         let active = Arc::new(AtomicUsize::new(0));
         let max_active = Arc::new(AtomicUsize::new(0));
@@ -978,6 +1730,113 @@ mod tests {
         assert!(out.contains("parallel sub-agent wave (2/2 completed)"));
         assert!(out.contains("first result"), "{out}");
         assert!(out.contains("second result"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn graph_dispatch_batch_and_routed_run_share_one_budget() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn LlmProvider> = Arc::new(ProbeProvider {
+            active,
+            max_active: max_active.clone(),
+        });
+        let agents = Agents {
+            defs: vec![test_agent("explorer"), test_agent("reviewer")],
+            providers: HashMap::new(),
+            route_candidates: Vec::new(),
+        };
+        let call = ToolCall {
+            id: "shared-budget-batch".into(),
+            name: "dispatch_agents".into(),
+            arguments: serde_json::json!({
+                "tasks":[
+                    {"agent":"explorer","task":"inspect input"},
+                    {"agent":"reviewer","task":"inspect output"}
+                ]
+            }),
+        };
+        let budget = Arc::new(crate::DispatchBudget::new(1).unwrap());
+        let routed_agents = Agents::default();
+        let (batch, routed) = tokio::join!(
+            dispatch_batch_obs_with_budget(&agents, &provider, &call, budget.clone()),
+            crate::run_planned_routed_with_budget(
+                &routed_agents,
+                provider.clone(),
+                "route one check",
+                budget.clone(),
+            )
+        );
+        assert!(
+            batch.contains("parallel sub-agent wave (2/2 completed) failed=0"),
+            "{batch}"
+        );
+        assert!(routed.is_ok(), "{routed:?}");
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+        assert_eq!(budget.stats().active, 0);
+    }
+
+    #[tokio::test]
+    async fn graph_dispatch_budget_rejection_is_structured_and_not_completed() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(provider::ScriptedProvider::new(vec![]));
+        let agents = Agents {
+            defs: vec![test_agent("explorer")],
+            providers: HashMap::new(),
+            route_candidates: Vec::new(),
+        };
+        let call = ToolCall {
+            id: "closed-budget".into(),
+            name: "dispatch_agent".into(),
+            arguments: serde_json::json!({"agent":"explorer","task":"inspect"}),
+        };
+        let budget = Arc::new(crate::DispatchBudget::new(1).unwrap());
+        budget.close();
+        let single = dispatch_obs_with_budget(&agents, &provider, &call, budget.clone()).await;
+        assert!(single.contains("dispatch_status=failed"), "{single}");
+        assert!(single.contains("dispatch_budget_rejected"), "{single}");
+        assert!(single.contains("reason=\"closed\""), "{single}");
+        assert!(!single.contains("dispatch_status=completed"), "{single}");
+
+        let batch_call = ToolCall {
+            id: "closed-budget-batch".into(),
+            name: "dispatch_agents".into(),
+            arguments: serde_json::json!({
+                "tasks":[
+                    {"agent":"explorer","task":"one"},
+                    {"agent":"explorer","task":"two"}
+                ]
+            }),
+        };
+        let batch = dispatch_batch_obs_with_budget(&agents, &provider, &batch_call, budget).await;
+        assert!(
+            batch.contains("parallel sub-agent wave (0/2 completed) failed=2"),
+            "{batch}"
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_dispatch_timeout_drops_waiting_permit() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(provider::ScriptedProvider::new(vec![]));
+        let agents = Agents {
+            defs: vec![test_agent("explorer")],
+            providers: HashMap::new(),
+            route_candidates: Vec::new(),
+        };
+        let call = ToolCall {
+            id: "waiting-budget".into(),
+            name: "dispatch_agent".into(),
+            arguments: serde_json::json!({"agent":"explorer","task":"inspect"}),
+        };
+        let budget = Arc::new(crate::DispatchBudget::new(1).unwrap());
+        let holder = budget.acquire(None, "test.holder").await.unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_millis(20),
+            dispatch_obs_with_budget(&agents, &provider, &call, budget.clone()),
+        )
+        .await;
+        assert!(result.is_err(), "waiting dispatch should hit test timeout");
+        assert_eq!(budget.stats().active, 1);
+        drop(holder);
+        assert_eq!(budget.stats().active, 0);
     }
 
     #[tokio::test]
@@ -1073,11 +1932,14 @@ mod tests {
             arguments: serde_json::json!({"agent":"explorer","task":"read the README"}),
         };
 
-        let out = dispatch_obs(&agents, &main, &call).await;
+        let budget = Arc::new(crate::DispatchBudget::new_with_attempt_limit(1, 2).unwrap());
+        let out = dispatch_obs_with_budget(&agents, &main, &call, budget.clone()).await;
         assert!(out.contains("selected provider failed (http 429)"), "{out}");
         assert!(out.contains("using main agent provider/model"), "{out}");
         assert!(out.contains("main fallback result"));
         assert!(!out.contains("secret-api-body"));
+        assert_eq!(budget.stats().attempts, 2);
+        assert_eq!(budget.stats().active, 0);
     }
 
     #[tokio::test]
@@ -1209,6 +2071,227 @@ mod tests {
 
     /// 知识层:扫 SKILL.md 解析成 Skill 并注入 system prompt(让 agent 做编程外的事)。
     #[test]
+    fn load_skills_handles_bom_crlf_and_duplicate_names_deterministically() {
+        let dir = std::env::temp_dir().join(format!(
+            "ridge_skill_reliability_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("z-last")).unwrap();
+        std::fs::create_dir_all(dir.join("a-first")).unwrap();
+        std::fs::create_dir_all(dir.join("middle")).unwrap();
+        std::fs::write(
+            dir.join("z-last/SKILL.md"),
+            "---\nname: duplicate\ndescription: later\n---\nsecond body",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("a-first/SKILL.md"),
+            "\u{feff}---\r\nname: duplicate\r\ndescription: first\r\n---\r\nfirst body\r\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("middle/SKILL.md"),
+            "---\r\nname: unique\r\ndescription: stable\r\n---\r\nunique body\r\n",
+        )
+        .unwrap();
+
+        let skills = load_skills(&dir);
+        assert_eq!(
+            skills
+                .iter()
+                .map(|skill| skill.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["duplicate", "unique"]
+        );
+        assert_eq!(skills[0].description, "first");
+        assert_eq!(skills[0].body, "first body");
+        assert_eq!(skills[1].body, "unique body");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_skills_prefers_user_source_over_builtin() {
+        let user = Skill {
+            name: "skill-creator".into(),
+            description: "local override".into(),
+            body: "local body".into(),
+        };
+        let builtin = Skill {
+            name: "skill-creator".into(),
+            description: "builtin".into(),
+            body: "builtin body".into(),
+        };
+        let extra = Skill {
+            name: "extra".into(),
+            description: "extra".into(),
+            body: "extra body".into(),
+        };
+        assert_eq!(
+            merge_skills(vec![user.clone(), extra.clone()], vec![builtin]),
+            vec![user, extra]
+        );
+    }
+
+    fn write_test_skill(root: &std::path::Path, dir: &str, name: &str, body: &str) {
+        let path = root.join(dir);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(
+            path.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: test\n---\n{body}"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn skill_catalog_precedence_collision_alias_and_prompt_bounded() {
+        let root = std::env::temp_dir().join(format!(
+            "ridge_skill_catalog_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let env = root.join("env");
+        let user = root.join("user");
+        let command_dir = root.join("commands");
+        write_test_skill(&env, "one", "shared", "env body");
+        write_test_skill(&user, "one", "shared", "user body");
+        std::fs::create_dir_all(&command_dir).unwrap();
+        std::fs::write(command_dir.join("shared.md"), "file command body").unwrap();
+
+        let catalog = load_skill_catalog(
+            &[SkillScope::new("env", &env), SkillScope::new("user", &user)],
+            std::iter::empty(),
+        );
+        assert_eq!(catalog.skills.len(), 1);
+        assert_eq!(catalog.skills[0].body, "env body");
+        assert_eq!(catalog.collisions.len(), 1);
+        assert_eq!(catalog.collisions[0].winner.label, "env");
+        assert_eq!(catalog.collisions[0].shadowed[0].label, "user");
+
+        let commands = load_commands_from_catalog(&command_dir, &catalog);
+        assert_eq!(
+            resolve_command("shared", &commands).unwrap().body,
+            "file command body"
+        );
+        assert_eq!(
+            resolve_command("env:shared", &commands).unwrap().body,
+            "env body"
+        );
+        assert_eq!(
+            resolve_command("user:shared", &commands).unwrap().body,
+            "user body"
+        );
+        let prompt = build_system_prompt(&catalog.skills);
+        assert!(prompt.contains("env body"));
+        assert!(!prompt.contains("user body"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn skill_scopes_are_bounded_deduplicated_and_stable() {
+        let root = std::env::temp_dir().join(format!(
+            "ridge_skill_scopes_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let cwd = root.clone();
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(root.join(".codegraph")).unwrap();
+        let scopes = discover_skill_scopes(
+            &cwd,
+            root.join("user"),
+            Some(root.join("config")),
+            Some(root.join("env")),
+        );
+        let labels: Vec<&str> = scopes.iter().map(|scope| scope.label.as_str()).collect();
+        assert_eq!(labels[..2], ["env", "config"]);
+        assert_eq!(labels.last(), Some(&"user"));
+        assert!(scopes.iter().any(|scope| scope.label == "cwd"));
+        assert_eq!(
+            scopes
+                .iter()
+                .filter(|scope| scope.dir.ends_with(".ridge/skills"))
+                .count(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn skill_catalog_applies_one_global_candidate_cap() {
+        let root = std::env::temp_dir().join(format!(
+            "ridge_skill_global_cap_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let high = root.join("high");
+        let low = root.join("low");
+        for index in 0..200 {
+            write_test_skill(
+                &high,
+                &format!("high-{index:03}"),
+                &format!("high-{index:03}"),
+                "h",
+            );
+            write_test_skill(
+                &low,
+                &format!("low-{index:03}"),
+                &format!("low-{index:03}"),
+                "l",
+            );
+        }
+        let catalog = load_skill_catalog(
+            &[SkillScope::new("high", &high), SkillScope::new("low", &low)],
+            vec![Skill {
+                name: "fallback".into(),
+                description: String::new(),
+                body: "fallback".into(),
+            }],
+        );
+        assert_eq!(catalog.candidates.len(), 256);
+        assert_eq!(catalog.skills.len(), 256);
+        assert!(catalog.skills.iter().any(|skill| skill.name == "high-000"));
+        assert!(!catalog.skills.iter().any(|skill| skill.name == "fallback"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_skills_bounds_candidate_count_and_file_size() {
+        let dir = std::env::temp_dir().join(format!(
+            "ridge_skill_bounds_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for index in 0..300 {
+            let skill_dir = dir.join(format!("skill-{index:03}"));
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: skill-{index:03}\n---\nbody"),
+            )
+            .unwrap();
+        }
+        let oversized = dir.join("zz-oversized");
+        std::fs::create_dir_all(&oversized).unwrap();
+        std::fs::write(
+            oversized.join("SKILL.md"),
+            format!("---\nname: oversized\n---\n{}", "x".repeat(128 * 1024)),
+        )
+        .unwrap();
+
+        let skills = load_skills(&dir);
+        assert_eq!(skills.len(), 256);
+        assert!(!skills.iter().any(|skill| skill.name == "oversized"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn load_skills_and_inject_into_system_prompt() {
         let mut dir = std::env::temp_dir();
         dir.push(format!("ridge_skills_{}", std::process::id()));
@@ -1249,6 +2332,22 @@ mod tests {
         // 测试 cwd(crates/agent)无 CLAUDE.md/AGENTS.md,全局也无 → None。
         assert!(load_project_rules(Some(&f)).is_none());
         assert!(load_project_rules(None).is_none());
+    }
+
+    #[test]
+    fn load_project_rules_retains_head_tail_and_marks_oversize() {
+        let file = std::env::temp_dir().join(format!(
+            "ridge_global_rules_bounds_{}_{}.md",
+            std::process::id(),
+            line!()
+        ));
+        let middle = "x".repeat(super::MAX_PROJECT_RULE_BYTES as usize);
+        std::fs::write(&file, format!("HEAD\n{middle}\nTAIL")).unwrap();
+        let rules = load_project_rules(Some(&file)).expect("oversized rules stay explicit");
+        assert!(rules.body.contains("HEAD"));
+        assert!(rules.body.contains("TAIL"));
+        assert!(rules.body.contains(FILE_TRUNCATION_MARKER.trim()));
+        let _ = std::fs::remove_file(&file);
     }
 
     /// 内置 /init:恒在命令表(垫底)、不入 skills(不常驻 system prompt);用户同名文件命令可覆盖。
@@ -1327,6 +2426,43 @@ mod tests {
         assert_eq!(deploy.body, "Deploy $ARGS");
         assert!(resolve_command("cooking", &cmds).is_some()); // skill 命令
         assert!(resolve_command("nope", &cmds).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_commands_bounds_candidate_count_and_file_size() {
+        let dir = std::env::temp_dir().join(format!(
+            "ridge_command_bounds_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for index in 0..300 {
+            std::fs::write(dir.join(format!("cmd-{index:03}.md")), "command body").unwrap();
+        }
+        let commands = load_commands(&dir, &[]);
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command.name.starts_with("cmd-"))
+                .count(),
+            MAX_COMMAND_FILES
+        );
+        assert!(resolve_command("cmd-255", &commands).is_some());
+        assert!(resolve_command("cmd-256", &commands).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("valid.md"), "valid body").unwrap();
+        std::fs::write(
+            dir.join("oversized.md"),
+            "x".repeat(MAX_COMMAND_BYTES as usize + 1),
+        )
+        .unwrap();
+        let commands = load_commands(&dir, &[]);
+        assert!(resolve_command("valid", &commands).is_some());
+        assert!(resolve_command("oversized", &commands).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

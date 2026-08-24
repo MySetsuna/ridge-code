@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::VecDeque;
 
 use super::{
@@ -146,7 +147,83 @@ fn snapshot_styled_rows(buffer: &Buffer) -> Vec<Vec<serde_json::Value>> {
         .collect()
 }
 
-fn snapshot_payload(buffer: &Buffer, render_us: u128, ui: &Ui, vitals: &Vitals) -> String {
+fn snapshot_input(ui: &Ui) -> Option<serde_json::Value> {
+    // Input text is intentionally opt-in: frame snapshots are often retained
+    // as diagnostics, while the draft may contain credentials or private work.
+    (std::env::var("RIDGE_TUI_INPUT_DIAGNOSTICS").ok().as_deref() == Some("1")).then(|| {
+        serde_json::json!({
+            "buffer": &ui.input.buffer,
+            "cursor": ui.input.cursor,
+            "len": ui.input.buffer.chars().count(),
+        })
+    })
+}
+
+const SNAPSHOT_RENDER_SAMPLE_CAPACITY: usize = 4096;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SnapshotRenderStats {
+    frame_sequence: u64,
+    sample_count: usize,
+    p95_us: u128,
+    max_us: u128,
+    truncated: bool,
+}
+
+#[derive(Default)]
+struct SnapshotRenderTelemetry {
+    path: Option<std::path::PathBuf>,
+    sorted_samples: Vec<u128>,
+    frame_sequence: u64,
+    truncated: bool,
+}
+
+impl SnapshotRenderTelemetry {
+    fn record(&mut self, path: &std::path::Path, render_us: u128) -> SnapshotRenderStats {
+        if self.path.as_deref() != Some(path) {
+            self.path = Some(path.to_path_buf());
+            self.sorted_samples.clear();
+            self.frame_sequence = 0;
+            self.truncated = false;
+        }
+
+        self.frame_sequence = self.frame_sequence.saturating_add(1);
+        if self.sorted_samples.len() < SNAPSHOT_RENDER_SAMPLE_CAPACITY {
+            let index = self
+                .sorted_samples
+                .partition_point(|sample| *sample <= render_us);
+            self.sorted_samples.insert(index, render_us);
+        } else {
+            self.truncated = true;
+        }
+
+        let sample_count = self.sorted_samples.len();
+        let p95_index = sample_count
+            .saturating_mul(95)
+            .div_ceil(100)
+            .saturating_sub(1);
+        SnapshotRenderStats {
+            frame_sequence: self.frame_sequence,
+            sample_count,
+            p95_us: self.sorted_samples.get(p95_index).copied().unwrap_or(0),
+            max_us: self.sorted_samples.last().copied().unwrap_or(0),
+            truncated: self.truncated,
+        }
+    }
+}
+
+thread_local! {
+    static SNAPSHOT_RENDER_TELEMETRY: RefCell<SnapshotRenderTelemetry> =
+        RefCell::new(SnapshotRenderTelemetry::default());
+}
+
+fn snapshot_payload(
+    buffer: &Buffer,
+    render_us: u128,
+    render_stats: Option<SnapshotRenderStats>,
+    ui: &Ui,
+    vitals: &Vitals,
+) -> String {
     let area = buffer.area();
     let width = area.width as usize;
     let mut rows = Vec::with_capacity(area.height as usize);
@@ -245,6 +322,7 @@ fn snapshot_payload(buffer: &Buffer, render_us: u128, ui: &Ui, vitals: &Vitals) 
                 "detail_scroll": panel.detail_scroll,
             })
         }),
+        "input": snapshot_input(ui),
         "telemetry": {
             "phase_duration_ms": ui
                 .activity_started
@@ -252,6 +330,12 @@ fn snapshot_payload(buffer: &Buffer, render_us: u128, ui: &Ui, vitals: &Vitals) 
                 .unwrap_or(0),
             "token_velocity": vitals.rate,
             "last_render_us": render_us,
+            "frame_sequence": render_stats.map(|stats| stats.frame_sequence),
+            "render_sample_count": render_stats.map(|stats| stats.sample_count),
+            "render_p95_us": render_stats.map(|stats| stats.p95_us),
+            "render_max_us": render_stats.map(|stats| stats.max_us),
+            "render_samples_truncated": render_stats.map(|stats| stats.truncated),
+            "render_sample_capacity": SNAPSHOT_RENDER_SAMPLE_CAPACITY,
         },
         "rows": rows,
         "styled_rows": snapshot_styled_rows(buffer),
@@ -288,7 +372,16 @@ fn dump_frame_snapshot(
             "RIDGE_TUI_SNAPSHOT exceeded 16ms"
         );
     }
-    let payload = snapshot_payload(frame.buffer_mut(), elapsed.as_micros(), ui, vitals);
+    let render_us = elapsed.as_micros();
+    let render_stats =
+        SNAPSHOT_RENDER_TELEMETRY.with(|telemetry| telemetry.borrow_mut().record(&path, render_us));
+    let payload = snapshot_payload(
+        frame.buffer_mut(),
+        render_us,
+        Some(render_stats),
+        ui,
+        vitals,
+    );
     let mut write_error = None;
     for attempt in 0..4 {
         match std::fs::write(&path, &payload) {
@@ -5273,6 +5366,46 @@ mod snapshot_tests {
     use ratatui::Terminal;
 
     #[test]
+    fn snapshot_render_telemetry_tracks_exact_percentile_and_resets_by_path() {
+        let mut telemetry = SnapshotRenderTelemetry::default();
+        let first_path = std::path::Path::new("first-frame.json");
+        let mut stats = SnapshotRenderStats::default();
+        for sample in 1..=20 {
+            stats = telemetry.record(first_path, sample);
+        }
+        assert_eq!(stats.frame_sequence, 20);
+        assert_eq!(stats.sample_count, 20);
+        assert_eq!(stats.p95_us, 19);
+        assert_eq!(stats.max_us, 20);
+        assert!(!stats.truncated);
+
+        let reset = telemetry.record(std::path::Path::new("second-frame.json"), 7);
+        assert_eq!(reset.frame_sequence, 1);
+        assert_eq!(reset.sample_count, 1);
+        assert_eq!(reset.p95_us, 7);
+        assert_eq!(reset.max_us, 7);
+        assert!(!reset.truncated);
+    }
+
+    #[test]
+    fn snapshot_render_telemetry_marks_capacity_overflow() {
+        let path = std::path::PathBuf::from("frame.json");
+        let mut telemetry = SnapshotRenderTelemetry {
+            path: Some(path.clone()),
+            sorted_samples: vec![1; SNAPSHOT_RENDER_SAMPLE_CAPACITY],
+            frame_sequence: SNAPSHOT_RENDER_SAMPLE_CAPACITY as u64,
+            truncated: false,
+        };
+        let stats = telemetry.record(&path, 2);
+        assert_eq!(stats.sample_count, SNAPSHOT_RENDER_SAMPLE_CAPACITY);
+        assert_eq!(
+            stats.frame_sequence,
+            SNAPSHOT_RENDER_SAMPLE_CAPACITY as u64 + 1
+        );
+        assert!(stats.truncated);
+    }
+
+    #[test]
     fn snapshot_preserves_rows_and_metadata() {
         let mut buffer = Buffer::with_lines(["RidgeCode", "输出"]);
         buffer[(0, 0)].set_style(
@@ -5293,7 +5426,14 @@ mod snapshot_tests {
             ctx_used: 11,
             queued: 1,
         };
-        let snapshot = snapshot_payload(&buffer, 37, &ui, &vitals);
+        let render_stats = SnapshotRenderStats {
+            frame_sequence: 4,
+            sample_count: 4,
+            p95_us: 37,
+            max_us: 41,
+            truncated: false,
+        };
+        let snapshot = snapshot_payload(&buffer, 37, Some(render_stats), &ui, &vitals);
         let value: serde_json::Value = serde_json::from_str(&snapshot).expect("snapshot json");
 
         assert_eq!(value["format"], "ridgecode-tui-frame");
@@ -5315,6 +5455,15 @@ mod snapshot_tests {
             .as_array()
             .is_some_and(|rows| { rows.len() <= MAX_PRESENTATION_RECORDS }));
         assert_eq!(value["telemetry"]["last_render_us"], 37);
+        assert_eq!(value["telemetry"]["frame_sequence"], 4);
+        assert_eq!(value["telemetry"]["render_sample_count"], 4);
+        assert_eq!(value["telemetry"]["render_p95_us"], 37);
+        assert_eq!(value["telemetry"]["render_max_us"], 41);
+        assert_eq!(value["telemetry"]["render_samples_truncated"], false);
+        assert_eq!(
+            value["telemetry"]["render_sample_capacity"],
+            SNAPSHOT_RENDER_SAMPLE_CAPACITY
+        );
         assert_eq!(value["telemetry"]["token_velocity"], 7);
         assert_eq!(value["telemetry"]["phase_duration_ms"], 0);
         let rows = value["rows"]
@@ -5360,13 +5509,14 @@ mod snapshot_tests {
             queued: 1,
         };
         let value: serde_json::Value =
-            serde_json::from_str(&snapshot_payload(&buffer, 11, &ui, &vitals)).expect("snapshot");
+            serde_json::from_str(&snapshot_payload(&buffer, 11, None, &ui, &vitals))
+                .expect("snapshot");
         assert_eq!(value["panel"]["kind"], "Queue");
         assert_eq!(value["panel"]["selected"], "⏭ next");
         assert_eq!(value["panel"]["visible_rows"], 1);
         assert_eq!(value["state"]["live_view"], "follow");
         assert_eq!(value["state"]["queue"][0], "first pending request");
-        assert!(snapshot_payload(&buffer, 11, &ui, &vitals).contains("first pending request"));
+        assert!(snapshot_payload(&buffer, 11, None, &ui, &vitals).contains("first pending request"));
     }
 
     #[test]
@@ -5384,7 +5534,8 @@ mod snapshot_tests {
             queued: 0,
         };
         let value: serde_json::Value =
-            serde_json::from_str(&snapshot_payload(&buffer, 13, &ui, &vitals)).expect("snapshot");
+            serde_json::from_str(&snapshot_payload(&buffer, 13, None, &ui, &vitals))
+                .expect("snapshot");
         assert_eq!(value["state"]["live_view"], "hold");
     }
 
@@ -5404,7 +5555,8 @@ mod snapshot_tests {
             queued: 0,
         };
         let value: serde_json::Value =
-            serde_json::from_str(&snapshot_payload(&buffer, 17, &ui, &vitals)).expect("snapshot");
+            serde_json::from_str(&snapshot_payload(&buffer, 17, None, &ui, &vitals))
+                .expect("snapshot");
         assert_eq!(value["state"]["reasoning_history"], 1);
         assert_eq!(value["panel"]["kind"], "Reasoning");
         assert!(value["panel"]["selected"]
@@ -5435,7 +5587,8 @@ mod snapshot_tests {
             queued: 0,
         };
         let value: serde_json::Value =
-            serde_json::from_str(&snapshot_payload(&buffer, 19, &ui, &vitals)).expect("snapshot");
+            serde_json::from_str(&snapshot_payload(&buffer, 19, None, &ui, &vitals))
+                .expect("snapshot");
         assert_eq!(value["state"]["live_blocks"], 2);
         assert_eq!(value["panel"]["kind"], "Audit");
         assert_eq!(value["panel"]["detail_open"], true);
@@ -5464,7 +5617,8 @@ mod snapshot_tests {
             queued: 0,
         };
         let value: serde_json::Value =
-            serde_json::from_str(&snapshot_payload(&buffer, 19, &ui, &vitals)).expect("snapshot");
+            serde_json::from_str(&snapshot_payload(&buffer, 19, None, &ui, &vitals))
+                .expect("snapshot");
         assert_eq!(value["state"]["live_focus"], "answer:1");
         assert_eq!(value["state"]["presentation"][0]["channel"], "reasoning");
         assert_eq!(value["state"]["presentation"][1]["channel"], "answer");

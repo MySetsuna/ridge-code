@@ -13,6 +13,7 @@
 
 use serde_json::{json, Value};
 use thiserror::Error;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
 #[derive(Debug, Error)]
 pub enum McpError {
@@ -20,8 +21,98 @@ pub enum McpError {
     Transport(String),
     #[error("rpc error {code}: {message}")]
     Rpc { code: i64, message: String },
+    #[error("tool error: {0}")]
+    Tool(String),
     #[error("bad response: {0}")]
     BadResponse(String),
+}
+
+impl McpError {
+    /// Return a bounded diagnostic suitable for status trails and user-facing
+    /// observations.  Transport/RPC payloads can contain command arguments,
+    /// response bodies, or credentials, so callers should not display the
+    /// `Display` text at trust boundaries.
+    pub fn redacted_summary(&self) -> String {
+        match self {
+            Self::Transport(_) => "transport error".to_string(),
+            Self::Rpc { code, .. } => format!("RPC error {code}"),
+            Self::Tool(_) => "MCP tool error".to_string(),
+            Self::BadResponse(_) => "invalid MCP response".to_string(),
+        }
+    }
+}
+
+const CLIENT_PROTOCOL_VERSION: &str = "2025-06-18";
+const MAX_TOOL_TEXT_CHARS: usize = 64 * 1024;
+pub const MAX_MCP_FRAME_BYTES: usize = 1024 * 1024;
+pub const MAX_MCP_TOOLS: usize = 256;
+
+async fn read_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+) -> Result<Option<Vec<u8>>, McpError> {
+    let mut line = Vec::new();
+    loop {
+        let available = reader
+            .fill_buf()
+            .await
+            .map_err(|error| McpError::Transport(error.to_string()))?;
+        if available.is_empty() {
+            return if line.is_empty() {
+                Ok(None)
+            } else {
+                Err(McpError::Transport("truncated MCP frame".to_string()))
+            };
+        }
+        if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
+            if line.len() + newline + 1 > MAX_MCP_FRAME_BYTES {
+                return Err(McpError::BadResponse(
+                    "MCP frame exceeds size limit".to_string(),
+                ));
+            }
+            line.extend_from_slice(&available[..newline]);
+            reader.consume(newline + 1);
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            return Ok(Some(line));
+        }
+        if line.len() + available.len() > MAX_MCP_FRAME_BYTES {
+            return Err(McpError::BadResponse(
+                "MCP frame exceeds size limit".to_string(),
+            ));
+        }
+        line.extend_from_slice(available);
+        let consumed = available.len();
+        reader.consume(consumed);
+    }
+}
+
+fn bounded_text(text: &str) -> String {
+    let mut output = text.chars().take(MAX_TOOL_TEXT_CHARS).collect::<String>();
+    if text.chars().nth(MAX_TOOL_TEXT_CHARS).is_some() {
+        output.push_str("…[truncated]");
+    }
+    output
+}
+
+fn content_text(response: &Value) -> String {
+    let mut parts = response["content"]
+        .as_array()
+        .into_iter()
+        .flat_map(|blocks| blocks.iter())
+        .filter_map(|block| block["text"].as_str())
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        if let Some(structured) = response
+            .get("structuredContent")
+            .filter(|value| !value.is_null())
+        {
+            return bounded_text(&structured.to_string());
+        }
+        return String::new();
+    }
+    parts.retain(|part| !part.is_empty());
+    bounded_text(&parts.join(""))
 }
 
 /// 一个 MCP 服务器暴露的工具(已从 wire 归一化)。
@@ -71,16 +162,27 @@ impl McpClient {
 
     /// 握手:initialize 请求 + `notifications/initialized` 通知(MCP 规范要求,真实 server 常校验)。
     pub async fn initialize(&self) -> Result<(), McpError> {
-        self.transport
+        let response = self
+            .transport
             .request(
                 "initialize",
                 json!({
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": CLIENT_PROTOCOL_VERSION,
                     "capabilities": {},
                     "clientInfo": {"name": "ridge", "version": "0.1.0"}
                 }),
             )
             .await?;
+        // Older local fixtures omit the field; when present, it must be a
+        // non-empty negotiated version rather than silently accepting a
+        // malformed result.
+        if let Some(version) = response.get("protocolVersion") {
+            if version.as_str().is_none_or(str::is_empty) {
+                return Err(McpError::BadResponse(
+                    "initialize 缺有效 protocolVersion".to_string(),
+                ));
+            }
+        }
         self.transport
             .notify("notifications/initialized", json!({}))
             .await?;
@@ -93,14 +195,29 @@ impl McpClient {
         let arr = res["tools"]
             .as_array()
             .ok_or_else(|| McpError::BadResponse("tools/list 缺 tools 数组".to_string()))?;
-        Ok(arr
-            .iter()
-            .map(|t| McpTool {
-                name: t["name"].as_str().unwrap_or("").to_string(),
-                description: t["description"].as_str().unwrap_or("").to_string(),
-                input_schema: t["inputSchema"].clone(),
-            })
-            .collect())
+        if arr.len() > MAX_MCP_TOOLS {
+            return Err(McpError::BadResponse(format!(
+                "tools/list exceeds {MAX_MCP_TOOLS} tools"
+            )));
+        }
+        let mut tools = Vec::with_capacity(arr.len());
+        for (index, tool) in arr.iter().enumerate() {
+            let name = tool["name"]
+                .as_str()
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| McpError::BadResponse(format!("tools/list 工具 {index} 缺 name")))?;
+            let input_schema = tool
+                .get("inputSchema")
+                .filter(|schema| !schema.is_null())
+                .cloned()
+                .unwrap_or_else(|| json!({"type": "object"}));
+            tools.push(McpTool {
+                name: name.to_string(),
+                description: tool["description"].as_str().unwrap_or("").to_string(),
+                input_schema,
+            });
+        }
+        Ok(tools)
     }
 
     /// 调用一个工具(传**未加命名空间**的原始工具名),返回文本结果。
@@ -110,17 +227,18 @@ impl McpClient {
             .request("tools/call", json!({"name": tool, "arguments": arguments}))
             .await?;
         // content 是块数组,拼接其中的 text 块。
-        let text = res["content"]
-            .as_array()
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter_map(|b| b["text"].as_str())
-                    .collect::<Vec<_>>()
-                    .join("")
-            })
-            .unwrap_or_default();
-        Ok(text)
+        // MCP execution failures are successful JSON-RPC responses carrying
+        // `isError: true`; do not turn them into an empty successful
+        // observation. Preserve only a bounded diagnostic at this boundary.
+        if res["isError"].as_bool() == Some(true) {
+            let message = content_text(&res);
+            return Err(McpError::Tool(if message.is_empty() {
+                "MCP tool reported an error".to_string()
+            } else {
+                message
+            }));
+        }
+        Ok(content_text(&res))
     }
 }
 
@@ -150,18 +268,36 @@ pub struct StdioTransport {
 
 struct Io {
     stdin: tokio::process::ChildStdin,
-    stdout: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    stdout: tokio::io::BufReader<tokio::process::ChildStdout>,
 }
 
 impl StdioTransport {
     pub fn spawn(command: &str, args: &[String]) -> Result<Self, McpError> {
+        Self::spawn_with_env(command, args, &[])
+    }
+
+    /// Spawn with a deliberately small inherited environment. Provider keys,
+    /// `RIDGE_*`, proxy credentials, and arbitrary shell state stay out of MCP
+    /// children unless explicitly declared for that server.
+    pub fn spawn_with_env(
+        command: &str,
+        args: &[String],
+        env: &[(String, String)],
+    ) -> Result<Self, McpError> {
         use std::process::Stdio;
-        let mut child = tokio::process::Command::new(command)
+        let mut process = tokio::process::Command::new(command);
+        process
             .args(args)
+            .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            .kill_on_drop(true);
+        for (key, value) in filtered_environment(env) {
+            process.env(key, value);
+        }
+        let mut child = process
             .spawn()
-            .map_err(|e| McpError::Transport(format!("spawn {command}: {e}")))?;
+            .map_err(|e| McpError::Transport(format!("MCP process spawn failed: {e}")))?;
         let stdin = child
             .stdin
             .take()
@@ -170,14 +306,68 @@ impl StdioTransport {
             .stdout
             .take()
             .ok_or_else(|| McpError::Transport("no stdout".to_string()))?;
-        use tokio::io::AsyncBufReadExt;
-        let stdout = tokio::io::BufReader::new(stdout).lines();
+        let stdout = tokio::io::BufReader::new(stdout);
         Ok(Self {
             io: tokio::sync::Mutex::new(Io { stdin, stdout }),
             next_id: std::sync::atomic::AtomicU64::new(1),
             _child: child,
         })
     }
+}
+
+const SAFE_ENV_KEYS: &[&str] = &[
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "SYSTEMDRIVE",
+    "TEMP",
+    "TMP",
+    "HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "COLORTERM",
+];
+
+fn safe_env_key(key: &std::ffi::OsStr) -> bool {
+    let Some(key) = key.to_str() else {
+        return false;
+    };
+    SAFE_ENV_KEYS.iter().any(|allowed| {
+        if cfg!(windows) {
+            key.eq_ignore_ascii_case(allowed)
+        } else {
+            key == *allowed
+        }
+    })
+}
+
+fn filtered_environment(
+    overrides: &[(String, String)],
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (key, value) in std::env::vars_os() {
+        if safe_env_key(&key) {
+            let normalized = key.to_string_lossy().to_ascii_lowercase();
+            if seen.insert(normalized) {
+                out.push((key, value));
+            }
+        }
+    }
+    for (key, value) in overrides {
+        if key.is_empty() {
+            continue;
+        }
+        out.retain(|(existing, _)| !existing.to_string_lossy().eq_ignore_ascii_case(key));
+        out.push((key.clone().into(), value.clone().into()));
+    }
+    out
 }
 
 #[async_trait::async_trait]
@@ -206,15 +396,10 @@ impl McpTransport for StdioTransport {
 
         // 读到 id 匹配的那条响应(跳过通知 / 无关行)。
         loop {
-            let next = guard
-                .stdout
-                .next_line()
-                .await
-                .map_err(|e| McpError::Transport(e.to_string()))?;
-            let Some(l) = next else {
+            let Some(line) = read_bounded_line(&mut guard.stdout).await? else {
                 return Err(McpError::Transport("stdout EOF".to_string()));
             };
-            let Ok(v) = serde_json::from_str::<Value>(&l) else {
+            let Ok(v) = serde_json::from_slice::<Value>(&line) else {
                 continue; // 非 JSON 行(日志噪声)跳过
             };
             if v["id"] == json!(id) {
@@ -289,6 +474,160 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out, "result from mcp");
+    }
+
+    #[tokio::test]
+    async fn tool_execution_error_is_not_reported_as_empty_success() {
+        let c = McpClient::new(
+            "server",
+            Box::new(FnTransport(|method: &str, _params: &Value| match method {
+                "tools/call" => Ok(json!({
+                    "isError": true,
+                    "content": [{"type": "text", "text": "secret backend detail"}]
+                })),
+                _ => Ok(json!({})),
+            })),
+        );
+        let err = c.call_tool("search", json!({})).await.unwrap_err();
+        assert!(matches!(err, McpError::Tool(_)));
+        assert_eq!(err.redacted_summary(), "MCP tool error");
+        assert!(!err.redacted_summary().contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn list_tools_rejects_missing_name_and_defaults_schema() {
+        let missing = McpClient::new(
+            "server",
+            Box::new(FnTransport(|method: &str, _params: &Value| match method {
+                "tools/list" => Ok(json!({"tools": [{"description": "broken"}]})),
+                _ => Ok(json!({})),
+            })),
+        );
+        assert!(matches!(
+            missing.list_tools().await,
+            Err(McpError::BadResponse(_))
+        ));
+
+        let schema = McpClient::new(
+            "server",
+            Box::new(FnTransport(|method: &str, _params: &Value| match method {
+                "tools/list" => Ok(json!({"tools": [{"name": "search"}]})),
+                _ => Ok(json!({})),
+            })),
+        );
+        let tools = schema.list_tools().await.unwrap();
+        assert_eq!(tools[0].input_schema, json!({"type": "object"}));
+    }
+
+    #[tokio::test]
+    async fn list_tools_rejects_registry_above_hard_limit() {
+        let client = McpClient::new(
+            "server",
+            Box::new(FnTransport(|method: &str, _params: &Value| match method {
+                "tools/list" => Ok(json!({
+                    "tools": (0..=MAX_MCP_TOOLS)
+                        .map(|index| json!({"name": format!("tool-{index}")}))
+                        .collect::<Vec<_>>()
+                })),
+                _ => Ok(json!({})),
+            })),
+        );
+        assert!(matches!(
+            client.list_tools().await,
+            Err(McpError::BadResponse(message)) if message.contains("exceeds")
+        ));
+    }
+
+    #[test]
+    fn stdio_child_environment_keeps_runtime_path_but_drops_secrets() {
+        let inherited = filtered_environment(&[]);
+        let names = inherited
+            .iter()
+            .map(|(key, _)| key.to_string_lossy().to_ascii_lowercase())
+            .collect::<std::collections::BTreeSet<_>>();
+        if std::env::var_os("PATH").is_some() {
+            assert!(names.contains("path"));
+        }
+        assert!(!names.contains("ridge_api_key"));
+        assert!(!names.iter().any(|name| {
+            name.starts_with("ridge_")
+                || name.contains("api_key")
+                || name.contains("token")
+                || name.contains("secret")
+        }));
+
+        let explicit = filtered_environment(&[("MCP_TEST_TOKEN".into(), "allowed".into())]);
+        assert!(explicit
+            .iter()
+            .any(|(key, value)| key == "MCP_TEST_TOKEN" && value == "allowed"));
+    }
+
+    #[tokio::test]
+    async fn stdio_child_receives_allowlisted_path_without_parent_secret() {
+        let prior = std::env::var_os("RIDGE_TEST_SECRET");
+        std::env::set_var("RIDGE_TEST_SECRET", "must-not-reach-child");
+        let path = std::env::temp_dir().join(format!(
+            "ridge_mcp_env_probe_{}_{}{}",
+            std::process::id(),
+            line!(),
+            if cfg!(windows) { ".cmd" } else { ".sh" }
+        ));
+        #[cfg(windows)]
+        let (command, args, script) = (
+            "cmd.exe",
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                path.to_string_lossy().into_owned(),
+            ],
+            "@echo off\nset \"line=\"\nset /p line=\nif defined RIDGE_TEST_SECRET (set \"secret=true\") else (set \"secret=false\")\nif defined PATH (set \"path=true\") else (set \"path=false\")\necho {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"secret\":%secret%,\"path\":%path%}}\n",
+        );
+        #[cfg(not(windows))]
+        let (command, args, script) = (
+            "sh",
+            vec![path.to_string_lossy().into_owned()],
+            "read line\nif [ -n \"${RIDGE_TEST_SECRET+x}\" ]; then secret=true; else secret=false; fi\nif [ -n \"${PATH+x}\" ]; then path=true; else path=false; fi\nprintf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"secret\":%s,\"path\":%s}}\\n' \"$secret\" \"$path\"\n",
+        );
+        std::fs::write(&path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(&path, permissions).unwrap();
+        }
+        let transport = StdioTransport::spawn_with_env(command, &args, &[]).unwrap();
+        let response = transport
+            .request("probe", json!({}))
+            .await
+            .expect("stdio probe response");
+        drop(transport);
+        let _ = std::fs::remove_file(&path);
+        match prior {
+            Some(value) => std::env::set_var("RIDGE_TEST_SECRET", value),
+            None => std::env::remove_var("RIDGE_TEST_SECRET"),
+        }
+        assert_eq!(response["secret"], false);
+        assert_eq!(response["path"], true);
+    }
+
+    #[tokio::test]
+    async fn stdio_reader_rejects_oversized_line_before_allocating_unboundedly() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut writer, reader) = tokio::io::duplex(MAX_MCP_FRAME_BYTES + 2);
+        let mut payload = vec![b'x'; MAX_MCP_FRAME_BYTES];
+        payload.push(b'x');
+        payload.push(b'\n');
+        writer.write_all(&payload).await.unwrap();
+        drop(writer);
+
+        let mut reader = tokio::io::BufReader::new(reader);
+        assert!(matches!(
+            read_bounded_line(&mut reader).await,
+            Err(McpError::BadResponse(message)) if message.contains("size limit")
+        ));
     }
 
     /// RPC 错误要如实映射成 McpError::Rpc。

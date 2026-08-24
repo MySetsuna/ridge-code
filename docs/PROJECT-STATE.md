@@ -1,11 +1,11 @@
-# RidgeCode PROJECT-STATE(2026-08-16 · iter-53)
+# RidgeCode PROJECT-STATE(2026-08-24 · iter-67)
 
 > 本文是 NotebookLM 中**唯一**的 RidgeCode 来源,每轮迭代覆盖式更新并替换。
 > 结构:A. 项目定位与北极星(稳定段)→ B. 近期迭代与验证证据 → C. 能力对照与差距 → D. 开放问题与请 NotebookLM 定夺的问题 → E. 已落地架构详情(codegraph 生成的代码事实全文)。
 
 ## A. 项目定位与北极星(稳定段,少改)
 
-RidgeCode 是一个**模块化、跨领域可扩展的通用 agent 框架**(单二进制 `ridgecode`,Rust workspace,当前 v0.5.22,住 `crates/agent`)。既能像 Claude Code 写代码,又能做编程以外的事。**加新能力 = 加一个 MCP server 配置或一个 SKILL.md,而不是改 Rust 源码。**
+RidgeCode 是一个**模块化、跨领域可扩展的通用 agent 框架**(单二进制 `ridgecode`,Rust workspace,当前 v0.5.23,住 `crates/agent`)。既能像 Claude Code 写代码,又能做编程以外的事。**加新能力 = 加一个 MCP server 配置或一个 SKILL.md,而不是改 Rust 源码。**
 
 四层解耦(已全部落地):
 1. **内核** —— `langgraph` 纯图引擎(StateGraph + Pregel BSP 超步 + checkpoint 时间旅行,零 LLM 依赖);
@@ -17,6 +17,154 @@ RidgeCode 是一个**模块化、跨领域可扩展的通用 agent 框架**(单�
 **已锁定决策(不变量,改码前须知)**:maker≠checker;reducer 显式;引擎零 LLM;外置能力走 MCP/SKILL 不进内核;provider 边界(第三方 SDK 包在 trait 后);一切注入块有界截断;危险命令拦截不可绕过、sub-agent 恒只读;注入块有序稳态利 prompt 缓存。内核 token 节约四判据已收束:历史有界自动压缩 / 静态底噪极小 / Lean 输出 / durable-state 事实驱动。
 
 ## B. 近期迭代与验证证据
+- **iter-67 · 终端控制噪声与确定性流式 harness**：Windows raw-VT parser 现直接解码
+  focus 与 SGR mouse；Crossterm fallback 以持久、有界 `CsiNoiseFilter` 跨 poll batch 过滤
+  泄漏的 mouse/focus 报告，同时保留普通 `[I`/`[O`、空格、Enter、Tab。fallback 在每次
+  阻塞 poll 前及 read 后重申关闭 Windows VT input，免受子进程遗留 console mode 污染。
+  `InputFixture` 新增同一次物理 ConPTY 写入 bracketed paste+CRLF，keylog 必须恰有一个
+  Paste、一个 Enter，输入框为空且第二任务已 busy；本轮到 stage 11，全证据为真，输出
+  425812B，draw p95 2256µs、max 3823µs。WSL Ubuntu-22.04 真 PTY 亦过，输出 1385540B。
+- provider harness 新增 ordered `ScriptedStream`：chunk 可由 oneshot gate 精确放行，无网络、
+  无 sleep 复现流边界；gate 关闭 fail-closed 且不泄漏尾段，请求记录仍只留有界形状。
+  Windows Crossterm `CompletionFixture+ResizeProbe` 88 帧全真，p95 2691µs、max 5334µs；
+  `BusyFixture` 队首/FIFO/接管全真，p95 1592µs、max 3934µs。bounded soak 10×3 全过；
+  kill→restart recovery 复用 2、执行 1，三 case 全批准。
+- 本轮 workspace 全闸通过：agent 237、TUI/bin 503、eval 16 + CLI 2、langgraph 9、MCP 8、
+  provider 58、tools 27（1 ignored）、doctest 1；fmt、clippy `-D warnings`、build、diff 均绿。
+- `cargo llvm-cov --fail-under-lines 80` 通过：line 83.68%、function 83.45%、region 83.03%。
+- SpecTree 为 23 nodes / 171 targets / 67 Rust sources；Obsidian 23 notes 已重导，根节点逐项
+  列出 6 个直接子节点，叶节点显式标注无子节点，且每页含确定性的 `overview_language`、
+  `overview_detail_level`、`overview_includes_children`。最终 `ALIGNED`、`VALID`、stale `[]`，
+  graphHash `822deb2f291191050eb05f21b6d95b32cf4853ad7b4d68ebf55ade3adeb26f6d`。
+- **iter-66 · Windows raw-VT 单一输入所有者**：新增有界增量 `tui/raw_vt.rs`，跨 read
+  chunk 解码 UTF-8、CR/LF/HT/BS/DEL、Alt、CSI/SS3 导航、Home/End/Delete/Page、
+  Shift-Tab、CSI-u 修饰/Press/Repeat/Release 与 bracketed paste `200~`/`201~`；未知或
+  不完整序列在有界等待后回放，不吞普通文本，paste 正文仍交既有 `sanitize_paste`。
+  Windows `TerminalGuard` 现按 `RIDGE_TUI_VT_INPUT`（unset/`auto`=auto、`1`=raw-vt、
+  `0`=Crossterm）原子选择 backend；raw reader 独占 stdin，失败在同一线程回退并记录原因，
+  不再与 Crossterm 并行读；raw 路径跳过 rapid/burst 重分类，guard 退出恢复原 console mode。
+- 纯 backend policy 与 raw parser 15 项、terminal noise 4 项回归已通过；真实 ConPTY
+  `-InputFixture` 与 WSL PTY 已复验。仍不宣称每种 native Windows console、macOS/Unix
+  physical terminal 的全矩阵。
+- **iter-65 · 全局派发预算、注入边界与 harness 成本证据**：新增独立
+  `dispatch_budget` 模块；默认进程级并发上限 3，`RIDGE_DISPATCH_CONCURRENCY` 硬夹在
+  1..=32。`dispatch_agent`、`dispatch_agents`、legacy planned、routed teammate 与 A2A
+  共享同一 semaphore；等待可取消，permit 在成功、失败、超时及 fallback 前均以 RAII
+  释放。预算拒绝为 `GraphError::DispatchBudget` 或稳定
+  `dispatch_budget_rejected{...}` observation，不触发 provider fallback；batch 逐项标
+  `dispatch_status=completed|failed`，拒绝项不再误计 completed。两批 graph dispatch、单次
+  dispatch 与 routed run 跨入口并发回归证明合计峰值不越界。
+- Skills、flat commands、flat agents 的候选数分别封顶 256；Skills 单文件限 128 KiB，
+  commands/agents 单文件限 64 KiB，路径字典序及同名优先级确定。全局 `CLAUDE.md`/
+  `AGENTS.md` 各限 128 KiB；超限仅取 UTF-8 安全首尾并带 marker，最终系统注入仍受既有
+  24 Ki Unicode/6000-token 总闸。对应 knowledge 回归 25 项通过。
+- eval `CaseResult` 新增 `duration_ms`；timeout/failed 从最新内存 checkpoint 回收已完成
+  steps/token，计入 `total_tokens`，但 invariant 仍全部 fail-closed。bounded soak 同步记录
+  process、case 总/最大耗时及 timeout 已观测成本；本轮 10 iterations × 3 concurrency
+  全过，0 timeout，最大 case 1266ms、最大子进程 2077ms、累计已观测 token 1200。
+- Windows `InputFixture` 连续 3/3 到 stage 9，空格、BS、DEL、Tab、Shift-Tab、bracketed
+  paste 与独立 LF 全真；draw p95 2784/2747/2962µs，max 3229/3732/3825µs，输出均低于
+  1 MiB。Completion+Resize 79 帧通过，completion/diff/fold/table/highlight/resize 全真，
+  p95 2719µs、max 3341µs、输出 959357B。
+- workspace 全闸通过：agent 228、TUI/bin 482、eval 7 + CLI 1、langgraph 9、MCP 6、
+  provider 56、tools 27（1 ignored）、doctest 1；fmt、clippy `-D warnings`、build、diff 均绿。
+  CodeGraph 已同步。SpecTree 为 23 nodes / 166 targets / 65 Rust sources；独立 Obsidian vault
+  23 notes，唯一根 `L1-PROJECT-001`、16 leaves 的 parent/children link 已抽验；最终
+  `ALIGNED`、`VALID`、stale `[]`，graphHash
+  `b3bb2a8afa1f258d97fb1cfe80ea6006335f6fb23c230beecde3b70d3cb11613`。
+- 未证边界不变：24h 多故障 soak、snapshot 写盘及端到端
+  event-loop 延迟、macOS/native terminal matrix、外部 A2A 长连接故障注入、远端 Sonar。
+  当前已有 `sonar-scanner-npm`，但无 `SONAR_TOKEN` 且 localhost:9000 不通，故不宣称
+  Sonar gate；`.iteration/` 保持用户删除态。
+- **iter-64 · 输入证据去假阳性、draw 性能硬闸与文档树恢复**：Windows `InputFixture`
+  改为逐帧状态机，依次确认 `a b → a  → a b → a  → a → axyz`，空格、BS、DEL、Tab、
+  Shift-Tab、bracketed paste、独立 LF 各有快照或独立 keylog 边界；不再由最终缓冲反推此前
+  动作成功。真实 ConPTY 连续 3/3 通过，均到 stage 9；Shift-Tab 为 `raw-vt-fallback`、paste
+  为 `raw-bracketed-fallback`；draw p95 分别 3248/3079/3481µs，max 3717/3778/3732µs，
+  输出 969517/946102/957997B。Completion+Resize 通过：79 帧，p95 2766µs、max 4568µs，
+  completion/diff/table/highlight/resize 全真，输出 976688B。
+- `RIDGE_TUI_SNAPSHOT` 现以 4096 样本硬上限累计 exact draw-render 分布；ConPTY 默认闸为
+  p95 ≤16ms、max ≤50ms，样本缺失或截断即失败。此闸仅量 draw；snapshot 序列化/写盘、
+  snapshot-byte 分位与端到端事件循环延迟仍未证。`status=partial` 默认非零失败，
+  `-AllowPartial` 仅供诊断。
+- bounded soak 子进程现有 30 秒总 deadline，超时则终止且不写伪报告；1 秒故障探针已验证
+  exit 1，正常 `10 iterations × 3 concurrency` 全部结构完整、0 timed-out case。Windows
+  quality gate 已纳入 soak、逐段 Input、Completion+Resize；Unix gate 已纳入 Linux PTY replay。
+- A2A client/server/paired handshake 的完整 send/recv 现统一限 15 秒；silent-peer 三路径回归皆返回
+  `Timeout`，带 HMAC 的真实跨进程 2-session reconnect smoke 仍通过。MCP stdio 单帧硬限 1 MiB、
+  工具注册表硬限 256 项，transport drop 终止子进程；越界帧与清单均有回归。
+- workspace 全闸通过：agent 218、TUI/bin 482、eval 6 + CLI 1、langgraph 9、MCP 6、
+  provider 56、tools 27（1 ignored）、doctest 1；fmt、clippy `-D warnings`、build 均绿。
+  SpecTree 23 节点从本机审计记录原样恢复，空图现明确报错；独立 Obsidian vault 已导出并
+  核验根/叶、23 notes、`ALIGNED`/`VALID`，graphHash
+  `b45449aed4c66009b20d3bb1ec39b13720939664167fb1a4c20c2822efd4319d`。`.iteration/` 继续保持用户删除状态。24h soak、
+  agent kill→restart→resume、外部 A2A 长连接故障注入、macOS/native terminal matrix、
+  可复用 golden 与远端 Sonar 仍属开放边界。
+- **iter-63 · SpecTree 实证对齐与总量硬限**：CodeGraph/测试审计确认 routed teammate
+  并发峰值原已限 3，但 planner 数组总量此前无上限，与 `agent-orchestration` 的 bounded
+  声明不完全相符。现 `parse_subtasks` 统一 trim、过滤空白并只保留前 5 项；legacy/routed
+  共用该入口，invalid/empty fallback 不变。回归以超过 5 项的计划证明总执行 5、原序及
+  `max_active == 3`，主线程 targeted orchestration 21/21 通过。
+- Skill 发现原已限 256 份、每份 128 KiB，但 `build_system_prompt_with_mode` 此前无总注入
+  上限，理论可膨胀约 32 MiB。现 Skills 块同时受 24 Ki Unicode 字符与 6000 估算 token
+  硬限；超限采用 Unicode-safe 头尾保留和明确 marker，末尾 `项目规则` 预留预算并仍置尾端，
+  普通小集合输出逐字不变。三项 focused 回归均通过。
+- 主验收：`-CompletionFixture -ResizeProbe -TimeoutMs 12000` 结构化结果为
+  `status=passed`；`tool_fold_observed`、`completion_observed`、`diff_path_observed`、
+  `answer_table_observed`、`answer_highlight_observed`、`resize_observed`、
+  `output_budget_satisfied`、`crossterm_events_observed` 与对应 completion/diff evidence
+  均为 `true`。`output_bytes=974603`（约 0.96 MiB / 4 MiB），Resize Snapshot Rect 已由
+  `96×24` 切至 `40×12`；`InputFixture` worker 复跑亦 `status=passed`。首次 Completion+Resize
+  为 partial，非夹具执行失败：ConPTY 合法 `┆` presentation rail 插入 `view` 与
+  `transcript` 间，旧探针未匹配；现已按既有语义轨集合及紧凑 sentinel 修复，复跑通过。
+- 本轮只把已证事实写成 VALID，不抹平未证边界：Windows bracketed/unwrapped multiline
+  transport、可复用帧序列/golden、逐帧 render/snapshot p95/max 硬闸、进程 kill→restart→resume、
+  24h 多故障 soak、外部 A2A 长连接故障注入与 streamed run 总 wall-clock deadline 仍开放；
+  当前 shell 无 `SONAR_TOKEN`，故远端 Sonar gate 未宣称通过。`.iteration/` 保持用户删除态。
+- **iter-62 · Windows VT 输入来源、ConPTY 夹具与证据**：Crossterm 0.28.1 Windows 使用
+  `ReadConsoleInputW`/`INPUT_RECORD`；`ENABLE_VIRTUAL_TERMINAL_INPUT` 默认关闭，仅精确
+  `RIDGE_TUI_VT_INPUT=1` 实验性开启，`terminal doctor`/`/doctor` 同一策略。
+  `reassert_virtual_terminal_input` 仅在目标 bit 与当前 mode 不同时调用 `SetConsoleMode`。
+- `-InputFixture` 不再设置 `RIDGE_TUI_UNWRAPPED_BRIDGE=1`，不再注入或断言
+  `axyzraw\n\ttail`；其原子发送 CSI/OSC bracketed payload 产出 `axyz`，另测原始 TAB/Shift-Tab，
+  待 keylog 边界证明独立物理 LF 已被观察后再提交。输出受 `-MaxOutputBytes` 上限约束。
+- ConPTY 仍可将 bracketed-body 或无包围多行中的 C0 改写为成对 `Ctrl+Enter`/`Tab`；该事件
+  形状与真实快捷键无法区分，真实 bracketed multiline/unwrapped multiline 仍属明确 transport
+  gap，应用不从语义键推断 paste。`Event::Paste`/raw fallback 单测覆盖 multiline CRLF/CR 与
+  CSI/OSC 清理。
+- 委派验收：`InputFixture` 3/3、`BusyFixture` 1/1；主验收 3 次 Input 均 exit 0，其中一份
+  结构化输出全部输入证据为 true、`output_bytes=180570`。VTI native tests 6 项、terminal
+  doctor test 1 项、fmt/build 均通过；workspace 全测通过：agent 213、TUI/bin 480、eval 6
+  + CLI 1、langgraph 9、mcp 4、provider 56、tools 27（1 ignored）、doctest 1。
+- Coverage TOTAL：lines 83.37%、regions 82.70%、functions 82.97%；`fail-under-lines 80` 通过。
+- bounded soak：PASSED，10 iterations × 3 concurrency；iterations 1/6/7 各有 1 个
+  `timed_out_case`，每轮至少 1 个 passed case，不宣称 zero timeout。
+- A2A smoke：approved；reconnect 覆盖 2 external sessions。
+- SpecTree 已完成投影：graphHash `50e9da530a13f41e38a9d7e548254aae6b2ca309afa18959469b180063920ce6`，
+  23 nodes / 159 targets / 64 Rust / 23 notes，`ALIGNED`、`VALID`、stale `[]`。
+- **iter-61 · 输入语义分流与释放配对**：快速收集器不再把已解码的 `Enter`/`Tab` 按下事件当作粘贴候选；普通提交/补全仅走 10ms 探测，literal C0 或 Linux legacy PTY 的 Ctrl-J+Tab Press 桥接形状才启用 100ms 延续窗口。按键去重身份对 ASCII 大小写折叠，修复 Shift 在 key-up 前释放导致的重复字符；补全浮窗 `BackTab` 改路由为 `PopupPrev`。新增快速候选、Shift key-up、BackTab 路由与 Unix 多行桥接回归；Windows 夹具每次以 GUID 隔离临时 profile/config，重复回放不继承旧快照。workspace 测试 `213 + 468 + eval 6 + CLI 1 + langgraph 9 + mcp 4 + provider 56 + tools 27（1 ignored）+ doctest` 全绿；Windows `InputFixture`、`BusyFixture` 各连续 3/3 通过，输入快照仍为 `axyzraw\n\ttail`、cursor 13，WSL Ubuntu-22.04 POSIX PTY 回放通过，CSI-u→legacy-crlf 回退通过，输出均低于 4 MiB。SpecTree 当前 graphHash `fc7815699eb0de4865829c84265b30d460b082e8f5581461f71086a32e4b75be`（23 nodes/156 targets/64 Rust sources/23 notes），`ALIGNED`、`VALID`、无 stale。原生 Windows 控制台、macOS/native terminal matrix 与 Unix 硬独占 reader/replay 仍未证，故不宣称跨终端完备。
+- **iter-61 · 输入语义分流与释放配对**：快速收集器不再把已解码的 `Enter`/`Tab` 按下事件当作粘贴候选；普通字符（含空格）与已配对 Press/Release 直通，不启动 10ms 收集器；默认仅 literal C0 取得无包围粘贴资格，Linux legacy PTY 的 Ctrl-J+Tab Press 桥接与 ConPTY dangling Release 均须 `RIDGE_TUI_UNWRAPPED_BRIDGE=1`。按键去重身份对 ASCII 大小写折叠，修复 Shift 在 key-up 前释放导致的重复字符；补全浮窗 `BackTab` 改路由为 `PopupPrev`。新增默认安全路由、显式兼容桥、孤立 Release、Shift key-up、BackTab 路由与 Unix 多行桥接回归；Windows 夹具每次以 GUID 隔离临时 profile/config，重复回放不继承旧快照。workspace 测试 `213 + 477 + eval 6 + CLI 1 + langgraph 9 + mcp 4 + provider 56 + tools 27（1 ignored）+ doctest` 全绿；Windows `InputFixture` 最新通过，输入快照为 `axyzraw\n\ttail`、cursor 13，输出 877383B/4MiB，coverage 行 83.39%，WSL Ubuntu-22.04 POSIX PTY 回放通过。SpecTree 当前 graphHash `91e42e29e469b45bb5f51904df1d1ce6c342422331ce84cb69b52a734b668705`（23 nodes/159 targets/64 Rust sources/23 notes），`ALIGNED`、`VALID`、无 stale。原生 Windows 控制台、macOS/native terminal matrix 与 Unix 硬独占 reader/replay 仍未证，故不宣称跨终端完备。
+- **iter-60 · Windows 原生输入模式重申 + Unix raw fd**：`spawn_key_reader` 于每次 Crossterm `event::poll`/`event::read` 前后重申关闭 `ENABLE_VIRTUAL_TERMINAL_INPUT`，堵住模式被重写后将 `[C/[D/[3~` 泄成字面键的窗口；ConPTY/重定向管道无 Win32 console mode，行为不变。workspace 启用 Crossterm `use-dev-tty` 原始 `/dev/tty` descriptor poll/select backend，降低 SSH/Jupyter/IDE bridge 读 stdin 缓冲风险，但硬独占自定义 reader/replay 仍未证。InputFixture、BusyFixture 各连续 3/3 通过；SpecTree 当前 graphHash `70b600fcf870306800d7500a58e00ff9844dbded2968fe654113565d4478d949`（23 nodes/154 targets/64 Rust sources/23 notes），`ALIGNED`、`VALID`、无 stale。原生 Windows 控制台及 macOS/Linux PTY 仍待实机验收，故不宣称跨终端完备。
+- **iter-59 · 输入来源不可证时拒绝粘贴重分类**：对“真实 `Ctrl+Enter`→`Tab`”加入对抗回归，确认 Crossterm 的成对/悬空控制事件与 ConPTY 无包围粘贴在事件层无可区分来源；移除成对事件推断，仅保留 literal C0 边界与 ConPTY 特有的“无对应 Press 的 dangling `Enter`+`Tab` Release”窄回退，成对 Press/Release 永不重分类，故不误吞真实快捷键；快速收集窗口改为 10ms 探测 + 100ms 有界延续，连续 3 次 Windows ConPTY `-InputFixture` 与 `-BusyFixture` 均过。7 个 rapid 输入回归与 12 项原始字节/快捷键归一矩阵、workspace `213 + 464 + eval 6 + CLI 1 + langgraph 9 + mcp 4 + provider 56 + tools 27（1 ignored）+ doctest`、bounded eval soak `10×3`（0 timeout）、fmt/clippy/build/diff/coverage 均过，行覆盖率 83.41%、regions 82.72%（阈值 80%）；SpecTree 当前 graphHash `8674b08dd38a849ee00d8d92efe6494ae5ad8ec2b27f957dccf1b69612ec4a31`（23 nodes/153 targets/64 Rust sources/23 notes），`ALIGNED`、`VALID`、无 stale；macOS/Linux PTY 与 Unix SSH/Jupyter/IDE bridge raw-reader 仍待补证。
+- **iter-58 · 终端能力判定与文档树对齐**：新增 `tui/terminal.rs`，以纯环境矩阵决定 Kitty keyboard protocol 是否协商；Windows 原生输入、VS Code/xterm.js、Apple Terminal、JetBrains、旧 VTE、未知 multiplexer/终端默认走 legacy，已知支持终端与新 VTE 才启用，`RIDGE_TUI_KITTY=1/0` 可显式覆盖。状态提示随实际能力改报 `Shift/Alt+Enter` 或 `Alt+Enter/Ctrl+J`；纯矩阵测试、Windows `-InputFixture` 与默认 `-BusyFixture` 已通过（Busy 默认多留一帧，避免 Queue[2] 被接管中断抢先吞掉）。`specs/agent-input.md`、README 已绑定该实现与测试；SpecTree 重导出为 graphHash `8674b08dd38a849ee00d8d92efe6494ae5ad8ec2b27f957dccf1b69612ec4a31`，23 nodes/153 targets/64 Rust sources/23 notes，`ALIGNED`、`VALID`、无 stale；`cargo llvm-cov` 当前行覆盖率 83.43%、regions 82.73%（阈值 80%）。macOS/Linux PTY 矩阵、24h soak、Sonar 与长连接外部 A2A 仍未证。策略参考 Grok Build 的保守终端能力判定与 Alt+Enter 退化路径。
+- **iter-57h · 全量质量闸**：workspace 串行测试 `213 + 462 + eval 6 + CLI 1 + langgraph 9 + mcp 4 + provider 56 + tools 27（1 ignored）+ doctest` 全绿；`cargo fmt --all`、`clippy --workspace --all-targets -D warnings`、`cargo build --workspace`、`git diff --check` 均通过。
+- **iter-57g · A2A session 与 bounded harness**：`AgentClientSession` 已接入 CLI client path；一次握手可复用多任务，transport/timeout/cancel 后 session 自动 poison，peer 退出需新 session；loopback 回归与带 `RIDGE_A2A_SECRET` 的 `a2a smoke`（2 个外部进程 session）通过。`npm run eval:soak` 10 轮、3 workers、5s timeout 全过，固定 3 cases、每轮至少 1 approved、无 all-timeout，证据写入 `target/quality/bounded-soak.json`。Sonar、macOS/Linux PTY、24h soak、外部长连接 transport 仍未证。
+- **iter-57e · ConPTY 成对控制事件回归**：修复未包裹粘贴在 ConPTY 中被拆成成对 `Ctrl+Enter`/`Tab` 时的误提交/误补全；新增成对事件单测，保留孤立 Ctrl+Enter 按键语义。最新 Windows `-InputFixture` 连续 3 轮均通过，均观察 `axyzraw\n\ttail`、cursor 13、Enter/Tab/Shift-Tab/paste 证据。`cargo llvm-cov` 最新总行覆盖率 83.39%（regions 82.70%，`target/quality/lcov.info`）。
+- **iter-57f · SpecTree 最终投影**：输入与 harness CLI 规格写回后，`npm run spectree:export`、`npm run spectree:check`、`stc validate/status` 全通过；当前 graphHash `5f31f3b4a05afebf3ef2f928adb18a829f095b44fb321f562caa4b97434e912b`，23 nodes/151 targets/63 Rust sources/23 notes，`ALIGNED`、无 stale。
+- **iter-57c · 最新质量重算**：`cargo llvm-cov --workspace --all-features --locked --fail-under-lines 80` 通过，最新总行覆盖率 83.39%（regions 82.70%，`target/quality/lcov.info`）；full workspace test、clippy、build、fmt、PTY、A2A 与 SpecTree 证据均在本轮改动后复跑。
+- **iter-57 · Shift-Tab 协议边界与有界输入通道**：补齐标准 VT/xterm `ESC [ Z`、修饰形式 `ESC [ 1 ; 2 Z` 及 Windows ConPTY 丢 ESC 后的 bare `[Z`/`[1;2Z` 解码，回归断言不泄入 `[`/`Z` 残字；键盘读取线程改为容量 4096 的有界 Tokio 通道，以背压替代无界积压。`eval::run_eval` 统一委托默认有界 `HarnessOptions`，避免公共入口绕过 case timeout/concurrency 限制；默认 `a2a smoke` 连续验证两个真实外部 peer session，首 peer 退出后重新握手。`cargo fmt --all -- --check`、eval 6+CLI、Shift-Tab 单测、A2A secret smoke、workspace 212/457、eval 6+CLI、langgraph 9、mcp 4、provider 56、tools 27(+1 ignored)、doctest、clippy/build/diff 全通过；真实 ConPTY `-InputFixture` 通过（输出 911154/4194304 bytes，Shift-Tab、paste、独立 LF 均满足）。安装 `cargo-llvm-cov 0.9.0` 后总行覆盖率 83.33%（`target/quality/lcov.info`，阈值 80%）；Sonar scanner/token 仍缺，故不宣称远端 gate。当前仍未宣称 macOS/Linux 终端矩阵、长连接 transport 复用、24h soak 或真实终端原生复制/搜索已通过。SpecTree graphHash `42770473ac3e30b779797570cb218022c7d21e918c99099be334548ff6095228`，23 nodes/150 targets/63 Rust sources/23 notes，`stc validate/status` 均为 VALID、无 stale。
+- **iter-56 · 终端控制键矩阵收口**：归一层现明确区分 raw LF+Ctrl（物理 Ctrl+Enter，忙时前置队列）与显式 `Char('j')+Ctrl`（Ctrl-J 换行）；raw C0 HT、`KeyCode::Tab` 的 Ctrl/Alt 别名统一到 live-history `Ctrl-I`，Shift-Tab 统一为 `BackTab`，普通 Tab 仍为补全。新增终端控制矩阵与 live-history 回归；workspace 串行 `--no-fail-fast --test-threads=1` 通过（212/456、eval 6+CLI、langgraph 9、mcp 4、provider 56、tools 27(+1 ignored)、doctest），fmt/clippy/build/diff 全绿；Windows ConPTY `-InputFixture` 复跑通过，输入探针仍为 `axyzraw\n\ttail`、cursor 13；带 `RIDGE_A2A_SECRET` 的跨进程 A2A smoke 通过。
+
+- **iter-55b · ConPTY 复核**：快速输入采用 10ms 探测 + 25ms 有界延续，识别 dangling release；真实 `-InputFixture` 已证明 `axyzraw\n\ttail` 与独立 LF 提交。
+
+- **iter-55c · Harness 闸与最终复核**：`ridgecode-eval --fail-on-unapproved` 输出同一结构化报告但对空套件/未通过 case 返回非零；workspace 212/456、eval 6+CLI、langgraph 9、mcp 4、provider 56、tools 27(+1 ignored)、doctest 全绿，fmt/clippy/build/diff 全绿；A2A smoke 与 Windows ConPTY InputFixture 复跑通过。SpecTree graphHash `d65add30515ca0234dfd04a074715f9966d9133fe5d5c54b3b710262f04a04b0`，23 nodes/149 targets/63 Rust sources/23 notes，ALIGNED/VALID、无 stale。
+
+- **iter-55 · 输入与 Skill 优先级对齐**：快速无包围粘贴仅在事件流含 raw C0 LF/TAB/CR 边界时合并，语义 `Enter`/`Tab` 后紧跟字符仍走按键路径；未知 Ctrl/Alt/Super 字符事件丢弃，避免控制键泄入字面空格/字符。新增 raw LF/TAB handler 与语义 Enter 回归。`merge_skills` 使用户定义优先于内置，项目规则最后注入且同名替换；SpecTree 已同步 `agent-input`/`agent-knowledge`。
+- **iter-54 · SpecTree 文档树与实现对齐、输入/编排收口**：`specs/agent-input.md` 现在绑定 `input.rs`/`csi.rs`/`mod.rs`/`draw.rs`/`render.rs` 与 `windows-pty-e2e.ps1`；`sanitize_paste` 已完整丢弃 CSI/OSC/DCS 等控制序列，兼容 ConPTY 丢 ESC 后的 bare CSI/OSC 残尾，回归覆盖 `[31m` 残尾、OSC 与 8-bit CSI，避免多余键/空格泄入输入框。读取线程改为 `poll/read` 可重试；快速无包围多行串原以 2ms 探测 + 有界 25ms 延续合并（后由 iter-55b 修为 10ms），普通输入后回车仍走按键路径。`-InputFixture` 真实 ConPTY 探针写入 BS(`0x08`)、DEL(`0x7f`)、TAB(`0x09`)、LF(`0x0a`) 与 bracketed paste，另断言无包围正文 `axyzraw\n\ttail` 后再独立 LF 提交，并将输入正文限制在显式 `RIDGE_TUI_INPUT_DIAGNOSTICS=1` 快照。PTY 所有模式新增 `-MaxOutputBytes`(默认 4 MiB) 硬上限；Busy/Completion/Stress/Commands/Input 五类夹具均通过。
+- **iter-54 · MCP 协议语义收口**：初始化发送 `2025-06-18` 并校验服务端非空协商版本（兼容旧测试 transport 省略字段）；`tools/list` 拒绝缺名工具并为缺失 schema 使用 object 默认；`tools/call` 保留 `isError:true` 为显式 `McpError::Tool`，文本/structuredContent 诊断上限 64 KiB，agent graph 观察边界仅输出脱敏错误类别。
+- **iter-54 · routed/A2A 取消传播**：`run_planned_routed_with_cancellation` 将 `AgentCancellation` 贯穿 planner、三路有界 teammate wave 与 in-process A2A handler；取消后不触发 provider fallback，并有 `routed_orchestrator_cancellation_stops_teammates_without_fallback` 回归。
+- **iter-54 · 本轮闸门**：上一轮 workspace 闸门已通过（agent lib 210、ridgecode bin/TUI 448、eval 6、langgraph 9、mcp 2、provider 56、tools 27 + 1 ignored、doctest 全绿）；本轮新增输入单测与 MCP 4 测试，Windows `-InputFixture` 通过（raw BS/DEL/TAB/LF、bracketed paste、无包围多行 `axyzraw\n\ttail`、独立 LF 提交，输出受 4 MiB 上限约束），无密钥 `cargo run -p agent --bin ridgecode -- a2a smoke` 仍为通过；本轮 workspace test 通过（agent 211、ridgecode 451、eval 6、langgraph 9、mcp 4、provider 56、tools 27 + 1 ignored、doctest 全绿），fmt/clippy/build/diff 亦通过。质量闸已纳入 `npm run spectree:check`。本轮 SpecTree 已重导出并校验：graphHash `c852390a1671e4200bccfc3909ea81d61d432eb00c1f25238a4589b9ef703174`，23 nodes/149 targets/63 Rust sources/23 notes，`stc validate/status` 均通过且无 stale。
+- **iter-54 · 未证项**：macOS/Linux 终端矩阵、外部多进程 A2A 重连、24h bounded soak、真实终端原生复制/搜索与远端 Sonar 仍未宣称通过；`.iteration/` 当前按用户状态保持删除，不恢复。
 
 - **iter-53 · Grok Build 全量接手与可用性收敛**：已审计本地 Grok 会话 `01a0035b-084b-7fa1-8c6a-0f7d828c23b8`，其终态为 `infra_paused`（402）且五项计划未完成；用户“批准所有需求”已固化为 `REQ-20260816-GROK-HANDOFF-01` 与 `REQ-20260816-TUI-ANSWER-OUTPUT-01`，并显式修订旧 read_file 可见性条款：主 scrollback 仅显示摘要/准确 `… +N lines`，Ctrl+T 审计保存完整 observation，assistant answer 永不折叠。
 - **执行闭环**：变更任务 completion gate 要求匹配目标写入；两次匹配编辑拒绝后有界 wrapup，避免伪完成或无限 reason；parked shell 可由 shipped `cancel_job_id` 入口取消并清 `live_shell_jobs`；命名 provider 运行时尊重 `RIDGE_MODEL/RIDGE_BASE_URL`，但仍取所选 profile 凭证；sub-agent 缺 profile/model、401、429、不可达时逐任务回退调度时主 provider/model；`search.path` 可为文件或目录，消除 Windows `os error 267`。
@@ -127,7 +275,9 @@ agent 定义 = frontmatter `.md`:内置 fastcontext/explorer/reviewer 编进二�
 
 ### 2.7 Skills 与项目规则
 
-`SKILL.md` 声明式技能:`RIDGE_SKILLS_DIR` env > config `skills_dir` > `~/.ridge/skills`。cwd 的 `CLAUDE.md`/`AGENTS.md` 经 `load_project_rules` 注入 system prompt。`@file` 引用注入正文(MENTION_CAP=20000 截断)。
+`SKILL.md` 声明式技能:`RIDGE_SKILLS_DIR` env > config `skills_dir` > `~/.ridge/skills`；`merge_skills` 按用户/项目源优先于内置去重，项目规则最后注入。cwd 的 `CLAUDE.md`/`AGENTS.md` 经 `load_project_rules` 注入 system prompt。`@file` 引用注入正文(MENTION_CAP=20000 截断)。
+
+当前多 scope loader 已收束为确定性优先级：env > config > cwd `.ridge/skills`/`.agents/skills` > repo root 同名目录 > user > builtin；cwd 与 repo root 重合时去重。所有 scope 共用 `MAX_SKILLS=256`，同名冲突只注入胜者，stderr 仅报告 source label/path；被覆盖 Skill 通过 `/scope:name` 限定命令保留显式调用，hot reload/progressive loading 尚未实现。
 
 ## 3. provider:LLM 抽象
 
@@ -825,4 +975,3 @@ providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/bas
 - Agent route 已落地：`build_agents` 仅把可解析凭据的 `providers[]` 放入候选；`RouteRequest` 按任务推断难度/规模/类型，`choose_route` 过滤排序，`dispatch_agent` 与 `run_planned_routed` 输出选择理由及单次 fallback。真实配置 smoke 观察到 `Zai::glm-4.6` 选择及 HTTP 429 后主 provider fallback；`/agent` 当前仅列出可用 agent，未接手动派发。
 - 发布/安装基线在本轮将递增至 `v0.5.17`；提交、推送、GitHub Release 与本机新包安装须以远端资产和 `ridgecode --version` 复核为准。
 - 本轮 NotebookLM 冷闸因用户请求触发，但本机认证已过期且 CDP 初始不可用；未消费未验证研究结论。上述代码、测试、配置与 smoke 为当前事实权威；跨进程 A2A/ridge-mcp 互操作须另立明确 receipt、身份、取消与响应契约后再开发。
-

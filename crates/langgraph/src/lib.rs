@@ -37,7 +37,7 @@ mod state;
 
 pub use checkpoint::{Checkpoint, Checkpointer, FileCheckpointer, MemoryCheckpointer};
 pub use graph::{CompiledGraph, RunConfig, StateGraph, StreamEvent, END, START};
-pub use state::{BoxError, GraphError, GraphState};
+pub use state::{BoxError, DispatchBudgetReason, GraphError, GraphState};
 
 #[cfg(test)]
 mod tests;

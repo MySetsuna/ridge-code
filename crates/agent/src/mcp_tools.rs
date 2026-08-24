@@ -4,6 +4,7 @@ use mcp::{McpClient, McpError};
 use provider::ToolSpec;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// MCP server 生命周期中用户可见的阶段。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,11 +81,7 @@ impl McpServerStatus {
 
 /// 将错误压缩成不含命令参数、token 或 API key 的可展示原因。
 pub fn mcp_error_summary(error: &McpError) -> String {
-    match error {
-        McpError::Transport(_) => "transport error".to_string(),
-        McpError::Rpc { code, .. } => format!("RPC error {code}"),
-        McpError::BadResponse(_) => "invalid MCP response".to_string(),
-    }
+    error.redacted_summary()
 }
 
 /// 已连好的 MCP 工具:暴露给 LLM 的 [`ToolSpec`] + 「命名空间名 → (客户端, 原始工具名)」路由表。
@@ -93,6 +90,7 @@ pub struct McpTools {
     pub(crate) specs: Vec<ToolSpec>,
     pub(crate) router: HashMap<String, (Arc<McpClient>, String)>,
     statuses: Vec<McpServerStatus>,
+    startup_errors: Vec<String>,
 }
 
 impl McpTools {
@@ -108,6 +106,12 @@ impl McpTools {
     pub fn statuses(&self) -> &[McpServerStatus] {
         &self.statuses
     }
+
+    /// Deterministic startup errors, including namespace collisions. A
+    /// colliding tool is removed from both the LLM spec list and router.
+    pub fn startup_errors(&self) -> &[String] {
+        &self.startup_errors
+    }
 }
 
 /// 连上一批 MCP 客户端:各自 initialize + list_tools,把工具归一化成 [`ToolSpec`](命名空间)+ 建路由表。
@@ -119,41 +123,249 @@ pub async fn resolve_mcp(clients: Vec<Arc<McpClient>>) -> McpTools {
 /// 与 [`resolve_mcp`] 相同，但接收启动阶段已记录的 configured/failed 状态。
 pub async fn resolve_mcp_with_statuses(
     clients: Vec<Arc<McpClient>>,
-    mut statuses: Vec<McpServerStatus>,
+    statuses: Vec<McpServerStatus>,
 ) -> McpTools {
+    resolve_mcp_with_options(
+        clients,
+        statuses,
+        mcp_startup_timeout(),
+        mcp_startup_parallelism(),
+    )
+    .await
+}
+
+async fn resolve_mcp_with_options(
+    clients: Vec<Arc<McpClient>>,
+    mut statuses: Vec<McpServerStatus>,
+    timeout: Duration,
+    parallelism: usize,
+) -> McpTools {
+    let ordered_clients = clients;
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(parallelism.max(1)));
+    let mut tasks = Vec::with_capacity(ordered_clients.len());
+
+    // Run each server independently, but collect by input index below.  A
+    // slow server therefore cannot delay a fast one, and completion order can
+    // never change the visible status/tool order or namespace winner.
+    for (index, client) in ordered_clients.iter().cloned().enumerate() {
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("MCP startup semaphore remains open");
+        tasks.push(tokio::spawn(async move {
+            let _permit = permit;
+            (index, resolve_mcp_client(client, timeout).await)
+        }));
+    }
+
+    let mut results = (0..ordered_clients.len())
+        .map(|_| None)
+        .collect::<Vec<Option<ClientResolution>>>();
+    for task in tasks {
+        match task.await {
+            Ok((index, result)) => results[index] = Some(result),
+            Err(_) => {
+                // Join failures contain no server payload.  The corresponding
+                // indexed slot is reported as a generic, redacted failure.
+            }
+        }
+    }
+
     let mut out = McpTools {
         statuses: std::mem::take(&mut statuses),
         ..McpTools::empty()
     };
-    for client in clients {
+    let mut owners = HashMap::<String, String>::new();
+    let mut collided_names = std::collections::BTreeSet::<String>::new();
+    let mut collision_servers = std::collections::BTreeSet::<String>::new();
+    for (index, client) in ordered_clients.into_iter().enumerate() {
         let name = client.namespace().to_string();
         status_for(&mut out.statuses, &name).started();
-        if let Err(error) = client.initialize().await {
-            status_for(&mut out.statuses, &name)
-                .failed(format!("initialize failed: {}", mcp_error_summary(&error)));
-            continue;
-        }
-        status_for(&mut out.statuses, &name).initialized();
-        let tools = match client.list_tools().await {
-            Ok(tools) => tools,
-            Err(error) => {
-                status_for(&mut out.statuses, &name)
-                    .failed(format!("tools/list failed: {}", mcp_error_summary(&error)));
-                continue;
+        match results[index].take() {
+            Some(ClientResolution::Ready(tools)) => {
+                status_for(&mut out.statuses, &name).initialized();
+                let tools = stable_tools(tools);
+                status_for(&mut out.statuses, &name).tools_listed(tools.len());
+                append_tools(
+                    &mut out,
+                    &client,
+                    tools,
+                    &mut owners,
+                    &mut collided_names,
+                    &mut collision_servers,
+                );
             }
-        };
-        status_for(&mut out.statuses, &name).tools_listed(tools.len());
-        for t in tools {
-            let ns = client.namespaced(&t.name);
-            out.specs.push(ToolSpec {
-                name: ns.clone(),
-                description: t.description,
-                schema: t.input_schema,
-            });
-            out.router.insert(ns, (client.clone(), t.name));
+            Some(ClientResolution::Failed(failure)) => {
+                if failure.stage == StartupStage::ToolsList {
+                    status_for(&mut out.statuses, &name).initialized();
+                }
+                status_for(&mut out.statuses, &name).failed(failure.detail());
+            }
+            Some(ClientResolution::TimedOut(stage)) => {
+                if stage == StartupStage::ToolsList {
+                    status_for(&mut out.statuses, &name).initialized();
+                }
+                status_for(&mut out.statuses, &name).failed(format!(
+                    "{} timed out after {}ms",
+                    stage.label(),
+                    timeout.as_millis()
+                ));
+            }
+            None => {
+                status_for(&mut out.statuses, &name).failed("startup task failed");
+            }
+        }
+    }
+    if !out.startup_errors.is_empty() {
+        let detail = format!("namespace collision(s): {}", out.startup_errors.join(", "));
+        for status in &mut out.statuses {
+            if collision_servers.contains(&status.name) {
+                status.failed(detail.clone());
+            }
         }
     }
     out
+}
+
+const DEFAULT_MCP_STARTUP_TIMEOUT_SECS: u64 = 15;
+const MAX_MCP_STARTUP_TIMEOUT_SECS: u64 = 300;
+const DEFAULT_MCP_STARTUP_PARALLELISM: usize = 4;
+const MAX_MCP_STARTUP_PARALLELISM: usize = 32;
+
+fn mcp_startup_timeout() -> Duration {
+    let max = Duration::from_secs(MAX_MCP_STARTUP_TIMEOUT_SECS);
+    if let Some(milliseconds) = std::env::var("RIDGE_MCP_STARTUP_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+    {
+        return Duration::from_millis(milliseconds).min(max);
+    }
+    if let Some(seconds) = std::env::var("RIDGE_MCP_STARTUP_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+    {
+        return Duration::from_secs(seconds).min(max);
+    }
+    Duration::from_secs(DEFAULT_MCP_STARTUP_TIMEOUT_SECS)
+}
+
+fn mcp_startup_parallelism() -> usize {
+    std::env::var("RIDGE_MCP_STARTUP_PARALLELISM")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .map_or(DEFAULT_MCP_STARTUP_PARALLELISM, |value| {
+            value.min(MAX_MCP_STARTUP_PARALLELISM)
+        })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupStage {
+    Initialize,
+    ToolsList,
+}
+
+impl StartupStage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Initialize => "initialize",
+            Self::ToolsList => "tools/list",
+        }
+    }
+}
+
+struct StartupFailure {
+    stage: StartupStage,
+    error: McpError,
+}
+
+impl StartupFailure {
+    fn detail(&self) -> String {
+        format!(
+            "{} failed: {}",
+            self.stage.label(),
+            mcp_error_summary(&self.error)
+        )
+    }
+}
+
+enum ClientResolution {
+    Ready(Vec<mcp::McpTool>),
+    Failed(StartupFailure),
+    TimedOut(StartupStage),
+}
+
+async fn resolve_mcp_client(client: Arc<McpClient>, timeout: Duration) -> ClientResolution {
+    let mut stage = StartupStage::Initialize;
+    let result = tokio::time::timeout(timeout, async {
+        client.initialize().await.map_err(|error| StartupFailure {
+            stage: StartupStage::Initialize,
+            error,
+        })?;
+        stage = StartupStage::ToolsList;
+        client.list_tools().await.map_err(|error| StartupFailure {
+            stage: StartupStage::ToolsList,
+            error,
+        })
+    })
+    .await;
+    match result {
+        Ok(Ok(tools)) => ClientResolution::Ready(tools),
+        Ok(Err(failure)) => ClientResolution::Failed(failure),
+        Err(_) => ClientResolution::TimedOut(stage),
+    }
+}
+
+fn stable_tools(mut tools: Vec<mcp::McpTool>) -> Vec<mcp::McpTool> {
+    tools.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.description.cmp(&right.description))
+            .then_with(|| {
+                serde_json::to_string(&left.input_schema)
+                    .unwrap_or_default()
+                    .cmp(&serde_json::to_string(&right.input_schema).unwrap_or_default())
+            })
+    });
+    tools.dedup_by(|left, right| left.name == right.name);
+    tools
+}
+
+fn append_tools(
+    out: &mut McpTools,
+    client: &Arc<McpClient>,
+    tools: Vec<mcp::McpTool>,
+    owners: &mut HashMap<String, String>,
+    collided_names: &mut std::collections::BTreeSet<String>,
+    collision_servers: &mut std::collections::BTreeSet<String>,
+) {
+    for tool in tools {
+        let namespace = client.namespaced(&tool.name);
+        if collided_names.contains(&namespace) {
+            collision_servers.insert(client.namespace().to_string());
+            continue;
+        }
+        if let Some(owner) = owners.get(&namespace).cloned() {
+            out.router.remove(&namespace);
+            out.specs.retain(|spec| spec.name != namespace);
+            collided_names.insert(namespace.clone());
+            collision_servers.insert(owner.clone());
+            collision_servers.insert(client.namespace().to_string());
+            out.startup_errors
+                .push(format!("{namespace} ({owner}, {})", client.namespace()));
+            continue;
+        }
+        out.specs.push(ToolSpec {
+            name: namespace.clone(),
+            description: tool.description,
+            schema: tool.input_schema,
+        });
+        owners.insert(namespace.clone(), client.namespace().to_string());
+        out.router.insert(namespace, (client.clone(), tool.name));
+    }
 }
 
 fn status_for<'a>(statuses: &'a mut Vec<McpServerStatus>, name: &str) -> &'a mut McpServerStatus {
@@ -223,12 +435,15 @@ pub fn render_todos(todos: &[Todo]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_mentions, render_todos, resolve_mcp, McpServerState};
+    use super::{
+        expand_mentions, render_todos, resolve_mcp, resolve_mcp_with_options, McpServerState,
+    };
     use crate::exec::{execute_tool_call, parse_todos};
     use crate::needs_approval;
     use mcp::{FnTransport, McpClient, McpError};
     use provider::ToolCall;
     use std::sync::Arc;
+    use std::time::Duration;
 
     /// todo_write:解析 todos + 渲染 checklist + 只读不走权限门。
     #[test]
@@ -277,7 +492,7 @@ mod tests {
         let ready = Arc::new(McpClient::new(
             "ready",
             Box::new(FnTransport(
-                |method: &str, _params: &serde_json::Value| match method {
+                move |method: &str, _params: &serde_json::Value| match method {
                     "initialize" => Ok(serde_json::json!({})),
                     "tools/list" => Ok(serde_json::json!({
                         "tools": [{
@@ -333,5 +548,149 @@ mod tests {
         assert_eq!(list_status.state, McpServerState::Failed);
         assert_eq!(list_status.detail, "tools/list failed: RPC error -32001");
         assert!(!list_status.detail.contains("secret"));
+    }
+
+    struct BarrierTransport {
+        barrier: Arc<tokio::sync::Barrier>,
+        tools: Vec<&'static str>,
+    }
+
+    #[async_trait::async_trait]
+    impl mcp::McpTransport for BarrierTransport {
+        async fn request(
+            &self,
+            method: &str,
+            _params: serde_json::Value,
+        ) -> Result<serde_json::Value, McpError> {
+            match method {
+                "initialize" => {
+                    self.barrier.wait().await;
+                    Ok(serde_json::json!({}))
+                }
+                "tools/list" => Ok(serde_json::json!({
+                    "tools": self
+                        .tools
+                        .iter()
+                        .map(|name| serde_json::json!({
+                            "name": name,
+                            "description": name,
+                            "inputSchema": {"type": "object"}
+                        }))
+                        .collect::<Vec<_>>()
+                })),
+                _ => Ok(serde_json::json!({})),
+            }
+        }
+    }
+
+    struct HangingTransport;
+
+    #[async_trait::async_trait]
+    impl mcp::McpTransport for HangingTransport {
+        async fn request(
+            &self,
+            _method: &str,
+            _params: serde_json::Value,
+        ) -> Result<serde_json::Value, McpError> {
+            std::future::pending::<Result<serde_json::Value, McpError>>().await
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_mcp_runs_startup_in_parallel_and_orders_results() {
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let first = Arc::new(McpClient::new(
+            "first",
+            Box::new(BarrierTransport {
+                barrier: barrier.clone(),
+                tools: vec!["zeta", "alpha"],
+            }),
+        ));
+        let second = Arc::new(McpClient::new(
+            "second",
+            Box::new(BarrierTransport {
+                barrier,
+                tools: vec!["beta", "alpha"],
+            }),
+        ));
+
+        let resolved = tokio::time::timeout(
+            Duration::from_secs(1),
+            resolve_mcp_with_options(
+                vec![first, second],
+                Vec::new(),
+                Duration::from_millis(100),
+                2,
+            ),
+        )
+        .await
+        .expect("independent MCP startups should make progress together");
+        assert_eq!(
+            resolved.tool_names(),
+            vec![
+                "first__alpha",
+                "first__zeta",
+                "second__alpha",
+                "second__beta"
+            ]
+        );
+        assert_eq!(
+            resolved
+                .statuses()
+                .iter()
+                .map(|status| status.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+    }
+
+    #[tokio::test]
+    async fn namespace_collision_fails_closed_with_deterministic_error() {
+        let make = || {
+            Arc::new(McpClient::new(
+                "same-server",
+                Box::new(FnTransport(
+                    move |method: &str, _params: &serde_json::Value| match method {
+                        "initialize" => Ok(serde_json::json!({})),
+                        "tools/list" => Ok(serde_json::json!({
+                            "tools": [{"name": "same", "description": "duplicate"}]
+                        })),
+                        _ => Ok(serde_json::json!({})),
+                    },
+                )),
+            ))
+        };
+        let resolved = resolve_mcp_with_options(
+            vec![make(), make()],
+            Vec::new(),
+            Duration::from_millis(100),
+            2,
+        )
+        .await;
+        assert!(
+            resolved.tool_names().is_empty(),
+            "collision must not pick a winner"
+        );
+        assert_eq!(
+            resolved.startup_errors(),
+            &["same-server__same (same-server, same-server)".to_string()]
+        );
+        assert!(resolved.statuses().iter().all(|status| {
+            status.state == McpServerState::Failed
+                && status.detail.contains("same-server__same")
+                && status.detail.contains("same-server, same-server")
+        }));
+    }
+
+    #[tokio::test]
+    async fn resolve_mcp_timeout_is_bounded_and_redacted() {
+        let client = Arc::new(McpClient::new("hanging", Box::new(HangingTransport)));
+        let resolved =
+            resolve_mcp_with_options(vec![client], Vec::new(), Duration::from_millis(5), 1).await;
+        assert_eq!(resolved.tool_names(), Vec::<String>::new());
+        let status = &resolved.statuses()[0];
+        assert_eq!(status.state, McpServerState::Failed);
+        assert_eq!(status.detail, "initialize timed out after 5ms");
+        assert!(status.trail_labels().contains(&"failed"));
     }
 }

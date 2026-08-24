@@ -55,6 +55,142 @@ pub(crate) fn host_env_block() -> String {
     )
 }
 
+const SKILLS_CHAR_CAP: usize = 24 * 1024;
+const SKILLS_TOKEN_CAP: usize = 6_000;
+const SKILLS_TRUNCATION_MARKER: &str = "\n… [skills truncated: budget reached] …\n";
+const PROJECT_RULE_NAME: &str = "项目规则";
+
+fn skills_fit_budget(text: &str) -> bool {
+    text.chars().count() <= SKILLS_CHAR_CAP && crate::context::est_tokens(text) <= SKILLS_TOKEN_CAP
+}
+
+fn render_skill_section(skill: &Skill) -> String {
+    format!(
+        "\n## {} — {}\n{}\n",
+        skill.name, skill.description, skill.body
+    )
+}
+
+/// Keep the beginning and end of an overflowing piece while making the
+/// complete surrounding prompt obey both deterministic budgets.  `chars`
+/// keeps all slicing Unicode-safe; the binary search keeps giant skill bodies
+/// from requiring a quadratic shrink loop.
+fn bounded_middle(text: &str, outer_prefix: &str, outer_suffix: &str) -> String {
+    if skills_fit_budget(&format!("{outer_prefix}{text}{outer_suffix}")) {
+        return text.to_string();
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut low = 0usize;
+    let mut high = chars.len();
+    while low < high {
+        let kept = (low + high).div_ceil(2);
+        let head_len = kept.div_ceil(2);
+        let tail_len = kept / 2;
+        let head: String = chars.iter().take(head_len).collect();
+        let tail: String = chars
+            .iter()
+            .skip(chars.len().saturating_sub(tail_len))
+            .collect();
+        let candidate =
+            format!("{outer_prefix}{head}{SKILLS_TRUNCATION_MARKER}{tail}{outer_suffix}");
+        if skills_fit_budget(&candidate) {
+            low = kept;
+        } else {
+            high = kept - 1;
+        }
+    }
+
+    let head_len = low.div_ceil(2);
+    let tail_len = low / 2;
+    let head: String = chars.iter().take(head_len).collect();
+    let tail: String = chars
+        .iter()
+        .skip(chars.len().saturating_sub(tail_len))
+        .collect();
+    format!("{head}{SKILLS_TRUNCATION_MARKER}{tail}")
+}
+
+fn bounded_project_section(skill: &Skill, block_prefix: &str) -> String {
+    let full = render_skill_section(skill);
+    let reserved_prefix = format!("{block_prefix}{SKILLS_TRUNCATION_MARKER}");
+    if skills_fit_budget(&format!("{reserved_prefix}{full}")) {
+        return full;
+    }
+
+    // Preserve the recognizable project-rules heading even when its body is
+    // itself oversized.  The description and body share a head+tail budget.
+    let heading = format!("\n## {} — ", skill.name);
+    let content = format!("{}\n{}", skill.description, skill.body);
+    let bounded = bounded_middle(&content, &format!("{reserved_prefix}{heading}"), "\n");
+    format!("{heading}{bounded}\n")
+}
+
+fn bounded_skills_block(skills: &[Skill]) -> String {
+    let block_prefix = "\n\n# Skills — domain knowledge to apply\n";
+
+    // Fast path is deliberately assembled exactly as before.  Besides
+    // preserving byte-for-byte output for ordinary prompts, stopping at the
+    // first overflow avoids materializing a possible 32 MiB prompt.
+    let mut unchanged = String::from(block_prefix);
+    let mut overflowed = false;
+    for skill in skills {
+        unchanged.push_str(&render_skill_section(skill));
+        if !skills_fit_budget(&unchanged) {
+            overflowed = true;
+            break;
+        }
+    }
+    if !overflowed {
+        return unchanged;
+    }
+
+    let project = skills
+        .last()
+        .filter(|skill| skill.name == PROJECT_RULE_NAME);
+    let Some(project) = project else {
+        let mut body = String::from(block_prefix);
+        for skill in skills {
+            let section = render_skill_section(skill);
+            // Keep room for the marker before accepting another full section;
+            // otherwise a near-cap prefix could make the marker exceed budget.
+            let candidate = format!("{body}{section}{SKILLS_TRUNCATION_MARKER}");
+            if skills_fit_budget(&candidate) {
+                body.push_str(&section);
+                continue;
+            }
+            let bounded = bounded_middle(&section, &body, "");
+            body.push_str(&bounded);
+            break;
+        }
+        return body;
+    };
+
+    // `load_configured_skills` appends 项目规则 last. Reserve that tail
+    // before ordinary skills consume the remaining deterministic budget.
+    let project_section = bounded_project_section(project, block_prefix);
+    let mut ordinary = String::new();
+    for skill in &skills[..skills.len().saturating_sub(1)] {
+        let section = render_skill_section(skill);
+        let candidate =
+            format!("{block_prefix}{ordinary}{section}{SKILLS_TRUNCATION_MARKER}{project_section}");
+        if skills_fit_budget(&candidate) {
+            ordinary.push_str(&section);
+            continue;
+        }
+
+        let bounded = bounded_middle(
+            &section,
+            &format!("{block_prefix}{ordinary}"),
+            &format!("{SKILLS_TRUNCATION_MARKER}{project_section}"),
+        );
+        ordinary.push_str(&bounded);
+        return format!("{block_prefix}{ordinary}{project_section}");
+    }
+
+    format!("{block_prefix}{ordinary}{SKILLS_TRUNCATION_MARKER}{project_section}")
+}
+
 /// 把宿主环境 + 技能注入 system prompt(知识层 → 大脑偏好)。host_env 恒注入(令模型自主择 shell);
 /// 技能有则续附。
 #[allow(dead_code)]
@@ -80,13 +216,7 @@ pub(crate) fn build_system_prompt_with_mode(skills: &[Skill], read_only: bool) -
         );
     }
     if !skills.is_empty() {
-        s.push_str("\n\n# Skills — domain knowledge to apply\n");
-        for sk in skills {
-            s.push_str(&format!(
-                "\n## {} — {}\n{}\n",
-                sk.name, sk.description, sk.body
-            ));
-        }
+        s.push_str(&bounded_skills_block(skills));
     }
     s
 }
@@ -558,10 +688,11 @@ pub(crate) async fn verify_node(s: AgentState) -> Result<Patch, Infallible> {
 #[cfg(test)]
 mod tests {
     use super::{
-        act_route, build_system_prompt, build_system_prompt_with_mode, completion_blocked,
-        explore_exhausted, explore_handoff_patch, is_explore_tool, is_land_edit_tool, must_stop,
-        needs_land_edit, reason_route, tool_output_failed, verify_failure_reason, verify_node,
-        verify_ok, verify_route, verify_route_llm, AgentState, BASE_SYSTEM,
+        act_route, bounded_skills_block, build_system_prompt, build_system_prompt_with_mode,
+        completion_blocked, explore_exhausted, explore_handoff_patch, is_explore_tool,
+        is_land_edit_tool, must_stop, needs_land_edit, reason_route, tool_output_failed,
+        verify_failure_reason, verify_node, verify_ok, verify_route, verify_route_llm, AgentState,
+        Skill, BASE_SYSTEM, SKILLS_CHAR_CAP, SKILLS_TOKEN_CAP, SKILLS_TRUNCATION_MARKER,
     };
     use crate::state::{Todo, MAX_EXPLORE};
     use langgraph::GraphState;
@@ -652,6 +783,79 @@ mod tests {
             sys.contains(tools::default_shell()),
             "应含宿主默认 shell 名"
         );
+    }
+
+    #[test]
+    fn small_skills_block_stays_byte_for_byte_unchanged() {
+        let skills = vec![
+            Skill {
+                name: "alpha".into(),
+                description: "short guidance".into(),
+                body: "Use the first tool.".into(),
+            },
+            Skill {
+                name: "beta".into(),
+                description: "more guidance".into(),
+                body: "Keep the result concise.".into(),
+            },
+        ];
+        let expected = concat!(
+            "\n\n# Skills — domain knowledge to apply\n",
+            "\n## alpha — short guidance\nUse the first tool.\n",
+            "\n## beta — more guidance\nKeep the result concise.\n",
+        );
+
+        assert_eq!(bounded_skills_block(&skills), expected);
+        assert!(build_system_prompt(&skills).ends_with(expected));
+    }
+
+    #[test]
+    fn giant_unicode_skills_are_bounded_and_deterministic() {
+        let skills = (0..300)
+            .map(|index| Skill {
+                name: format!("giant-{index:03}"),
+                description: "CJK and emoji".into(),
+                body: format!("HEAD-{index}-{}-TAIL-{index}", "界😀".repeat(8_000)),
+            })
+            .collect::<Vec<_>>();
+
+        let first = bounded_skills_block(&skills);
+        let second = bounded_skills_block(&skills);
+
+        assert_eq!(first, second);
+        assert!(first.contains(SKILLS_TRUNCATION_MARKER));
+        assert!(first.contains("HEAD-0-"));
+        assert!(first.contains("-TAIL-0"));
+        assert!(first.chars().count() <= SKILLS_CHAR_CAP);
+        assert!(crate::context::est_tokens(&first) <= SKILLS_TOKEN_CAP);
+    }
+
+    #[test]
+    fn giant_skills_keep_project_rules_at_the_tail() {
+        let mut skills = (0..300)
+            .map(|index| Skill {
+                name: format!("before-{index:03}"),
+                description: "preceding skill".into(),
+                body: format!("BEFORE-{index}-{}", "前置😀".repeat(8_000)),
+            })
+            .collect::<Vec<_>>();
+        skills.push(Skill {
+            name: "项目规则".into(),
+            description: "project rules".into(),
+            body: format!("PROJECT_HEAD\n{}\nPROJECT_TAIL", "规则😀".repeat(200)),
+        });
+
+        let first = bounded_skills_block(&skills);
+        let second = bounded_skills_block(&skills);
+
+        assert_eq!(first, second);
+        assert!(first.contains(SKILLS_TRUNCATION_MARKER));
+        assert!(first.contains("## 项目规则 — project rules"));
+        assert!(first.contains("PROJECT_HEAD"));
+        assert!(first.ends_with("PROJECT_TAIL\n"));
+        assert!(first.chars().count() <= SKILLS_CHAR_CAP);
+        assert!(crate::context::est_tokens(&first) <= SKILLS_TOKEN_CAP);
+        assert!(first.find("BEFORE-0-").unwrap() < first.find("## 项目规则").unwrap());
     }
 
     /// 失败判据**结构化**(单一真相,不认裸子串):正常输出含 "error"/"failed" 字样(grep 命中、

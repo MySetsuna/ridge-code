@@ -4,7 +4,12 @@
 //! 执行图跑在后台 Tokio task,token 流、工具事件和权限门都不会卡住界面(iter-23 事件驱动主环)。
 
 use std::io;
-use std::sync::Arc;
+#[cfg(windows)]
+use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -41,6 +46,24 @@ pub(crate) type ModelCatalog = Vec<(String, Vec<provider::models::ModelInfo>)>;
 const LIVE_HEIGHT: u16 = 14;
 /// 单次 token 唤醒最多合并的 chunk；留出下一轮 select 处理键盘，保证 Ctrl-C 可抢占。
 const MAX_STREAM_CHUNKS_PER_WAKE: usize = 256;
+const CSI_ESCAPE_FLUSH_MS: u64 = 80;
+const BRACKETED_PASTE_FLUSH_MS: u64 = 1_000;
+const RAPID_PASTE_DETECT_MS: u64 = 10;
+// ConPTY can expose one raw byte as a Press/Release pair with several
+// scheduler ticks between records. Keep ordinary key runs on the short
+// detection window; only a literal C0 boundary earns the longer continuation
+// window needed to collect an unwrapped multiline paste.
+const RAPID_PASTE_CONTINUE_MS: u64 = 100;
+const RAPID_PASTE_MAX_EVENTS: usize = 5_000;
+const KEY_EVENT_CHANNEL_CAPACITY: usize = 4_096;
+#[cfg(target_os = "windows")]
+const RAW_VT_READ_CHANNEL_CAPACITY: usize = 32;
+const EVENT_READ_POLL_MS: u64 = 100;
+const EVENT_READ_RETRY_MS: u64 = 10;
+
+fn startup_canvas_width(columns: u16) -> usize {
+    usize::from(columns).saturating_sub(1).max(1)
+}
 
 /// Play the exact standalone intro before any provider/configuration logs or
 /// the inline ratatui viewport can write to the terminal.
@@ -59,7 +82,12 @@ pub(crate) fn play_startup_animation() -> io::Result<()> {
         }
         let (columns, rows) = size().unwrap_or((100, 28));
         let height = usize::from(rows.saturating_sub(1).max(8));
-        let frame = splash_canvas(usize::from(columns), height, elapsed, SPLASH_DURATION_SECS);
+        let frame = splash_canvas(
+            startup_canvas_width(columns),
+            height,
+            elapsed,
+            SPLASH_DURATION_SECS,
+        );
         stdout.write_all(b"\x1b[H")?;
         stdout.write_all(frame.as_bytes())?;
         stdout.flush()?;
@@ -222,6 +250,8 @@ struct TerminalGuard {
     keyboard_enhancement_pushed: bool,
     mouse_capture_enabled: bool,
     base_mouse_capture_enabled: bool,
+    input_backend: TerminalInputBackend,
+    active_vt_input: Arc<AtomicBool>,
     native_selection_guard: Option<native_input::NativeSelectionGuard>,
 }
 
@@ -233,7 +263,9 @@ struct TerminalGuard {
 /// consumed by `event::read`, even though RidgeCode never requested capture.
 #[cfg(windows)]
 mod native_input {
+    use super::TerminalInputBackend;
     use std::ffi::c_void;
+    use std::io;
 
     type Handle = *mut c_void;
 
@@ -242,44 +274,152 @@ mod native_input {
     const ENABLE_MOUSE_INPUT: u32 = 0x0010;
     const ENABLE_QUICK_EDIT_MODE: u32 = 0x0040;
     const ENABLE_EXTENDED_FLAGS: u32 = 0x0080;
+    const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
     const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
-    const NOT_RAW_MODE_MASK: u32 = 0x0002 | 0x0004 | 0x0001;
+    const NOT_RAW_MODE_MASK: u32 = 0x0002 | 0x0004 | 0x0001 | ENABLE_VIRTUAL_TERMINAL_INPUT;
+    const FILE_TYPE_PIPE: u32 = 0x0003;
 
     #[link(name = "kernel32")]
     extern "system" {
         fn GetStdHandle(standard_handle: u32) -> Handle;
         fn GetConsoleMode(handle: Handle, mode: *mut u32) -> i32;
         fn SetConsoleMode(handle: Handle, mode: u32) -> i32;
+        fn GetFileType(handle: Handle) -> u32;
+        fn ReadFile(
+            handle: Handle,
+            buffer: *mut u8,
+            bytes_to_read: u32,
+            bytes_read: *mut u32,
+            overlapped: *mut c_void,
+        ) -> i32;
     }
 
     pub(crate) struct NativeSelectionGuard {
         handle: Handle,
         original_mode: u32,
+        vt_input_enabled: bool,
     }
 
-    pub(crate) fn enter() -> Option<NativeSelectionGuard> {
+    fn mode_with_virtual_terminal_input(original_mode: u32, use_vt_input: bool) -> u32 {
+        if use_vt_input {
+            original_mode | ENABLE_VIRTUAL_TERMINAL_INPUT
+        } else {
+            original_mode & !ENABLE_VIRTUAL_TERMINAL_INPUT
+        }
+    }
+
+    fn host_mode_with_vt(original_mode: u32, use_vt_input: bool) -> u32 {
+        let mode =
+            (original_mode | ENABLE_EXTENDED_FLAGS | ENABLE_QUICK_EDIT_MODE) & !ENABLE_MOUSE_INPUT;
+        mode_with_virtual_terminal_input(mode, use_vt_input)
+    }
+
+    fn app_mode_with_vt(original_mode: u32, use_vt_input: bool) -> u32 {
+        let mode = original_mode & !(NOT_RAW_MODE_MASK & !ENABLE_VIRTUAL_TERMINAL_INPUT);
+        mode_with_virtual_terminal_input(mode, use_vt_input)
+    }
+
+    fn startup_mode_with_vt(
+        original_mode: u32,
+        preserve_selection: bool,
+        use_vt_input: bool,
+    ) -> u32 {
+        if preserve_selection {
+            host_mode_with_vt(original_mode, use_vt_input)
+        } else {
+            mode_with_virtual_terminal_input(original_mode, use_vt_input)
+        }
+    }
+
+    pub(crate) fn reassert_virtual_terminal_input(use_vt_input: bool) {
         let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
         if handle.is_null() || handle == (-1isize as Handle) {
-            return None;
+            return;
+        }
+        let mut mode = 0;
+        if unsafe { GetConsoleMode(handle, &mut mode) } != 0 {
+            let target = mode_with_virtual_terminal_input(mode, use_vt_input);
+            if target != mode {
+                let _ = unsafe { SetConsoleMode(handle, target) };
+            }
+        }
+    }
+
+    pub(crate) fn enter(
+        preserve_selection: bool,
+    ) -> (Option<NativeSelectionGuard>, TerminalInputBackend) {
+        let requested = super::terminal_input_backend();
+        let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        if handle.is_null() || handle == (-1isize as Handle) {
+            return (None, TerminalInputBackend::crossterm("no_stdin_handle"));
         }
 
         let mut original_mode = 0;
         if unsafe { GetConsoleMode(handle, &mut original_mode) } == 0 {
             // ConPTY and redirected stdin are not console handles. Their host
             // owns selection/scrollback and needs no Win32 mode adjustment.
-            return None;
+            if requested.is_raw_vt() && unsafe { GetFileType(handle) } == FILE_TYPE_PIPE {
+                return (None, TerminalInputBackend::raw_vt("windows_conpty_pipe"));
+            }
+            return (
+                None,
+                if requested.is_raw_vt() {
+                    TerminalInputBackend::crossterm("no_console_mode")
+                } else {
+                    requested
+                },
+            );
         }
 
-        let host_mode =
-            (original_mode | ENABLE_EXTENDED_FLAGS | ENABLE_QUICK_EDIT_MODE) & !ENABLE_MOUSE_INPUT;
-        if host_mode != original_mode && unsafe { SetConsoleMode(handle, host_mode) } == 0 {
-            return None;
+        let use_vt_input = requested.is_raw_vt();
+        let initial_mode = startup_mode_with_vt(original_mode, preserve_selection, use_vt_input);
+        if initial_mode != original_mode && unsafe { SetConsoleMode(handle, initial_mode) } == 0 {
+            return (
+                None,
+                if use_vt_input {
+                    TerminalInputBackend::crossterm("vt_activation_failed")
+                } else {
+                    TerminalInputBackend::crossterm("console_mode_unchanged")
+                },
+            );
         }
 
-        Some(NativeSelectionGuard {
-            handle,
-            original_mode,
-        })
+        (
+            Some(NativeSelectionGuard {
+                handle,
+                original_mode,
+                vt_input_enabled: use_vt_input,
+            }),
+            requested,
+        )
+    }
+
+    pub(crate) fn read_vt_bytes_blocking() -> io::Result<Vec<u8>> {
+        let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        if handle.is_null() || handle == (-1isize as Handle) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "stdin handle unavailable",
+            ));
+        }
+        let mut buffer = [0u8; 8192];
+        let mut bytes_read = 0u32;
+        if unsafe {
+            ReadFile(
+                handle,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                &mut bytes_read,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if bytes_read == 0 {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "stdin closed"));
+        }
+        Ok(buffer[..bytes_read as usize].to_vec())
     }
 
     pub(crate) fn ansi_supported() -> bool {
@@ -299,15 +439,26 @@ mod native_input {
     }
 
     impl NativeSelectionGuard {
+        pub(crate) fn set_vt_input_enabled(&mut self, enabled: bool) {
+            self.vt_input_enabled = enabled;
+        }
+
         pub(crate) fn prepare_for_app(&mut self) {
-            let app_mode = self.original_mode & !NOT_RAW_MODE_MASK;
-            let _ = unsafe { SetConsoleMode(self.handle, app_mode) };
+            let _ = unsafe {
+                SetConsoleMode(
+                    self.handle,
+                    app_mode_with_vt(self.original_mode, self.vt_input_enabled),
+                )
+            };
         }
 
         pub(crate) fn restore_for_host(&mut self) {
-            let host_mode = (self.original_mode | ENABLE_EXTENDED_FLAGS | ENABLE_QUICK_EDIT_MODE)
-                & !ENABLE_MOUSE_INPUT;
-            let _ = unsafe { SetConsoleMode(self.handle, host_mode) };
+            let _ = unsafe {
+                SetConsoleMode(
+                    self.handle,
+                    host_mode_with_vt(self.original_mode, self.vt_input_enabled),
+                )
+            };
         }
     }
 
@@ -319,33 +470,82 @@ mod native_input {
 
     #[cfg(test)]
     mod tests {
-        use super::{ENABLE_EXTENDED_FLAGS, ENABLE_MOUSE_INPUT, ENABLE_QUICK_EDIT_MODE};
+        use super::{
+            app_mode_with_vt, host_mode_with_vt, mode_with_virtual_terminal_input,
+            startup_mode_with_vt, ENABLE_EXTENDED_FLAGS, ENABLE_MOUSE_INPUT,
+            ENABLE_QUICK_EDIT_MODE, ENABLE_VIRTUAL_TERMINAL_INPUT,
+        };
+
+        #[test]
+        fn vt_input_mode_bit_is_idempotent_and_policy_driven() {
+            let original = 0x0040;
+            let enabled = mode_with_virtual_terminal_input(original, true);
+            let disabled = mode_with_virtual_terminal_input(enabled, false);
+            assert_ne!(enabled & ENABLE_VIRTUAL_TERMINAL_INPUT, 0);
+            assert_eq!(mode_with_virtual_terminal_input(enabled, true), enabled);
+            assert_eq!(disabled & ENABLE_VIRTUAL_TERMINAL_INPUT, 0);
+            assert_eq!(mode_with_virtual_terminal_input(disabled, false), disabled);
+        }
 
         #[test]
         fn host_mode_disables_mouse_records_and_enables_quick_edit() {
             let original = ENABLE_MOUSE_INPUT;
-            let host =
-                (original | ENABLE_EXTENDED_FLAGS | ENABLE_QUICK_EDIT_MODE) & !ENABLE_MOUSE_INPUT;
+            let host = host_mode_with_vt(original, false);
             assert_eq!(host & ENABLE_MOUSE_INPUT, 0);
             assert_ne!(host & ENABLE_QUICK_EDIT_MODE, 0);
             assert_ne!(host & ENABLE_EXTENDED_FLAGS, 0);
+            assert_eq!(host & ENABLE_VIRTUAL_TERMINAL_INPUT, 0);
+        }
+
+        #[test]
+        fn host_mode_can_keep_vt_input_for_conpty() {
+            let host = host_mode_with_vt(ENABLE_MOUSE_INPUT, true);
+            assert_eq!(host & ENABLE_MOUSE_INPUT, 0);
+            assert_ne!(host & ENABLE_VIRTUAL_TERMINAL_INPUT, 0);
+        }
+
+        #[test]
+        fn app_mode_respects_explicit_vt_input_policy_after_raw_mode_rewrite() {
+            let original = ENABLE_MOUSE_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT | 0x0007;
+            let app = app_mode_with_vt(original, true);
+            assert_ne!(app & ENABLE_VIRTUAL_TERMINAL_INPUT, 0);
+            assert_eq!(app & (0x0001 | 0x0002 | 0x0004), 0);
+            let app_without_vt = app_mode_with_vt(original, false);
+            assert_eq!(app_without_vt & ENABLE_VIRTUAL_TERMINAL_INPUT, 0);
+        }
+
+        #[test]
+        fn startup_mode_respects_vt_input_policy_without_native_selection() {
+            let original = ENABLE_MOUSE_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT;
+            let startup_without_vt = startup_mode_with_vt(original, false, false);
+            assert_ne!(startup_without_vt & ENABLE_MOUSE_INPUT, 0);
+            assert_eq!(startup_without_vt & ENABLE_VIRTUAL_TERMINAL_INPUT, 0);
+            let startup_with_vt = startup_mode_with_vt(original, false, true);
+            assert_ne!(startup_with_vt & ENABLE_VIRTUAL_TERMINAL_INPUT, 0);
         }
     }
 }
 
 #[cfg(not(windows))]
 mod native_input {
+    use super::TerminalInputBackend;
     pub(crate) struct NativeSelectionGuard;
 
-    pub(crate) fn enter() -> Option<NativeSelectionGuard> {
-        None
+    pub(crate) fn enter(
+        _preserve_selection: bool,
+    ) -> (Option<NativeSelectionGuard>, TerminalInputBackend) {
+        (None, TerminalInputBackend::crossterm("non_windows"))
     }
 
     pub(crate) fn ansi_supported() -> bool {
         false
     }
 
+    pub(crate) fn reassert_virtual_terminal_input(_use_vt_input: bool) {}
+
     impl NativeSelectionGuard {
+        pub(crate) fn set_vt_input_enabled(&mut self, _enabled: bool) {}
+
         pub(crate) fn prepare_for_app(&mut self) {}
 
         pub(crate) fn restore_for_host(&mut self) {}
@@ -408,15 +608,37 @@ mod mouse_reporting_tests {
 }
 
 impl TerminalGuard {
+    fn input_is_raw_vt(&self) -> bool {
+        self.input_backend.is_raw_vt() && self.active_vt_input.load(Ordering::Acquire)
+    }
+
+    fn sync_native_input_mode(&mut self) {
+        let active = self.input_is_raw_vt();
+        if let Some(guard) = self.native_selection_guard.as_mut() {
+            guard.set_vt_input_enabled(active);
+        }
+        native_input::reassert_virtual_terminal_input(active);
+    }
+
     fn enter() -> anyhow::Result<(Self, Term)> {
         let base_mouse_capture_enabled =
             mouse_capture_requested(std::env::var("RIDGE_TUI_MOUSE_CAPTURE").ok().as_deref());
         // Save the pre-raw console mode.  The guard must outlive raw-mode
         // teardown so Windows returns exactly to the caller's input settings.
-        let native_selection_guard = (!base_mouse_capture_enabled)
-            .then(native_input::enter)
-            .flatten();
-        enable_raw_mode()?;
+        let (native_selection_guard, input_backend) =
+            native_input::enter(!base_mouse_capture_enabled);
+        let active_vt_input = Arc::new(AtomicBool::new(input_backend.is_raw_vt()));
+        if let Err(error) = enable_raw_mode() {
+            // A ConPTY stdin is already a byte pipe; it has no Win32 console
+            // mode for Crossterm's raw-mode helper to change.  Keep the raw
+            // VT reader active in that case, while every real console failure
+            // remains an atomic fallback/error boundary.
+            if input_backend.reason != "windows_conpty_pipe" {
+                return Err(error.into());
+            }
+            tracing::debug!(%error, "ConPTY has no console raw mode; keeping raw VT byte reader");
+        }
+        native_input::reassert_virtual_terminal_input(active_vt_input.load(Ordering::Acquire));
         let mut stdout = io::stdout();
         // BPM best-effort(iter-24):旧 Windows conhost 不支持则静默退化为逐字粘贴,绝不阻 TUI 启动。
         let _ = execute!(stdout, event::EnableBracketedPaste);
@@ -430,36 +652,36 @@ impl TerminalGuard {
                 && execute!(stdout, event::EnableMouseCapture).is_ok();
             if captured {
                 let _ = enable_raw_mode();
+                native_input::reassert_virtual_terminal_input(
+                    active_vt_input.load(Ordering::Acquire),
+                );
             }
             captured
         } else {
             let _ = disable_terminal_mouse_reporting(&mut stdout);
             let _ = execute!(stdout, event::DisableMouseCapture);
+            native_input::reassert_virtual_terminal_input(active_vt_input.load(Ordering::Acquire));
             false
         };
         // CSI u best-effort(iter-27):现代终端(Ghostty/WezTerm/iTerm2/kitty)得 Shift+Enter
         // 精确修饰键;不支持则静默降级(Alt+Enter / Ctrl+J 仍可换行)。同时请求
         // REPORT_EVENT_TYPES，让 Ctrl+Space 可实现按住审计、松开跟随；decide_key
         // 只放行这一语义键的 Release，其余 press/release 噪声仍去重。
-        // ⚠ **仅非 Windows 推**:Windows Terminal 的 Kitty 键盘协议实现有缺陷 —— 开了它,**逐字打的空格键
-        // 会被吞**(粘贴走 BracketedPaste 不受影响,故长任务粘贴照常);Windows 回落普通 WinAPI 键事件,
-        // 空格正常,仅失 Shift+Enter 精确换行(Alt+Enter / Ctrl+J 仍可换行,损失可接受)。
-        // Windows stays on the legacy WinAPI path by default; the opt-in
-        // fixture flag lets a raw ConPTY harness send CSI-u Ctrl+Enter without
-        // changing normal Windows Terminal compatibility.
-        let keyboard_enhancement_pushed =
-            if !cfg!(windows) || std::env::var("RIDGE_TUI_KITTY").ok().as_deref() == Some("1") {
-                execute!(
-                    stdout,
-                    PushKeyboardEnhancementFlags(
-                        KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                            | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
-                    )
+        // Windows keeps Kitty negotiation disabled. The raw-VT byte backend
+        // is automatic when activation succeeds; RIDGE_TUI_VT_INPUT=0 keeps
+        // the legacy Crossterm reader for diagnosis or compatibility.
+        let keyboard_enhancement_pushed = if terminal_keyboard_policy().keyboard_enhancement {
+            execute!(
+                stdout,
+                PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
                 )
-                .is_ok()
-            } else {
-                false
-            };
+            )
+            .is_ok()
+        } else {
+            false
+        };
         set_precise_multiline_input_enabled(keyboard_enhancement_pushed);
         // 主屏内联视口(iter-26):不进备用屏,终端原生历史/选取/搜索神圣不可侵犯。
         let term = Terminal::with_options(
@@ -468,11 +690,14 @@ impl TerminalGuard {
                 viewport: Viewport::Inline(inline_height_cap()),
             },
         )?;
+        set_active_input_backend(input_backend);
         Ok((
             Self {
                 keyboard_enhancement_pushed,
                 mouse_capture_enabled,
                 base_mouse_capture_enabled,
+                input_backend,
+                active_vt_input,
                 native_selection_guard,
             },
             term,
@@ -493,7 +718,9 @@ impl TerminalGuard {
         }
         // Release the host-selection mode before asking crossterm to consume
         // mouse records for the fullscreen editor.
+        let active_vt_input = self.input_is_raw_vt();
         if let Some(guard) = self.native_selection_guard.as_mut() {
+            guard.set_vt_input_enabled(active_vt_input);
             guard.prepare_for_app();
         }
         let mut stdout = io::stdout();
@@ -502,6 +729,7 @@ impl TerminalGuard {
             && execute!(stdout, event::EnableMouseCapture).is_ok();
         if self.mouse_capture_enabled {
             let _ = enable_raw_mode();
+            self.sync_native_input_mode();
         }
     }
 
@@ -515,10 +743,13 @@ impl TerminalGuard {
         if self.base_mouse_capture_enabled {
             return;
         }
+        let active_vt_input = self.input_is_raw_vt();
         if let Some(guard) = self.native_selection_guard.as_mut() {
+            guard.set_vt_input_enabled(active_vt_input);
             guard.restore_for_host();
         }
         let _ = enable_raw_mode();
+        self.sync_native_input_mode();
     }
 }
 impl Drop for TerminalGuard {
@@ -537,6 +768,7 @@ impl Drop for TerminalGuard {
             let _ = execute!(io::stdout(), SetTitle("ridgecode"));
         }
         let _ = disable_raw_mode();
+        clear_active_input_backend();
         // `native_selection_guard` now drops and restores the exact pre-TUI
         // mode, including any caller-owned Quick Edit setting.
     }
@@ -554,8 +786,12 @@ mod idle_submit_tests;
 mod input;
 mod panel;
 mod presentation;
+#[cfg(target_os = "windows")]
+mod raw_vt;
 mod render;
 mod status;
+mod terminal;
+mod terminal_noise;
 #[cfg(test)]
 mod tests;
 mod transcript;
@@ -572,8 +808,11 @@ pub(crate) use eventfmt::*;
 pub(crate) use input::*;
 pub(crate) use panel::*;
 pub(crate) use presentation::*;
+#[cfg(target_os = "windows")]
+pub(crate) use raw_vt::*;
 pub(crate) use render::*;
 pub(crate) use status::*;
+pub(crate) use terminal::*;
 pub(crate) use transcript::*;
 pub(crate) use turn_view::*;
 
@@ -623,6 +862,7 @@ struct KeyEventContext<'a> {
     momentary_hold: &'a mut bool,
     last_ctrl_c: &'a mut Option<Instant>,
     pressed: &'a mut std::collections::HashSet<KeyCode>,
+    csi_pending_since: &'a mut Option<Instant>,
     keylog_path: &'a Option<std::path::PathBuf>,
     guard: Option<&'a mut TerminalGuard>,
 }
@@ -634,7 +874,15 @@ async fn handle_key_event(
     log_key_event(&event, context.keylog_path);
     let key = match terminal_event_action(event) {
         TerminalEventAction::Paste(text) => {
-            apply_paste(context.ui, &text);
+            if context.ui.bracketed_paste_active {
+                let mut buffered = std::mem::take(&mut context.ui.bracketed_paste_buffer);
+                buffered.push_str(&text);
+                context.ui.bracketed_paste_active = false;
+                *context.csi_pending_since = None;
+                apply_paste(context.ui, &buffered);
+            } else {
+                apply_paste(context.ui, &text);
+            }
             sync_input_editor_scroll(context.ui);
             return Ok(KeyEventResult::Continue);
         }
@@ -648,14 +896,92 @@ async fn handle_key_event(
     let Some(key) = decide_key(context.pressed, &key) else {
         return Ok(KeyEventResult::Continue);
     };
-    let key = match feed_nav_key(&mut context.ui.csi_pending, &key) {
-        NavFeed::Hold => return Ok(KeyEventResult::Continue),
+    if context.ui.bracketed_paste_active {
+        if is_ctrl_c(&key) {
+            context.ui.bracketed_paste_active = false;
+            context.ui.bracketed_paste_buffer.clear();
+            *context.csi_pending_since = None;
+            return handle_ctrl_c(context);
+        }
+        if let Some(payload) =
+            push_bracketed_paste_key(&mut context.ui.bracketed_paste_buffer, &key)
+        {
+            context.ui.bracketed_paste_active = false;
+            *context.csi_pending_since = None;
+            apply_paste(context.ui, &payload);
+            sync_input_editor_scroll(context.ui);
+        } else {
+            *context.csi_pending_since = Some(Instant::now());
+        }
+        return Ok(KeyEventResult::Continue);
+    }
+    let pending_before = context.ui.csi_pending.clone();
+    let nav = if context.ui.allow_bare_kitty {
+        feed_nav_key(&mut context.ui.csi_pending, &key)
+    } else {
+        feed_nav_key_with_kitty(&mut context.ui.csi_pending, &key, false)
+    };
+    if let NavFeed::Event(decoded) = &nav {
+        if is_bracketed_paste_start(&pending_before, &key, decoded) {
+            context.ui.csi_pending.clear();
+            *context.csi_pending_since = Some(Instant::now());
+            context.ui.bracketed_paste_active = true;
+            context.ui.bracketed_paste_buffer.clear();
+            return Ok(KeyEventResult::Continue);
+        }
+    }
+    let key = match nav {
+        NavFeed::Hold => {
+            if context.ui.csi_pending == "\u{1b}"
+                && !context.ui.busy
+                && (context.ui.input_editor_scroll.is_some()
+                    || context.ui.popup.is_some()
+                    || context.ui.panel.is_some()
+                    || context.pending.is_some())
+            {
+                context.ui.csi_pending.clear();
+                *context.csi_pending_since = None;
+                return dispatch_decoded_key(
+                    KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                    context,
+                )
+                .await;
+            }
+            if !context.ui.csi_pending.is_empty() {
+                context.csi_pending_since.get_or_insert_with(Instant::now);
+            }
+            return Ok(KeyEventResult::Continue);
+        }
         NavFeed::PrefixThen(prefix, key) => {
+            *context.csi_pending_since = None;
+            insert_active_text(context.ui, &prefix);
+            key
+        }
+        NavFeed::EscapeThen(prefix, key) => {
+            *context.csi_pending_since = None;
+            let escape = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+            if matches!(
+                dispatch_decoded_key(escape, context).await?,
+                KeyEventResult::Exit
+            ) {
+                return Ok(KeyEventResult::Exit);
+            }
             insert_active_text(context.ui, &prefix);
             key
         }
         NavFeed::Event(key) => key,
     };
+    if context.ui.csi_pending.is_empty() {
+        *context.csi_pending_since = None;
+    }
+    dispatch_decoded_key(key, context).await
+}
+
+async fn dispatch_decoded_key(
+    key: KeyEvent,
+    context: &mut KeyEventContext<'_>,
+) -> anyhow::Result<KeyEventResult> {
+    let key = absorb_active_csi(context.ui, key);
     if (context.ui.popup.is_some() || context.ui.panel.is_some())
         && matches!(key.code, KeyCode::Char('['))
         && context.ui.csi_pending.is_empty()
@@ -663,7 +989,6 @@ async fn handle_key_event(
         context.ui.csi_pending.push('[');
         return Ok(KeyEventResult::Continue);
     }
-    let key = absorb_active_csi(context.ui, key);
     if live_hold_release_action(&key, context.ui.popup.is_some()) {
         if *context.momentary_hold {
             *context.momentary_hold = false;
@@ -785,6 +1110,50 @@ fn log_key_event(event: &Event, keylog_path: &Option<std::path::PathBuf>) {
         .open(path)
     {
         let _ = writeln!(file, "{event:?}");
+    }
+}
+
+fn log_input_backend(keylog_path: &Option<std::path::PathBuf>, backend: TerminalInputBackend) {
+    let Some(path) = keylog_path else {
+        return;
+    };
+    append_keylog_line(
+        path,
+        format!("backend: {} reason={}\n", backend.label(), backend.reason),
+    );
+}
+
+#[cfg(windows)]
+fn log_input_backend_error(
+    keylog_path: &Option<std::path::PathBuf>,
+    backend: TerminalInputBackend,
+    error: &io::Error,
+) {
+    let Some(path) = keylog_path else {
+        return;
+    };
+    append_keylog_line(
+        path,
+        format!(
+            "backend: {} reason={} error_kind={:?} os_code={:?}\n",
+            backend.label(),
+            backend.reason,
+            error.kind(),
+            error.raw_os_error()
+        ),
+    );
+}
+
+fn append_keylog_line(path: &std::path::Path, line: String) {
+    use std::io::Write;
+    let bytes = line.into_bytes();
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = file.write_all(&bytes);
+        let _ = file.flush();
     }
 }
 
@@ -1323,7 +1692,9 @@ fn absorb_active_csi(ui: &mut Ui, key: KeyEvent) -> KeyEvent {
     if ui.panel.is_some() && ui.input_editor_scroll.is_none() {
         return absorb_panel_csi(ui, key);
     }
-    if let Some((nav, consume)) = apply_csi_buffer_nav(&ui.input.buffer, ui.input.cursor, key) {
+    if let Some((nav, consume)) =
+        apply_csi_buffer_nav(&ui.input.buffer, ui.input.cursor, key, ui.allow_bare_kitty)
+    {
         for _ in 0..consume {
             ui.input.backspace();
         }
@@ -1828,16 +2199,170 @@ fn keylog_path() -> Option<std::path::PathBuf> {
     enabled.then(|| dir.join("keylog.txt"))
 }
 
-fn spawn_key_reader() -> tokio::sync::mpsc::UnboundedReceiver<Event> {
-    let (key_tx, key_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
-    std::thread::spawn(move || {
-        while let Ok(event) = event::read() {
-            if key_tx.send(event).is_err() {
-                break;
+fn run_crossterm_key_reader(key_tx: &tokio::sync::mpsc::Sender<Event>) {
+    let mut noise_filter = terminal_noise::CsiNoiseFilter::new();
+    loop {
+        if key_tx.is_closed() {
+            break;
+        }
+        // Crossterm's Windows backend consumes INPUT_RECORD values. Another
+        // console client may restore VT byte mode while this reader lives, so
+        // reassert ownership at both sides of the blocking poll boundary.
+        #[cfg(windows)]
+        native_input::reassert_virtual_terminal_input(false);
+        match event::poll(Duration::from_millis(EVENT_READ_POLL_MS)) {
+            Ok(true) => match event::read() {
+                Ok(first) => {
+                    #[cfg(windows)]
+                    native_input::reassert_virtual_terminal_input(false);
+                    let mut batch = vec![first];
+                    while batch.len() < 256 && event::poll(Duration::ZERO).unwrap_or(false) {
+                        match event::read() {
+                            Ok(event) => batch.push(event),
+                            Err(error) => {
+                                tracing::debug!(%error, "terminal event batch read failed");
+                                break;
+                            }
+                        }
+                    }
+                    for event in noise_filter.filter(batch) {
+                        if key_tx.blocking_send(event).is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "terminal event read failed; retrying");
+                    std::thread::sleep(Duration::from_millis(EVENT_READ_RETRY_MS));
+                }
+            },
+            Ok(false) => {}
+            Err(error) => {
+                tracing::debug!(%error, "terminal event poll failed; retrying");
+                std::thread::sleep(Duration::from_millis(EVENT_READ_RETRY_MS));
             }
         }
-    });
+    }
+}
+
+#[cfg(windows)]
+fn run_raw_vt_read_pump(read_tx: SyncSender<io::Result<Vec<u8>>>) {
+    loop {
+        match native_input::read_vt_bytes_blocking() {
+            Ok(bytes) => {
+                if read_tx.send(Ok(bytes)).is_err() {
+                    return;
+                }
+            }
+            Err(error) => {
+                let _ = read_tx.send(Err(error));
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn run_raw_vt_key_reader(
+    key_tx: &tokio::sync::mpsc::Sender<Event>,
+    keylog_path: Option<std::path::PathBuf>,
+    active_vt_input: Arc<AtomicBool>,
+) {
+    let (read_tx, read_rx) = mpsc::sync_channel(RAW_VT_READ_CHANNEL_CAPACITY);
+    std::thread::spawn(move || run_raw_vt_read_pump(read_tx));
+    let mut parser = RawVtParser::new();
+    let read_timeout = Duration::from_millis(25);
+    let sequence_timeout = Duration::from_millis(CSI_ESCAPE_FLUSH_MS);
+    loop {
+        if key_tx.is_closed() {
+            return;
+        }
+        match read_rx.recv_timeout(read_timeout) {
+            Ok(Ok(bytes)) => {
+                for event in parser.push(&bytes) {
+                    if key_tx.blocking_send(event).is_err() {
+                        return;
+                    }
+                }
+            }
+            Ok(Err(error)) => {
+                active_vt_input.store(false, Ordering::Release);
+                native_input::reassert_virtual_terminal_input(false);
+                let fallback = TerminalInputBackend::crossterm("raw_reader_error");
+                set_active_input_backend(fallback);
+                log_input_backend_error(&keylog_path, fallback, &error);
+                for event in parser.flush() {
+                    if key_tx.blocking_send(event).is_err() {
+                        return;
+                    }
+                }
+                tracing::debug!(%error, "raw VT input pump failed; switching to crossterm");
+                run_crossterm_key_reader(key_tx);
+                return;
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                for event in parser.flush_expired(Instant::now(), sequence_timeout) {
+                    if key_tx.blocking_send(event).is_err() {
+                        return;
+                    }
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                for event in parser.flush() {
+                    if key_tx.blocking_send(event).is_err() {
+                        return;
+                    }
+                }
+                tracing::debug!("raw VT input pump exited without a fatal error");
+                return;
+            }
+        }
+    }
+}
+
+fn spawn_key_reader(
+    input_backend: TerminalInputBackend,
+    keylog_path: Option<std::path::PathBuf>,
+    active_vt_input: Arc<AtomicBool>,
+) -> tokio::sync::mpsc::Receiver<Event> {
+    let (key_tx, key_rx) = tokio::sync::mpsc::channel::<Event>(KEY_EVENT_CHANNEL_CAPACITY);
+    #[cfg(windows)]
+    if input_backend.is_raw_vt() {
+        std::thread::spawn(move || run_raw_vt_key_reader(&key_tx, keylog_path, active_vt_input));
+        return key_rx;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (input_backend, keylog_path, active_vt_input);
+    }
+    std::thread::spawn(move || run_crossterm_key_reader(&key_tx));
     key_rx
+}
+
+#[cfg(all(test, windows))]
+mod raw_vt_reader_tests {
+    use super::*;
+
+    #[test]
+    fn read_pump_channel_distinguishes_timeout_fatal_and_disconnect() {
+        let (read_tx, read_rx) = mpsc::sync_channel::<io::Result<Vec<u8>>>(1);
+        assert!(matches!(
+            read_rx.recv_timeout(Duration::ZERO),
+            Err(RecvTimeoutError::Timeout)
+        ));
+        read_tx
+            .send(Err(io::Error::new(io::ErrorKind::BrokenPipe, "test")))
+            .unwrap();
+        assert!(matches!(
+            read_rx.recv_timeout(Duration::ZERO),
+            Ok(Err(error)) if error.kind() == io::ErrorKind::BrokenPipe
+        ));
+        drop(read_tx);
+        assert!(matches!(
+            read_rx.recv_timeout(Duration::ZERO),
+            Err(RecvTimeoutError::Disconnected)
+        ));
+    }
 }
 
 fn poll_model_catalog(
@@ -1986,6 +2511,7 @@ struct EventStepContext<'a> {
     momentary_hold: &'a mut bool,
     last_ctrl_c: &'a mut Option<Instant>,
     pressed: &'a mut std::collections::HashSet<KeyCode>,
+    csi_pending_since: &'a mut Option<Instant>,
     keylog_path: &'a Option<std::path::PathBuf>,
     last_activity: &'a mut Option<Instant>,
     history: &'a mut Vec<Message>,
@@ -1994,7 +2520,7 @@ struct EventStepContext<'a> {
     session_tokens: &'a mut usize,
     session_turns: &'a mut usize,
     start_task: &'a StartTask,
-    key_rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<Event>,
+    key_rx: &'a mut tokio::sync::mpsc::Receiver<Event>,
     token_rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<provider::StreamChunk>,
     event_rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<StreamEvent<AgentState>>,
     approval_rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<ApprovalRequest>,
@@ -2003,6 +2529,79 @@ struct EventStepContext<'a> {
     terminal: &'a mut Term,
     guard: Option<&'a mut TerminalGuard>,
     animation_due: &'a mut bool,
+}
+
+/// Give terminals that do not emit `Event::Paste` a short, bounded window only
+/// after an event carries raw C0 provenance. The legacy Ctrl-J/Tab and dangling
+/// release bridges are compatibility opt-ins, never inferred by default.
+/// Ordinary characters never start this collector: delaying every typed byte
+/// makes the following semantic Enter/Tab depend on scheduler timing and was
+/// the source of duplicate spaces and swallowed shortcuts on mixed PTYs.
+async fn collect_rapid_key_events(
+    first: Event,
+    key_rx: &mut tokio::sync::mpsc::Receiver<Event>,
+    pressed: &std::collections::HashSet<KeyCode>,
+) -> Vec<Event> {
+    collect_rapid_key_events_with_policy(first, key_rx, pressed, legacy_unwrapped_bridge_enabled())
+        .await
+}
+
+async fn collect_rapid_key_events_with_policy(
+    first: Event,
+    key_rx: &mut tokio::sync::mpsc::Receiver<Event>,
+    pressed: &std::collections::HashSet<KeyCode>,
+    allow_legacy_bridge: bool,
+) -> Vec<Event> {
+    let starts_literal = is_literal_rapid_paste_boundary(&first);
+    let starts_legacy_bridge = allow_legacy_bridge && rapid_paste_bridge_char(&first).is_some();
+    let starts_unmatched_release =
+        allow_legacy_bridge && is_unmatched_legacy_release(pressed, &first);
+    if !(starts_literal || starts_legacy_bridge || starts_unmatched_release) {
+        return vec![first];
+    }
+
+    let mut events = vec![first];
+    let mut literal_boundary_seen = is_literal_rapid_paste_boundary(&events[0]);
+    let mut wait = Duration::from_millis(RAPID_PASTE_DETECT_MS);
+    while events.len() < RAPID_PASTE_MAX_EVENTS {
+        let next = match tokio::time::timeout(wait, key_rx.recv()).await {
+            Ok(Some(event)) => event,
+            Ok(None) | Err(_) => break,
+        };
+        let rapid = rapid_paste_char(&next).is_some();
+        let bridge = allow_legacy_bridge
+            .then(|| rapid_paste_bridge_char(&next))
+            .flatten();
+        // A plain Tab remains an immediate completion shortcut unless a
+        // legacy Ctrl-J newline has already established the multiline shape.
+        if !rapid && bridge.is_none() {
+            events.push(next);
+            break;
+        }
+        if bridge == Some('\t')
+            && !events
+                .iter()
+                .any(|event| rapid_paste_bridge_char(event) == Some('\n'))
+        {
+            events.push(next);
+            break;
+        }
+        literal_boundary_seen |= is_literal_rapid_paste_boundary(&next);
+        events.push(next);
+        let legacy_newline_seen = events
+            .iter()
+            .any(|event| rapid_paste_bridge_char(event) == Some('\n'));
+        wait = Duration::from_millis(if literal_boundary_seen || legacy_newline_seen {
+            RAPID_PASTE_CONTINUE_MS
+        } else {
+            RAPID_PASTE_DETECT_MS
+        });
+    }
+    if allow_legacy_bridge {
+        coalesce_rapid_key_events_with_policy(events, true)
+    } else {
+        coalesce_rapid_key_events(events)
+    }
 }
 
 async fn run_event_step(context: EventStepContext<'_>) -> anyhow::Result<EventStepResult> {
@@ -2020,6 +2619,7 @@ async fn run_event_step(context: EventStepContext<'_>) -> anyhow::Result<EventSt
         momentary_hold,
         last_ctrl_c,
         pressed,
+        csi_pending_since,
         keylog_path,
         last_activity,
         history,
@@ -2038,40 +2638,50 @@ async fn run_event_step(context: EventStepContext<'_>) -> anyhow::Result<EventSt
         guard,
         animation_due,
     } = context;
+    let mut guard = guard;
+    let raw_vt_input = guard.as_ref().is_some_and(|guard| guard.input_is_raw_vt());
     let dirty = tokio::select! {
         biased;
         Some(event) = key_rx.recv() => {
-            let resized = matches!(&event, Event::Resize(_, _));
-            if resized {
-                // `draw` also autoresizes, but doing it at the event boundary
-                // clears the inline viewport before the next frame and keeps
-                // native scrollback aligned with the new terminal width.
-                let _ = terminal.autoresize();
-                sync_input_editor_scroll(ui);
-            }
-            let result = handle_key_event(
-                event,
-                &mut KeyEventContext {
-                    ui,
-                    meta,
-                    swap,
-                    bus,
-                    steer_bus,
-                    pending,
-                    task,
-                    task_started,
-                    last_task,
-                    retry_count,
-                    pending_submit,
-                    momentary_hold,
-                    last_ctrl_c,
-                    pressed,
-                    keylog_path,
-                    guard,
-                },
-            ).await?;
-            if matches!(result, KeyEventResult::Exit) {
-                return Ok(EventStepResult { exit: true, dirty: true });
+            let events = if raw_vt_input {
+                vec![event]
+            } else {
+                collect_rapid_key_events(event, key_rx, pressed).await
+            };
+            for event in events {
+                let resized = matches!(&event, Event::Resize(_, _));
+                if resized {
+                    // `draw` also autoresizes, but doing it at the event boundary
+                    // clears the inline viewport before the next frame and keeps
+                    // native scrollback aligned with the new terminal width.
+                    let _ = terminal.autoresize();
+                    sync_input_editor_scroll(ui);
+                }
+                let result = handle_key_event(
+                    event,
+                    &mut KeyEventContext {
+                        ui,
+                        meta,
+                        swap,
+                        bus,
+                        steer_bus,
+                        pending,
+                        task,
+                        task_started,
+                        last_task,
+                        retry_count,
+                        pending_submit,
+                        momentary_hold,
+                        last_ctrl_c,
+                        pressed,
+                        csi_pending_since,
+                        keylog_path,
+                        guard: guard.as_deref_mut(),
+                    },
+                ).await?;
+                if matches!(result, KeyEventResult::Exit) {
+                    return Ok(EventStepResult { exit: true, dirty: true });
+                }
             }
             true
         }
@@ -2124,7 +2734,66 @@ async fn run_event_step(context: EventStepContext<'_>) -> anyhow::Result<EventSt
         }
         _ = tick.tick() => {
             *animation_due = ui.busy && pending.is_none() && ui.panel.is_none();
-            handle_tick(ui, &*last_activity, &*pending)
+            let mut dirty = false;
+            if ui.bracketed_paste_active
+                && csi_pending_since.as_ref().is_some_and(|started| {
+                    started.elapsed() >= Duration::from_millis(BRACKETED_PASTE_FLUSH_MS)
+                })
+            {
+                let buffered = std::mem::take(&mut ui.bracketed_paste_buffer);
+                ui.bracketed_paste_active = false;
+                *csi_pending_since = None;
+                if !buffered.is_empty() {
+                    apply_paste(ui, &buffered);
+                }
+                dirty = true;
+            }
+            if !ui.csi_pending.is_empty()
+                && csi_pending_since.as_ref().is_some_and(|started| {
+                    started.elapsed() >= Duration::from_millis(CSI_ESCAPE_FLUSH_MS)
+                })
+            {
+                let csi_literal = flush_pending_literal(&mut ui.csi_pending);
+                *csi_pending_since = None;
+                if let Some((had_escape, literal)) = csi_literal {
+                    if had_escape
+                        && matches!(
+                            dispatch_decoded_key(
+                                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                                &mut KeyEventContext {
+                                    ui,
+                                    meta,
+                                    swap,
+                                    bus,
+                                    steer_bus,
+                                    pending,
+                                    task,
+                                    task_started,
+                                    last_task,
+                                    retry_count,
+                                    pending_submit,
+                                    momentary_hold,
+                                    last_ctrl_c,
+                                    pressed,
+                                    csi_pending_since,
+                                    keylog_path,
+                                    guard,
+                                },
+                            )
+                            .await?,
+                            KeyEventResult::Exit
+                        )
+                    {
+                        return Ok(EventStepResult { exit: true, dirty: true });
+                    }
+                    if !literal.is_empty() {
+                        insert_active_text(ui, &literal);
+                        sync_input_editor_scroll(ui);
+                    }
+                }
+                dirty = true;
+            }
+            dirty || handle_tick(ui, &*last_activity, &*pending)
         }
         else => return Ok(EventStepResult { exit: true, dirty: false }),
     };
@@ -2801,7 +3470,7 @@ struct TuiLoopContext {
     event_rx: tokio::sync::mpsc::UnboundedReceiver<StreamEvent<AgentState>>,
     token_rx: tokio::sync::mpsc::UnboundedReceiver<provider::StreamChunk>,
     done_rx: tokio::sync::mpsc::UnboundedReceiver<Result<AgentState, String>>,
-    key_rx: tokio::sync::mpsc::UnboundedReceiver<Event>,
+    key_rx: tokio::sync::mpsc::Receiver<Event>,
     tick: tokio::time::Interval,
     bus: TokenBus,
     steer_bus: SteerBus,
@@ -2863,6 +3532,7 @@ async fn run_event_loop(context: TuiLoopContext) -> anyhow::Result<()> {
         mut dirty,
         mut animation_due,
     } = context;
+    let mut csi_pending_since = None;
     'main: loop {
         if prepare_loop(&mut LoopPrepareContext {
             ui: &mut ui,
@@ -2907,6 +3577,7 @@ async fn run_event_loop(context: TuiLoopContext) -> anyhow::Result<()> {
             momentary_hold: &mut momentary_hold,
             last_ctrl_c: &mut last_ctrl_c,
             pressed: &mut pressed,
+            csi_pending_since: &mut csi_pending_since,
             keylog_path: &keylog_path,
             last_activity: &mut last_activity,
             history: &mut history,
@@ -2979,10 +3650,19 @@ pub(super) async fn run(
     let (token_tx, token_rx) = tokio::sync::mpsc::unbounded_channel::<provider::StreamChunk>();
     let (done_tx, done_rx) = tokio::sync::mpsc::unbounded_channel::<Result<AgentState, String>>();
     let (guard, terminal) = TerminalGuard::enter()?;
+    let input_backend = guard.input_backend;
+    let keylog_path = keylog_path();
+    log_input_backend(&keylog_path, input_backend);
+    // An explicit fixture/user override also authorizes decoding a raw CSI-u
+    // stream when the host cannot acknowledge the push command (ConPTY does
+    // this); ordinary terminals still require a successful negotiated push.
+    let allow_bare_kitty = guard.keyboard_enhancement_pushed
+        || std::env::var("RIDGE_TUI_KITTY").ok().as_deref() == Some("1");
     tui_trace("terminal.ready");
     let live_cache = LiveOutputCache::default();
     let mut ui = Ui {
         effort: Some(initial_effort),
+        allow_bare_kitty,
         mcp_statuses,
         session_id: agent::current_session_id(),
         ..Ui::default()
@@ -3031,7 +3711,11 @@ pub(super) async fn run(
 
     // 阻塞读线程(iter-23):不开 crossterm `event-stream` feature(免引 futures 依赖),
     // std 线程 `event::read()` 转发进 tokio 通道;主环退出后线程仍阻塞在 read 上,随进程结束回收。
-    let key_rx = spawn_key_reader();
+    let key_rx = spawn_key_reader(
+        input_backend,
+        keylog_path.clone(),
+        guard.active_vt_input.clone(),
+    );
     // tick 只登记 busy 时的动画帧需求;业务 busy 不再直接触发 draw。
     let tick = tokio::time::interval(Duration::from_millis(100));
     let dirty = true;
@@ -3065,8 +3749,6 @@ pub(super) async fn run(
     // 诊断开关:env `RIDGE_KEYLOG` **或** 标记文件 `~/.ridge/keylog.on` 任一存在即开(标记文件防呆:
     // 免 env 未被子进程继承之坑)。日志写**绝对路径** `~/.ridge/keylog.txt`(不依赖 cwd,便于定位)。
     // 供排查「某键(如空格)按了没反应」—— 看它被投递成什么 KeyCode/kind/modifiers,还是根本没到进程。
-    let keylog_path = keylog_path();
-
     // 「已按下集」:去重 Windows 每键的 Press+Release,并识别输入法「仅 Release」的悬空字符注入。
     let pressed: std::collections::HashSet<KeyCode> = std::collections::HashSet::new();
     // Ctrl+Space 的按住审计标记；无 Release 能力的终端自然退化为原有 toggle。

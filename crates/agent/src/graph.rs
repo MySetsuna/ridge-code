@@ -4,12 +4,14 @@ use crate::brain::{
     verify_failure_reason, verify_node, verify_ok, verify_route_llm,
 };
 use crate::context::{bound_observation, to_messages};
+use crate::dispatch_budget::{default_dispatch_budget, DispatchBudget};
 use crate::exec::{
     builtin_tool_specs, durable_updates, execute_tool_call, is_error_observation, parse_todos,
 };
 use crate::guard::{is_mutating_tool, read_only_block};
 use crate::knowledge::{
-    dispatch_batch_obs, dispatch_batch_spec, dispatch_obs, dispatch_spec, Agents, Skill,
+    dispatch_batch_obs_with_budget, dispatch_batch_spec, dispatch_obs_with_budget, dispatch_spec,
+    Agents, Skill,
 };
 use crate::mcp_tools::McpTools;
 use crate::observe::{fetch_url_obs, preview_call, web_search_obs};
@@ -137,7 +139,7 @@ async fn call_mcp_with_timeout(
 ) -> String {
     match tokio::time::timeout(timeout, client.call_tool(tool, arguments)).await {
         Ok(Ok(text)) => text,
-        Ok(Err(error)) => format!("mcp error: {error}"),
+        Ok(Err(error)) => format!("mcp error: {}", error.redacted_summary()),
         Err(_) => format!("mcp error: timed out after {}ms", timeout.as_millis()),
     }
 }
@@ -281,6 +283,33 @@ fn build_core(
     read_only: bool,
     steer_bus: SteerBus,
 ) -> Result<CompiledGraph<AgentState>, GraphError> {
+    build_core_with_dispatch_budget(
+        provider,
+        mcp,
+        reviewer,
+        approver,
+        skills,
+        token_bus,
+        agents,
+        read_only,
+        steer_bus,
+        default_dispatch_budget(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_core_with_dispatch_budget(
+    provider: Arc<dyn LlmProvider>,
+    mcp: McpTools,
+    reviewer: Option<Arc<dyn LlmProvider>>,
+    approver: Arc<dyn Approver>,
+    skills: Vec<Skill>,
+    token_bus: TokenBus,
+    agents: Arc<Agents>,
+    read_only: bool,
+    steer_bus: SteerBus,
+    dispatch_budget: Arc<DispatchBudget>,
+) -> Result<CompiledGraph<AgentState>, GraphError> {
     graph_trace("build.begin");
     let specs = build_tool_specs(&mcp, &agents, read_only);
     let system = Arc::new(build_system_prompt_with_mode(&skills, read_only));
@@ -311,6 +340,7 @@ fn build_core(
             agents,
             main_provider: provider.clone(),
             read_only,
+            dispatch_budget,
         },
     );
     add_verify_node(&mut graph, reviewer);
@@ -648,6 +678,7 @@ struct ActContext {
     agents: Arc<Agents>,
     main_provider: Arc<dyn LlmProvider>,
     read_only: bool,
+    dispatch_budget: Arc<DispatchBudget>,
 }
 
 fn add_act_node(graph: &mut StateGraph<AgentState>, context: ActContext) {
@@ -657,6 +688,18 @@ fn add_act_node(graph: &mut StateGraph<AgentState>, context: ActContext) {
             let patch = match state.pending_call.as_ref() {
                 Some(call) => {
                     let effective_call = normalize_explicit_run_shell(&state, call);
+                    let is_dispatch = matches!(call.name.as_str(), "dispatch_agent" | "dispatch_agents");
+                    let dispatch_remaining = context
+                        .dispatch_budget
+                        .attempt_limit()
+                        .saturating_sub(state.dispatch_attempts_used);
+                    let dispatch_scope = is_dispatch.then(|| {
+                        Arc::new(
+                            context
+                                .dispatch_budget
+                                .scope_with_attempt_limit(dispatch_remaining),
+                        )
+                    });
                     let observation = if let Some(blocked) = explicit_sequence_block(&state, call) {
                         blocked
                     } else if state.dispatch_wave_count() >= MAX_DISPATCH_BATCHES
@@ -665,6 +708,12 @@ fn add_act_node(graph: &mut StateGraph<AgentState>, context: ActContext) {
                         format!(
                             "BLOCKED (dispatch budget): {}/{} dispatch waves used; continue the main task without another batch",
                             state.dispatch_wave_count(), MAX_DISPATCH_BATCHES
+                        )
+                    } else if is_dispatch && dispatch_remaining == 0 {
+                        format!(
+                            "BLOCKED (dispatch budget): {}/{} dispatch attempts used; no provider call issued",
+                            state.dispatch_attempts_used,
+                            context.dispatch_budget.attempt_limit()
                         )
                     } else if state.codegraph_unavailable && call.name.starts_with("codegraph__") {
                         "BLOCKED (codegraph unavailable): use built-in read_file/search or act; do not retry CodeGraph"
@@ -685,9 +734,23 @@ fn add_act_node(graph: &mut StateGraph<AgentState>, context: ActContext) {
                             state.last_read_paths.join(", ")
                         )
                     } else {
-                        execute_pending_call(&effective_call, &context).await
+                        execute_pending_call(&effective_call, &context, dispatch_scope.as_ref()).await
                     };
-                    act_patch(&state, call, observation)
+                    let patch = act_patch(&state, call, observation);
+                    let consumed = dispatch_scope
+                        .as_ref()
+                        .map(|budget| budget.stats().attempts)
+                        .unwrap_or(0);
+                    if consumed == 0 {
+                        patch
+                    } else {
+                        Patch::Batch(vec![
+                            patch,
+                            Patch::SetDispatchAttempts(
+                                state.dispatch_attempts_used.saturating_add(consumed),
+                            ),
+                        ])
+                    }
                 }
                 None => Patch::Message("act: no pending tool_call".to_string()),
             };
@@ -758,7 +821,11 @@ fn exact_run_shell_command(task: &str) -> Option<&str> {
     (!command.is_empty()).then_some(command)
 }
 
-async fn execute_pending_call(call: &provider::ToolCall, context: &ActContext) -> String {
+async fn execute_pending_call(
+    call: &provider::ToolCall,
+    context: &ActContext,
+    dispatch_budget: Option<&Arc<DispatchBudget>>,
+) -> String {
     if let Some(message) = read_only_block(context.read_only, &call.name) {
         return message;
     }
@@ -766,10 +833,28 @@ async fn execute_pending_call(call: &provider::ToolCall, context: &ActContext) -
         return format!("permission denied by user: {}", call.name);
     }
     if call.name == "dispatch_agent" {
-        return dispatch_obs(&context.agents, &context.main_provider, call).await;
+        let Some(budget) = dispatch_budget else {
+            return "dispatch budget unavailable; no provider call issued".to_string();
+        };
+        return dispatch_obs_with_budget(
+            &context.agents,
+            &context.main_provider,
+            call,
+            budget.clone(),
+        )
+        .await;
     }
     if call.name == "dispatch_agents" {
-        return dispatch_batch_obs(&context.agents, &context.main_provider, call).await;
+        let Some(budget) = dispatch_budget else {
+            return "dispatch budget unavailable; no provider call issued".to_string();
+        };
+        return dispatch_batch_obs_with_budget(
+            &context.agents,
+            &context.main_provider,
+            call,
+            budget.clone(),
+        )
+        .await;
     }
     if call.name == "web_search" {
         return web_search_obs(context.fetch.as_ref(), &context.net, call).await;
@@ -1104,14 +1189,16 @@ mod tests {
     use crate::{
         build_agent, build_llm_agent, build_llm_agent_full_with_steer, build_llm_agent_reviewed,
         build_llm_agent_with, completion_blocked, default_tool, execute_tool_call, resolve_mcp,
-        scripted, AgentState, AutoApprove, Brain, HaltReason, McpTools, Tool, MAX_DISPATCH_BATCHES,
-        MAX_EXPLORE, MAX_STEPS,
+        scripted, Agent, AgentState, Agents, AutoApprove, Brain, DispatchBudget, HaltReason,
+        McpTools, Tool, MAX_DISPATCH_BATCHES, MAX_EXPLORE, MAX_STEPS,
     };
     use langgraph::GraphState;
     use langgraph::RunConfig;
     use mcp::McpClient;
     use provider::{Completion, CompletionRequest, LlmProvider, ProviderError, ToolCall, ToolSpec};
-    use std::sync::Arc;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     #[derive(Clone, Default)]
@@ -1221,6 +1308,80 @@ mod tests {
                 .pop_front()
                 .unwrap_or_default())
         }
+    }
+
+    #[derive(Clone)]
+    struct DispatchGraphProvider {
+        main_responses: Arc<Mutex<VecDeque<Completion>>>,
+        main_calls: Arc<AtomicUsize>,
+        subagent_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for DispatchGraphProvider {
+        async fn complete(&self, request: &CompletionRequest) -> Result<Completion, ProviderError> {
+            let is_main = request
+                .tools
+                .iter()
+                .any(|tool| tool.name == "dispatch_agent");
+            if is_main {
+                self.main_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(self
+                    .main_responses
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| Completion {
+                        text: "finished".into(),
+                        ..Default::default()
+                    }))
+            } else {
+                self.subagent_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Completion {
+                    text: "sub-agent result".into(),
+                    ..Default::default()
+                })
+            }
+        }
+    }
+
+    fn dispatch_graph_completions() -> Vec<Completion> {
+        vec![
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "dispatch-first".into(),
+                    name: "dispatch_agent".into(),
+                    arguments: serde_json::json!({
+                        "agent": "explorer",
+                        "task": "inspect the project"
+                    }),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "dispatch-second".into(),
+                    name: "dispatch_agent".into(),
+                    arguments: serde_json::json!({
+                        "agent": "explorer",
+                        "task": "inspect the project"
+                    }),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "read-after-budget".into(),
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": "Cargo.toml"}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                text: "inspection complete".into(),
+                ..Default::default()
+            },
+        ]
     }
 
     #[tokio::test]
@@ -1783,6 +1944,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_attempt_cap_is_per_run_and_blocks_second_provider_call() {
+        let mut completions = dispatch_graph_completions();
+        completions.extend(dispatch_graph_completions());
+        let provider = DispatchGraphProvider {
+            main_responses: Arc::new(Mutex::new(completions.into_iter().collect())),
+            main_calls: Arc::new(AtomicUsize::new(0)),
+            subagent_calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let subagent_calls = provider.subagent_calls.clone();
+        let agents = Arc::new(Agents {
+            defs: vec![Agent {
+                name: "explorer".into(),
+                description: "read-only inspection".into(),
+                provider: None,
+                tools: Some(vec!["search".into()]),
+                body: "inspect only".into(),
+            }],
+            providers: std::collections::HashMap::new(),
+            route_candidates: Vec::new(),
+        });
+        let app = super::build_core_with_dispatch_budget(
+            Arc::new(provider),
+            McpTools::empty(),
+            None,
+            Arc::new(AutoApprove),
+            Vec::new(),
+            super::null_token_bus(),
+            agents,
+            false,
+            super::null_steer_bus(),
+            Arc::new(DispatchBudget::new_with_attempt_limit(3, 1).unwrap()),
+        )
+        .unwrap();
+
+        let first = app
+            .invoke(AgentState::new("inspect the project"))
+            .await
+            .unwrap();
+        assert_eq!(first.dispatch_attempts_used, 1);
+        assert!(first
+            .messages
+            .iter()
+            .any(|message| message.contains("[dispatch_status=completed]")));
+        assert!(first
+            .messages
+            .iter()
+            .any(|message| message.contains("no provider call issued")));
+        assert_eq!(subagent_calls.load(Ordering::SeqCst), 1);
+
+        let second = app
+            .invoke(AgentState::new("inspect the project"))
+            .await
+            .unwrap();
+        assert_eq!(second.dispatch_attempts_used, 1);
+        assert_eq!(subagent_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn happy_path_converges_and_gets_approved() {
         let app = build_agent(scripted(), default_tool()).unwrap();
         let out = app
@@ -2022,6 +2241,37 @@ mod tests {
     }
 
     // maker:跑 exit 0(确定性通过)然后收尾。
+    #[tokio::test]
+    async fn mcp_tool_errors_are_redacted_before_agent_observation() {
+        struct ErrorTransport;
+        #[async_trait::async_trait]
+        impl mcp::McpTransport for ErrorTransport {
+            async fn request(
+                &self,
+                method: &str,
+                _params: serde_json::Value,
+            ) -> Result<serde_json::Value, mcp::McpError> {
+                if method == "tools/call" {
+                    Err(mcp::McpError::Tool("secret backend detail".to_string()))
+                } else {
+                    Ok(serde_json::json!({}))
+                }
+            }
+        }
+
+        let client = mcp::McpClient::new("error", Box::new(ErrorTransport));
+        let result = call_mcp_with_timeout(
+            &client,
+            "fails",
+            serde_json::json!({}),
+            Duration::from_millis(20),
+        )
+        .await;
+        assert_eq!(result, "mcp error: MCP tool error");
+        assert!(!result.contains("secret"));
+        assert!(is_error_observation(&result));
+    }
+
     fn maker_passes_then_finishes() -> provider::ScriptedProvider {
         use provider::{Completion, ScriptedProvider};
         ScriptedProvider::new(vec![

@@ -14,8 +14,14 @@ path = "src/main.rs"
 
 [dependencies]
 agent = { path = "../agent" }
+langgraph = { path = "../langgraph" }
 provider = { path = "../provider" }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }

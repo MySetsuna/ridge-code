@@ -25,8 +25,37 @@ pub enum GraphError {
     #[error("node task panicked or was cancelled: {0}")]
     Join(String),
 
+    /// A bounded shared dispatch budget rejected an operation before it ran.
+    ///
+    /// This stays structured so callers can distinguish cancellation from a
+    /// closed budget without scraping the display string.
+    #[error("dispatch budget rejected `{operation}`: {reason} (limit {limit})")]
+    DispatchBudget {
+        operation: String,
+        limit: usize,
+        reason: DispatchBudgetReason,
+    },
+
     #[error("best-of: no branch to select (empty input or all branches failed)")]
     NoWinner,
+}
+
+/// Why a dispatch permit could not be acquired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchBudgetReason {
+    Cancelled,
+    Closed,
+    AttemptsExhausted,
+}
+
+impl std::fmt::Display for DispatchBudgetReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Cancelled => "cancelled",
+            Self::Closed => "closed",
+            Self::AttemptsExhausted => "attempts exhausted",
+        })
+    }
 }
 
 /// 节点错误统一归一化成这个 boxed 类型(同 provider 边界原则:对上归一化)。

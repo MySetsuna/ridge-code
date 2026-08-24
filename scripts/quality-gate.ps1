@@ -36,6 +36,7 @@ $gitCheckOutput | Write-Output
 if ($gitCheckExitCode -ne 0) {
     throw "git diff --check failed with exit code $gitCheckExitCode"
 }
+Invoke-Checked "npm" @("run", "spectree:check")
 Invoke-Checked "cargo" @("test", "--workspace", "--locked")
 Invoke-Checked "cargo" @("clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings")
 $clippyErrorAction = $ErrorActionPreference
@@ -47,6 +48,20 @@ if ($clippyExitCode -ne 0) {
     throw "cargo clippy JSON report failed with exit code $clippyExitCode"
 }
 Invoke-Checked "cargo" @("build", "--workspace", "--locked")
+Invoke-Checked "powershell" @(
+    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/recovery-soak.ps1"
+)
+Invoke-Checked "powershell" @(
+    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/bounded-soak.ps1"
+)
+Invoke-Checked "powershell" @(
+    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/windows-pty-e2e.ps1",
+    "-InputFixture", "-TimeoutMs", "12000"
+)
+Invoke-Checked "powershell" @(
+    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/windows-pty-e2e.ps1",
+    "-CompletionFixture", "-ResizeProbe", "-TimeoutMs", "12000"
+)
 
 & cargo llvm-cov --version *> $null
 if ($LASTEXITCODE -ne 0) {

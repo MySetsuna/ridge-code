@@ -30,3 +30,11 @@
 # 沙箱测试临时产物(写 jail 后测试落在 cwd 子树,自清理;防 panic 残留污染)
 *.tmp
 ridge_agent_batch_tmp/
+
+# 本地验证/文档投影产物（源码与证据索引另行入库）
+/node_modules/
+/obsidian-vault/
+/crates/agent/.ridge/
+/.ridge-*.log
+/.ridge-*.stderr
+/.ridge-pty-input-regression-*.json
