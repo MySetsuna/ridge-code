@@ -13,7 +13,9 @@ pub(crate) fn is_user_prompt_line(text: &str) -> bool {
 }
 
 pub(crate) fn is_process_noise(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
+    // Process status is emitted as a single line.  User-facing reports may
+    // contain the same words in explanatory detail, so classify by title line.
+    let lower = text.lines().next().unwrap_or(text).to_ascii_lowercase();
     lower.contains("skip-danger")
         || lower.contains("task submitted")
         || (lower.contains("no reasoning") && !lower.contains("history"))
@@ -239,7 +241,9 @@ pub(crate) fn process_bundle_title_style() -> ratatui::style::Color {
 #[cfg(test)]
 mod tests {
     use super::ActivityKind;
-    use super::{project_process_bundle, tighten_answer_spacing, user_prompt_line};
+    use super::{
+        is_process_noise, project_process_bundle, tighten_answer_spacing, user_prompt_line,
+    };
 
     #[test]
     fn user_prompt_is_special_and_readable() {
@@ -271,6 +275,14 @@ mod tests {
         assert!(body[1].contains("waiting"));
         assert!(body[1].contains("no reasoning"));
         assert!(!body[1].contains("extra discarded"));
+    }
+
+    #[test]
+    fn process_noise_uses_title_line_for_multiline_user_reports() {
+        assert!(is_process_noise("verifying checker\ndetail"));
+        assert!(!is_process_noise(
+            "terminal doctor\nhints: verifying the PTY"
+        ));
     }
 
     #[test]

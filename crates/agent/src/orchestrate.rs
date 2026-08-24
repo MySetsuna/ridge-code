@@ -2020,7 +2020,9 @@ mod tests {
         let cancellation = AgentCancellation::new();
         let trigger = cancellation.clone();
         let trigger_task = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            // Leave enough time for the planner and teammate wave to start;
+            // cancellation may still arrive while either side is awaiting.
+            tokio::time::sleep(Duration::from_millis(100)).await;
             trigger.cancel();
         });
         let result = run_planned_routed_with_cancellation(
@@ -2031,10 +2033,18 @@ mod tests {
         )
         .await;
         trigger_task.await.expect("cancellation trigger");
-        assert!(matches!(
-            result,
-            Err(GraphError::Join(message)) if message.contains("cancel")
-        ));
+        let cancelled = match &result {
+            Err(GraphError::Join(message)) => message.contains("cancel"),
+            Err(GraphError::DispatchBudget {
+                reason: langgraph::DispatchBudgetReason::Cancelled,
+                ..
+            }) => true,
+            _ => false,
+        };
+        assert!(
+            cancelled,
+            "expected structured cancellation, got {result:?}"
+        );
         assert!(provider.calls.load(Ordering::SeqCst) >= 2);
     }
 
