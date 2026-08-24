@@ -17,3 +17,6 @@
 统一阀由 `scripts/quality-gate.ps1`、`scripts/quality-gate.sh` 与 `.github/workflows/quality-gate.yml` 共同执行：格式、workspace 测试、`clippy -D warnings`、workspace build、`cargo llvm-cov` 的批准阈值、`git diff --check` 与本机 SonarQube quality gate 均为硬失败条件。质量阀失败时只能修复代码、测试或架构后重跑；不得降阈值、跳过扫描、扩大排除或伪造报告。
 
 证据路径：`target/quality/` 覆盖率报告、SonarQube 项目 `ridge-code`、GitHub Actions release quality run、`docs/PROJECT-STATE.md` 与 `docs/archive/events-2026-08.jsonl`。本切片不上传密钥、cookie、原始会话或隐藏推理；推理审计只接收显式安全摘要。
+
+发布 workflow 以 deterministic gates 为阻断条件；本地 Sonar 仍由独立
+`quality-gate` workflow 在 `ridgecode-sonar` runner 与 `SONAR_TOKEN` 齐备时执行。

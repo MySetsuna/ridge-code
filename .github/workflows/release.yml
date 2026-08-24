@@ -13,10 +13,13 @@ permissions:
 
 jobs:
   quality:
-    name: release quality gate (local SonarQube)
+    name: release quality gate (deterministic; Sonar standalone)
     uses: ./.github/workflows/quality-gate.yml
     with:
-      run_sonar: true
+      # Release is blocked only by the deterministic gates.  Sonar remains
+      # available through the standalone quality-gate workflow when the
+      # self-hosted `ridgecode-sonar` runner and token are present.
+      run_sonar: false
     secrets: inherit
 
   # 先建好 Release(幂等),再让矩阵各目标往里传产物 —— 根除「五 job 并发抢着创建 Release
