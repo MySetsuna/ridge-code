@@ -45,6 +45,13 @@ const mappedBySpec = (file) => {
   );
 };
 
+const generatedSpectreeState = (file) =>
+  file === ".spectree/approvals.json" ||
+  file === ".spectree/evidence.json" ||
+  file === ".spectree/need-spec-change.json" ||
+  file === ".spectree/spectree.lock.json" ||
+  file.startsWith(".spectree/build/");
+
 function sourceFiles(directory) {
   const files = [];
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -94,7 +101,7 @@ for (const file of changedPaths) {
     normalized === "package.json" ||
     normalized === "package-lock.json" ||
     normalized.startsWith("scripts/") ||
-    normalized.startsWith(".spectree/");
+    normalized.startsWith(".spectree/") && !generatedSpectreeState(normalized);
   if ((isScopedImplementation || isScopedTooling) && !mappedBySpec(normalized)) {
     errors.push(`changed path is not mapped by any spec target: ${normalized}`);
   }

@@ -53,7 +53,9 @@ function links(ids) {
 
 function overviewLanguage(record) {
   if (requestedLanguage !== "auto") return requestedLanguage;
-  const sourceUsesHan = /[\u3400-\u9fff]/u.test(`${record.title}\n${record.body}`);
+  const sourceUsesHan = /[\u3400-\u9fff]/u.test(
+    `${record?.title ?? ""}\n${record?.body ?? ""}`,
+  );
   const hostUsesChinese = Intl.DateTimeFormat().resolvedOptions().locale
     .toLowerCase()
     .startsWith("zh");
@@ -61,12 +63,12 @@ function overviewLanguage(record) {
 }
 
 function detailLevel(record) {
-  const parsed = Number.parseInt(record.level.slice(1), 10);
+  const parsed = Number.parseInt(record?.level?.slice(1) ?? "", 10);
   return Number.isFinite(parsed) ? Math.max(1, Math.min(4, parsed)) : 1;
 }
 
 function firstParagraph(record) {
-  const paragraph = record.body
+  const paragraph = (record?.body ?? "")
     .replace(/^# .*\r?\n/u, "")
     .split(/\r?\n\s*\r?\n/u)
     .map((paragraph) => paragraph.replace(/\s+/gu, " ").trim())
@@ -89,6 +91,9 @@ function buildOverview(record, children, language) {
   });
   const level = detailLevel(record);
   const purpose = firstParagraph(record) ?? record.title;
+  const codeTargets = record.codeTargets ?? [];
+  const testTargets = record.testTargets ?? [];
+  const recordLevel = record.level ?? "CHG";
   if (language === "zh-CN") {
     const rows = [
       "## 节点概览",
@@ -138,7 +143,15 @@ for (const note of projection.notes) {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
   if (!match) throw new Error(`invalid generated note: ${note.relativePath}`);
 
-  const record = built.graph.nodes.get(note.id);
+  const sourceRecord =
+    built.graph.nodes.get(note.id) ?? built.graph.changes.get(note.id);
+  if (!sourceRecord) throw new Error(`unknown projection record: ${note.id}`);
+  const record = {
+    ...sourceRecord,
+    level: sourceRecord.level ?? "CHG",
+    codeTargets: sourceRecord.codeTargets ?? [],
+    testTargets: sourceRecord.testTargets ?? [],
+  };
   const parent = record?.parent;
   const children = built.graph.edges
     .filter((edge) => edge.type === "parent" && edge.from === note.id)
@@ -165,7 +178,9 @@ for (const note of projection.notes) {
   );
   const language = overviewLanguage(record);
   setScalarField(frontmatter, "overview_language", language);
-  setScalarField(frontmatter, "overview_detail_level", record.level);
+  if (sourceRecord.level) {
+    setScalarField(frontmatter, "overview_detail_level", sourceRecord.level);
+  }
   setScalarField(frontmatter, "overview_includes_children", "true");
 
   let body = match[2].replace(/^\r?\n/, "");

@@ -1,0 +1,15 @@
+{
+  "changeId": "CHG-001",
+  "evidence": {
+    "tests": [
+      "cargo test --workspace --locked",
+      "cargo clippy --workspace --all-targets --locked -- -D warnings",
+      "npm run spectree:export",
+      "npm run spectree:check"
+    ],
+    "results": "PASS",
+    "focusedRegression": "oauth_file_and_profile_registration_round_trip_without_plaintext_key passes under parallel runner",
+    "projection": "24 notes; ALIGNED"
+  },
+  "reportedAt": "2026-08-25T17:08:13.594Z"
+}

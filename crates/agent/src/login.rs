@@ -828,6 +828,11 @@ fn read_pasted_authorization(expected_state: &str) -> anyhow::Result<String> {
 }
 
 pub(crate) fn register_oauth_profile(provider_id: &str) -> Option<String> {
+    let cfg_path = config_path();
+    register_oauth_profile_at(provider_id, std::path::Path::new(&cfg_path))
+}
+
+fn register_oauth_profile_at(provider_id: &str, cfg_path: &std::path::Path) -> Option<String> {
     let (dm, db) = oauth_defaults(provider_id);
     let (name, kind) = match provider_id {
         "anthropic" => ("claude-max", "anthropic"),
@@ -845,13 +850,12 @@ pub(crate) fn register_oauth_profile(provider_id: &str) -> Option<String> {
         use_oauth: Some(true),
         route: None,
     };
-    let cfg_path = config_path();
-    let cfg_text = std::fs::read_to_string(&cfg_path).unwrap_or_default();
+    let cfg_text = std::fs::read_to_string(cfg_path).unwrap_or_default();
     let updated = agent::config_add_provider(&cfg_text, &prof).ok()?;
-    if let Some(dir) = std::path::Path::new(&cfg_path).parent() {
+    if let Some(dir) = cfg_path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    std::fs::write(&cfg_path, updated).ok()?;
+    std::fs::write(cfg_path, updated).ok()?;
     Some(prof.name)
 }
 
@@ -978,7 +982,7 @@ fn choose_catalog_model(models: Vec<provider::models::ModelInfo>, model: String)
 mod tests {
     use super::{
         choose_catalog_model, handle_local_callback_stream, now_epoch, oauth_defaults,
-        oauth_model_and_base, oauth_model_info, register_oauth_profile, run_login,
+        oauth_model_and_base, oauth_model_info, register_oauth_profile_at, run_login,
         save_oauth_token, verify_key_via,
     };
     use crate::Config;
@@ -1272,27 +1276,21 @@ mod tests {
             id_token: None,
             account_id: Some("account".into()),
         };
-        with_envs(
-            &[
-                ("RIDGE_OAUTH", oauth_file.to_str().unwrap()),
-                ("RIDGE_CONFIG", config_file.to_str().unwrap()),
-            ],
-            || {
-                let saved = save_oauth_token("openai", &token).unwrap();
-                assert_eq!(saved, oauth_file.to_string_lossy());
-                let text = std::fs::read_to_string(&oauth_file).unwrap();
-                assert_eq!(agent::oauth_get(&text, "openai").unwrap(), token);
-                assert_eq!(oauth_model_info(&Config::default()).unwrap().0, "openai");
-                assert_eq!(
-                    register_oauth_profile("anthropic").as_deref(),
-                    Some("claude-max")
-                );
-                let cfg = Config::load(&config_file);
-                assert_eq!(cfg.providers.len(), 1);
-                assert_eq!(cfg.providers[0].use_oauth, Some(true));
-                assert!(cfg.providers[0].api_key.is_none());
-            },
-        );
+        with_envs(&[("RIDGE_OAUTH", oauth_file.to_str().unwrap())], || {
+            let saved = save_oauth_token("openai", &token).unwrap();
+            assert_eq!(saved, oauth_file.to_string_lossy());
+            let text = std::fs::read_to_string(&oauth_file).unwrap();
+            assert_eq!(agent::oauth_get(&text, "openai").unwrap(), token);
+            assert_eq!(oauth_model_info(&Config::default()).unwrap().0, "openai");
+            assert_eq!(
+                register_oauth_profile_at("anthropic", &config_file).as_deref(),
+                Some("claude-max")
+            );
+            let cfg = Config::load(&config_file);
+            assert_eq!(cfg.providers.len(), 1);
+            assert_eq!(cfg.providers[0].use_oauth, Some(true));
+            assert!(cfg.providers[0].api_key.is_none());
+        });
         let _ = std::fs::remove_dir_all(root);
     }
 }
