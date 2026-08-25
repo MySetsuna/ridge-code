@@ -915,6 +915,11 @@ pub(crate) struct InputState {
     pub(crate) draft: String,
 }
 
+/// Bound editable input so a paste or a queued long-task prompt cannot make
+/// every redraw rescan an unbounded UTF-8 buffer.  This matches the steer
+/// message limit and leaves ample room for normal multi-line tasks.
+const MAX_INPUT_CHARS: usize = 32_768;
+
 impl InputState {
     pub(crate) fn set_history(&mut self, history: Vec<String>, session_mode: bool) {
         self.history = history;
@@ -951,14 +956,23 @@ impl InputState {
             .unwrap_or(self.buffer.len())
     }
     pub(crate) fn insert(&mut self, c: char) {
+        if self.buffer.chars().count() >= MAX_INPUT_CHARS {
+            return;
+        }
         let b = self.byte_at(self.cursor);
         self.buffer.insert(b, c);
         self.cursor += 1;
     }
     pub(crate) fn insert_str(&mut self, s: &str) {
+        let length = self.buffer.chars().count();
+        let available = MAX_INPUT_CHARS.saturating_sub(length);
+        if available == 0 {
+            return;
+        }
+        let bounded = s.chars().take(available).collect::<String>();
         let b = self.byte_at(self.cursor);
-        self.buffer.insert_str(b, s);
-        self.cursor += s.chars().count();
+        self.buffer.insert_str(b, &bounded);
+        self.cursor += bounded.chars().count();
     }
     pub(crate) fn backspace(&mut self) {
         if self.cursor > 0 {

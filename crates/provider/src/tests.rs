@@ -4,6 +4,41 @@ use serde_json::json;
 use std::sync::{Arc, Mutex};
 
 #[test]
+fn tool_effects_are_conservative_and_metadata_wins() {
+    assert_eq!(ToolEffect::from_name("read_file"), ToolEffect::Explore);
+    assert_eq!(
+        ToolEffect::from_name("mcp__write_record"),
+        ToolEffect::Unknown
+    );
+    assert_eq!(ToolEffect::from_name("mcp__run_tests"), ToolEffect::Unknown);
+    assert_eq!(ToolEffect::from_name("mcp__mystery"), ToolEffect::Unknown);
+    assert_eq!(
+        ToolEffect::from_metadata(
+            "mcp__mystery",
+            "opaque operation",
+            Some(&json!({"annotations": {"readOnlyHint": true}})),
+        ),
+        ToolEffect::Explore
+    );
+    assert_eq!(
+        ToolEffect::from_metadata(
+            "mcp__mystery",
+            "opaque operation",
+            Some(&json!({"effect": "edit"})),
+        ),
+        ToolEffect::Edit
+    );
+    assert_eq!(
+        ToolEffect::from_metadata(
+            "mcp__run_tests",
+            "opaque operation",
+            Some(&json!({"effect": "verify"})),
+        ),
+        ToolEffect::Verify
+    );
+}
+
+#[test]
 fn openai_and_anthropic_normalize_to_same_tool_call() {
     // 两种厂商的 wire 格式,归一化后应得到等价的 ToolCall。
     let openai_wire = json!({
@@ -260,6 +295,7 @@ fn openai_build_request_multiturn_tool_loop() {
             name: "run_shell".to_string(),
             description: "run".to_string(),
             schema: json!({"type": "object"}),
+            effect: ToolEffect::Verify,
         }],
     };
     let body = openai::build_request("gpt-x", &req);
@@ -697,6 +733,7 @@ async fn volc_provider_retry_disables_thinking_without_affecting_other_endpoints
             name: "search".into(),
             description: "search one file".into(),
             schema: json!({"type":"object"}),
+            effect: ToolEffect::Explore,
         }],
     };
     let volc_http = Arc::new(CapturingHttp::new(reply.clone()));
@@ -765,6 +802,7 @@ async fn chatgpt_provider_uses_codex_responses_wire() {
                 name: "run_shell".into(),
                 description: "run a command".into(),
                 schema: json!({"type": "object", "properties": {"cmd": {"type": "string"}}}),
+                effect: ToolEffect::Verify,
             }],
         })
         .await

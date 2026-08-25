@@ -1,7 +1,7 @@
 use crate::rich_output::{Color, RichOutput};
 use crate::state::Todo;
 use mcp::{McpClient, McpError};
-use provider::ToolSpec;
+use provider::{ToolEffect, ToolSpec};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -101,6 +101,16 @@ impl McpTools {
     /// 已接入的 MCP 工具名(命名空间形式,如 `nlm__notebook_list`)。供 `/tools` 列举。
     pub fn tool_names(&self) -> Vec<String> {
         self.specs.iter().map(|s| s.name.clone()).collect()
+    }
+
+    /// Resolve the capability of a routed tool. Built-ins are handled by the
+    /// provider fallback; a listed MCP tool uses its trusted effect metadata.
+    pub fn effect_for(&self, name: &str) -> ToolEffect {
+        self.specs
+            .iter()
+            .find(|spec| spec.name == name)
+            .map(|spec| spec.effect.resolved_for(name))
+            .unwrap_or_else(|| ToolEffect::from_name(name))
     }
 
     pub fn statuses(&self) -> &[McpServerStatus] {
@@ -362,6 +372,7 @@ fn append_tools(
             name: namespace.clone(),
             description: tool.description,
             schema: tool.input_schema,
+            effect: tool.effect,
         });
         owners.insert(namespace.clone(), client.namespace().to_string());
         out.router.insert(namespace, (client.clone(), tool.name));

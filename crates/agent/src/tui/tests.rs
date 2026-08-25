@@ -435,6 +435,36 @@ fn extracted_token_handler_drains_bounded_wake_batch() {
     assert!(last_activity.is_some());
 }
 
+#[test]
+fn token_flood_leaves_tail_for_next_wake() {
+    let mut ui = Ui::default();
+    let mut last_activity = None;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    for index in 0..40 {
+        tx.send(provider::StreamChunk::Answer(index.to_string()))
+            .expect("token chunk");
+    }
+
+    handle_token_chunk(
+        provider::StreamChunk::Answer("first".into()),
+        &mut ui,
+        &mut last_activity,
+        &mut rx,
+    );
+
+    let remaining = std::iter::from_fn(|| rx.try_recv().ok()).count();
+    assert_eq!(remaining, 8, "one wake must not monopolize the event loop");
+}
+
+#[test]
+fn oversized_input_is_bounded_without_splitting_utf8() {
+    let mut input = InputState::default();
+    input.insert_str(&"界".repeat(40_000));
+    assert_eq!(input.buffer.chars().count(), 32_768);
+    assert!(input.buffer.chars().all(|ch| ch == '界'));
+    assert_eq!(input.cursor, 32_768);
+}
+
 #[tokio::test]
 async fn extracted_event_step_covers_stream_approval_done_and_tick_branches() {
     let mut ui = Ui::default();

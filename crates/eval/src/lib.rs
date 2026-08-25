@@ -37,6 +37,10 @@ pub enum Invariant {
     MaxSteps(usize),
     MaxTokens(usize),
     Marker(String),
+    /// Require at least this many durable file mutations.
+    ModifiedFilesAtLeast(usize),
+    /// Require a named tool call to appear in the completed trace.
+    ToolUsed(String),
 }
 
 impl Invariant {
@@ -67,6 +71,14 @@ impl Invariant {
     pub fn marker_present(value: impl Into<String>) -> Self {
         Self::Marker(value.into())
     }
+
+    pub fn modified_files_at_least(limit: usize) -> Self {
+        Self::ModifiedFilesAtLeast(limit)
+    }
+
+    pub fn tool_used(name: impl Into<String>) -> Self {
+        Self::ToolUsed(name.into())
+    }
 }
 
 /// Stable, non-sensitive category for one invariant observation.
@@ -76,6 +88,8 @@ pub enum InvariantKind {
     Steps,
     Tokens,
     Marker,
+    ModifiedFiles,
+    Tool,
 }
 
 /// Bounded evidence for an invariant.  `observed` is a boolean (0/1) for
@@ -180,6 +194,14 @@ impl HarnessOptions {
         self.with_invariant(Invariant::Marker(marker.into()))
     }
 
+    pub fn require_modified_files(self, minimum: usize) -> Self {
+        self.with_invariant(Invariant::ModifiedFilesAtLeast(minimum))
+    }
+
+    pub fn require_tool(self, tool: impl Into<String>) -> Self {
+        self.with_invariant(Invariant::ToolUsed(tool.into()))
+    }
+
     pub fn with_max_invariants(mut self, value: usize) -> Self {
         self.max_invariants = value;
         self
@@ -238,6 +260,13 @@ pub struct CaseResult {
     pub timed_out: bool,
     pub invariants: Vec<InvariantEvidence>,
     pub evidence: Vec<InvariantEvidence>,
+    /// Durable facts retained for long-task diagnostics and manifest review.
+    #[serde(default)]
+    pub modified_files: Vec<String>,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub explore_handoffs: usize,
 }
 
 /// 整批 eval 的报告。
@@ -295,6 +324,14 @@ pub fn case_execution_fingerprint(case: &EvalCase, options: &HarnessOptions) -> 
             Invariant::Marker(marker) => {
                 hasher.update([3]);
                 update_text(&mut hasher, marker);
+            }
+            Invariant::ModifiedFilesAtLeast(limit) => {
+                hasher.update([4]);
+                hasher.update((*limit as u64).to_le_bytes());
+            }
+            Invariant::ToolUsed(tool) => {
+                hasher.update([5]);
+                update_text(&mut hasher, tool);
             }
         }
     }
@@ -642,6 +679,7 @@ async fn run_case_with_options(case: EvalCase, options: HarnessOptions) -> CaseR
                 evaluate_invariants(&state, &options.invariants, options.max_invariants);
             let gate_passed = invariants.iter().all(|evidence| evidence.passed);
             let approved = state.approved && gate_passed;
+            let facts = trace_facts(&state);
             CaseResult {
                 name,
                 approved,
@@ -652,6 +690,9 @@ async fn run_case_with_options(case: EvalCase, options: HarnessOptions) -> CaseR
                 timed_out: false,
                 evidence: invariants.clone(),
                 invariants,
+                modified_files: facts.modified_files,
+                tools: facts.tools,
+                explore_handoffs: facts.explore_handoffs,
             }
         }
         CaseExecution::Incomplete { status, state } => {
@@ -661,6 +702,7 @@ async fn run_case_with_options(case: EvalCase, options: HarnessOptions) -> CaseR
                 options.max_invariants,
                 state.as_deref(),
             );
+            let facts = state.as_deref().map(trace_facts).unwrap_or_default();
             CaseResult {
                 name,
                 approved: false,
@@ -671,8 +713,36 @@ async fn run_case_with_options(case: EvalCase, options: HarnessOptions) -> CaseR
                 timed_out,
                 evidence: invariants.clone(),
                 invariants,
+                modified_files: facts.modified_files,
+                tools: facts.tools,
+                explore_handoffs: facts.explore_handoffs,
             }
         }
+    }
+}
+
+#[derive(Default)]
+struct TraceFacts {
+    modified_files: Vec<String>,
+    tools: Vec<String>,
+    explore_handoffs: usize,
+}
+
+fn trace_facts(state: &AgentState) -> TraceFacts {
+    let mut tools = BTreeSet::new();
+    for message in &state.history {
+        for call in &message.tool_calls {
+            tools.insert(call.name.clone());
+        }
+    }
+    TraceFacts {
+        modified_files: state.modified_files.iter().cloned().collect(),
+        tools: tools.into_iter().collect(),
+        explore_handoffs: state
+            .messages
+            .iter()
+            .filter(|message| message.starts_with("control: exploration guard triggered"))
+            .count(),
     }
 }
 
@@ -718,6 +788,21 @@ fn evaluate_invariants(
                     limit: Some(1),
                 }
             }
+            Invariant::ModifiedFilesAtLeast(limit) => InvariantEvidence {
+                kind: InvariantKind::ModifiedFiles,
+                passed: state.modified_files.len() >= *limit,
+                observed: state.modified_files.len(),
+                limit: Some(*limit),
+            },
+            Invariant::ToolUsed(tool) => {
+                let present = tool_used(state, tool);
+                InvariantEvidence {
+                    kind: InvariantKind::Tool,
+                    passed: present,
+                    observed: usize::from(present),
+                    limit: Some(1),
+                }
+            }
         })
         .collect()
 }
@@ -755,8 +840,29 @@ fn failed_invariants(
                 observed: state.map_or(0, |state| usize::from(marker_present(state, marker))),
                 limit: Some(1),
             },
+            Invariant::ModifiedFilesAtLeast(limit) => InvariantEvidence {
+                kind: InvariantKind::ModifiedFiles,
+                passed: false,
+                observed: state.map_or(0, |state| state.modified_files.len()),
+                limit: Some(*limit),
+            },
+            Invariant::ToolUsed(tool) => InvariantEvidence {
+                kind: InvariantKind::Tool,
+                passed: false,
+                observed: state.map_or(0, |state| usize::from(tool_used(state, tool))),
+                limit: Some(1),
+            },
         })
         .collect()
+}
+
+fn tool_used(state: &AgentState, tool: &str) -> bool {
+    !tool.trim().is_empty()
+        && state
+            .history
+            .iter()
+            .flat_map(|message| &message.tool_calls)
+            .any(|call| call.name == tool)
 }
 
 fn marker_present(state: &AgentState, marker: &str) -> bool {
@@ -923,6 +1029,66 @@ mod tests {
         assert_eq!(report.passed, 1);
         assert!((report.pass_rate() - 0.5).abs() < 1e-9);
         assert!(report.total_tokens >= 10);
+    }
+
+    #[tokio::test]
+    async fn long_exploration_harness_reaches_edit_and_reports_facts() {
+        let path = format!("target/quality/ridge-long-task-{}.txt", std::process::id());
+        std::fs::create_dir_all("target/quality").expect("quality directory");
+        std::fs::write(&path, "old\n").expect("fixture file");
+
+        let mut steps = (0..12)
+            .map(|index| Completion {
+                tool_calls: vec![ToolCall {
+                    id: format!("read-{index}"),
+                    name: "read_file".into(),
+                    arguments: json!({"path": path.clone(), "limit": 4}),
+                }],
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        steps.push(Completion {
+            tool_calls: vec![ToolCall {
+                id: "edit".into(),
+                name: "edit_file".into(),
+                arguments: json!({
+                    "path": path.clone(),
+                    "old_string": "old",
+                    "new_string": "new"
+                }),
+            }],
+            ..Default::default()
+        });
+        steps.push(Completion {
+            text: "done".into(),
+            ..Default::default()
+        });
+
+        let report = run_eval_with_options(
+            vec![EvalCase::new(
+                "long-edit-handoff",
+                format!("edit {path} then verify"),
+                Arc::new(ScriptedProvider::new(steps)),
+            )],
+            HarnessOptions::default().with_invariants([
+                Invariant::Approved,
+                Invariant::ModifiedFilesAtLeast(1),
+                Invariant::ToolUsed("edit_file".into()),
+                Invariant::MaxSteps(40),
+            ]),
+        )
+        .await
+        .expect("long-task harness");
+
+        let _ = std::fs::remove_file(&path);
+        let result = &report.results[0];
+        assert!(
+            result.approved,
+            "long task must enter edit phase: {result:?}"
+        );
+        assert_eq!(result.explore_handoffs, 1);
+        assert!(result.modified_files.iter().any(|file| file == &path));
+        assert!(result.tools.iter().any(|tool| tool == "edit_file"));
     }
 
     #[tokio::test]

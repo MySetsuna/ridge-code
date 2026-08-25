@@ -1155,6 +1155,7 @@ pub(crate) fn dispatch_spec(agents: &Agents) -> Option<ToolSpec> {
             },
             "required":["agent","task"]
         }),
+        effect: provider::ToolEffect::Explore,
     })
 }
 
@@ -1188,6 +1189,7 @@ pub(crate) fn dispatch_batch_spec(agents: &Agents) -> Option<ToolSpec> {
             },
             "required":["tasks"]
         }),
+        effect: provider::ToolEffect::Explore,
     })
 }
 

@@ -122,6 +122,7 @@ pub struct McpTool {
     pub description: String,
     /// 入参 JSON Schema(对应 provider 的 `ToolSpec.schema`)。
     pub input_schema: Value,
+    pub effect: provider::ToolEffect,
 }
 
 /// 传输抽象:发一个 JSON-RPC 请求(method + params),拿回 `result`(错误映射成 [`McpError`])。
@@ -211,10 +212,12 @@ impl McpClient {
                 .filter(|schema| !schema.is_null())
                 .cloned()
                 .unwrap_or_else(|| json!({"type": "object"}));
+            let description = tool["description"].as_str().unwrap_or("");
             tools.push(McpTool {
                 name: name.to_string(),
-                description: tool["description"].as_str().unwrap_or("").to_string(),
+                description: description.to_string(),
                 input_schema,
+                effect: provider::ToolEffect::from_metadata(name, description, Some(tool)),
             });
         }
         Ok(tools)
@@ -467,6 +470,7 @@ mod tests {
         let tools = c.list_tools().await.unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "search");
+        assert_eq!(tools[0].effect, provider::ToolEffect::Explore);
         assert_eq!(c.namespaced("search"), "brave__search");
 
         let out = c
@@ -517,6 +521,30 @@ mod tests {
         );
         let tools = schema.list_tools().await.unwrap();
         assert_eq!(tools[0].input_schema, json!({"type": "object"}));
+    }
+
+    #[tokio::test]
+    async fn list_tools_preserves_mcp_effect_annotations_and_unknown_default() {
+        let client = McpClient::new(
+            "server",
+            Box::new(FnTransport(|method: &str, _params: &Value| match method {
+                "tools/list" => Ok(json!({
+                    "tools": [
+                        {
+                            "name": "opaque_action",
+                            "description": "opaque operation",
+                            "annotations": {"readOnlyHint": false}
+                        },
+                        {"name": "opaque_write_action", "description": "opaque operation"}
+                    ]
+                })),
+                _ => Ok(json!({})),
+            })),
+        );
+        let tools = client.list_tools().await.unwrap();
+        assert_eq!(tools[0].effect, provider::ToolEffect::Edit);
+        assert_eq!(tools[1].name, "opaque_write_action");
+        assert_eq!(tools[1].effect, provider::ToolEffect::Unknown);
     }
 
     #[tokio::test]

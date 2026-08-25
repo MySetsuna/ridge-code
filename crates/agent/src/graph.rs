@@ -1,14 +1,15 @@
 use crate::brain::{
     act_route, build_system_prompt_with_mode, completion_blocked, explore_handoff_patch,
-    is_explore_tool, is_land_edit_tool, needs_land_edit, reason_route, tool_output_ok,
-    verify_failure_reason, verify_node, verify_ok, verify_route_llm,
+    is_land_edit_tool, needs_land_edit, reason_route, tool_output_ok, verify_failure_reason,
+    verify_node, verify_ok, verify_route_llm,
 };
 use crate::context::{bound_observation, to_messages};
 use crate::dispatch_budget::{default_dispatch_budget, DispatchBudget};
 use crate::exec::{
-    builtin_tool_specs, durable_updates, execute_tool_call, is_error_observation, parse_todos,
+    builtin_tool_specs, durable_updates_with_effect, effective_tool_effect, execute_tool_call,
+    is_error_observation, parse_todos,
 };
-use crate::guard::{is_mutating_tool, read_only_block};
+use crate::guard::{is_mutating_tool, read_only_block_with_effect};
 use crate::knowledge::{
     dispatch_batch_obs_with_budget, dispatch_batch_spec, dispatch_obs_with_budget, dispatch_spec,
     Agents, Skill,
@@ -19,7 +20,7 @@ use crate::state::{
     needs_approval, AgentState, Approver, AutoApprove, Patch, MAX_DISPATCH_BATCHES,
 };
 use langgraph::{CompiledGraph, GraphError, StateGraph};
-use provider::{CompletionRequest, LlmProvider, Message, Role, StreamChunk};
+use provider::{CompletionRequest, LlmProvider, Message, Role, StreamChunk, ToolEffect};
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -584,13 +585,13 @@ fn provider_retry_patch(state: &AgentState, error: String) -> Patch {
 }
 
 fn handoff_tool_specs(specs: &[provider::ToolSpec]) -> Vec<provider::ToolSpec> {
-    // MCP action tools stay available here; `execute_pending_call` still
-    // applies the normal approval/read-only gates. Only known exploration
-    // tools are removed, so adding an MCP server does not make the handoff
-    // path silently unable to perform its domain-specific action.
+    // The handoff is intentionally fail-closed: only declared edit/verify
+    // capabilities remain visible. An unknown dynamic tool may be useful in
+    // ordinary reasoning, but exposing it here lets a model keep exploring
+    // forever because the runtime cannot prove that it changed anything.
     specs
         .iter()
-        .filter(|spec| !is_explore_tool(&spec.name))
+        .filter(|spec| spec.effect.resolved_for(&spec.name).satisfies_handoff())
         .cloned()
         .collect()
 }
@@ -688,6 +689,7 @@ fn add_act_node(graph: &mut StateGraph<AgentState>, context: ActContext) {
             let patch = match state.pending_call.as_ref() {
                 Some(call) => {
                     let effective_call = normalize_explicit_run_shell(&state, call);
+                    let effect = context.mcp.effect_for(&call.name);
                     let is_dispatch = matches!(call.name.as_str(), "dispatch_agent" | "dispatch_agents");
                     let dispatch_remaining = context
                         .dispatch_budget
@@ -718,7 +720,7 @@ fn add_act_node(graph: &mut StateGraph<AgentState>, context: ActContext) {
                     } else if state.codegraph_unavailable && call.name.starts_with("codegraph__") {
                         "BLOCKED (codegraph unavailable): use built-in read_file/search or act; do not retry CodeGraph"
                             .to_string()
-                    } else if state.explore_handoff && is_explore_tool(&call.name) {
+                    } else if state.explore_handoff && effect.is_explore() {
                         format!(
                             "BLOCKED (explore handoff): {} is read-only; choose an edit or verification action",
                             call.name
@@ -736,7 +738,7 @@ fn add_act_node(graph: &mut StateGraph<AgentState>, context: ActContext) {
                     } else {
                         execute_pending_call(&effective_call, &context, dispatch_scope.as_ref()).await
                     };
-                    let patch = act_patch(&state, call, observation);
+                    let patch = act_patch_with_effect(&state, call, effect, observation);
                     let consumed = dispatch_scope
                         .as_ref()
                         .map(|budget| budget.stats().attempts)
@@ -826,7 +828,8 @@ async fn execute_pending_call(
     context: &ActContext,
     dispatch_budget: Option<&Arc<DispatchBudget>>,
 ) -> String {
-    if let Some(message) = read_only_block(context.read_only, &call.name) {
+    let effect = context.mcp.effect_for(&call.name);
+    if let Some(message) = read_only_block_with_effect(context.read_only, &call.name, effect) {
         return message;
     }
     if needs_approval(&call.name) && !context.approver.approve(&call.name, &preview_call(call)) {
@@ -869,7 +872,23 @@ async fn execute_pending_call(
     execute_tool_call(call)
 }
 
+#[allow(dead_code)]
 fn act_patch(state: &AgentState, call: &provider::ToolCall, observation: String) -> Patch {
+    let effect = if is_land_edit_tool(&call.name) {
+        ToolEffect::Edit
+    } else {
+        ToolEffect::from_name(&call.name)
+    };
+    act_patch_with_effect(state, call, effect, observation)
+}
+
+fn act_patch_with_effect(
+    state: &AgentState,
+    call: &provider::ToolCall,
+    effect: ToolEffect,
+    observation: String,
+) -> Patch {
+    let effect = effective_tool_effect(effect.resolved_for(&call.name), &observation);
     let display_observation = observation.clone();
     let observation = bound_observation(observation);
     let stall = if state.tool_output.as_deref() == Some(observation.as_str()) {
@@ -882,7 +901,7 @@ fn act_patch(state: &AgentState, call: &provider::ToolCall, observation: String)
     } else {
         0
     };
-    let explore_streak = next_explore_streak(state, call, &observation);
+    let explore_streak = next_explore_streak(state, call, effect, &observation);
     let mut patches = vec![
         Patch::Message(format!("act: {} -> {}", call.name, observation)),
         Patch::DisplayMessage(format!("act: {} -> {}", call.name, display_observation)),
@@ -890,6 +909,7 @@ fn act_patch(state: &AgentState, call: &provider::ToolCall, observation: String)
         Patch::SetStall(stall),
         Patch::SetErrStreak(err_streak),
         Patch::SetExploreStreak(explore_streak),
+        Patch::SetLastToolEffect(effect),
         Patch::ToolOutput(Some(observation.clone())),
         Patch::PendingCall(None),
     ];
@@ -897,11 +917,11 @@ fn act_patch(state: &AgentState, call: &provider::ToolCall, observation: String)
         patches.push(Patch::SetExploreActionUsed(satisfies_handoff_action(
             state,
             call,
+            effect,
             &observation,
         )));
     }
-    if state.explore_handoff && is_land_edit_tool(&call.name) && !is_error_observation(&observation)
-    {
+    if state.explore_handoff && effect.is_edit() && !is_error_observation(&observation) {
         patches.push(Patch::SetExploreHandoff(false));
         patches.push(Patch::SetExploreActionUsed(false));
     }
@@ -919,7 +939,7 @@ fn act_patch(state: &AgentState, call: &provider::ToolCall, observation: String)
     if call.name.starts_with("codegraph__") && codegraph_unavailable(&observation) {
         patches.push(Patch::SetCodegraphUnavailable(true));
     }
-    patches.extend(durable_updates(call, &observation));
+    patches.extend(durable_updates_with_effect(call, effect, &observation));
     Patch::Batch(patches)
 }
 
@@ -946,18 +966,19 @@ fn is_broad_search_after_target(state: &AgentState, call: &provider::ToolCall) -
 
 fn satisfies_handoff_action(
     state: &AgentState,
-    call: &provider::ToolCall,
+    _call: &provider::ToolCall,
+    effect: ToolEffect,
     observation: &str,
 ) -> bool {
     if is_error_observation(observation) {
         return false;
     }
-    if is_land_edit_tool(&call.name) {
+    if effect.is_edit() {
         return true;
     }
     // A change task that already located a file is not "acted on" by another
     // shell listing or test run. Verify shells only count after a write lands.
-    call.name == "run_shell" && !needs_land_edit(state)
+    effect.is_verify() && !needs_land_edit(state)
 }
 
 fn is_explore_shell_after_target(state: &AgentState, call: &provider::ToolCall) -> bool {
@@ -996,10 +1017,15 @@ fn is_explore_shell_after_target(state: &AgentState, call: &provider::ToolCall) 
     .any(|marker| cmd.contains(marker))
 }
 
-fn next_explore_streak(state: &AgentState, call: &provider::ToolCall, observation: &str) -> usize {
-    if is_land_edit_tool(&call.name) && !is_error_observation(observation) {
+fn next_explore_streak(
+    state: &AgentState,
+    _call: &provider::ToolCall,
+    effect: ToolEffect,
+    observation: &str,
+) -> usize {
+    if effect.is_edit() && !is_error_observation(observation) {
         0
-    } else if is_explore_tool(&call.name) {
+    } else if effect.is_explore() {
         state.explore_streak + 1
     } else {
         state.explore_streak
@@ -1195,7 +1221,9 @@ mod tests {
     use langgraph::GraphState;
     use langgraph::RunConfig;
     use mcp::McpClient;
-    use provider::{Completion, CompletionRequest, LlmProvider, ProviderError, ToolCall, ToolSpec};
+    use provider::{
+        Completion, CompletionRequest, LlmProvider, ProviderError, ToolCall, ToolEffect, ToolSpec,
+    };
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -1897,17 +1925,96 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_effects_share_handoff_and_verify_gate() {
+        let edit = ToolCall {
+            id: "mcp-edit".into(),
+            name: "records__opaque_action".into(),
+            arguments: serde_json::json!({"file_path": "src/dynamic.rs"}),
+        };
+        let mut edited = AgentState::new("edit src/dynamic.rs");
+        edited.explore_handoff = true;
+        edited.apply(super::act_patch_with_effect(
+            &edited,
+            &edit,
+            ToolEffect::Edit,
+            "updated record".into(),
+        ));
+        assert!(edited.modified_files.contains("src/dynamic.rs"));
+        assert!(!edited.explore_handoff);
+        assert_eq!(edited.last_tool_effect, ToolEffect::Edit);
+
+        let unknown = ToolCall {
+            id: "mcp-unknown".into(),
+            name: "records__mystery".into(),
+            arguments: serde_json::json!({"path": "src/unknown.rs"}),
+        };
+        let mut blocked = AgentState::new("edit src/unknown.rs");
+        blocked.explore_handoff = true;
+        blocked.apply(super::act_patch_with_effect(
+            &blocked,
+            &unknown,
+            ToolEffect::Unknown,
+            "completed successfully".into(),
+        ));
+        assert!(blocked.modified_files.is_empty());
+        assert!(blocked.explore_handoff);
+        assert!(!blocked.explore_action_used);
+
+        let mut unknown_finish = AgentState {
+            explore_handoff: true,
+            explore_action_used: true,
+            last_tool_effect: ToolEffect::Unknown,
+            tool_output: Some("exit 0: ok".into()),
+            ..AgentState::new("inspect")
+        };
+        assert!(!super::verify_ok(&unknown_finish));
+        unknown_finish.last_tool_effect = ToolEffect::Verify;
+        assert!(super::verify_ok(&unknown_finish));
+    }
+
+    #[test]
+    fn handoff_filters_dynamic_exploration_by_declared_effect() {
+        let specs = vec![
+            ToolSpec {
+                name: "records__read_opaque".into(),
+                description: "read".into(),
+                schema: serde_json::json!({}),
+                effect: ToolEffect::Explore,
+            },
+            ToolSpec {
+                name: "records__write_opaque".into(),
+                description: "write".into(),
+                schema: serde_json::json!({}),
+                effect: ToolEffect::Edit,
+            },
+            ToolSpec {
+                name: "records__unknown".into(),
+                description: "opaque".into(),
+                schema: serde_json::json!({}),
+                effect: ToolEffect::Unknown,
+            },
+        ];
+        let names = super::handoff_tool_specs(&specs)
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["records__write_opaque".to_string()]);
+    }
+
+    #[test]
     fn dispatch_batches_allow_multiple_waves_until_runtime_budget() {
         let specs = vec![
             ToolSpec {
                 name: "dispatch_agents".into(),
                 description: "batch".into(),
                 schema: serde_json::json!({}),
+                effect: provider::ToolEffect::Explore,
             },
             ToolSpec {
                 name: "read_file".into(),
                 description: "read".into(),
                 schema: serde_json::json!({}),
+                effect: provider::ToolEffect::Explore,
             },
         ];
         let mut state = AgentState::new("inspect");

@@ -1,5 +1,5 @@
 use crate::config::HookCfg;
-use provider::ToolCall;
+use provider::{ToolCall, ToolEffect};
 
 /// 地址越狱开关(iter-34):进程级,默认 **关**。开则 `jail` 放行 cwd 子树外的写。
 /// **只放宽 cwd 子树这一条** —— 危险命令硬拦截、受保护路径(tests/.git)守卫、只读模式全不受影响。
@@ -76,8 +76,20 @@ pub(crate) fn constraint_guard_shell(cmd: &str) -> Option<String> {
 
 /// 只读模式(`--read-only`)的深度防御:副作用工具即使被 offer/幻觉调到,也硬拒。
 /// `Some(观察串)` = 拒绝(与 offering 过滤形成双保险)。
-pub(crate) fn read_only_block(read_only: bool, name: &str) -> Option<String> {
-    (read_only && is_mutating_tool(name))
+/// Read-only mode must fail closed for an unannotated dynamic tool. The two
+/// internal bookkeeping tools retain their historical read-only behavior.
+pub(crate) fn read_only_block_with_effect(
+    read_only: bool,
+    name: &str,
+    effect: ToolEffect,
+) -> Option<String> {
+    let internal_bookkeeping = matches!(name, "todo_write" | "signal_write");
+    let blocked_effect = !internal_bookkeeping
+        && matches!(
+            effect,
+            ToolEffect::Edit | ToolEffect::Verify | ToolEffect::Unknown
+        );
+    (read_only && (is_mutating_tool(name) || blocked_effect))
         .then(|| format!("BLOCKED (read-only): 只读模式拒绝副作用工具 {name}"))
 }
 
@@ -301,9 +313,10 @@ pub fn fire_session_hooks(event: &str, detail: &str) {
 mod tests {
     use super::{
         audit_line, constraint_guard_shell, constraint_guard_write, hook_is_safe, hooks_for_event,
-        is_mutating_tool, jail_guard, read_only_block, sandbox_argv, sandbox_split,
+        is_mutating_tool, jail_guard, read_only_block_with_effect, sandbox_argv, sandbox_split,
     };
     use crate::{builtin_tool_specs, Config};
+    use provider::ToolEffect;
 
     /// iter-46:sandbox_cmd 模板引号感知分词。
     #[test]
@@ -470,12 +483,24 @@ mod tests {
     /// 只读模式深度防御:只拦副作用工具,读类放行;非只读一律不拦。
     #[test]
     fn read_only_block_rejects_mutating_only() {
-        assert!(read_only_block(true, "write_file").is_some());
-        assert!(read_only_block(true, "run_shell").is_some());
-        assert!(read_only_block(true, "read_file").is_none());
-        assert!(read_only_block(false, "write_file").is_none());
-        assert!(read_only_block(true, "edit_file")
-            .unwrap()
-            .starts_with("BLOCKED (read-only)"));
+        assert!(read_only_block_with_effect(true, "write_file", ToolEffect::Edit).is_some());
+        assert!(read_only_block_with_effect(true, "run_shell", ToolEffect::Verify).is_some());
+        assert!(read_only_block_with_effect(true, "read_file", ToolEffect::Explore).is_none());
+        assert!(read_only_block_with_effect(false, "write_file", ToolEffect::Edit).is_none());
+        assert!(
+            read_only_block_with_effect(true, "edit_file", ToolEffect::Edit)
+                .unwrap()
+                .starts_with("BLOCKED (read-only)")
+        );
+    }
+
+    #[test]
+    fn read_only_dynamic_effects_fail_closed_except_exploration() {
+        assert!(
+            read_only_block_with_effect(true, "mcp__opaque_write", ToolEffect::Unknown).is_some()
+        );
+        assert!(read_only_block_with_effect(true, "mcp__write", ToolEffect::Edit).is_some());
+        assert!(read_only_block_with_effect(true, "mcp__search", ToolEffect::Explore).is_none());
+        assert!(read_only_block_with_effect(true, "todo_write", ToolEffect::Unknown).is_none());
     }
 }

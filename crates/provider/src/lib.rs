@@ -189,11 +189,137 @@ fn matching_tool_calls(assistant: &Message, results: &[Message]) -> Vec<ToolCall
         .collect()
 }
 
+/// Deterministic side-effect class shared by built-in and dynamically loaded
+/// tools.  Unknown is deliberately the default: an unannotated tool must not
+/// satisfy the exploration handoff or create durable change facts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolEffect {
+    /// Reads/locates information and cannot land a requested change.
+    Explore,
+    /// Mutates a user-visible artifact (usually a file or record).
+    Edit,
+    /// Produces an objective check/build/test result.
+    Verify,
+    /// Effect could not be established from trusted metadata.
+    #[default]
+    Unknown,
+}
+
+/// Compatibility name for callers that model effects as capabilities.
+pub type ToolCapability = ToolEffect;
+
+impl ToolEffect {
+    pub fn is_explore(self) -> bool {
+        matches!(self, Self::Explore)
+    }
+
+    pub fn is_edit(self) -> bool {
+        matches!(self, Self::Edit)
+    }
+
+    pub fn is_verify(self) -> bool {
+        matches!(self, Self::Verify)
+    }
+
+    /// Capability accepted by the exploration handoff.  Unknown and pure
+    /// exploration never count as the required next action.
+    pub fn satisfies_handoff(self) -> bool {
+        matches!(self, Self::Edit | Self::Verify)
+    }
+
+    /// Resolve a legacy/hand-authored spec which did not declare an effect.
+    /// Built-in names remain deterministic while arbitrary dynamic names stay
+    /// fail-closed as [`ToolEffect::Unknown`].
+    pub fn resolved_for(self, name: &str) -> Self {
+        if self != Self::Unknown {
+            return self;
+        }
+        Self::from_name(name)
+    }
+
+    /// Stable built-in fallback. Dynamic MCP tools must carry explicit effect
+    /// metadata; names alone are not evidence of a side effect.
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "read_file" | "search" | "web_search" | "fetch_url" | "dispatch_agent"
+            | "dispatch_agents" => Self::Explore,
+            "write_file" | "edit_file" | "apply_edits" => Self::Edit,
+            "run_shell" => Self::Verify,
+            _ if name.starts_with("codegraph__") => Self::Explore,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Infer an MCP effect from explicit metadata and standard annotations.
+    /// `metadata` is the raw tool object so callers can pass either standard
+    /// `annotations` or a local `effect` hint without widening the provider
+    /// wire model. Descriptions and dynamic names are intentionally ignored.
+    pub fn from_metadata(name: &str, _description: &str, metadata: Option<&Value>) -> Self {
+        if let Some(effect) = metadata
+            .and_then(|value| value.get("effect"))
+            .and_then(Value::as_str)
+            .and_then(Self::parse)
+        {
+            return effect;
+        }
+        let annotations = metadata.and_then(|value| value.get("annotations"));
+        if let Some(effect) = annotations
+            .and_then(|value| value.get("effect"))
+            .and_then(Value::as_str)
+            .and_then(Self::parse)
+        {
+            return effect;
+        }
+        if annotations
+            .and_then(|value| value.get("destructiveHint"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            return Self::Edit;
+        }
+        if annotations
+            .and_then(|value| value.get("readOnlyHint"))
+            .and_then(Value::as_bool)
+            == Some(false)
+        {
+            // A write-capable MCP tool is an edit unless its name gives an
+            // objective verification meaning (for example `run_tests`).
+            let named = Self::from_name(name);
+            return if named == Self::Verify {
+                named
+            } else {
+                Self::Edit
+            };
+        }
+        if annotations
+            .and_then(|value| value.get("readOnlyHint"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            return Self::Explore;
+        }
+        Self::from_name(name)
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "explore" | "read" | "readonly" | "read_only" => Some(Self::Explore),
+            "edit" | "write" | "mutate" | "mutation" => Some(Self::Edit),
+            "verify" | "verification" | "test" => Some(Self::Verify),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolSpec {
     pub name: String,
     pub description: String,
     pub schema: Value,
+    #[serde(default)]
+    pub effect: ToolEffect,
 }
 
 /// 归一化后的一次工具调用。`arguments` 是解析好的对象(OpenAI 的 JSON 字符串已被解开)。

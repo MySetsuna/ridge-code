@@ -1,6 +1,6 @@
 use crate::dispatch_budget::MAX_DISPATCH_ATTEMPTS;
 use langgraph::{GraphState, RunConfig};
-use provider::{Message, ToolCall, Usage};
+use provider::{Message, ToolCall, ToolEffect, Usage};
 use serde::de::{self, Deserializer, Visitor};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -104,6 +104,10 @@ pub struct AgentState {
     /// Parked `run_shell` job ids. A live job blocks successful completion.
     #[serde(default)]
     pub live_shell_jobs: Vec<String>,
+    /// Effect of the last completed tool call. Verify and handoff consume the
+    /// same capability fact instead of re-guessing dynamic tool names.
+    #[serde(default)]
+    pub last_tool_effect: ToolEffect,
     /// **信号复利**:run 启动时从 `.ridge/signals` 载入的「继承信号」有界注入块(上个会话留下的未决发现/
     /// 摩擦/待办)。run 中不变,由 CLI 在建 state 时经 [`load_signal_block`] 注入;无则 `None`。
     pub signal_block: Option<String>,
@@ -219,6 +223,7 @@ pub enum Patch {
     RecordRead(String),
     AddLiveShellJob(String),
     RemoveLiveShellJob(String),
+    SetLastToolEffect(ToolEffect),
     SetLastError(Option<String>),
     BumpStep,
     Batch(Vec<Patch>),
@@ -282,6 +287,7 @@ impl GraphState for AgentState {
             Patch::RemoveLiveShellJob(id) => {
                 self.live_shell_jobs.retain(|existing| existing != &id);
             }
+            Patch::SetLastToolEffect(effect) => self.last_tool_effect = effect,
             Patch::SetLastError(e) => self.last_error = e,
             Patch::BumpStep => self.steps += 1,
             Patch::Batch(v) => v.into_iter().for_each(|p| self.apply(p)),

@@ -1,7 +1,7 @@
 use crate::knowledge::Skill;
 use crate::state::{AgentState, Patch, MAX_ERR_STREAK, MAX_EXPLORE, MAX_STALL, MAX_STEPS};
 use langgraph::{CompiledGraph, GraphError, StateGraph, END};
-use provider::Role;
+use provider::{Role, ToolEffect};
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -247,16 +247,9 @@ pub(crate) fn explore_needs_handoff(s: &AgentState) -> bool {
 }
 
 /// 纯侦察类内置/MCP 入口(不含 run_shell:测构建/跑命令算干活)。
-pub(crate) fn is_explore_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "read_file" | "search" | "web_search" | "fetch_url" | "dispatch_agent" | "dispatch_agents"
-    ) || name.starts_with("codegraph__")
-}
-
 /// 成功后清零 explore_streak 的落盘改写工具。
 pub(crate) fn is_land_edit_tool(name: &str) -> bool {
-    matches!(name, "write_file" | "edit_file" | "apply_edits")
+    ToolEffect::from_name(name).is_edit()
 }
 
 /// Change-intent in the user task (or an already-fired explore handoff).
@@ -373,7 +366,10 @@ pub fn tool_output_failed(o: &str) -> bool {
 ///
 /// 编码任务仍严格卡 `exit 0`;只对「模型自己收尾且无客观失败」放行,兼顾通用性与 maker≠checker。
 pub(crate) fn verify_ok(s: &AgentState) -> bool {
-    if completion_blocked(s) || (s.explore_handoff && !s.explore_action_used) || needs_land_edit(s)
+    if completion_blocked(s)
+        || (s.explore_handoff
+            && (!s.explore_action_used || !s.last_tool_effect.satisfies_handoff()))
+        || needs_land_edit(s)
     {
         return false;
     }
@@ -689,10 +685,10 @@ pub(crate) async fn verify_node(s: AgentState) -> Result<Patch, Infallible> {
 mod tests {
     use super::{
         act_route, bounded_skills_block, build_system_prompt, build_system_prompt_with_mode,
-        completion_blocked, explore_exhausted, explore_handoff_patch, is_explore_tool,
-        is_land_edit_tool, must_stop, needs_land_edit, reason_route, tool_output_failed,
-        verify_failure_reason, verify_node, verify_ok, verify_route, verify_route_llm, AgentState,
-        Skill, BASE_SYSTEM, SKILLS_CHAR_CAP, SKILLS_TOKEN_CAP, SKILLS_TRUNCATION_MARKER,
+        completion_blocked, explore_exhausted, explore_handoff_patch, is_land_edit_tool, must_stop,
+        needs_land_edit, reason_route, tool_output_failed, verify_failure_reason, verify_node,
+        verify_ok, verify_route, verify_route_llm, AgentState, Skill, BASE_SYSTEM, SKILLS_CHAR_CAP,
+        SKILLS_TOKEN_CAP, SKILLS_TRUNCATION_MARKER,
     };
     use crate::state::{Todo, MAX_EXPLORE};
     use langgraph::GraphState;
@@ -1067,9 +1063,6 @@ mod tests {
         };
         assert!(explore_exhausted(&thrash));
         assert!(must_stop(&thrash));
-        assert!(is_explore_tool("read_file"));
-        assert!(is_explore_tool("codegraph__codegraph_explore"));
-        assert!(!is_explore_tool("run_shell"));
         assert!(is_land_edit_tool("edit_file"));
         let located = AgentState {
             task: "edit Cargo.toml then pack".into(),

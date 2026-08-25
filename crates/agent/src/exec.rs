@@ -4,7 +4,7 @@ use crate::guard::{
 };
 use crate::signals::{signal_create, signal_resolve, SIGNALS_DIR};
 use crate::state::{Patch, Todo};
-use provider::{ToolCall, ToolSpec};
+use provider::{ToolCall, ToolEffect, ToolSpec};
 
 /// 内置工具的规格(喂给 LLM 让它按 schema 出结构化 tool_call)。
 pub fn builtin_tool_specs() -> Vec<ToolSpec> {
@@ -13,51 +13,61 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
             name: "run_shell".to_string(),
             description: "Run host build/test/pack. Not for files (use search/read/edit). >180s parks; poll or cancel job_id.".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"cmd":{"type":"string","description":"Command to start; omit when polling job_id"},"shell":{"type":"string","enum":["cmd","powershell","pwsh","bash","sh"],"description":"可选:执行用的 shell;省=宿主默认(见 host_env)"},"job_id":{"type":"string","description":"Poll a parked job from a previous run_shell"},"cancel_job_id":{"type":"string","description":"Cancel a parked job and return its bounded settlement"}},"required":[]}),
+            effect: ToolEffect::Verify,
         },
         ToolSpec {
             name: "write_file".to_string(),
             description: "把内容整文件写入路径(覆盖)。仅用于**新建文件**;改动已有文件请用 edit_file".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"contents":{"type":"string"}},"required":["path","contents"]}),
+            effect: ToolEffect::Edit,
         },
         ToolSpec {
             name: "edit_file".to_string(),
             description: "精准编辑:唯一 old_string→new_string。CRLF 对齐;失败用观察里的锚点再 edit。".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"]}),
+            effect: ToolEffect::Edit,
         },
         ToolSpec {
             name: "apply_edits".to_string(),
             description: "**跨文件批量**精准编辑:多处 {path, old_string, new_string} 汇总一份 diff 一次确认、**原子应用**(全成或全不改)。重构/多文件改动用它".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"edits":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"]}}},"required":["edits"]}),
+            effect: ToolEffect::Edit,
         },
         ToolSpec {
             name: "read_file".to_string(),
             description: "读取文件。可选 offset(起始行,1 起)+ limit(行数)只读一段,大文件别整读".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}),
+            effect: ToolEffect::Explore,
         },
         ToolSpec {
             name: "search".to_string(),
             description: "按 glob+pattern 搜 路径:行号:内容；path 可为文件或目录。定位用它,目标已明勿全库搜。".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"}},"required":["pattern"]}),
+            effect: ToolEffect::Explore,
         },
         ToolSpec {
             name: "web_search".to_string(),
             description: "联网搜索,返回标题/链接/摘要(自动按网络环境选可用引擎)。查实时信息或外部资料用它;query 会发给外部搜索引擎".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+            effect: ToolEffect::Explore,
         },
         ToolSpec {
             name: "fetch_url".to_string(),
             description: "抓取一个网页并返回**可读正文**(去脚本/样式/标签)。配合 web_search:先搜到链接,再用它读正文、据原文作答,别只凭摘要猜".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}),
+            effect: ToolEffect::Explore,
         },
         ToolSpec {
             name: "todo_write".to_string(),
             description: "维护任务清单:把计划拆成若干 {content, status}。**多步/复杂任务**开始时列清单、每完成一步更新其状态给用户看进度;简单单步不必用".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"todos":{"type":"array","items":{"type":"object","properties":{"content":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]}},"required":["content","status"]}}},"required":["todos"]}),
+            effect: ToolEffect::Unknown,
         },
         ToolSpec {
             name: "signal_write".to_string(),
             description: "记录/消解**跨会话复用**的信号(发现/摩擦/待办)。记:给 type+body;消解已处理的:给 resolve=<id>。下个会话自动继承未决信号".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"type":{"type":"string"},"body":{"type":"string"},"resolve":{"type":"string"}}}),
+            effect: ToolEffect::Unknown,
         },
     ]
 }
@@ -116,9 +126,22 @@ pub(crate) fn is_error_observation(obs: &str) -> bool {
         || (first.starts_with("exit ") && !first.starts_with("exit 0"))
 }
 
+#[allow(dead_code)]
 pub(crate) fn durable_updates(call: &ToolCall, observation: &str) -> Vec<Patch> {
+    durable_updates_with_effect(call, ToolEffect::from_name(&call.name), observation)
+}
+
+/// Durable update path for a resolved dynamic tool.  The ordinary wrapper
+/// above keeps built-in callers/source compatibility; MCP dispatch supplies
+/// its trusted effect metadata here.
+pub(crate) fn durable_updates_with_effect(
+    call: &ToolCall,
+    effect: ToolEffect,
+    observation: &str,
+) -> Vec<Patch> {
     let mut patches = Vec::new();
-    if is_error_observation(observation) {
+    let failed = is_error_observation(observation);
+    if failed {
         let line = observation
             .lines()
             .next()
@@ -127,29 +150,194 @@ pub(crate) fn durable_updates(call: &ToolCall, observation: &str) -> Vec<Patch> 
         patches.push(Patch::SetLastError(Some(line)));
     }
     let arg = |k: &str| call.arguments.get(k).and_then(|v| v.as_str());
+    let observed_paths = if !failed {
+        observation_changed_paths(observation)
+    } else {
+        Vec::new()
+    };
     match call.name.as_str() {
-        "write_file" | "edit_file" if !is_error_observation(observation) => {
+        "write_file" | "edit_file" if !failed => {
             if let Some(path) = arg("path") {
                 patches.push(Patch::RecordModified(path.to_string()));
                 patches.push(Patch::SetLastError(None));
             }
         }
-        "apply_edits" if !is_error_observation(observation) => {
+        "apply_edits" if !failed => {
             let edits = parse_edits(call);
             if !edits.is_empty() {
                 patches.extend(edits.into_iter().map(|e| Patch::RecordModified(e.path)));
                 patches.push(Patch::SetLastError(None));
             }
         }
-        "read_file" if !is_error_observation(observation) => {
+        "read_file" if !failed => {
             if let Some(path) = arg("path") {
                 patches.push(Patch::RecordRead(path.to_string()));
             }
         }
         "run_shell" => patches.extend(shell_job_updates(call, observation)),
+        _ if !failed && effect.is_edit() => {
+            let mut paths = argument_paths(call);
+            paths.extend(observed_paths.iter().cloned());
+            paths.sort();
+            paths.dedup();
+            patches.extend(paths.into_iter().map(Patch::RecordModified));
+            if !patches.is_empty() {
+                patches.push(Patch::SetLastError(None));
+            }
+        }
+        // An unannotated dynamic tool may still prove a mutation through a
+        // bounded structured result. Plain prose never upgrades Unknown.
+        _ if !failed && effect == ToolEffect::Unknown && !observed_paths.is_empty() => {
+            patches.extend(observed_paths.into_iter().map(Patch::RecordModified));
+            patches.push(Patch::SetLastError(None));
+        }
+        _ if !failed && effect.is_explore() => {
+            let paths = argument_paths(call);
+            patches.extend(paths.into_iter().map(Patch::RecordRead));
+        }
         _ => {}
     }
     patches
+}
+
+/// Upgrade an unknown dynamic action only when its result carries explicit,
+/// machine-readable changed paths. This is the same evidence used by durable
+/// state, so handoff and completion cannot disagree about what happened.
+pub(crate) fn effective_tool_effect(effect: ToolEffect, observation: &str) -> ToolEffect {
+    if effect == ToolEffect::Unknown
+        && !is_error_observation(observation)
+        && !observation_changed_paths(observation).is_empty()
+    {
+        ToolEffect::Edit
+    } else {
+        effect
+    }
+}
+
+fn observation_changed_paths(observation: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(observation.trim()) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    collect_observation_paths(&value, &mut paths);
+    paths
+}
+
+fn collect_observation_paths(value: &serde_json::Value, paths: &mut Vec<String>) {
+    const MAX_PATHS: usize = 64;
+    if paths.len() >= MAX_PATHS {
+        return;
+    }
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                if is_changed_path_key(key) {
+                    collect_path_values(value, paths);
+                } else {
+                    collect_observation_paths(value, paths);
+                }
+                if paths.len() >= MAX_PATHS {
+                    break;
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_observation_paths(value, paths);
+                if paths.len() >= MAX_PATHS {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_path_values(value: &serde_json::Value, paths: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(path) => {
+            let path = path.trim();
+            if !path.is_empty() && !paths.iter().any(|existing| existing == path) {
+                paths.push(path.to_string());
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_path_values(value, paths);
+            }
+        }
+        serde_json::Value::Object(_) => collect_observation_paths(value, paths),
+        _ => {}
+    }
+}
+
+fn is_changed_path_key(key: &str) -> bool {
+    matches!(
+        key,
+        "modified_files"
+            | "modifiedFiles"
+            | "changed_files"
+            | "changedFiles"
+            | "changed_paths"
+            | "changedPaths"
+            | "written_files"
+            | "writtenFiles"
+    )
+}
+
+fn argument_paths(call: &ToolCall) -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_argument_paths(&call.arguments, false, &mut paths);
+    paths
+}
+
+fn collect_argument_paths(value: &serde_json::Value, path_context: bool, paths: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                let key_path = is_path_key(key);
+                if key_path {
+                    collect_argument_paths(value, true, paths);
+                } else if key == "edits" || key == "changes" || key == "files" {
+                    collect_argument_paths(value, false, paths);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_argument_paths(value, path_context, paths);
+            }
+        }
+        serde_json::Value::String(path) if path_context => {
+            let path = path.trim();
+            if !path.is_empty() && !paths.iter().any(|existing| existing == path) {
+                paths.push(path.to_string());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_path_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    matches!(
+        key.as_str(),
+        "path"
+            | "paths"
+            | "file"
+            | "files"
+            | "filename"
+            | "filenames"
+            | "file_path"
+            | "file_paths"
+            | "source"
+            | "destination"
+            | "target"
+            | "targets"
+    ) || key.ends_with("_path")
+        || key.ends_with("_paths")
+        || key.ends_with("_file")
+        || key.ends_with("_files")
 }
 
 fn shell_job_updates(call: &ToolCall, observation: &str) -> Vec<Patch> {
@@ -533,14 +721,17 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{builtin_tool_specs, durable_updates, execute_tool_call, unix_syntax_hint};
+    use super::{
+        builtin_tool_specs, durable_updates, durable_updates_with_effect, execute_tool_call,
+        unix_syntax_hint,
+    };
     use crate::brain::{tool_output_failed, tool_output_ok};
     use crate::context::durable_state_block;
     use crate::exec::is_error_observation;
     use crate::observe::preview_call;
     use crate::{build_llm_agent_gated, shell_tool, AgentState, AutoDeny, McpTools, MAX_STEPS};
     use langgraph::GraphState;
-    use provider::ToolCall;
+    use provider::{ToolCall, ToolEffect};
     use std::sync::Arc;
 
     /// Unix 语法撞 PowerShell 的纠错提示:命中 bash 特征且用 PS/cmd → 提示;已用 bash 或本就是 PS 命令 → 不提示。
@@ -800,6 +991,57 @@ mod tests {
     }
 
     /// 事实驱动 O(1):反复改同两文件 50 步,事实块字符数恒定(不随步数膨胀)。
+    #[test]
+    fn dynamic_edit_backfills_paths_but_unknown_action_does_not() {
+        let dynamic = ToolCall {
+            id: "mcp-edit".into(),
+            name: "records__opaque_action".into(),
+            arguments: serde_json::json!({"file_path": "src/dynamic.rs"}),
+        };
+        let mut state = AgentState::new("edit src/dynamic.rs");
+        for patch in durable_updates_with_effect(&dynamic, ToolEffect::Edit, "updated record") {
+            state.apply(patch);
+        }
+        assert!(state.modified_files.contains("src/dynamic.rs"));
+
+        let unknown = ToolCall {
+            id: "mcp-unknown".into(),
+            name: "records__mystery".into(),
+            arguments: serde_json::json!({"path": "src/unknown.rs"}),
+        };
+        let mut unknown_state = AgentState::new("edit src/unknown.rs");
+        for patch in
+            durable_updates_with_effect(&unknown, ToolEffect::Unknown, "completed successfully")
+        {
+            unknown_state.apply(patch);
+        }
+        assert!(unknown_state.modified_files.is_empty());
+        assert!(unknown_state.last_read_paths.is_empty());
+    }
+
+    #[test]
+    fn unknown_action_upgrades_only_on_structured_changed_paths() {
+        let call = ToolCall {
+            id: "mcp-edit".into(),
+            name: "records__opaque_action".into(),
+            arguments: serde_json::json!({}),
+        };
+        let observation = r#"{"changed_paths":["src/record.rs"]}"#;
+        assert_eq!(
+            super::effective_tool_effect(ToolEffect::Unknown, observation),
+            ToolEffect::Edit
+        );
+        let mut state = AgentState::new("edit src/record.rs");
+        for patch in durable_updates_with_effect(&call, ToolEffect::Unknown, observation) {
+            state.apply(patch);
+        }
+        assert!(state.modified_files.contains("src/record.rs"));
+        assert_eq!(
+            super::effective_tool_effect(ToolEffect::Unknown, "completed successfully"),
+            ToolEffect::Unknown
+        );
+    }
+
     #[test]
     fn durable_state_block_stays_bounded_over_steps() {
         let mut st = AgentState::new("t");
