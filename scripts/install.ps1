@@ -1,9 +1,9 @@
-<#
+﻿<#
 .SYNOPSIS
   RidgeCode 安装器(Windows)—— 零 cargo、零源码,只需一个独立 .exe。
 .DESCRIPTION
   在线装最新版:  irm https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.ps1 | iex
-  指定版本:      &([scriptblock]::Create((irm .../v0.5.26/scripts/install.ps1))) -Version v0.5.26
+  指定版本:      &([scriptblock]::Create((irm .../v0.5.27/scripts/install.ps1))) -Version v0.5.27
   装本地已构建:  .\scripts\install.ps1 -Local .\target\release\ridgecode.exe
   装到 $env:LOCALAPPDATA\Programs\ridgecode,并把该目录加入「用户 PATH」(新终端生效)。
 .PARAMETER Version
@@ -31,6 +31,7 @@ if ($Local) {
   Copy-Item -Force $Local $dest
 } else {
   # 仅支持 x86_64-msvc 发布产物(与 release.yml 的 Windows 目标一致)。
+
   $target = "x86_64-pc-windows-msvc"
   $base = "https://github.com/$Repo/releases"
   $url = if ($Version -eq "latest") { "$base/latest/download/ridgecode-$target.zip" }
@@ -63,6 +64,7 @@ if ($Local) {
 Write-Host "[OK] 已安装: $dest" -ForegroundColor Green
 
 # 把安装目录加入「用户 PATH」(幂等;新终端生效)。
+
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 $parts = @()
 if ($userPath) { $parts = $userPath.Split(';') | Where-Object { $_ -ne "" } }
@@ -74,6 +76,7 @@ if ($parts -notcontains $Dir) {
 }
 # ---- 配置骨架:写 config.example.json 到安装目录 + 首次生成 ~/.ridge/config.json ----
 # 注意:配置文件写成 UTF-8 无 BOM(serde_json 不吞 BOM,带 BOM 会解析失败)。
+
 $noBom = New-Object System.Text.UTF8Encoding $false
 $exampleJson = @'
 {
