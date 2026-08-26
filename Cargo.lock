@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent"
-version = "0.5.27"
+version = "0.5.28"
 dependencies = [
  "anyhow",
  "arboard",
@@ -387,7 +387,7 @@ checksum = "dea2df4cf52843e0452895c455a1a2cfbb842a1e7329671acf418fdc53ed4c59"
 
 [[package]]
 name = "eval"
-version = "0.5.27"
+version = "0.5.28"
 dependencies = [
  "agent",
  "anyhow",
@@ -891,7 +891,7 @@ dependencies = [
 
 [[package]]
 name = "langgraph"
-version = "0.5.27"
+version = "0.5.28"
 dependencies = [
  "serde",
  "serde_json",
@@ -971,7 +971,7 @@ dependencies = [
 
 [[package]]
 name = "mcp"
-version = "0.5.27"
+version = "0.5.28"
 dependencies = [
  "async-trait",
  "provider",
@@ -1196,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "provider"
-version = "0.5.27"
+version = "0.5.28"
 dependencies = [
  "async-trait",
  "getrandom 0.2.17",
@@ -1910,7 +1910,7 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "tools"
-version = "0.5.27"
+version = "0.5.28"
 dependencies = [
  "encoding_rs",
 ]
