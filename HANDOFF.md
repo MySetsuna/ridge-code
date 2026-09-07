@@ -1,12 +1,12 @@
 # RidgeCode STC 交接记录
 
-更新时间：2026-09-07
+更新时间：2026-09-08
 当前分支：`main`
-基线：`a566ac8`（`v0.5.28`，提交前与 `origin/main` 同步）
+基线：`0054b8d`（`origin/main`，修复 Unix shell 下外部评测 JSON fixture 转义）
 
 ## 当前结论
 
-本轮 STC（实现 → 测试 → 证据）已完成本机可执行部分。运行时、工具执行、结构化证据、评测适配、TUI、恢复和发布构建均有确定性验证。计划尚未宣称完成，原因是官方 Harbor/Docker 与 Sonar/coverage 外部环境尚未就绪。
+本轮 STC（实现 → 测试 → 证据）已完成本机及 GitHub Linux runner 可执行部分。运行时、工具执行、结构化证据、评测适配、TUI、恢复和发布构建均有确定性验证。计划尚未宣称完成，原因是官方 Harbor/Docker 与本地 Sonar 外部环境尚未就绪。
 
 ## 已完成能力
 
@@ -38,6 +38,8 @@ cargo run -p agent --bin ridgecode -- terminal doctor
 
 关键结果：agent 263 tests、TUI 509 tests、eval 31 tests；bounded soak 3/3 轮通过；recovery 3/3 恢复通过；ConPTY fixtures 全部通过；release 二进制可执行。
 
+GitHub Actions 独立验证：`quality-gate` run `34146251345`（commit `0054b8d`）于 2026-09-08 通过；Linux runner 上 workspace tests、fmt、diff check、Clippy、build、`cargo llvm-cov --fail-under-lines 80` 和报告上传全部通过。该修复将 Unix fixture 从 `echo` 改为 `printf`，避免 `/bin/sh` 去除 JSON 引号；Windows fixture 行为保持不变。
+
 ## 当前阻塞
 
 运行以下命令重新检查：
@@ -47,7 +49,7 @@ cargo run -p agent --bin ridgecode -- terminal doctor
 .\scripts\quality-preflight.ps1
 ```
 
-当前已确认：Docker engine 不可达、Harbor CLI 不在 PATH、PATH 上的 Python 是不可执行 shim、C 盘约 64 GiB（要求 120 GiB）、`cargo-llvm-cov`/Sonar scanner/`SONAR_TOKEN` 缺失。WSL `Ubuntu-22.04` 存在但没有 cargo，因此 Linux PTY smoke 尚未执行。
+当前已确认：Docker engine 不可达、Harbor CLI 不在 PATH、PATH 上的 Python 是不可执行 shim、C 盘约 64 GiB（要求 120 GiB）、本机 Sonar scanner/`SONAR_TOKEN` 缺失。GitHub Linux runner 已补齐 `cargo-llvm-cov` 并通过 coverage gate；WSL `Ubuntu-22.04` 存在但没有 cargo，因此本机 Linux PTY smoke 尚未执行。
 
 ## 恢复步骤
 
