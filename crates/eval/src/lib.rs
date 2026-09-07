@@ -2785,11 +2785,11 @@ mod tests {
         let root = external_eval_test_root();
         let workspace = root.join("case");
         std::fs::create_dir_all(&workspace).unwrap();
-        let agent = write_external_eval_script(
-            &root,
-            "fake-ridgecode",
-            r#"echo {"event":"run_finished","approved":false,"steps":2,"tokens":3,"elapsed_ms":4,"outcome":"unverified"}"#,
-        );
+        #[cfg(windows)]
+        let agent_body = r#"echo {"event":"run_finished","approved":false,"steps":2,"tokens":3,"elapsed_ms":4,"outcome":"unverified"}"#;
+        #[cfg(not(windows))]
+        let agent_body = r#"printf '%s\n' '{"event":"run_finished","approved":false,"steps":2,"tokens":3,"elapsed_ms":4,"outcome":"unverified"}'"#;
+        let agent = write_external_eval_script(&root, "fake-ridgecode", agent_body);
         let verifier = write_external_eval_script(&root, "verifier", "exit 0");
         let case = ExternalEvalCaseV1 {
             case: CaseSpecV1::new("verifier-wins", "do a bounded task"),
