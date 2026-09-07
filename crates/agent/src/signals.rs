@@ -256,10 +256,10 @@ fn parse_extracted_signals(text: &str) -> Vec<(String, String)> {
     out
 }
 
-/// 自动 signal 抽取是否启用(**opt-in**,env `RIDGE_EXTRACT_SIGNALS` = 1/true/on/yes)。
+/// 自动 signal 抽取是否启用(**opt-in**,env `RIDGECODE_EXTRACT_SIGNALS` = 1/true/on/yes)。
 /// 默认关 —— 尊重 token 北极星,不默认给每轮加一次 LLM 成本。
 pub fn signal_extract_enabled() -> bool {
-    std::env::var("RIDGE_EXTRACT_SIGNALS")
+    std::env::var("RIDGECODE_EXTRACT_SIGNALS")
         .map(|v| {
             matches!(
                 v.trim().to_ascii_lowercase().as_str(),

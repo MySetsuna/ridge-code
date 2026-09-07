@@ -19,9 +19,10 @@ async fn main() -> anyhow::Result<()> {
         .next()
         .ok_or_else(|| anyhow::anyhow!("usage: stdio_mcp_chain <command> [args...]"))?;
     let command_args: Vec<String> = args.collect();
-    let namespace = std::env::var("RIDGE_MCP_NAMESPACE").unwrap_or_else(|_| "stdio".into());
-    let raw_tool = std::env::var("RIDGE_MCP_TOOL").unwrap_or_else(|_| "codegraph_explore".into());
-    let arguments = std::env::var("RIDGE_MCP_ARGS")
+    let namespace = std::env::var("RIDGECODE_MCP_NAMESPACE").unwrap_or_else(|_| "stdio".into());
+    let raw_tool =
+        std::env::var("RIDGECODE_MCP_TOOL").unwrap_or_else(|_| "codegraph_explore".into());
+    let arguments = std::env::var("RIDGECODE_MCP_ARGS")
         .ok()
         .map(|raw| serde_json::from_str::<Value>(&raw))
         .transpose()?

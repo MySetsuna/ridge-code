@@ -10,14 +10,1045 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent::{build_llm_agent, AgentState};
 use langgraph::{MemoryCheckpointer, RunConfig};
 use provider::LlmProvider;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::process::Command;
+
+/// Schema version for machine-readable external evaluation artifacts.
+///
+/// This is intentionally separate from the append-only harness manifest
+/// version: callers can evolve resumable local execution without changing the
+/// result contract consumed by benchmark runners.
+pub const MACHINE_EVAL_SCHEMA_VERSION: u32 = 1;
+
+/// Serializable description of one externally evaluated task.
+///
+/// `EvalCase` deliberately owns a live provider and is therefore not suitable
+/// for exchange with an external runner. `CaseSpecV1` is the provider-free
+/// counterpart used in machine-readable inputs and results.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaseSpecV1 {
+    pub schema_version: u32,
+    pub case_id: String,
+    pub task: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+impl CaseSpecV1 {
+    pub fn new(case_id: impl Into<String>, task: impl Into<String>) -> Self {
+        Self {
+            schema_version: MACHINE_EVAL_SCHEMA_VERSION,
+            case_id: case_id.into(),
+            task: task.into(),
+            tags: Vec::new(),
+        }
+    }
+
+    pub fn with_tags(mut self, tags: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.tags = tags.into_iter().map(Into::into).collect();
+        self
+    }
+}
+
+/// Outcome reported by a verifier that is independent from the agent.
+///
+/// `NotRun` is deliberate rather than an optional value: an agent's internal
+/// approval is never evidence of external success.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalVerificationStatus {
+    #[default]
+    NotRun,
+    Passed,
+    Failed,
+    Error,
+}
+
+/// Bounded, serializable result emitted by an external verifier.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalVerification {
+    pub schema_version: u32,
+    pub status: ExternalVerificationStatus,
+    /// Stable identifier for the verifier, for example `hidden-tests-v1`.
+    pub verifier: String,
+    /// Revision or workspace fingerprint the verifier observed, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// Human- and machine-readable bounded summary. Implementations must not
+    /// place secrets or unbounded command output here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub duration_ms: u64,
+}
+
+impl ExternalVerification {
+    pub fn not_run(verifier: impl Into<String>) -> Self {
+        Self::new(ExternalVerificationStatus::NotRun, verifier)
+    }
+
+    pub fn passed(verifier: impl Into<String>) -> Self {
+        Self::new(ExternalVerificationStatus::Passed, verifier)
+    }
+
+    pub fn failed(verifier: impl Into<String>) -> Self {
+        Self::new(ExternalVerificationStatus::Failed, verifier)
+    }
+
+    pub fn error(verifier: impl Into<String>) -> Self {
+        Self::new(ExternalVerificationStatus::Error, verifier)
+    }
+
+    pub fn is_success(&self) -> bool {
+        self.status == ExternalVerificationStatus::Passed
+    }
+
+    fn new(status: ExternalVerificationStatus, verifier: impl Into<String>) -> Self {
+        Self {
+            schema_version: MACHINE_EVAL_SCHEMA_VERSION,
+            status,
+            verifier: verifier.into(),
+            revision: None,
+            summary: None,
+            duration_ms: 0,
+        }
+    }
+}
+
+/// Versioned machine result that keeps the agent's self-assessment separate
+/// from independently verified success.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaseResultV1 {
+    pub schema_version: u32,
+    pub case: CaseSpecV1,
+    /// The existing agent-internal deterministic gate. This is diagnostic only
+    /// and never implies benchmark success.
+    pub agent_approved: bool,
+    pub external_verification: ExternalVerification,
+    pub steps: usize,
+    pub tokens: usize,
+    pub duration_ms: u64,
+    pub status: CaseStatus,
+    #[serde(default)]
+    pub timed_out: bool,
+}
+
+impl CaseResultV1 {
+    pub fn from_case_result(
+        case: CaseSpecV1,
+        result: &CaseResult,
+        external_verification: ExternalVerification,
+    ) -> Self {
+        Self {
+            schema_version: MACHINE_EVAL_SCHEMA_VERSION,
+            case,
+            agent_approved: result.approved,
+            external_verification,
+            steps: result.steps,
+            tokens: result.tokens,
+            duration_ms: result.duration_ms,
+            status: result.status.clone(),
+            timed_out: result.timed_out,
+        }
+    }
+
+    /// The only success predicate for external benchmarks.
+    pub fn externally_verified_success(&self) -> bool {
+        self.external_verification.is_success()
+    }
+}
+
+/// Serializable aggregate for one externally scored experiment.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentManifestV1 {
+    pub schema_version: u32,
+    pub experiment_id: String,
+    pub results: Vec<CaseResultV1>,
+}
+
+impl ExperimentManifestV1 {
+    pub fn new(experiment_id: impl Into<String>, results: Vec<CaseResultV1>) -> Self {
+        Self {
+            schema_version: MACHINE_EVAL_SCHEMA_VERSION,
+            experiment_id: experiment_id.into(),
+            results,
+        }
+    }
+
+    pub fn externally_verified_passed(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|result| result.externally_verified_success())
+            .count()
+    }
+}
+
+/// A verifier command for one external benchmark case.  It is always started
+/// as an argv vector, never through a shell.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalVerifierV1 {
+    pub name: String,
+    pub program: PathBuf,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+/// One task, its isolated worktree, and the independent verifier that scores
+/// it.  `workspace` must resolve inside the corpus root passed to the runner.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalEvalCaseV1 {
+    pub case: CaseSpecV1,
+    pub workspace: PathBuf,
+    pub verifier: ExternalVerifierV1,
+}
+
+/// Versioned JSON input accepted by `ridgecode-eval external`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalEvalSuiteV1 {
+    pub schema_version: u32,
+    pub experiment_id: String,
+    pub cases: Vec<ExternalEvalCaseV1>,
+}
+
+impl ExternalEvalSuiteV1 {
+    pub fn new(experiment_id: impl Into<String>, cases: Vec<ExternalEvalCaseV1>) -> Self {
+        Self {
+            schema_version: MACHINE_EVAL_SCHEMA_VERSION,
+            experiment_id: experiment_id.into(),
+            cases,
+        }
+    }
+}
+
+/// Runtime controls for an external benchmark invocation.
+#[derive(Clone, Debug)]
+pub struct ExternalEvalOptions {
+    pub corpus_root: PathBuf,
+    pub ridgecode_path: PathBuf,
+    pub experiment_id: String,
+    pub max_turns: usize,
+    pub timeout: Duration,
+    pub budget_tokens: Option<usize>,
+    pub read_only: bool,
+    pub require_api_key: bool,
+}
+
+impl ExternalEvalOptions {
+    pub fn new(
+        corpus_root: impl Into<PathBuf>,
+        ridgecode_path: impl Into<PathBuf>,
+        experiment_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            corpus_root: corpus_root.into(),
+            ridgecode_path: ridgecode_path.into(),
+            experiment_id: experiment_id.into(),
+            max_turns: 80,
+            timeout: Duration::from_secs(20 * 60),
+            budget_tokens: None,
+            read_only: false,
+            require_api_key: true,
+        }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    pub fn with_max_turns(mut self, max_turns: usize) -> Self {
+        self.max_turns = max_turns.max(1);
+        self
+    }
+
+    pub fn with_budget_tokens(mut self, budget_tokens: Option<usize>) -> Self {
+        self.budget_tokens = budget_tokens;
+        self
+    }
+
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
+    pub fn require_api_key(mut self, require_api_key: bool) -> Self {
+        self.require_api_key = require_api_key;
+        self
+    }
+}
+
+/// Minimal fields consumed from a SWE-bench dataset row. Extra upstream
+/// dataset fields are intentionally ignored so a downloaded JSONL can be used
+/// directly without coupling the Rust harness to a Python dataset release.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SweBenchInstanceV1 {
+    pub instance_id: String,
+    pub problem_statement: String,
+}
+
+/// Official SWE-bench prediction record. This type deliberately contains no
+/// RidgeCode approval or verifier fields: only the official SWE harness may
+/// turn a patch into a resolved/unresolved score.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SweBenchPredictionV1 {
+    pub instance_id: String,
+    pub model_name_or_path: String,
+    pub model_patch: String,
+}
+
+impl SweBenchPredictionV1 {
+    pub fn new(
+        instance_id: impl Into<String>,
+        model_name_or_path: impl Into<String>,
+        model_patch: impl Into<String>,
+    ) -> anyhow::Result<Self> {
+        let instance_id = instance_id.into();
+        if !is_safe_swebench_instance_id(&instance_id) {
+            anyhow::bail!("SWE-bench instance id must be a single safe path component");
+        }
+        let model_name_or_path = model_name_or_path.into();
+        if model_name_or_path.trim().is_empty() {
+            anyhow::bail!("SWE-bench model name must not be empty");
+        }
+        Ok(Self {
+            instance_id,
+            model_name_or_path,
+            model_patch: model_patch.into(),
+        })
+    }
+}
+
+/// Controls for producing SWE-bench prediction JSONL from pre-provisioned
+/// worktrees. Scoring remains outside RidgeCode in the official harness.
+#[derive(Clone, Debug)]
+pub struct SweBenchExportOptions {
+    pub workspaces_root: PathBuf,
+    pub ridgecode_path: PathBuf,
+    pub model_name_or_path: String,
+    pub max_turns: usize,
+    pub timeout: Duration,
+    pub budget_tokens: Option<usize>,
+    pub require_api_key: bool,
+}
+
+impl SweBenchExportOptions {
+    pub fn new(
+        workspaces_root: impl Into<PathBuf>,
+        ridgecode_path: impl Into<PathBuf>,
+        model_name_or_path: impl Into<String>,
+    ) -> Self {
+        Self {
+            workspaces_root: workspaces_root.into(),
+            ridgecode_path: ridgecode_path.into(),
+            model_name_or_path: model_name_or_path.into(),
+            max_turns: 80,
+            timeout: Duration::from_secs(20 * 60),
+            budget_tokens: None,
+            require_api_key: true,
+        }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    pub fn with_max_turns(mut self, max_turns: usize) -> Self {
+        self.max_turns = max_turns.max(1);
+        self
+    }
+
+    pub fn with_budget_tokens(mut self, budget_tokens: Option<usize>) -> Self {
+        self.budget_tokens = budget_tokens;
+        self
+    }
+
+    pub fn require_api_key(mut self, require_api_key: bool) -> Self {
+        self.require_api_key = require_api_key;
+        self
+    }
+}
+
+/// Score derived exclusively from official SWE-bench `report.json` files.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SweBenchScoreV1 {
+    pub schema_version: u32,
+    pub total: usize,
+    pub resolved: usize,
+    pub unresolved: usize,
+    /// Fraction in `[0.0, 1.0]`, derived from official `resolved` booleans.
+    pub resolution_rate: f64,
+}
+
+/// Difference between two official scorecards. Positive values favour the
+/// candidate; this structure contains no model-generated assessment.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SweBenchComparisonV1 {
+    pub schema_version: u32,
+    pub baseline: SweBenchScoreV1,
+    pub candidate: SweBenchScoreV1,
+    pub resolved_delta: isize,
+    pub resolution_rate_delta: f64,
+}
+
+/// Read official harness reports below one run/model root and construct a
+/// fail-closed scorecard. The expected shape is `{instance_id: {resolved:
+/// bool}}`, matching SWE-bench's per-instance `report.json` artifact.
+pub fn score_swebench_reports(reports_root: &Path) -> anyhow::Result<SweBenchScoreV1> {
+    let reports_root = reports_root
+        .canonicalize()
+        .map_err(|error| anyhow::anyhow!("cannot resolve SWE-bench reports root: {error}"))?;
+    if !reports_root.is_dir() {
+        anyhow::bail!("SWE-bench reports root is not a directory");
+    }
+    let mut resolved = BTreeMap::new();
+    collect_swebench_reports(&reports_root, &mut resolved)?;
+    if resolved.is_empty() {
+        anyhow::bail!("no official SWE-bench report.json files found");
+    }
+    let total = resolved.len();
+    let resolved_count = resolved.values().filter(|resolved| **resolved).count();
+    Ok(SweBenchScoreV1 {
+        schema_version: MACHINE_EVAL_SCHEMA_VERSION,
+        total,
+        resolved: resolved_count,
+        unresolved: total - resolved_count,
+        resolution_rate: resolved_count as f64 / total as f64,
+    })
+}
+
+pub fn compare_swebench_scores(
+    baseline: SweBenchScoreV1,
+    candidate: SweBenchScoreV1,
+) -> anyhow::Result<SweBenchComparisonV1> {
+    if baseline.schema_version != MACHINE_EVAL_SCHEMA_VERSION
+        || candidate.schema_version != MACHINE_EVAL_SCHEMA_VERSION
+    {
+        anyhow::bail!("unsupported SWE-bench score schema version");
+    }
+    if baseline.total == 0 || candidate.total == 0 {
+        anyhow::bail!("cannot compare empty SWE-bench scorecards");
+    }
+    Ok(SweBenchComparisonV1 {
+        schema_version: MACHINE_EVAL_SCHEMA_VERSION,
+        resolved_delta: candidate.resolved as isize - baseline.resolved as isize,
+        resolution_rate_delta: candidate.resolution_rate - baseline.resolution_rate,
+        baseline,
+        candidate,
+    })
+}
+
+const MAX_SWEBENCH_REPORTS: usize = 10_000;
+
+fn collect_swebench_reports(
+    directory: &Path,
+    resolved: &mut BTreeMap<String, bool>,
+) -> anyhow::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if file_type.is_dir() {
+            collect_swebench_reports(&path, resolved)?;
+            continue;
+        }
+        if !file_type.is_file() || entry.file_name() != "report.json" {
+            continue;
+        }
+        let source = fs::read_to_string(&path)
+            .map_err(|error| anyhow::anyhow!("cannot read official SWE-bench report: {error}"))?;
+        let value: serde_json::Value = serde_json::from_str(&source)
+            .map_err(|error| anyhow::anyhow!("invalid official SWE-bench report JSON: {error}"))?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("official SWE-bench report must be an object"))?;
+        if object.len() != 1 {
+            anyhow::bail!("official SWE-bench report must contain exactly one instance result");
+        }
+        let (instance_id, result) = object.iter().next().expect("checked one report entry");
+        if !is_safe_swebench_instance_id(instance_id) {
+            anyhow::bail!("official SWE-bench report contains unsafe instance id");
+        }
+        let resolved_value = result
+            .get("resolved")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| anyhow::anyhow!("official SWE-bench report lacks boolean resolved"))?;
+        if resolved
+            .insert(instance_id.clone(), resolved_value)
+            .is_some()
+        {
+            anyhow::bail!("duplicate official SWE-bench instance result");
+        }
+        if resolved.len() > MAX_SWEBENCH_REPORTS {
+            anyhow::bail!("too many official SWE-bench reports");
+        }
+    }
+    Ok(())
+}
+
+fn is_safe_swebench_instance_id(instance_id: &str) -> bool {
+    !instance_id.is_empty()
+        && instance_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+        && !instance_id.starts_with('.')
+        && instance_id.contains("__")
+}
+
+const MAX_EXTERNAL_OUTPUT_BYTES: usize = 64 * 1024;
+
+/// Run isolated RidgeCode tasks and score them only with their independent
+/// verifier.  A machine-run `approved` bit is retained as diagnostic evidence
+/// but never determines the externally verified pass count.
+pub async fn run_external_eval(
+    cases: Vec<ExternalEvalCaseV1>,
+    options: ExternalEvalOptions,
+) -> anyhow::Result<ExperimentManifestV1> {
+    if cases.is_empty() {
+        anyhow::bail!("external eval requires at least one case");
+    }
+    if options.experiment_id.trim().is_empty() {
+        anyhow::bail!("external eval experiment id must not be empty");
+    }
+    let corpus_root = options
+        .corpus_root
+        .canonicalize()
+        .map_err(|error| anyhow::anyhow!("cannot resolve corpus root: {error}"))?;
+    let ridgecode_path = options
+        .ridgecode_path
+        .canonicalize()
+        .map_err(|error| anyhow::anyhow!("cannot resolve ridgecode executable: {error}"))?;
+    if !ridgecode_path.is_file() {
+        anyhow::bail!("ridgecode executable is not a file");
+    }
+
+    let mut results = Vec::with_capacity(cases.len());
+    for case in cases {
+        let workspace = contained_path(
+            &corpus_root,
+            &root_relative_path(&corpus_root, &case.workspace),
+            "case workspace",
+        )?;
+        let verifier_program = verifier_program(&corpus_root, &case.verifier.program)?;
+        results.push(
+            run_external_case(case, workspace, verifier_program, &ridgecode_path, &options).await,
+        );
+    }
+    Ok(ExperimentManifestV1::new(options.experiment_id, results))
+}
+
+/// Run pre-provisioned SWE-bench worktrees and export only the prediction
+/// contract consumed by the official SWE-bench evaluator. This function does
+/// not evaluate tests and must never be interpreted as a resolved-rate score.
+pub async fn run_swebench_export(
+    instances: Vec<SweBenchInstanceV1>,
+    options: SweBenchExportOptions,
+) -> anyhow::Result<Vec<SweBenchPredictionV1>> {
+    if instances.is_empty() {
+        anyhow::bail!("SWE-bench export requires at least one instance");
+    }
+    if options.model_name_or_path.trim().is_empty() {
+        anyhow::bail!("SWE-bench model name must not be empty");
+    }
+    let workspaces_root = options
+        .workspaces_root
+        .canonicalize()
+        .map_err(|error| anyhow::anyhow!("cannot resolve SWE-bench workspaces root: {error}"))?;
+    let ridgecode_path = options
+        .ridgecode_path
+        .canonicalize()
+        .map_err(|error| anyhow::anyhow!("cannot resolve ridgecode executable: {error}"))?;
+    if !ridgecode_path.is_file() {
+        anyhow::bail!("ridgecode executable is not a file");
+    }
+
+    let mut predictions = Vec::with_capacity(instances.len());
+    for instance in instances {
+        if !is_safe_swebench_instance_id(&instance.instance_id) {
+            anyhow::bail!("SWE-bench instance id must be a single safe path component");
+        }
+        if instance.problem_statement.trim().is_empty() {
+            anyhow::bail!("SWE-bench problem statement must not be empty");
+        }
+        let workspace = contained_path(
+            &workspaces_root,
+            &workspaces_root.join(&instance.instance_id),
+            "SWE-bench workspace",
+        )?;
+        let task = CaseSpecV1::new(&instance.instance_id, &instance.problem_statement);
+        let completed = run_swebench_agent(&task, &workspace, &ridgecode_path, &options).await;
+        let model_patch = if completed {
+            capture_git_diff(&workspace, options.timeout).await?
+        } else {
+            String::new()
+        };
+        predictions.push(SweBenchPredictionV1::new(
+            instance.instance_id,
+            &options.model_name_or_path,
+            model_patch,
+        )?);
+    }
+    Ok(predictions)
+}
+
+/// Atomically write official SWE-bench prediction JSONL under `root`. Existing
+/// output is refused so a new run cannot silently overwrite an artifact that
+/// the official harness may cache by run id.
+pub fn write_swebench_predictions(
+    root: &Path,
+    output: &Path,
+    predictions: &[SweBenchPredictionV1],
+) -> anyhow::Result<PathBuf> {
+    if predictions.is_empty() {
+        anyhow::bail!("SWE-bench predictions must not be empty");
+    }
+    let root = root
+        .canonicalize()
+        .map_err(|error| anyhow::anyhow!("cannot resolve SWE-bench output root: {error}"))?;
+    let output = root_relative_path(&root, output);
+    let parent = output
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("SWE-bench predictions need a parent directory"))?
+        .canonicalize()
+        .map_err(|error| {
+            anyhow::anyhow!("cannot resolve SWE-bench prediction directory: {error}")
+        })?;
+    if !parent.starts_with(&root) {
+        anyhow::bail!("SWE-bench prediction path is outside workspaces root");
+    }
+    if output.exists() {
+        anyhow::bail!("refusing to overwrite existing SWE-bench predictions");
+    }
+    let temp = parent.join(format!(
+        ".ridgecode-swebench-{}-{}.tmp",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let write_result = (|| -> anyhow::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        for prediction in predictions {
+            serde_json::to_writer(&mut file, prediction)?;
+            file.write_all(b"\n")?;
+        }
+        file.sync_all()?;
+        fs::rename(&temp, &output)?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    write_result?;
+    Ok(output)
+}
+
+async fn run_swebench_agent(
+    task: &CaseSpecV1,
+    workspace: &Path,
+    ridgecode_path: &Path,
+    options: &SweBenchExportOptions,
+) -> bool {
+    let Ok(task_file) = write_external_task(task) else {
+        return false;
+    };
+    let mut agent = Command::new(ridgecode_path);
+    agent
+        .current_dir(workspace)
+        .arg("run")
+        .arg("--task-file")
+        .arg(&task_file)
+        .arg("--jsonl")
+        .arg("--no-persist")
+        .arg("--isolate-runtime")
+        .arg("--max-turns")
+        .arg(options.max_turns.to_string())
+        .arg("--timeout")
+        .arg(format_duration_seconds(options.timeout));
+    if options.require_api_key {
+        agent.arg("--require-api-key");
+    }
+    if let Some(budget_tokens) = options.budget_tokens {
+        agent.arg("--budget-tokens").arg(budget_tokens.to_string());
+    }
+    let output = run_bounded_command(agent, options.timeout).await;
+    let _ = fs::remove_file(&task_file);
+    matches!(output, Ok(output) if !output.timed_out && parse_machine_run(&output.stdout).is_ok())
+}
+
+async fn capture_git_diff(workspace: &Path, timeout: Duration) -> anyhow::Result<String> {
+    let mut git = Command::new("git");
+    git.current_dir(workspace)
+        .arg("diff")
+        .arg("--binary")
+        .arg("--no-ext-diff");
+    let output = run_bounded_command(git, timeout)
+        .await
+        .map_err(|_| anyhow::anyhow!("cannot capture SWE-bench git diff"))?;
+    if output.timed_out {
+        anyhow::bail!("SWE-bench git diff timed out");
+    }
+    if !output.status.success() {
+        anyhow::bail!("SWE-bench workspace is not a usable git repository");
+    }
+    String::from_utf8(output.stdout).map_err(|_| anyhow::anyhow!("SWE-bench git diff is not UTF-8"))
+}
+
+fn root_relative_path(root: &Path, candidate: &Path) -> PathBuf {
+    if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        root.join(candidate)
+    }
+}
+
+async fn run_external_case(
+    case: ExternalEvalCaseV1,
+    workspace: PathBuf,
+    verifier_program: PathBuf,
+    ridgecode_path: &Path,
+    options: &ExternalEvalOptions,
+) -> CaseResultV1 {
+    let task_file = match write_external_task(&case.case) {
+        Ok(path) => path,
+        Err(error) => {
+            return failed_external_case(
+                case.case,
+                CaseStatus::Failed,
+                false,
+                0,
+                0,
+                0,
+                ExternalVerification::error(&case.verifier.name),
+            )
+            .with_verifier_summary(format!("task-file-error={}", stable_error_kind(&error)));
+        }
+    };
+    let started = Instant::now();
+    let mut agent = Command::new(ridgecode_path);
+    agent
+        .current_dir(&workspace)
+        .arg("run")
+        .arg("--task-file")
+        .arg(&task_file)
+        .arg("--jsonl")
+        .arg("--no-persist")
+        .arg("--isolate-runtime")
+        .arg("--max-turns")
+        .arg(options.max_turns.to_string())
+        .arg("--timeout")
+        .arg(format_duration_seconds(options.timeout));
+    if options.read_only {
+        agent.arg("--read-only");
+    }
+    if options.require_api_key {
+        agent.arg("--require-api-key");
+    }
+    if let Some(budget_tokens) = options.budget_tokens {
+        agent.arg("--budget-tokens").arg(budget_tokens.to_string());
+    }
+    let agent_output = run_bounded_command(agent, options.timeout).await;
+    let _ = fs::remove_file(&task_file);
+    let process_duration_ms = started.elapsed().as_millis() as u64;
+    let machine = match agent_output {
+        Ok(output) if output.timed_out => {
+            return failed_external_case(
+                case.case,
+                CaseStatus::TimedOut,
+                false,
+                0,
+                0,
+                process_duration_ms,
+                ExternalVerification::not_run(&case.verifier.name),
+            )
+            .with_verifier_summary("agent-timeout".to_string());
+        }
+        Ok(output) => match parse_machine_run(&output.stdout) {
+            Ok(machine) => machine,
+            Err(_) => {
+                return failed_external_case(
+                    case.case,
+                    CaseStatus::Failed,
+                    false,
+                    0,
+                    0,
+                    process_duration_ms,
+                    ExternalVerification::not_run(&case.verifier.name),
+                )
+                .with_verifier_summary("machine-result-invalid".to_string());
+            }
+        },
+        Err(_) => {
+            return failed_external_case(
+                case.case,
+                CaseStatus::Failed,
+                false,
+                0,
+                0,
+                process_duration_ms,
+                ExternalVerification::not_run(&case.verifier.name),
+            )
+            .with_verifier_summary("agent-start-error".to_string());
+        }
+    };
+
+    let verifier_started = Instant::now();
+    let mut verifier = Command::new(verifier_program);
+    verifier.current_dir(&workspace).args(&case.verifier.args);
+    let external_verification = match run_bounded_command(verifier, options.timeout).await {
+        Ok(output) if output.timed_out => verification_with_summary(
+            ExternalVerification::error(&case.verifier.name),
+            verifier_started.elapsed(),
+            "verifier-timeout",
+        ),
+        Ok(output) if output.status.success() => verification_with_summary(
+            ExternalVerification::passed(&case.verifier.name),
+            verifier_started.elapsed(),
+            "exit=0",
+        ),
+        Ok(output) => verification_with_summary(
+            ExternalVerification::failed(&case.verifier.name),
+            verifier_started.elapsed(),
+            &format!("exit={}", output.status.code().unwrap_or(-1)),
+        ),
+        Err(_) => verification_with_summary(
+            ExternalVerification::error(&case.verifier.name),
+            verifier_started.elapsed(),
+            "verifier-start-error",
+        ),
+    };
+    CaseResultV1 {
+        schema_version: MACHINE_EVAL_SCHEMA_VERSION,
+        case: case.case,
+        agent_approved: machine.approved,
+        external_verification,
+        steps: machine.steps,
+        tokens: machine.total_tokens,
+        duration_ms: machine.elapsed_ms.max(process_duration_ms),
+        status: CaseStatus::Completed,
+        timed_out: false,
+    }
+}
+
+fn contained_path(root: &Path, candidate: &Path, label: &str) -> anyhow::Result<PathBuf> {
+    let candidate = candidate
+        .canonicalize()
+        .map_err(|error| anyhow::anyhow!("cannot resolve {label}: {error}"))?;
+    if !candidate.starts_with(root) {
+        anyhow::bail!("{label} is outside corpus root");
+    }
+    if !candidate.is_dir() {
+        anyhow::bail!("{label} is not a directory");
+    }
+    Ok(candidate)
+}
+
+fn verifier_program(root: &Path, program: &Path) -> anyhow::Result<PathBuf> {
+    if program.is_absolute() || program.components().count() > 1 {
+        let program = root_relative_path(root, program)
+            .canonicalize()
+            .map_err(|error| anyhow::anyhow!("cannot resolve verifier program: {error}"))?;
+        if !program.starts_with(root) {
+            anyhow::bail!("verifier program is outside corpus root");
+        }
+        if !program.is_file() {
+            anyhow::bail!("verifier program is not a file");
+        }
+        Ok(program)
+    } else if program.as_os_str().is_empty() {
+        anyhow::bail!("verifier program must not be empty");
+    } else {
+        // A bare program such as `cargo` is resolved by PATH.  It is still
+        // argv-only; paths with separators must be contained in the corpus.
+        Ok(program.to_path_buf())
+    }
+}
+
+fn write_external_task(case: &CaseSpecV1) -> anyhow::Result<PathBuf> {
+    let id = case
+        .case_id
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+        .take(48)
+        .collect::<String>();
+    let path = std::env::temp_dir().join(format!(
+        "ridgecode-external-eval-{}-{}-{}.txt",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        if id.is_empty() { "case" } else { &id }
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    file.write_all(case.task.as_bytes())?;
+    file.sync_all()?;
+    Ok(path)
+}
+
+fn format_duration_seconds(duration: Duration) -> String {
+    format!("{}s", duration.as_secs().max(1))
+}
+
+#[derive(Debug, Deserialize)]
+struct MachineRunFinishV1 {
+    event: String,
+    #[serde(default)]
+    approved: bool,
+    #[serde(default)]
+    steps: usize,
+    #[serde(default)]
+    total_tokens: usize,
+    #[serde(default)]
+    tokens: usize,
+    #[serde(default)]
+    elapsed_ms: u64,
+}
+
+fn parse_machine_run(stdout: &[u8]) -> anyhow::Result<MachineRunFinishV1> {
+    let stdout =
+        std::str::from_utf8(stdout).map_err(|_| anyhow::anyhow!("machine output invalid"))?;
+    stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<MachineRunFinishV1>(line).ok())
+        .rev()
+        .find(|record| record.event == "run_finished")
+        .map(|mut record| {
+            if record.total_tokens == 0 {
+                record.total_tokens = record.tokens;
+            }
+            record
+        })
+        .ok_or_else(|| anyhow::anyhow!("machine output lacks run_finished"))
+}
+
+struct BoundedCommandOutput {
+    status: std::process::ExitStatus,
+    timed_out: bool,
+    stdout: Vec<u8>,
+}
+
+async fn run_bounded_command(
+    mut command: Command,
+    timeout: Duration,
+) -> anyhow::Result<BoundedCommandOutput> {
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("child stdout unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("child stderr unavailable"))?;
+    let stdout_task = tokio::spawn(read_bounded(stdout));
+    let stderr_task = tokio::spawn(read_bounded(stderr));
+    let (status, timed_out) = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(result) => (result?, false),
+        Err(_) => {
+            let _ = child.kill().await;
+            (child.wait().await?, true)
+        }
+    };
+    let stdout = stdout_task
+        .await
+        .map_err(|_| anyhow::anyhow!("stdout reader failed"))??;
+    let _ = stderr_task
+        .await
+        .map_err(|_| anyhow::anyhow!("stderr reader failed"))??;
+    Ok(BoundedCommandOutput {
+        status,
+        timed_out,
+        stdout,
+    })
+}
+
+async fn read_bounded<R: AsyncRead + Unpin>(mut reader: R) -> std::io::Result<Vec<u8>> {
+    let mut retained = Vec::with_capacity(MAX_EXTERNAL_OUTPUT_BYTES);
+    let mut buffer = [0u8; 4096];
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok(retained);
+        }
+        let remaining = MAX_EXTERNAL_OUTPUT_BYTES.saturating_sub(retained.len());
+        retained.extend_from_slice(&buffer[..read.min(remaining)]);
+    }
+}
+
+fn verification_with_summary(
+    mut verification: ExternalVerification,
+    elapsed: Duration,
+    summary: &str,
+) -> ExternalVerification {
+    verification.duration_ms = elapsed.as_millis() as u64;
+    verification.summary = Some(summary.to_string());
+    verification
+}
+
+fn failed_external_case(
+    case: CaseSpecV1,
+    status: CaseStatus,
+    agent_approved: bool,
+    steps: usize,
+    tokens: usize,
+    duration_ms: u64,
+    external_verification: ExternalVerification,
+) -> CaseResultV1 {
+    CaseResultV1 {
+        schema_version: MACHINE_EVAL_SCHEMA_VERSION,
+        case,
+        agent_approved,
+        external_verification,
+        steps,
+        tokens,
+        duration_ms,
+        status: status.clone(),
+        timed_out: status == CaseStatus::TimedOut,
+    }
+}
+
+trait CaseResultExternalSummary {
+    fn with_verifier_summary(self, summary: String) -> Self;
+}
+
+impl CaseResultExternalSummary for CaseResultV1 {
+    fn with_verifier_summary(mut self, summary: String) -> Self {
+        self.external_verification.summary = Some(summary);
+        self
+    }
+}
+
+fn stable_error_kind(error: &anyhow::Error) -> &'static str {
+    if error.downcast_ref::<std::io::Error>().is_some() {
+        "io"
+    } else {
+        "other"
+    }
+}
 
 /// 一个 eval case:名字 + 任务 + 用哪个 provider 跑。
 pub struct EvalCase {
@@ -891,6 +1922,7 @@ mod tests {
     };
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[derive(Default)]
     struct RefillProbe {
@@ -989,6 +2021,84 @@ mod tests {
 
     fn remove_manifest(path: &std::path::Path) {
         let _ = std::fs::remove_file(path);
+    }
+
+    fn approved_case_result() -> CaseResult {
+        CaseResult {
+            name: "internally-approved".to_string(),
+            approved: true,
+            steps: 3,
+            tokens: 42,
+            duration_ms: 7,
+            status: CaseStatus::Completed,
+            timed_out: false,
+            invariants: Vec::new(),
+            evidence: Vec::new(),
+            modified_files: Vec::new(),
+            tools: Vec::new(),
+            explore_handoffs: 0,
+        }
+    }
+
+    #[test]
+    fn internal_approval_is_not_external_success_until_verifier_passes() {
+        let spec = CaseSpecV1::new("external-gate", "make the hidden checks pass");
+        let internal = approved_case_result();
+
+        let not_run = CaseResultV1::from_case_result(
+            spec.clone(),
+            &internal,
+            ExternalVerification::not_run("hidden-tests-v1"),
+        );
+        assert!(not_run.agent_approved);
+        assert!(!not_run.externally_verified_success());
+
+        let failed = CaseResultV1::from_case_result(
+            spec.clone(),
+            &internal,
+            ExternalVerification::failed("hidden-tests-v1"),
+        );
+        assert!(failed.agent_approved);
+        assert!(!failed.externally_verified_success());
+
+        let passed = CaseResultV1::from_case_result(
+            spec,
+            &internal,
+            ExternalVerification::passed("hidden-tests-v1"),
+        );
+        assert!(passed.agent_approved);
+        assert!(passed.externally_verified_success());
+    }
+
+    #[test]
+    fn external_result_schema_round_trips_and_manifest_counts_only_verifier_passes() {
+        let internal = approved_case_result();
+        let not_run = CaseResultV1::from_case_result(
+            CaseSpecV1::new("not-run", "task"),
+            &internal,
+            ExternalVerification::not_run("hidden-tests-v1"),
+        );
+        let passed = CaseResultV1::from_case_result(
+            CaseSpecV1::new("passed", "task"),
+            &internal,
+            ExternalVerification::passed("hidden-tests-v1"),
+        );
+        let manifest = ExperimentManifestV1::new("external-foundation", vec![not_run, passed]);
+
+        let json = serde_json::to_string(&manifest).expect("serialize machine manifest");
+        let decoded: ExperimentManifestV1 =
+            serde_json::from_str(&json).expect("deserialize machine manifest");
+
+        assert_eq!(decoded.schema_version, MACHINE_EVAL_SCHEMA_VERSION);
+        assert_eq!(decoded.externally_verified_passed(), 1);
+        assert_eq!(
+            decoded.results[0].external_verification.status,
+            ExternalVerificationStatus::NotRun
+        );
+        assert_eq!(
+            decoded.results[1].external_verification.status,
+            ExternalVerificationStatus::Passed
+        );
     }
 
     #[tokio::test]
@@ -1573,5 +2683,277 @@ mod tests {
                 .max_concurrency,
             MAX_HARNESS_CONCURRENCY
         );
+    }
+
+    #[test]
+    fn swebench_prediction_uses_the_official_three_field_contract() {
+        let prediction = SweBenchPredictionV1::new(
+            "sympy__sympy-20590",
+            "ridgecode/glm-5.3",
+            "diff --git a/x b/x\n",
+        )
+        .expect("a normal SWE-bench id is valid");
+        let value = serde_json::to_value(&prediction).unwrap();
+        assert_eq!(value["instance_id"], "sympy__sympy-20590");
+        assert_eq!(value["model_name_or_path"], "ridgecode/glm-5.3");
+        assert_eq!(value["model_patch"], "diff --git a/x b/x\n");
+        assert_eq!(value.as_object().unwrap().len(), 3);
+        assert!(SweBenchPredictionV1::new("../escape", "ridgecode", "").is_err());
+    }
+
+    #[tokio::test]
+    async fn swebench_export_captures_git_patch_and_writes_official_jsonl() {
+        let root = external_eval_test_root();
+        let instance_id = "owner__repo-1";
+        let workspace = root.join(instance_id);
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("answer.txt"), "STATUS=TODO\n").unwrap();
+        git_in(&workspace, ["init", "-q"]);
+        git_in(&workspace, ["add", "answer.txt"]);
+        let agent = write_external_eval_script(&root, "fake-ridgecode", swebench_agent_body());
+        let predictions = run_swebench_export(
+            vec![SweBenchInstanceV1 {
+                instance_id: instance_id.to_string(),
+                problem_statement: "Set the answer status to DONE.".to_string(),
+            }],
+            SweBenchExportOptions::new(&root, agent, "ridgecode/fixture")
+                .with_timeout(Duration::from_secs(5)),
+        )
+        .await
+        .expect("fixture SWE-bench export should succeed");
+
+        assert_eq!(predictions.len(), 1);
+        assert!(predictions[0].model_patch.contains("STATUS=DONE"));
+        assert_isolated_runner_args(&workspace.join("agent-args.txt"));
+        let output =
+            write_swebench_predictions(&root, Path::new("predictions.jsonl"), &predictions)
+                .expect("prediction output must remain inside root");
+        let line = std::fs::read_to_string(&output).unwrap();
+        let decoded: SweBenchPredictionV1 = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(decoded, predictions[0]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn swebench_prediction_writer_rejects_output_outside_root() {
+        let root = external_eval_test_root();
+        let prediction = SweBenchPredictionV1::new("owner__repo-1", "ridgecode", "").unwrap();
+        let error = write_swebench_predictions(
+            &root,
+            &root.join("..").join("escaped.jsonl"),
+            &[prediction],
+        )
+        .expect_err("prediction output must be contained");
+        assert!(error.to_string().contains("outside workspaces root"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn swebench_score_uses_only_official_resolved_flags_and_rejects_duplicates() {
+        let root = external_eval_test_root();
+        let first = root.join("model").join("owner__repo-1");
+        let second = root.join("model").join("owner__repo-2");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(
+            first.join("report.json"),
+            r#"{"owner__repo-1":{"resolved":true,"extra":"ignored"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            second.join("report.json"),
+            r#"{"owner__repo-2":{"resolved":false}}"#,
+        )
+        .unwrap();
+        let score = score_swebench_reports(&root).expect("official reports should score");
+        assert_eq!((score.total, score.resolved, score.unresolved), (2, 1, 1));
+        assert_eq!(score.resolution_rate, 0.5);
+
+        let duplicate = root.join("duplicate");
+        std::fs::create_dir_all(&duplicate).unwrap();
+        std::fs::write(
+            duplicate.join("report.json"),
+            r#"{"owner__repo-1":{"resolved":true}}"#,
+        )
+        .unwrap();
+        assert!(score_swebench_reports(&root).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn external_eval_scores_the_verifier_not_agent_approval() {
+        let root = external_eval_test_root();
+        let workspace = root.join("case");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let agent = write_external_eval_script(
+            &root,
+            "fake-ridgecode",
+            r#"echo {"event":"run_finished","approved":false,"steps":2,"tokens":3,"elapsed_ms":4,"outcome":"unverified"}"#,
+        );
+        let verifier = write_external_eval_script(&root, "verifier", "exit 0");
+        let case = ExternalEvalCaseV1 {
+            case: CaseSpecV1::new("verifier-wins", "do a bounded task"),
+            workspace,
+            verifier: ExternalVerifierV1 {
+                name: "fixture-verifier".to_string(),
+                program: verifier,
+                args: Vec::new(),
+            },
+        };
+
+        let report = run_external_eval(
+            vec![case],
+            ExternalEvalOptions::new(&root, agent, "external-eval-test")
+                .with_timeout(Duration::from_secs(5)),
+        )
+        .await
+        .expect("fixture commands should run");
+
+        assert_eq!(report.results.len(), 1);
+        assert!(!report.results[0].agent_approved);
+        assert!(
+            report.results[0].externally_verified_success(),
+            "unexpected external result: {:?}",
+            report.results[0]
+        );
+        assert_eq!(report.externally_verified_passed(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn external_eval_forces_isolated_machine_runtime() {
+        let root = external_eval_test_root();
+        let workspace = root.join("case");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let agent = write_external_eval_script(&root, "fake-ridgecode", isolated_agent_body());
+        let verifier = write_external_eval_script(&root, "verifier", isolated_args_verifier_body());
+        let case = ExternalEvalCaseV1 {
+            case: CaseSpecV1::new("isolated-runtime", "do a bounded task"),
+            workspace: workspace.clone(),
+            verifier: ExternalVerifierV1 {
+                name: "isolated-args".to_string(),
+                program: verifier,
+                args: Vec::new(),
+            },
+        };
+        let report = run_external_eval(
+            vec![case],
+            ExternalEvalOptions::new(&root, agent, "isolated-runtime-test")
+                .with_timeout(Duration::from_secs(5)),
+        )
+        .await
+        .expect("fixture commands should run");
+        assert_eq!(report.externally_verified_passed(), 1, "{report:?}");
+        assert_isolated_runner_args(&workspace.join("agent-args.txt"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn external_eval_rejects_case_workspace_outside_corpus() {
+        let root = external_eval_test_root();
+        let outside = std::env::temp_dir().join(format!(
+            "ridgecode-external-eval-outside-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&outside).unwrap();
+        let agent = write_external_eval_script(&root, "fake-ridgecode", "exit 0");
+        let verifier = write_external_eval_script(&root, "verifier", "exit 0");
+        let error = run_external_eval(
+            vec![ExternalEvalCaseV1 {
+                case: CaseSpecV1::new("outside", "must not execute"),
+                workspace: outside.clone(),
+                verifier: ExternalVerifierV1 {
+                    name: "fixture-verifier".to_string(),
+                    program: verifier,
+                    args: Vec::new(),
+                },
+            }],
+            ExternalEvalOptions::new(&root, agent, "external-eval-test"),
+        )
+        .await
+        .expect_err("case roots must be contained");
+        assert!(error.to_string().contains("outside corpus root"));
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    fn external_eval_test_root() -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "ridgecode-external-eval-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn write_external_eval_script(root: &Path, stem: &str, body: &str) -> PathBuf {
+        #[cfg(windows)]
+        let path = root.join(format!("{stem}.cmd"));
+        #[cfg(not(windows))]
+        let path = root.join(stem);
+        #[cfg(windows)]
+        std::fs::write(&path, format!("@echo off\r\n{body}\r\n")).unwrap();
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(&path, permissions).unwrap();
+        }
+        path
+    }
+
+    #[cfg(windows)]
+    fn swebench_agent_body() -> &'static str {
+        r#"echo %* > agent-args.txt & echo STATUS=DONE> answer.txt & echo {"event":"run_finished","approved":false,"steps":1,"tokens":3,"elapsed_ms":4}"#
+    }
+
+    #[cfg(not(windows))]
+    fn swebench_agent_body() -> &'static str {
+        r#"printf '%s\n' "$@" > agent-args.txt; printf 'STATUS=DONE\n' > answer.txt; echo '{"event":"run_finished","approved":false,"steps":1,"tokens":3,"elapsed_ms":4}'"#
+    }
+
+    #[cfg(windows)]
+    fn isolated_agent_body() -> &'static str {
+        r#"echo %* > agent-args.txt & echo {"event":"run_finished","approved":false,"steps":1,"tokens":3,"elapsed_ms":4}"#
+    }
+
+    #[cfg(not(windows))]
+    fn isolated_agent_body() -> &'static str {
+        r#"printf '%s\n' "$@" > agent-args.txt; echo '{"event":"run_finished","approved":false,"steps":1,"tokens":3,"elapsed_ms":4}'"#
+    }
+
+    #[cfg(windows)]
+    fn isolated_args_verifier_body() -> &'static str {
+        r#"findstr /C:"--isolate-runtime" agent-args.txt >nul || exit /b 1 & findstr /C:"--no-persist" agent-args.txt >nul"#
+    }
+
+    #[cfg(not(windows))]
+    fn isolated_args_verifier_body() -> &'static str {
+        r#"grep -F -- '--isolate-runtime' agent-args.txt >/dev/null && grep -F -- '--no-persist' agent-args.txt >/dev/null"#
+    }
+
+    fn assert_isolated_runner_args(path: &Path) {
+        let args = std::fs::read_to_string(path).expect("fake runner should record arguments");
+        assert!(args.contains("--isolate-runtime"), "runner args: {args}");
+        assert!(args.contains("--no-persist"), "runner args: {args}");
+    }
+
+    fn git_in<const N: usize>(workspace: &Path, args: [&str; N]) {
+        let status = std::process::Command::new("git")
+            .current_dir(workspace)
+            .args(args)
+            .status()
+            .expect("git must be installed for this repository's SWE-bench adapter test");
+        assert!(status.success(), "git command failed");
     }
 }

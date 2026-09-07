@@ -2,7 +2,6 @@ use super::{
     Completion, CompletionRequest, ProviderError, Role, StreamChunk, ToolCall, ToolSpec, Usage,
 };
 use serde_json::{json, Value};
-use std::collections::HashMap;
 
 /// Build the Responses API body used by the ChatGPT subscription backend.
 pub fn build_request(model: &str, req: &CompletionRequest) -> Value {
@@ -60,7 +59,10 @@ pub fn build_request_with_effort(
         "model": model,
         "input": input,
         "tool_choice": "auto",
-        "parallel_tool_calls": true,
+        // RidgeCode executes tool calls in a durable ordered queue. Keep the
+        // upstream contract sequential until the runtime can prove safe
+        // parallel execution for every tool effect.
+        "parallel_tool_calls": false,
         "reasoning": {"effort": reasoning_effort, "summary": "auto"},
         "store": false,
         "stream": true,
@@ -90,7 +92,10 @@ pub struct StreamAcc {
     fallback_text: String,
     pub reasoning: String,
     tool_calls: Vec<ToolCallAcc>,
-    pending_tool_calls: HashMap<String, ToolCallAcc>,
+    // Keep first-seen order even when a stream ends before every
+    // `output_item.done`; `HashMap::into_values` would make the agent's
+    // execution order nondeterministic.
+    pending_tool_calls: Vec<(String, ToolCallAcc)>,
     pub usage: Usage,
     pub completed: bool,
     pub error: Option<String>,
@@ -156,22 +161,30 @@ fn append_function_delta(acc: &mut StreamAcc, value: &Value) {
     else {
         return;
     };
-    let call = acc
+    let position = acc
         .pending_tool_calls
-        .entry(key.to_string())
-        .or_insert_with(|| ToolCallAcc {
-            id: value
-                .get("item_id")
-                .and_then(Value::as_str)
-                .unwrap_or(key)
-                .to_string(),
-            call_id: value
-                .get("call_id")
-                .and_then(Value::as_str)
-                .unwrap_or(key)
-                .to_string(),
-            ..Default::default()
+        .iter()
+        .position(|(existing, _)| existing == key)
+        .unwrap_or_else(|| {
+            acc.pending_tool_calls.push((
+                key.to_string(),
+                ToolCallAcc {
+                    id: value
+                        .get("item_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(key)
+                        .to_string(),
+                    call_id: value
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(key)
+                        .to_string(),
+                    ..Default::default()
+                },
+            ));
+            acc.pending_tool_calls.len() - 1
         });
+    let call = &mut acc.pending_tool_calls[position].1;
     if let Some(delta) = value.get("delta").and_then(Value::as_str) {
         call.arguments.push_str(delta);
     }
@@ -204,7 +217,12 @@ fn append_function_item(acc: &mut StreamAcc, item: &Value) {
     } else {
         &item_id
     };
-    let mut call = acc.pending_tool_calls.remove(key).unwrap_or_default();
+    let mut call = acc
+        .pending_tool_calls
+        .iter()
+        .position(|(existing, _)| existing == key)
+        .map(|position| acc.pending_tool_calls.remove(position).1)
+        .unwrap_or_default();
     call.id = item_id;
     call.call_id = call_id;
     call.name = item
@@ -273,7 +291,7 @@ fn upsert_tool_call(calls: &mut Vec<ToolCallAcc>, call: ToolCallAcc) {
 
 impl StreamAcc {
     pub fn into_completion(mut self) -> Completion {
-        for call in self.pending_tool_calls.into_values() {
+        for (_, call) in self.pending_tool_calls {
             if !call.name.is_empty() {
                 upsert_tool_call(&mut self.tool_calls, call);
             }

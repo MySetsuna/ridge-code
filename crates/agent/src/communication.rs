@@ -1048,7 +1048,7 @@ pub fn json_rpc_loopback_pair() -> (JsonRpcLoopbackTransport, JsonRpcLoopbackTra
 
 /// Apply envelope authentication at the transport boundary.  This keeps the
 /// business protocol unaware of whether a peer is local or cross-process.
-/// The shared secret is supplied by the caller (normally `RIDGE_A2A_SECRET`),
+/// The shared secret is supplied by the caller (normally `RIDGECODE_A2A_SECRET`),
 /// never serialized into the envelope.
 pub struct AuthenticatedAgentTransport<T> {
     inner: T,

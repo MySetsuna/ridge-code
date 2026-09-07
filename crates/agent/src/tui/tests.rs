@@ -700,13 +700,13 @@ fn extracted_session_and_catalog_helpers_cover_idle_configuration_paths() {
 
 #[test]
 fn extracted_keylog_helper_writes_explicit_diagnostic_path() {
-    let previous_flag = std::env::var_os("RIDGE_KEYLOG");
-    std::env::set_var("RIDGE_KEYLOG", "1");
+    let previous_flag = std::env::var_os("RIDGECODE_KEYLOG");
+    std::env::set_var("RIDGECODE_KEYLOG", "1");
     assert!(keylog_path().is_some());
     if let Some(value) = previous_flag {
-        std::env::set_var("RIDGE_KEYLOG", value);
+        std::env::set_var("RIDGECODE_KEYLOG", value);
     } else {
-        std::env::remove_var("RIDGE_KEYLOG");
+        std::env::remove_var("RIDGECODE_KEYLOG");
     }
     let path = std::env::temp_dir().join(format!("ridge-code-keylog-{}.txt", std::process::id()));
     let keylog_path = Some(path.clone());

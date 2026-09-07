@@ -4,7 +4,7 @@ RidgeCode 的核心承诺:**加能力 = 加一个 `SKILL.md` 或一段 MCP 配�
 
 ## Skills(声明式领域技能)
 
-把 `skills/<name>/` 拷到 `~/.ridge/skills/<name>/`(或用 `RIDGE_SKILLS_DIR` 指到别处),启动 `ridgecode` 就会自动加载并注入 system prompt。
+把 `skills/<name>/` 拷到 `~/.ridge/skills/<name>/`(或用 `RIDGECODE_SKILLS_DIR` 指到别处),启动 `ridgecode` 就会自动加载并注入 system prompt。
 
 - `skills/researcher/SKILL.md` —— 调研:web_search → fetch_url → 据原文作答、带来源。
 - `skills/rust-fixer/SKILL.md` —— 修 Rust:信编译器不信自述、精准/批量编辑、改完必复核。
@@ -18,7 +18,7 @@ RidgeCode 的核心承诺:**加能力 = 加一个 `SKILL.md` 或一段 MCP 配�
 
 ## 配置
 
-`config.json` —— 配置样例,拷到 `~/.ridge/config.json`(或用 `RIDGE_CONFIG` 指定路径)。env 覆盖此处;**密钥只走 `RIDGE_API_KEY` 环境变量,不进 config**。
+`config.json` —— 配置样例,拷到 `~/.ridge/config.json`(或用 `RIDGECODE_CONFIG` 指定路径)。env 覆盖此处;**密钥只走 `RIDGECODE_API_KEY` 环境变量,不进 config**。
 
 键:
 
@@ -43,7 +43,7 @@ RidgeCode 的核心承诺:**加能力 = 加一个 `SKILL.md` 或一段 MCP 配�
 - `/provider use <name>` —— **热切换**到该档案(不重启、不重建图)。
 - `/model <name>` —— 只换模型(沿用当前 provider);`/cost` —— 看会话累计 tokens。
 
-**密钥永不进 config** —— 档案只存要读密钥的**环境变量名** `key_env`(默认 `RIDGE_API_KEY`)。切换前先 `export <KEY_ENV>=...`,否则 `/provider use` 会拒绝切换。
+**密钥永不进 config** —— 档案只存要读密钥的**环境变量名** `key_env`(默认 `RIDGECODE_API_KEY`)。切换前先 `export <KEY_ENV>=...`,否则 `/provider use` 会拒绝切换。
 
 ## MCP(接万物)
 

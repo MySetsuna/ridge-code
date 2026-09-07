@@ -340,13 +340,13 @@ mod tests {
             kind: "openai".into(),
             model: "m".into(),
             base_url: "u".into(),
-            key_env: "RIDGE_ITER37_UNSET".into(),
+            key_env: "RIDGECODE_ITER37_UNSET".into(),
             api_key: Some(" sk-inline ".into()),
             use_oauth: None,
             route: None,
         };
         let mut auth = BTreeMap::new();
-        auth.insert("RIDGE_ITER37_UNSET".to_string(), "sk-auth".to_string());
+        auth.insert("RIDGECODE_ITER37_UNSET".to_string(), "sk-auth".to_string());
         assert_eq!(inline.resolve_key_with(&auth).as_deref(), Some("sk-inline"));
         // 2) 无内联、env 未设 → 回落 auth。
         let prof = ProviderProfile {
@@ -356,12 +356,15 @@ mod tests {
         assert_eq!(prof.resolve_key_with(&auth).as_deref(), Some("sk-auth"));
         // 3) env 设了(唯一名)→ env 压倒 auth。
         let mut prof2 = prof.clone();
-        prof2.key_env = "RIDGE_ITER37_ENVWINS".into();
+        prof2.key_env = "RIDGECODE_ITER37_ENVWINS".into();
         let mut auth2 = BTreeMap::new();
-        auth2.insert("RIDGE_ITER37_ENVWINS".to_string(), "sk-auth".to_string());
-        std::env::set_var("RIDGE_ITER37_ENVWINS", "sk-env");
+        auth2.insert(
+            "RIDGECODE_ITER37_ENVWINS".to_string(),
+            "sk-auth".to_string(),
+        );
+        std::env::set_var("RIDGECODE_ITER37_ENVWINS", "sk-env");
         assert_eq!(prof2.resolve_key_with(&auth2).as_deref(), Some("sk-env"));
-        std::env::remove_var("RIDGE_ITER37_ENVWINS");
+        std::env::remove_var("RIDGECODE_ITER37_ENVWINS");
         // 4) 皆无 → None。
         assert_eq!(prof.resolve_key_with(&BTreeMap::new()), None);
     }
@@ -372,15 +375,15 @@ mod tests {
         use std::collections::BTreeMap;
         // 顶层内联 api_key(trim)优先,不看 key_env/auth。
         let inline =
-            Config::parse(r#"{ "api_key": "  sk-top  ", "key_env": "RIDGE_ITER41_UNSET" }"#);
+            Config::parse(r#"{ "api_key": "  sk-top  ", "key_env": "RIDGECODE_ITER41_UNSET" }"#);
         let mut auth = BTreeMap::new();
-        auth.insert("RIDGE_ITER41_UNSET".to_string(), "sk-auth".to_string());
+        auth.insert("RIDGECODE_ITER41_UNSET".to_string(), "sk-auth".to_string());
         assert_eq!(
             resolve_top_level_key(&inline, &auth).as_deref(),
             Some("sk-top")
         );
         // 无内联、key_env 指的槽在 auth → 取 auth(env 未设该唯一名)。
-        let viaenv = Config::parse(r#"{ "key_env": "RIDGE_ITER41_UNSET" }"#);
+        let viaenv = Config::parse(r#"{ "key_env": "RIDGECODE_ITER41_UNSET" }"#);
         assert_eq!(
             resolve_top_level_key(&viaenv, &auth).as_deref(),
             Some("sk-auth")

@@ -141,7 +141,7 @@ struct ModelTarget {
 }
 
 pub(crate) fn model_group_name(provider: &str, base_url: &str) -> String {
-    let oauth_base = std::env::var("RIDGE_CHATGPT_BASE_URL")
+    let oauth_base = std::env::var("RIDGECODE_CHATGPT_BASE_URL")
         .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
     if provider == "openai" && base_url.trim_end_matches('/') == oauth_base.trim_end_matches('/') {
         CHATGPT_MODEL_GROUP.to_string()
@@ -158,7 +158,7 @@ fn build_model_targets(
     active_model: &str,
 ) -> Vec<ModelTarget> {
     let mut targets = Vec::new();
-    let oauth_base = std::env::var("RIDGE_CHATGPT_BASE_URL")
+    let oauth_base = std::env::var("RIDGECODE_CHATGPT_BASE_URL")
         .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
     let active_is_oauth = active_provider == "openai"
         && active_base_url.trim_end_matches('/') == oauth_base.trim_end_matches('/');
@@ -350,7 +350,7 @@ pub(crate) fn auto_select_chatgpt_model(
     swap: &Arc<SwapProvider>,
     ui: &mut Ui,
 ) {
-    let oauth_base = std::env::var("RIDGE_CHATGPT_BASE_URL")
+    let oauth_base = std::env::var("RIDGECODE_CHATGPT_BASE_URL")
         .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
     if meta.provider != "openai"
         || meta.base_url.trim_end_matches('/') != oauth_base.trim_end_matches('/')
@@ -639,17 +639,17 @@ pub(crate) fn apply_oauth_token(
             } else {
                 cfg.model
             };
-            let model = std::env::var("RIDGE_MODEL")
+            let model = std::env::var("RIDGECODE_MODEL")
                 .ok()
                 .or(configured_oauth_model)
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| dm.to_string());
             let base_url = if ocfg.provider == "openai" {
-                std::env::var("RIDGE_CHATGPT_BASE_URL").unwrap_or_else(|_| db.to_string())
+                std::env::var("RIDGECODE_CHATGPT_BASE_URL").unwrap_or_else(|_| db.to_string())
             } else if ocfg.provider == "xai" {
-                std::env::var("RIDGE_XAI_BASE_URL").unwrap_or_else(|_| db.to_string())
+                std::env::var("RIDGECODE_XAI_BASE_URL").unwrap_or_else(|_| db.to_string())
             } else {
-                std::env::var("RIDGE_BASE_URL")
+                std::env::var("RIDGECODE_BASE_URL")
                     .ok()
                     .or(cfg.base_url)
                     .unwrap_or_else(|| db.to_string())
@@ -727,7 +727,7 @@ fn apply_effort(swap: &Arc<SwapProvider>, meta: &ReplMeta, value: &str, ui: &mut
         );
     }
 
-    let oauth_base = std::env::var("RIDGE_CHATGPT_BASE_URL")
+    let oauth_base = std::env::var("RIDGECODE_CHATGPT_BASE_URL")
         .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
     if meta.provider == "openai"
         && meta.base_url.trim_end_matches('/') == oauth_base.trim_end_matches('/')
@@ -753,7 +753,7 @@ fn apply_effort(swap: &Arc<SwapProvider>, meta: &ReplMeta, value: &str, ui: &mut
 /// 热切换模型(iter-32 共用路径):密钥经 `current_api_key`(env 优先,回落 config 内联)——
 /// `/model <name>` 文本命令与模型选择器浮窗同走此路,顺带修「内联 key 无法切模型」根因。
 pub(crate) fn swap_model(swap: &Arc<SwapProvider>, meta: &mut ReplMeta, model: &str, ui: &mut Ui) {
-    let oauth_base = std::env::var("RIDGE_CHATGPT_BASE_URL")
+    let oauth_base = std::env::var("RIDGECODE_CHATGPT_BASE_URL")
         .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
     if meta.provider == "openai"
         && meta.base_url.trim_end_matches('/') == oauth_base.trim_end_matches('/')
@@ -783,7 +783,7 @@ pub(crate) fn swap_model(swap: &Arc<SwapProvider>, meta: &mut ReplMeta, model: &
             ui.note(format!("switched model={model}"), role_color(Role::Success));
         }
         None => ui.note(
-            "no API key resolved (set RIDGE_API_KEY or api_key at config.json top level); cannot switch model",
+            "no API key resolved (set RIDGECODE_API_KEY or api_key at config.json top level); cannot switch model",
             role_color(Role::Error),
         ),
     }
@@ -933,7 +933,7 @@ fn apply_effort_live(val: &str, meta: &ReplMeta, swap: &Arc<SwapProvider>, ui: &
         return;
     };
     ui.effort = Some(effort.to_string());
-    let oauth_base = std::env::var("RIDGE_CHATGPT_BASE_URL")
+    let oauth_base = std::env::var("RIDGECODE_CHATGPT_BASE_URL")
         .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
     let is_chatgpt = meta.provider == "openai"
         && meta.base_url.trim_end_matches('/') == oauth_base.trim_end_matches('/');
@@ -1099,7 +1099,7 @@ fn panel_enter_chatgpt(
         );
         return;
     };
-    let base_url = std::env::var("RIDGE_CHATGPT_BASE_URL")
+    let base_url = std::env::var("RIDGECODE_CHATGPT_BASE_URL")
         .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
     swap.swap(oauth_swap_provider(
         "openai",
@@ -1152,7 +1152,7 @@ fn panel_enter_other_provider(
             );
             return;
         };
-        let base_url = std::env::var("RIDGE_CHATGPT_BASE_URL")
+        let base_url = std::env::var("RIDGECODE_CHATGPT_BASE_URL")
             .unwrap_or_else(|_| oauth_defaults("openai").1.to_string());
         swap.swap(oauth_swap_provider(
             "openai",

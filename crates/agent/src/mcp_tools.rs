@@ -245,14 +245,14 @@ const MAX_MCP_STARTUP_PARALLELISM: usize = 32;
 
 fn mcp_startup_timeout() -> Duration {
     let max = Duration::from_secs(MAX_MCP_STARTUP_TIMEOUT_SECS);
-    if let Some(milliseconds) = std::env::var("RIDGE_MCP_STARTUP_TIMEOUT_MS")
+    if let Some(milliseconds) = std::env::var("RIDGECODE_MCP_STARTUP_TIMEOUT_MS")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|value| *value > 0)
     {
         return Duration::from_millis(milliseconds).min(max);
     }
-    if let Some(seconds) = std::env::var("RIDGE_MCP_STARTUP_TIMEOUT_SECS")
+    if let Some(seconds) = std::env::var("RIDGECODE_MCP_STARTUP_TIMEOUT_SECS")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|value| *value > 0)
@@ -263,7 +263,7 @@ fn mcp_startup_timeout() -> Duration {
 }
 
 fn mcp_startup_parallelism() -> usize {
-    std::env::var("RIDGE_MCP_STARTUP_PARALLELISM")
+    std::env::var("RIDGECODE_MCP_STARTUP_PARALLELISM")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
@@ -520,7 +520,7 @@ mod tests {
             "init-failed",
             Box::new(FnTransport(|method: &str, _params: &serde_json::Value| {
                 if method == "initialize" {
-                    Err(McpError::Transport("RIDGE_API_KEY=secret".into()))
+                    Err(McpError::Transport("RIDGECODE_API_KEY=secret".into()))
                 } else {
                     Ok(serde_json::json!({}))
                 }

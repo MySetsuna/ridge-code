@@ -1,5 +1,5 @@
 use crate::knowledge::Skill;
-use crate::state::{AgentState, Patch, MAX_ERR_STREAK, MAX_EXPLORE, MAX_STALL, MAX_STEPS};
+use crate::state::{AgentState, Patch, MAX_ERR_STREAK, MAX_EXPLORE, MAX_STALL};
 use langgraph::{CompiledGraph, GraphError, StateGraph, END};
 use provider::{Role, ToolEffect};
 use std::convert::Infallible;
@@ -18,6 +18,10 @@ pub(crate) const BASE_SYSTEM: &str =
      web_search to find links then fetch_url to read the actual page — trust the page text, not just \
      the snippet. When there is an objective way to verify (compiler exit code, tests), rely on it \
      and don't trust your own claim. \
+     For a complex or multi-requirement task, first use contract_write to name the objective and \
+     acceptance requirements. After real tool evidence exists, use requirement_update to bind each \
+     satisfied requirement to its prior call_id; a contract blocks final completion while any \
+     requirement lacks current-revision successful evidence. \
      Harness contract: large tool outputs are truncated to a head+tail preview — for detail from a \
      big file use ranged read_file or search, never rely on one giant read. Never delete or empty \
      tests to make a check pass: it is blocked and counts as failure. Record a reusable finding, \
@@ -236,8 +240,8 @@ pub(crate) fn circuit_broken(s: &AgentState) -> bool {
     s.err_streak >= MAX_ERR_STREAK
 }
 
-/// 纯侦察耗尽?(连续 [`MAX_EXPLORE`] 轮只读/搜索且未落盘改动)。
-/// 与 stall 正交:stall 要「输出相同」,本条认「一直在查、从不 edit/write」。
+/// 纯侦察耗尽?(连续 [`MAX_EXPLORE`] 轮未取得新证据)。
+/// 与 stall 正交:stall 要「输出相同」,本条还认重复相同路径/查询的侦察。
 pub(crate) fn explore_exhausted(s: &AgentState) -> bool {
     s.explore_streak >= MAX_EXPLORE
 }
@@ -367,6 +371,9 @@ pub fn tool_output_failed(o: &str) -> bool {
 /// 编码任务仍严格卡 `exit 0`;只对「模型自己收尾且无客观失败」放行,兼顾通用性与 maker≠checker。
 pub(crate) fn verify_ok(s: &AgentState) -> bool {
     if completion_blocked(s)
+        || s.last_tool_result
+            .as_ref()
+            .is_some_and(|result| result.status.blocks_completion())
         || (s.explore_handoff
             && (!s.explore_action_used || !s.last_tool_effect.satisfies_handoff()))
         || needs_land_edit(s)
@@ -411,9 +418,10 @@ fn historical_shell_ok(s: &AgentState) -> bool {
 /// is settled. This is intentionally independent of model prose: a final
 /// answer while a todo or tool call remains live is an interrupted run.
 pub fn completion_blocked(s: &AgentState) -> bool {
-    s.pending_call.is_some()
+    s.has_pending_calls()
         || s.todos.iter().any(|todo| todo.status.trim() != "completed")
         || !s.live_shell_jobs.is_empty()
+        || s.contract_completion_blocked()
         || needs_land_edit(s)
 }
 
@@ -428,14 +436,22 @@ fn matching_edit_rejections(s: &AgentState) -> usize {
 /// derived from the same signals as [`verify_ok`] instead of trusting model
 /// prose, so users can distinguish a tool failure from an unverified finish.
 pub(crate) fn verify_failure_reason(s: &AgentState) -> &'static str {
-    if s.pending_call.is_some() {
+    if s.has_pending_calls() {
         "pending tool call"
     } else if s.todos.iter().any(|todo| todo.status.trim() != "completed") {
         "unfinished todo"
     } else if !s.live_shell_jobs.is_empty() {
         "live shell job"
+    } else if s.contract_completion_blocked() {
+        "unsatisfied task requirement"
     } else if needs_land_edit(s) {
         "target known, matching edit not landed"
+    } else if s
+        .last_tool_result
+        .as_ref()
+        .is_some_and(|result| result.status.blocks_completion())
+    {
+        "typed tool result not successful"
     } else if s.tool_output.as_deref().is_some_and(tool_output_failed) {
         "tool output failed"
     } else if s.last_action.as_deref() == Some("finish") {
@@ -453,13 +469,13 @@ pub(crate) fn must_stop(s: &AgentState) -> bool {
 
 /// 停机硬闸；探索交接可暂时覆盖 `explore_exhausted`，但不能绕过这些上限。
 fn hard_stop(s: &AgentState) -> bool {
-    s.steps >= MAX_STEPS || over_budget(s) || stalled(s) || circuit_broken(s)
+    s.steps >= s.reasoning_limit() || over_budget(s) || stalled(s) || circuit_broken(s)
 }
 
 pub(crate) fn explore_handoff_patch(s: &AgentState) -> Patch {
     Patch::Batch(vec![
         Patch::Message(format!(
-            "control: exploration guard triggered after {} read/search calls; next turn must edit, verify, or state the concrete blocker",
+            "control: exploration guard triggered after {} no-progress read/search calls; next turn must edit, verify, or state the concrete blocker",
             s.explore_streak
         )),
         Patch::SetExploreHandoff(true),
@@ -470,7 +486,7 @@ pub(crate) fn explore_handoff_patch(s: &AgentState) -> Patch {
 /// reason 之后的路由(scripted / llm 两条路径共用):先给侦察耗尽一次行动交接。
 pub(crate) fn reason_route(s: &AgentState) -> Vec<String> {
     if s.explore_handoff {
-        return if s.pending_call.is_some() && !s.explore_action_used {
+        return if s.has_pending_calls() && !s.explore_action_used {
             vec!["act".to_string()]
         } else if s.explore_action_used
             || hard_stop(s)
@@ -485,6 +501,18 @@ pub(crate) fn reason_route(s: &AgentState) -> Vec<String> {
     if explore_needs_handoff(s) {
         return vec!["explore_handoff".to_string()];
     }
+    // A final allowed reasoning turn may already have emitted tool calls. Drain
+    // that durable queue before honoring the turn cap; otherwise a strict
+    // machine-run budget would silently discard the model's last requested
+    // action. Budget/stall/circuit stops remain fail-closed and do not run it.
+    if s.steps >= s.reasoning_limit()
+        && s.has_pending_calls()
+        && !over_budget(s)
+        && !stalled(s)
+        && !circuit_broken(s)
+    {
+        return vec!["act".to_string()];
+    }
     if must_stop(s) {
         return vec!["verify".to_string()];
     }
@@ -496,7 +524,14 @@ pub(crate) fn reason_route(s: &AgentState) -> Vec<String> {
 }
 
 pub(crate) fn act_route(s: &AgentState) -> Vec<String> {
-    if s.explore_handoff {
+    // A completion may contain multiple calls. Drain the durable queue before
+    // asking the model to reason again; otherwise every entry after the head
+    // would be skipped when this route returned to `reason`.
+    if s.has_pending_calls() {
+        vec!["act".to_string()]
+    } else if s.steps >= s.reasoning_limit() {
+        vec!["verify".to_string()]
+    } else if s.explore_handoff {
         if s.explore_action_used {
             vec!["verify".to_string()]
         } else {
@@ -513,14 +548,14 @@ pub(crate) fn act_route(s: &AgentState) -> Vec<String> {
 /// (scripted 图无 `wrapup` 节点、大脑也不会写自然语言总结,故直接 END。)
 pub(crate) fn verify_route(s: &AgentState) -> Vec<String> {
     if completion_blocked(s) && !hard_stop(s) {
-        if s.pending_call.is_some() {
+        if s.has_pending_calls() {
             vec!["act".to_string()]
         } else {
             vec!["reason".to_string()]
         }
     } else if must_stop(s) {
         vec![END.to_string()]
-    } else if s.pending_call.is_some() {
+    } else if s.has_pending_calls() {
         vec!["act".to_string()]
     } else if s.approved
         || (s.explore_handoff
@@ -545,14 +580,14 @@ pub(crate) fn verify_route_llm(s: &AgentState) -> Vec<String> {
     if needs_land_edit(s) && !hard_stop(s) && matching_edit_rejections(s) >= 2 {
         vec!["wrapup".to_string()]
     } else if completion_blocked(s) && !hard_stop(s) {
-        if s.pending_call.is_some() {
+        if s.has_pending_calls() {
             vec!["act".to_string()]
         } else {
             vec!["reason".to_string()]
         }
     } else if must_stop(s) {
         vec!["wrapup".to_string()]
-    } else if s.pending_call.is_some() {
+    } else if s.has_pending_calls() {
         vec!["act".to_string()]
     } else if s.approved {
         vec![END.to_string()]
@@ -912,6 +947,36 @@ mod tests {
         assert_eq!(
             verify_failure_reason(&AgentState::default()),
             "no deterministic success signal"
+        );
+    }
+
+    #[test]
+    fn checker_rejects_running_typed_tool_result() {
+        let running = AgentState {
+            last_action: Some("finish".into()),
+            tool_output: Some("exit 0: stale output".into()),
+            last_tool_result: Some(crate::ToolResultV1 {
+                schema_version: 1,
+                call_id: "job-1".into(),
+                tool: "run_shell".into(),
+                effect: provider::ToolEffect::Verify,
+                status: crate::ToolResultStatus::Running,
+                exit_code: None,
+                retryable: false,
+                changed_paths: Vec::new(),
+                output_truncated: false,
+                read_offset: None,
+                read_limit: None,
+                match_count: None,
+                workspace_revision: 0,
+                summary: "job still running".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(!verify_ok(&running));
+        assert_eq!(
+            verify_failure_reason(&running),
+            "typed tool result not successful"
         );
     }
 

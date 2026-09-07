@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   RidgeCode 安装器(Windows)—— 零 cargo、零源码,只需一个独立 .exe。
 .DESCRIPTION
@@ -83,7 +83,7 @@ $exampleJson = @'
   "provider": "openai",
   "model": "glm-4.6",
   "base_url": "https://open.bigmodel.cn/api/paas/v4",
-  "api_key": "把你的 API Key 明文填这里即可直接启动;不想明文就删掉此行,改为设 RIDGE_API_KEY 环境变量",
+  "api_key": "把你的 API Key 明文填这里即可直接启动;不想明文就删掉此行,改为设 RIDGECODE_API_KEY 环境变量",
   "budget_tokens": 0,
   "skip_danger": false,
   "notify": false,
@@ -100,7 +100,7 @@ $exampleJson = @'
     { "name": "notebooklm", "cmd": "notebooklm-mcp" }
   ],
   "hooks": [
-    { "event": "post_tool", "matcher": "write_file", "command": "echo formatted $RIDGE_TOOL_ARG" },
+    { "event": "post_tool", "matcher": "write_file", "command": "echo formatted $RIDGECODE_TOOL_ARG" },
     { "event": "pre_tool", "matcher": "run_shell", "command": "exit 0", "blocking": true }
   ]
 }
@@ -109,7 +109,7 @@ $examplePath = Join-Path $Dir "config.example.json"
 [System.IO.File]::WriteAllText($examplePath, $exampleJson, $noBom)
 Write-Host "[OK] 示例配置: $examplePath" -ForegroundColor Green
 
-$cfgPath = if ($env:RIDGE_CONFIG) { $env:RIDGE_CONFIG } else { Join-Path $env:USERPROFILE ".ridge\config.json" }
+$cfgPath = if ($env:RIDGECODE_CONFIG) { $env:RIDGECODE_CONFIG } else { Join-Path $env:USERPROFILE ".ridge\config.json" }
 $cfgDir = Split-Path -Parent $cfgPath
 New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
 if (-not (Test-Path $cfgPath)) {
@@ -126,7 +126,7 @@ if (-not (Test-Path $cfgPath)) {
 }
 '@
   [System.IO.File]::WriteAllText($cfgPath, $initJson, $noBom)
-  Write-Host "[OK] 已生成配置: $cfgPath  —— 填顶层 api_key（或设 RIDGE_API_KEY）即可启动真实 LLM" -ForegroundColor Green
+  Write-Host "[OK] 已生成配置: $cfgPath  —— 填顶层 api_key（或设 RIDGECODE_API_KEY）即可启动真实 LLM" -ForegroundColor Green
 } else {
   Write-Host "已有配置，未改动: $cfgPath（参照 $examplePath 补 api_key）" -ForegroundColor DarkGray
 }

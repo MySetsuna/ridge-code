@@ -150,7 +150,11 @@ fn snapshot_styled_rows(buffer: &Buffer) -> Vec<Vec<serde_json::Value>> {
 fn snapshot_input(ui: &Ui) -> Option<serde_json::Value> {
     // Input text is intentionally opt-in: frame snapshots are often retained
     // as diagnostics, while the draft may contain credentials or private work.
-    (std::env::var("RIDGE_TUI_INPUT_DIAGNOSTICS").ok().as_deref() == Some("1")).then(|| {
+    (std::env::var("RIDGECODE_TUI_INPUT_DIAGNOSTICS")
+        .ok()
+        .as_deref()
+        == Some("1"))
+    .then(|| {
         serde_json::json!({
             "buffer": &ui.input.buffer,
             "cursor": ui.input.cursor,
@@ -359,7 +363,7 @@ fn dump_frame_snapshot(
     ui: &Ui,
     vitals: &Vitals,
 ) {
-    let Some(path) = std::env::var_os("RIDGE_TUI_SNAPSHOT")
+    let Some(path) = std::env::var_os("RIDGECODE_TUI_SNAPSHOT")
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
     else {
@@ -369,7 +373,7 @@ fn dump_frame_snapshot(
     if elapsed > std::time::Duration::from_millis(16) {
         tracing::warn!(
             render_us = elapsed.as_micros(),
-            "RIDGE_TUI_SNAPSHOT exceeded 16ms"
+            "RIDGECODE_TUI_SNAPSHOT exceeded 16ms"
         );
     }
     let render_us = elapsed.as_micros();
@@ -401,7 +405,7 @@ fn dump_frame_snapshot(
         // Dropping that diagnostic frame is preferable to polluting the TUI
         // with a warning or making the opt-in observer affect interaction.
         if error.raw_os_error() != Some(32) {
-            tracing::warn!(?path, %error, "failed to write RIDGE_TUI_SNAPSHOT");
+            tracing::warn!(?path, %error, "failed to write RIDGECODE_TUI_SNAPSHOT");
         }
     }
 }

@@ -95,7 +95,7 @@ fn theme_frame_text_dump_is_stable_enough_to_inspect() {
     assert!(text.contains("¶ ASK · inspect frame"), "{text}");
     assert!(!text.contains("§ ACTA ·"), "{text}");
     assert!(text.contains("ANSWER"), "{text}");
-    if let Ok(path) = std::env::var("RIDGE_THEME_FRAME_DUMP") {
+    if let Ok(path) = std::env::var("RIDGECODE_THEME_FRAME_DUMP") {
         if !path.is_empty() {
             std::fs::write(&path, &text).expect("write theme frame dump");
         }

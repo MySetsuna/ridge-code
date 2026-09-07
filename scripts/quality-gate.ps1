@@ -2,6 +2,13 @@
 param()
 
 $ErrorActionPreference = "Stop"
+$preflight = Join-Path $PSScriptRoot "quality-preflight.ps1"
+if (Test-Path -LiteralPath $preflight) {
+    & $preflight
+    if ($LASTEXITCODE -ne 0) {
+        throw "quality preflight failed; resolve the structured checks before running the gate"
+    }
+}
 $minLineCoverage = 80
 $qualityDir = Join-Path (Get-Location) "target\quality"
 $lcovPath = Join-Path $qualityDir "lcov.info"

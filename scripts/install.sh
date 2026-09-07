@@ -5,12 +5,12 @@
 #   指定版本:      curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.28/scripts/install.sh | sh -s -- --version v0.5.28
 #   装本地已构建:  ./scripts/install.sh --local target/release/ridgecode
 #
-# 装到 $RIDGE_BIN_DIR(默认 ~/.local/bin);若不在 PATH,脚本会提示如何加。
+# 装到 $RIDGECODE_BIN_DIR(默认 ~/.local/bin);若不在 PATH,脚本会提示如何加。
 set -eu
 
 REPO="MySetsuna/ridge-code"
 BIN="ridgecode"
-BIN_DIR="${RIDGE_BIN_DIR:-$HOME/.local/bin}"
+BIN_DIR="${RIDGECODE_BIN_DIR:-$HOME/.local/bin}"
 VERSION="latest"
 LOCAL=""
 
@@ -93,7 +93,7 @@ EXAMPLE='{
   "provider": "openai",
   "model": "glm-4.6",
   "base_url": "https://open.bigmodel.cn/api/paas/v4",
-  "api_key": "把你的 API Key 明文填这里即可直接启动;不想明文就删掉此行,改为设 RIDGE_API_KEY 环境变量",
+  "api_key": "把你的 API Key 明文填这里即可直接启动;不想明文就删掉此行,改为设 RIDGECODE_API_KEY 环境变量",
   "budget_tokens": 200000,
   "skip_danger": false,
   "providers": [
@@ -110,7 +110,7 @@ EXAMPLE='{
 printf '%s\n' "$EXAMPLE" > "$BIN_DIR/config.example.json"
 echo "✓ 示例配置: $BIN_DIR/config.example.json"
 
-CFG="${RIDGE_CONFIG:-$HOME/.ridge/config.json}"
+CFG="${RIDGECODE_CONFIG:-$HOME/.ridge/config.json}"
 mkdir -p "$(dirname "$CFG")"
 if [ ! -f "$CFG" ]; then
   printf '%s\n' '{
@@ -123,7 +123,7 @@ if [ ! -f "$CFG" ]; then
   "providers": [],
   "mcp": []
 }' > "$CFG"
-  echo "✓ 已生成配置: $CFG  —— 填顶层 api_key(或设 RIDGE_API_KEY)即可启动真实 LLM"
+  echo "✓ 已生成配置: $CFG  —— 填顶层 api_key(或设 RIDGECODE_API_KEY)即可启动真实 LLM"
 else
   echo "已有配置,未改动: $CFG(参照 $BIN_DIR/config.example.json 补 api_key)"
 fi

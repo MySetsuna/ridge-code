@@ -76,14 +76,17 @@ pub(crate) fn constraint_guard_shell(cmd: &str) -> Option<String> {
 
 /// 只读模式(`--read-only`)的深度防御:副作用工具即使被 offer/幻觉调到,也硬拒。
 /// `Some(观察串)` = 拒绝(与 offering 过滤形成双保险)。
-/// Read-only mode must fail closed for an unannotated dynamic tool. The two
-/// internal bookkeeping tools retain their historical read-only behavior.
+/// Read-only mode must fail closed for an unannotated dynamic tool. Internal
+/// bookkeeping tools retain their historical read-only behavior.
 pub(crate) fn read_only_block_with_effect(
     read_only: bool,
     name: &str,
     effect: ToolEffect,
 ) -> Option<String> {
-    let internal_bookkeeping = matches!(name, "todo_write" | "signal_write");
+    let internal_bookkeeping = matches!(
+        name,
+        "todo_write" | "contract_write" | "requirement_update" | "signal_write"
+    );
     let blocked_effect = !internal_bookkeeping
         && matches!(
             effect,
@@ -198,7 +201,7 @@ pub fn hooks_for_event<'a>(hooks: &'a [HookCfg], event: &str, tool: &str) -> Vec
         .collect()
 }
 
-/// 工具调用的「主参数」(喂给 hook 的 `RIDGE_TOOL_ARG`):按常见键取一个。纯函数。
+/// 工具调用的「主参数」(喂给 hook 的 `RIDGECODE_TOOL_ARG`):按常见键取一个。纯函数。
 fn tool_primary_arg(call: &ToolCall) -> String {
     for k in ["cmd", "path", "query", "url", "task"] {
         if let Some(s) = call.arguments.get(k).and_then(|v| v.as_str()) {
@@ -233,7 +236,7 @@ fn run_hook_command(command: &str, tool: &str, arg: &str) -> Option<i32> {
         c.arg("-c").arg(command);
         c
     };
-    c.env("RIDGE_TOOL", tool).env("RIDGE_TOOL_ARG", arg);
+    c.env("RIDGECODE_TOOL", tool).env("RIDGECODE_TOOL_ARG", arg);
     c.output().ok().map(|o| o.status.code().unwrap_or(-1))
 }
 
@@ -442,7 +445,7 @@ mod tests {
         assert!(!hook_is_safe("mkfs.ext4 /dev/sda"));
         assert!(!hook_is_safe(":(){ :|:& };:"));
         assert!(hook_is_safe("cargo fmt"));
-        assert!(hook_is_safe("echo formatted $RIDGE_TOOL_ARG"));
+        assert!(hook_is_safe("echo formatted $RIDGECODE_TOOL_ARG"));
     }
 
     /// iter-34:地址越狱决策纯函数 —— 开则放行 cwd 外,关则拦。测显式 bool,**不翻全局**(免污染并行的 jail_blocks 测试)。
@@ -502,5 +505,9 @@ mod tests {
         assert!(read_only_block_with_effect(true, "mcp__write", ToolEffect::Edit).is_some());
         assert!(read_only_block_with_effect(true, "mcp__search", ToolEffect::Explore).is_none());
         assert!(read_only_block_with_effect(true, "todo_write", ToolEffect::Unknown).is_none());
+        assert!(read_only_block_with_effect(true, "contract_write", ToolEffect::Unknown).is_none());
+        assert!(
+            read_only_block_with_effect(true, "requirement_update", ToolEffect::Unknown).is_none()
+        );
     }
 }

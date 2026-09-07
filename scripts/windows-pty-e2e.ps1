@@ -535,7 +535,7 @@ $effectiveInterruptAfterMs = if ($BusyFixture) {
     $InterruptAfterMs
 }
 $rawOutput = New-Object 'System.Collections.Generic.List[byte]'
-$previousConfig = [Environment]::GetEnvironmentVariable('RIDGE_CONFIG', 'Process')
+$previousConfig = [Environment]::GetEnvironmentVariable('RIDGECODE_CONFIG', 'Process')
 $runId = [Guid]::NewGuid().ToString('N')
 $isolatedConfig = Join-Path ([IO.Path]::GetTempPath()) "ridgecode-pty-$runId.json"
 $isolatedAuth = Join-Path ([IO.Path]::GetTempPath()) "ridgecode-pty-$runId-auth.json"
@@ -545,9 +545,9 @@ $isolatedWorkspace = Join-Path ([IO.Path]::GetTempPath()) "ridgecode-pty-$runId-
 $isolatedSnapshot = Join-Path $isolatedHome '.ridge\frame.json'
 $isolatedTrace = Join-Path $isolatedHome '.ridge\tui-trace.log'
 $isolatedVariables = @(
-    'RIDGE_PROVIDER', 'RIDGE_MODEL', 'RIDGE_BASE_URL', 'RIDGE_API_KEY',
-    'RIDGE_READ_ONLY', 'RIDGE_SKIP_PERMISSIONS', 'RIDGE_MCP', 'RIDGE_AUTH', 'RIDGE_OAUTH',
-    'RIDGE_KEYLOG', 'RIDGE_TUI_SNAPSHOT', 'RIDGE_TUI_INPUT_DIAGNOSTICS', 'RIDGE_FORCE_TUI', 'RIDGE_TUI_FIXTURE', 'RIDGE_TUI_TRACE', 'RIDGE_TUI_KITTY', 'RIDGE_TUI_VT_INPUT', 'RIDGE_TUI_INSPECT_ANSWER', 'RIDGE_TUI_MOUSE_CAPTURE'
+    'RIDGECODE_PROVIDER', 'RIDGECODE_MODEL', 'RIDGECODE_BASE_URL', 'RIDGECODE_API_KEY',
+    'RIDGECODE_READ_ONLY', 'RIDGECODE_SKIP_PERMISSIONS', 'RIDGECODE_MCP', 'RIDGECODE_AUTH', 'RIDGECODE_OAUTH',
+    'RIDGECODE_KEYLOG', 'RIDGECODE_TUI_SNAPSHOT', 'RIDGECODE_TUI_INPUT_DIAGNOSTICS', 'RIDGECODE_FORCE_TUI', 'RIDGECODE_TUI_FIXTURE', 'RIDGECODE_TUI_TRACE', 'RIDGECODE_TUI_KITTY', 'RIDGECODE_TUI_VT_INPUT', 'RIDGECODE_TUI_INSPECT_ANSWER', 'RIDGECODE_TUI_MOUSE_CAPTURE'
 )
 $previousVariables = @{}
 foreach ($name in $isolatedVariables) {
@@ -593,37 +593,37 @@ try {
     New-Item -ItemType Directory -Path $isolatedWorkspace -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $isolatedHome '.ridge') -Force | Out-Null
     $env:USERPROFILE = $isolatedHome
-    $env:RIDGE_CONFIG = $isolatedConfig
+    $env:RIDGECODE_CONFIG = $isolatedConfig
     foreach ($name in $isolatedVariables) { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
-    $env:RIDGE_AUTH = $isolatedAuth
-    $env:RIDGE_OAUTH = $isolatedOauth
-    $env:RIDGE_PROVIDER = 'openai'
-    $env:RIDGE_MODEL = 'pty-test-model'
-    $env:RIDGE_BASE_URL = 'http://127.0.0.1:9/v1'
-    $env:RIDGE_API_KEY = 'pty-test-key'
-    $env:RIDGE_KEYLOG = '1'
-    $env:RIDGE_TUI_SNAPSHOT = $isolatedSnapshot
+    $env:RIDGECODE_AUTH = $isolatedAuth
+    $env:RIDGECODE_OAUTH = $isolatedOauth
+    $env:RIDGECODE_PROVIDER = 'openai'
+    $env:RIDGECODE_MODEL = 'pty-test-model'
+    $env:RIDGECODE_BASE_URL = 'http://127.0.0.1:9/v1'
+    $env:RIDGECODE_API_KEY = 'pty-test-key'
+    $env:RIDGECODE_KEYLOG = '1'
+    $env:RIDGECODE_TUI_SNAPSHOT = $isolatedSnapshot
     # Keep legacy fixtures stable; InputFixture below explicitly proves the
     # raw-VT transport while the production default remains auto.
-    $env:RIDGE_TUI_VT_INPUT = '0'
+    $env:RIDGECODE_TUI_VT_INPUT = '0'
     if ($inputMode) {
-        $env:RIDGE_TUI_INPUT_DIAGNOSTICS = '1'
+        $env:RIDGECODE_TUI_INPUT_DIAGNOSTICS = '1'
     }
-    $env:RIDGE_FORCE_TUI = '1'
-    $env:RIDGE_TUI_TRACE = $isolatedTrace
+    $env:RIDGECODE_FORCE_TUI = '1'
+    $env:RIDGECODE_TUI_TRACE = $isolatedTrace
     # Native scrollback/selection is the acceptance path.  Isolate the opt-in
     # application mouse-capture switch from the caller's process environment.
-    $env:RIDGE_TUI_MOUSE_CAPTURE = '0'
+    $env:RIDGECODE_TUI_MOUSE_CAPTURE = '0'
     if ($InspectAnswer) {
-        $env:RIDGE_TUI_INSPECT_ANSWER = '1'
+        $env:RIDGECODE_TUI_INSPECT_ANSWER = '1'
     }
     if ($StressFixture) {
-        $env:RIDGE_TUI_FIXTURE = 'stress'
+        $env:RIDGECODE_TUI_FIXTURE = 'stress'
     } elseif ($BusyFixture) {
-        $env:RIDGE_TUI_FIXTURE = 'busy'
-        $env:RIDGE_TUI_KITTY = '1'
+        $env:RIDGECODE_TUI_FIXTURE = 'busy'
+        $env:RIDGECODE_TUI_KITTY = '1'
     } elseif ($CompletionFixture) {
-        $env:RIDGE_TUI_FIXTURE = 'complete'
+        $env:RIDGECODE_TUI_FIXTURE = 'complete'
         # Completion fixture edits only this pre-seeded file in the isolated
         # workspace, keeping PTY evidence hermetic while exercising a real edit.
         $fixtureDirectory = Join-Path $isolatedWorkspace 'src'
@@ -636,15 +636,15 @@ try {
             (Join-Path $fixtureDirectory 'fixture.rs'),
             $fixtureOldString
         )
-        $env:RIDGE_SKIP_PERMISSIONS = '1'
+        $env:RIDGECODE_SKIP_PERMISSIONS = '1'
     } elseif ($CommandsFixture) {
-        $env:RIDGE_TUI_FIXTURE = 'commands'
-        $env:RIDGE_TUI_KITTY = '1'
+        $env:RIDGECODE_TUI_FIXTURE = 'commands'
+        $env:RIDGECODE_TUI_KITTY = '1'
     } elseif ($InputFixture) {
-        $env:RIDGE_TUI_FIXTURE = 'input'
+        $env:RIDGECODE_TUI_FIXTURE = 'input'
         # Make the transport assertion deterministic: the fixture proves the
         # raw-VT path and the pure policy matrix covers auto/unset separately.
-        $env:RIDGE_TUI_VT_INPUT = '1'
+        $env:RIDGECODE_TUI_VT_INPUT = '1'
     }
     [IO.File]::WriteAllText(
         $isolatedConfig,
@@ -1874,9 +1874,9 @@ try {
 } finally {
     if ($null -ne $session) { $session.Dispose() }
     if ($null -eq $previousConfig) {
-        Remove-Item Env:RIDGE_CONFIG -ErrorAction SilentlyContinue
+        Remove-Item Env:RIDGECODE_CONFIG -ErrorAction SilentlyContinue
     } else {
-        $env:RIDGE_CONFIG = $previousConfig
+        $env:RIDGECODE_CONFIG = $previousConfig
     }
     foreach ($name in $isolatedVariables) {
         if ($null -eq $previousVariables[$name]) {

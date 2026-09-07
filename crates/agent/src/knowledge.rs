@@ -870,7 +870,7 @@ const DEFAULT_SUBAGENT_TIMEOUT_SECS: u64 = 45;
 const MAX_PARALLEL_SUBAGENTS: usize = 3;
 
 fn subagent_timeout() -> Duration {
-    std::env::var("RIDGE_SUBAGENT_TIMEOUT_SECS")
+    std::env::var("RIDGECODE_SUBAGENT_TIMEOUT_SECS")
         .ok()
         .and_then(|value| value.trim().parse().ok())
         .filter(|&seconds| seconds > 0)
@@ -1066,6 +1066,32 @@ impl std::fmt::Display for DispatchFailure {
     }
 }
 
+/// Structured outcome of a sub-agent dispatch. The human-readable report is
+/// retained for the model, while graph state consumes these execution facts.
+pub(crate) struct DispatchToolResult {
+    pub observation: String,
+    pub completed: bool,
+    pub retryable: bool,
+}
+
+impl DispatchToolResult {
+    fn completed(observation: String) -> Self {
+        Self {
+            observation,
+            completed: true,
+            retryable: false,
+        }
+    }
+
+    fn failed(observation: String, retryable: bool) -> Self {
+        Self {
+            observation,
+            completed: false,
+            retryable,
+        }
+    }
+}
+
 async fn run_subagent_bounded_with_budget(
     def: &Agent,
     provider: Arc<dyn LlmProvider>,
@@ -1209,13 +1235,32 @@ pub(crate) async fn dispatch_obs(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn dispatch_obs_with_budget(
     agents: &Agents,
     main: &Arc<dyn LlmProvider>,
     call: &ToolCall,
     budget: Arc<DispatchBudget>,
 ) -> String {
-    dispatch_one_obs_with_timeout_and_budget(
+    dispatch_one_result_with_timeout_and_budget(
+        agents,
+        main,
+        &call.arguments,
+        &call.id,
+        subagent_timeout(),
+        budget,
+    )
+    .await
+    .observation
+}
+
+pub(crate) async fn dispatch_result_with_budget(
+    agents: &Agents,
+    main: &Arc<dyn LlmProvider>,
+    call: &ToolCall,
+    budget: Arc<DispatchBudget>,
+) -> DispatchToolResult {
+    dispatch_one_result_with_timeout_and_budget(
         agents,
         main,
         &call.arguments,
@@ -1234,7 +1279,7 @@ async fn dispatch_one_obs_with_timeout(
     correlation_id: &str,
     timeout: Duration,
 ) -> String {
-    dispatch_one_obs_with_timeout_and_budget(
+    dispatch_one_result_with_timeout_and_budget(
         agents,
         main,
         arguments,
@@ -1243,23 +1288,27 @@ async fn dispatch_one_obs_with_timeout(
         Arc::new(default_dispatch_budget().scope()),
     )
     .await
+    .observation
 }
 
-async fn dispatch_one_obs_with_timeout_and_budget(
+async fn dispatch_one_result_with_timeout_and_budget(
     agents: &Agents,
     main: &Arc<dyn LlmProvider>,
     arguments: &serde_json::Value,
     correlation_id: &str,
     timeout: Duration,
     budget: Arc<DispatchBudget>,
-) -> String {
+) -> DispatchToolResult {
     let name = arguments
         .get("agent")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let task = arguments.get("task").and_then(|v| v.as_str()).unwrap_or("");
     let Some(def) = agents.defs.iter().find(|a| a.name == name) else {
-        return format!("没有名为 {name} 的 sub-agent(dispatch_agent 的 enum 里选)");
+        return DispatchToolResult::failed(
+            format!("没有名为 {name} 的 sub-agent(dispatch_agent 的 enum 里选)"),
+            false,
+        );
     };
     let request = RouteRequest::from_task(task, RouteRole::Subagent).with_overrides(
         arguments.get("difficulty").and_then(|v| v.as_str()),
@@ -1273,7 +1322,7 @@ async fn dispatch_one_obs_with_timeout_and_budget(
     );
     let routed = agents.select_provider(&request, main.clone());
     let mut decision = routed.decision;
-    let (out, completed) = match run_subagent_bounded_with_budget(
+    let (out, completed, retryable) = match run_subagent_bounded_with_budget(
         def,
         routed.provider,
         task,
@@ -1283,7 +1332,7 @@ async fn dispatch_one_obs_with_timeout_and_budget(
     )
     .await
     {
-        Ok(out) => (out, true),
+        Ok(out) => (out, true, false),
         Err(first_failure) if decision.selected.is_some() && !first_failure.is_budget() => {
             decision.used_fallback = true;
             decision.reason = format!(
@@ -1301,20 +1350,29 @@ async fn dispatch_one_obs_with_timeout_and_budget(
             )
             .await
             {
-                Ok(out) => (out, true),
+                Ok(out) => (out, true, false),
                 Err(fallback_failure) => (format!(
                     "[{} 出错: selected provider failed ({first_failure}); main-provider fallback failed ({fallback_failure})]",
                     def.name
-                ), false),
+                ), false, !fallback_failure.is_budget()),
             }
         }
-        Err(failure) => (format!("[{} 出错: {failure}]", def.name), false),
+        Err(failure) => (
+            format!("[{} 出错: {failure}]", def.name),
+            false,
+            !failure.is_budget(),
+        ),
     };
     let status = if completed { "completed" } else { "failed" };
-    format!(
+    let observation = format!(
         "[dispatch_status={status}]\n[sub-agent {name} route: {}]\n[sub-agent {name} 的结论]\n{out}",
         decision
-    )
+    );
+    if completed {
+        DispatchToolResult::completed(observation)
+    } else {
+        DispatchToolResult::failed(observation, retryable)
+    }
 }
 
 #[cfg(test)]
@@ -1332,24 +1390,42 @@ pub(crate) async fn dispatch_batch_obs(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn dispatch_batch_obs_with_budget(
     agents: &Agents,
     main: &Arc<dyn LlmProvider>,
     call: &ToolCall,
     budget: Arc<DispatchBudget>,
 ) -> String {
+    dispatch_batch_result_with_budget(agents, main, call, budget)
+        .await
+        .observation
+}
+
+pub(crate) async fn dispatch_batch_result_with_budget(
+    agents: &Agents,
+    main: &Arc<dyn LlmProvider>,
+    call: &ToolCall,
+    budget: Arc<DispatchBudget>,
+) -> DispatchToolResult {
     let Some(tasks) = call
         .arguments
         .get("tasks")
         .and_then(|value| value.as_array())
     else {
-        return "dispatch_agents requires a tasks array".to_string();
+        return DispatchToolResult::failed(
+            "dispatch_agents requires a tasks array".to_string(),
+            false,
+        );
     };
     if tasks.len() < 2 || tasks.len() > MAX_PARALLEL_SUBAGENTS {
-        return format!(
-            "dispatch_agents requires 2-{} tasks, got {}",
-            MAX_PARALLEL_SUBAGENTS,
-            tasks.len()
+        return DispatchToolResult::failed(
+            format!(
+                "dispatch_agents requires 2-{} tasks, got {}",
+                MAX_PARALLEL_SUBAGENTS,
+                tasks.len()
+            ),
+            false,
         );
     }
 
@@ -1358,7 +1434,7 @@ pub(crate) async fn dispatch_batch_obs_with_budget(
             let first_id = format!("{}:0", call.id);
             let second_id = format!("{}:1", call.id);
             let (first, second) = tokio::join!(
-                dispatch_one_obs_with_timeout_and_budget(
+                dispatch_one_result_with_timeout_and_budget(
                     agents,
                     main,
                     first,
@@ -1366,7 +1442,7 @@ pub(crate) async fn dispatch_batch_obs_with_budget(
                     subagent_timeout(),
                     budget.clone(),
                 ),
-                dispatch_one_obs_with_timeout_and_budget(
+                dispatch_one_result_with_timeout_and_budget(
                     agents,
                     main,
                     second,
@@ -1382,7 +1458,7 @@ pub(crate) async fn dispatch_batch_obs_with_budget(
             let second_id = format!("{}:1", call.id);
             let third_id = format!("{}:2", call.id);
             let (first, second, third) = tokio::join!(
-                dispatch_one_obs_with_timeout_and_budget(
+                dispatch_one_result_with_timeout_and_budget(
                     agents,
                     main,
                     first,
@@ -1390,7 +1466,7 @@ pub(crate) async fn dispatch_batch_obs_with_budget(
                     subagent_timeout(),
                     budget.clone(),
                 ),
-                dispatch_one_obs_with_timeout_and_budget(
+                dispatch_one_result_with_timeout_and_budget(
                     agents,
                     main,
                     second,
@@ -1398,7 +1474,7 @@ pub(crate) async fn dispatch_batch_obs_with_budget(
                     subagent_timeout(),
                     budget.clone(),
                 ),
-                dispatch_one_obs_with_timeout_and_budget(
+                dispatch_one_result_with_timeout_and_budget(
                     agents,
                     main,
                     third,
@@ -1411,16 +1487,27 @@ pub(crate) async fn dispatch_batch_obs_with_budget(
         }
         _ => unreachable!("task count is bounded above"),
     };
-    let completed = results
-        .iter()
-        .filter(|result| result.starts_with("[dispatch_status=completed]"))
-        .count();
+    let completed = results.iter().filter(|result| result.completed).count();
     let failed = results.len().saturating_sub(completed);
-    format!(
+    let observation = format!(
         "parallel sub-agent wave ({completed}/{} completed) failed={failed}\n{}",
         results.len(),
-        results.join("\n\n")
-    )
+        results
+            .iter()
+            .map(|result| result.observation.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    );
+    if failed == 0 {
+        DispatchToolResult::completed(observation)
+    } else {
+        DispatchToolResult::failed(
+            observation,
+            results
+                .iter()
+                .any(|result| !result.completed && result.retryable),
+        )
+    }
 }
 
 #[cfg(test)]

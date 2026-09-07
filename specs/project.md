@@ -29,7 +29,7 @@ RidgeCode 是单二进制 `ridgecode` 的模块化 agent 框架。当前代码�
 
 ## Runtime contract
 
-`crates/agent/src/main.rs::run_cli` 负责启动与模式分流；agent 图由 `build_llm_agent` 装配；图引擎以 `GraphState` reducer 和 Pregel/BSP 超步执行；provider 归一化模型协议；MCP 与 tools 提供外部能力；eval 只以 `approved` 和确定性约束计量结果。
+`crates/agent/src/main.rs::run_cli` 负责启动与模式分流；agent 图由 `build_llm_agent` 装配；图引擎以 `GraphState` reducer 和 Pregel/BSP 超步执行；provider 归一化模型协议；MCP 与 tools 提供外部能力。`approved` 与确定性约束仅是进程内回归信号；跨进程外部评测必须以独立 verifier 为准，SWE-bench 的 `resolved` 仅可由官方 harness 生成的 `report.json` 计分，二者不得互相替代。
 
 ## Safety and completion gates
 

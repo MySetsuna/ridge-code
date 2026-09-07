@@ -1,13 +1,30 @@
 use crate::exec::parse_edits;
 use provider::ToolCall;
 
+/// Outcome decided by the web-tool execution boundary. The string remains a
+/// model/UI observation; callers should use `failed` rather than parse it.
+pub(crate) struct WebToolResult {
+    pub observation: String,
+    pub failed: bool,
+    pub retryable: bool,
+}
+
 /// web_search 的观察结果:懒探测一次网络环境(缓存)→ 选引擎 → 搜 → 排版给模型看。
 /// `fetch`/`net` 从 [`build_core`] 注入,测试可用假抓取器。
+#[cfg(test)]
 pub(crate) async fn web_search_obs(
     fetch: &dyn provider::search::WebFetch,
     net: &std::sync::OnceLock<provider::search::NetEnv>,
     call: &ToolCall,
 ) -> String {
+    web_search_result(fetch, net, call).await.observation
+}
+
+pub(crate) async fn web_search_result(
+    fetch: &dyn provider::search::WebFetch,
+    net: &std::sync::OnceLock<provider::search::NetEnv>,
+    call: &ToolCall,
+) -> WebToolResult {
     use provider::search::{detect_net, engine_for, web_search, NetEnv};
     let query = call
         .arguments
@@ -15,7 +32,11 @@ pub(crate) async fn web_search_obs(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if query.is_empty() {
-        return "web_search error: 缺少 query".to_string();
+        return WebToolResult {
+            observation: "web_search error: 缺少 query".to_string(),
+            failed: true,
+            retryable: false,
+        };
     }
     // 网络环境只探一次,整个会话复用(ponytail: 进程级缓存;网络切换需重启)。
     let env = match net.get() {
@@ -31,7 +52,11 @@ pub(crate) async fn web_search_obs(
         NetEnv::Restricted => "受限(GFW 内)",
     };
     match web_search(fetch, query, env).await {
-        Ok(rs) if rs.is_empty() => format!("网络:{label} · 引擎:{} · (无结果)", engine_for(env)),
+        Ok(rs) if rs.is_empty() => WebToolResult {
+            observation: format!("网络:{label} · 引擎:{} · (无结果)", engine_for(env)),
+            failed: false,
+            retryable: false,
+        },
         Ok(rs) => {
             let mut s = format!("网络:{label} · 引擎:{}\n", engine_for(env));
             for (i, r) in rs.iter().enumerate() {
@@ -43,29 +68,61 @@ pub(crate) async fn web_search_obs(
                     r.snippet
                 ));
             }
-            s
+            WebToolResult {
+                observation: s,
+                failed: false,
+                retryable: false,
+            }
         }
-        Err(e) => format!("web_search error: {e}"),
+        Err(e) => WebToolResult {
+            observation: format!("web_search error: {e}"),
+            failed: true,
+            retryable: true,
+        },
     }
 }
 
 /// fetch_url 的观察结果:抓网页正文喂给模型(RAG 闭环的「读」)。`fetch` 从 [`build_core`] 注入。
+#[cfg(test)]
 pub(crate) async fn fetch_url_obs(
     fetch: &dyn provider::search::WebFetch,
     call: &ToolCall,
 ) -> String {
+    fetch_url_result(fetch, call).await.observation
+}
+
+pub(crate) async fn fetch_url_result(
+    fetch: &dyn provider::search::WebFetch,
+    call: &ToolCall,
+) -> WebToolResult {
     let url = call
         .arguments
         .get("url")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if url.is_empty() {
-        return "fetch_url error: 缺少 url".to_string();
+        return WebToolResult {
+            observation: "fetch_url error: 缺少 url".to_string(),
+            failed: true,
+            retryable: false,
+        };
     }
     match provider::search::fetch_url(fetch, url).await {
-        Ok(text) if text.is_empty() => format!("(空正文) {url}"),
-        Ok(text) => format!("正文 {url}:\n{text}"),
-        Err(e) => format!("fetch_url error: {e}"),
+        Ok(text) if text.is_empty() => WebToolResult {
+            observation: format!("(空正文) {url}"),
+            failed: false,
+            retryable: false,
+        },
+        Ok(text) => WebToolResult {
+            observation: format!("正文 {url}:\n{text}"),
+            failed: false,
+            retryable: false,
+        },
+        Err(e) => WebToolResult {
+            observation: format!("fetch_url error: {e}"),
+            failed: true,
+            retryable: true,
+        },
     }
 }
 
@@ -141,6 +198,27 @@ mod tests {
             arguments: serde_json::json!({}),
         };
         assert!(fetch_url_obs(&Page, &bad).await.contains("缺少 url"));
+    }
+
+    #[tokio::test]
+    async fn native_fetch_result_does_not_infer_failure_from_page_text() {
+        use provider::search::WebFetch;
+        struct Page;
+        #[async_trait::async_trait]
+        impl WebFetch for Page {
+            async fn get_text(&self, _url: &str) -> Result<String, provider::ProviderError> {
+                Ok("<p>fetch_url error: ordinary quoted text</p>".to_string())
+            }
+        }
+        let call = ToolCall {
+            id: "fetch-native".to_string(),
+            name: "fetch_url".to_string(),
+            arguments: serde_json::json!({"url": "https://ex.com"}),
+        };
+        let result = fetch_url_result(&Page, &call).await;
+        assert!(!result.failed);
+        assert!(!result.retryable);
+        assert!(result.observation.contains("fetch_url error:"));
     }
 
     /// web_search:探测网络环境 → 选引擎 → 排版结果,全程走假抓取器(不联网)。

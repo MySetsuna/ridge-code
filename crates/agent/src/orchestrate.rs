@@ -24,14 +24,14 @@ const MAX_PLANNER_TIMEOUT_SECS: u64 = 300;
 
 fn planner_timeout() -> Duration {
     let max = Duration::from_secs(MAX_PLANNER_TIMEOUT_SECS);
-    if let Some(milliseconds) = std::env::var("RIDGE_PLANNER_TIMEOUT_MS")
+    if let Some(milliseconds) = std::env::var("RIDGECODE_PLANNER_TIMEOUT_MS")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|value| *value > 0)
     {
         return Duration::from_millis(milliseconds).min(max);
     }
-    if let Some(seconds) = std::env::var("RIDGE_PLANNER_TIMEOUT_SECS")
+    if let Some(seconds) = std::env::var("RIDGECODE_PLANNER_TIMEOUT_SECS")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|value| *value > 0)
@@ -212,6 +212,54 @@ impl HaltReason {
     }
 }
 
+/// 运行生命周期的规范化状态。`status` 字段仍保留旧的字符串形式，
+/// 但新消费者应读取 `run_status`，避免把 reviewer 的结论和进程心跳混为一谈。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunStatus {
+    Running,
+    Completed,
+    Stopped,
+    Interrupted,
+    Cancelled,
+    Blocked,
+}
+
+impl RunStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Stopped => "stopped",
+            Self::Interrupted => "interrupted",
+            Self::Cancelled => "cancelled",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+fn normalized_run_status(requested: &str, complete: bool) -> RunStatus {
+    if complete {
+        return RunStatus::Completed;
+    }
+    match requested {
+        "interrupted" => RunStatus::Interrupted,
+        "cancelled" => RunStatus::Cancelled,
+        "blocked" => RunStatus::Blocked,
+        "stopped" | "completed" => RunStatus::Stopped,
+        _ => RunStatus::Running,
+    }
+}
+
+fn verification_status(out: &AgentState, complete: bool, run_status: RunStatus) -> &'static str {
+    if complete {
+        "passed"
+    } else if completion_blocked(out) || !matches!(run_status, RunStatus::Running) {
+        "failed"
+    } else {
+        "pending"
+    }
+}
+
 /// 据终态判定停机原因。优先级(高→低):成功、超预算(经济护栏最该被看见)、**约束违反**(奖励黑客,
 /// 安全须显)、**上下文腐烂**(结构性根因)、**熔断**(连错症状)、无进展(输出停滞)、回合上限(通用耗尽)、未验证。
 /// 「更根因/更具体者优先」:同为失败终态时,给最有诊断价值的标签(喂 signal 复利)。
@@ -233,7 +281,7 @@ pub fn halt_reason(s: &AgentState) -> HaltReason {
     } else if stalled(s) || explore_exhausted(s) {
         // 同标签 no_progress:输出重复 或 纯侦察耗尽(一直查不落盘),用户侧语义都是「没推进」
         HaltReason::Stall
-    } else if s.steps >= MAX_STEPS {
+    } else if s.steps >= s.reasoning_limit() {
         HaltReason::StepCap
     } else {
         HaltReason::Unverified
@@ -285,7 +333,8 @@ pub fn write_run_progress(
         .iter()
         .filter(|todo| todo.status.trim() != "completed")
         .count();
-    let effective_status = progress_status(status, complete);
+    let run_status = normalized_run_status(status, complete);
+    let effective_status = run_status.as_str();
     let phase = progress_phase(out, complete, unfinished_todos);
     let next_action = progress_next_action(out, complete, unfinished_todos);
     let modified_files = out
@@ -308,6 +357,7 @@ pub fn write_run_progress(
     let manifest = serde_json::json!({
         "schema_version": 1,
         "status": effective_status,
+        "run_status": effective_status,
         "task": out.task,
         "approved": complete,
         "completion_blocked": completion_blocked(out),
@@ -316,6 +366,11 @@ pub fn write_run_progress(
         "todo_pending": unfinished_todos,
         "todos": todos,
         "halt_reason": halt_reason(out).as_str(),
+        "verification": {
+            "status": verification_status(out, complete, run_status),
+            "approved": complete,
+            "halt_reason": halt_reason(out).as_str(),
+        },
         "phase": phase,
         "next_action": next_action,
         "step": out.steps,
@@ -336,14 +391,6 @@ pub fn write_run_progress(
     });
     let json = serde_json::to_string_pretty(&manifest).map_err(std::io::Error::other)?;
     atomic_write(dir.join("manifest.json"), json.as_bytes())
-}
-
-fn progress_status(status: &str, complete: bool) -> &str {
-    if status == "completed" && !complete {
-        "stopped"
-    } else {
-        status
-    }
 }
 
 fn progress_phase(out: &AgentState, complete: bool, unfinished_todos: usize) -> &'static str {
@@ -528,7 +575,11 @@ pub fn durable_run_is_live(task: &str) -> bool {
     let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
         return false;
     };
-    if manifest["status"] != "running" {
+    let status = manifest
+        .get("run_status")
+        .or_else(|| manifest.get("status"))
+        .and_then(serde_json::Value::as_str);
+    if status != Some("running") {
         return false;
     }
     manifest["owner_pid"]
@@ -672,9 +723,20 @@ pub async fn invoke_durable_at(
 /// 写一轮的审计轨迹到 `trace.json`(DoD⑥:客观证据,含工具输出/退出码 + 多轮 history)。密钥不入 trace。
 pub fn write_trace(out: &AgentState, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
     let complete = out.approved && !completion_blocked(out);
+    let run_status = if complete {
+        RunStatus::Completed
+    } else {
+        RunStatus::Stopped
+    };
     let record = serde_json::json!({
         "task": out.task,
         "approved": complete,
+        "run_status": run_status.as_str(),
+        "verification": {
+            "status": verification_status(out, complete, run_status),
+            "approved": complete,
+            "halt_reason": halt_reason(out).as_str(),
+        },
         "completion_blocked": completion_blocked(out),
         "pending_call": out.pending_call.as_ref().map(|call| call.name.clone()),
         "todos": out.todos,
@@ -1413,20 +1475,24 @@ mod tests {
         );
     }
 
-    /// 纯侦察耗尽:每轮 read 不同文件 → stall 不触发,但 explore_streak 触顶后 soft-stop(no_progress),
-    /// 不得烧到 MAX_STEPS 后再「重新触发一轮全库侦察」。
+    /// 同一证据的重复侦察必须触发交接、不得烧到回合上限。此脚本随后故意无视交接提示，
+    /// 因而预期由 circuit breaker 收尾；不同文件是新增证据，不应被误判为 thrash。
     #[tokio::test]
-    async fn explore_thrash_stops_before_step_cap() {
+    async fn repeated_exploration_stops_before_step_cap() {
         use provider::{Completion, ScriptedProvider, ToolCall};
-        let dir = std::env::temp_dir().join(format!("ridge_explore_thrash_{}", std::process::id()));
+        // Tool jail only permits the workspace. Keep the fixture under target
+        // so this exercises no-progress handling rather than the jail's
+        // out-of-workspace error path.
+        let dir =
+            PathBuf::from("target").join(format!("ridge_explore_thrash_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // MAX_EXPLORE 次不同读 + wrapup 补全;多备几条防边界
-        let n = MAX_EXPLORE + 4;
+        // 重读同一文件、得到同一观察：会先由更严格的 MAX_STALL 熔断。
+        let n = MAX_STALL + 4;
+        let p = dir.join("same.txt");
+        std::fs::write(&p, "same content").unwrap();
         let mut script = Vec::with_capacity(n + 1);
         for i in 0..n {
-            let p = dir.join(format!("f{i}.txt"));
-            std::fs::write(&p, format!("content-{i}")).unwrap();
             script.push(Completion {
                 tool_calls: vec![ToolCall {
                     id: format!("r{i}"),
@@ -1446,20 +1512,23 @@ mod tests {
             .await
             .unwrap();
         assert!(!out.approved, "只读侦察不得伪造成功");
+        assert!(out.explore_handoff, "重复侦察必须触发 action handoff");
         assert!(
-            out.explore_streak >= MAX_EXPLORE,
-            "explore_streak={}",
-            out.explore_streak
+            out.messages
+                .iter()
+                .any(|message| message.contains("exploration guard triggered")),
+            "应记录明确恢复指令: {:?}",
+            out.messages
         );
-        assert_eq!(halt_reason(&out), HaltReason::Stall);
+        assert_eq!(halt_reason(&out), HaltReason::CircuitBroken);
         assert!(
             out.steps < MAX_STEPS,
             "侦察熔断应远早于 step_cap: steps={}",
             out.steps
         );
         assert!(
-            out.steps <= MAX_EXPLORE + 6,
-            "应在触顶后很快 wrapup, steps={}",
+            out.steps <= MAX_STALL + MAX_ERR_STREAK + 6,
+            "重复侦察及其一次交接恢复应很快收敛, steps={}",
             out.steps
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1598,6 +1667,12 @@ mod tests {
         assert_eq!(m["tokens"], 42);
         assert_eq!(m["phase"], "reasoning");
         assert_eq!(m["status"], "stopped");
+        assert_eq!(m["run_status"], "stopped");
+        assert_eq!(m["verification"]["status"], "failed");
+        let t: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&trace).unwrap()).unwrap();
+        assert_eq!(t["run_status"], "stopped");
+        assert_eq!(t["verification"]["status"], "failed");
         assert!(m["updated_at_ms"].as_u64().is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1622,6 +1697,8 @@ mod tests {
         assert_eq!(manifest["phase"], "action_handoff");
         assert_eq!(manifest["next_action"], "edit_or_verify");
         assert_eq!(manifest["status"], "running");
+        assert_eq!(manifest["run_status"], "running");
+        assert_eq!(manifest["verification"]["status"], "pending");
         assert_eq!(manifest["modified_files"][0], "src/lib.rs");
         assert_eq!(manifest["blocker"], "provider request timed out");
         let _ = std::fs::remove_dir_all(&dir);
@@ -2019,10 +2096,14 @@ mod tests {
         });
         let cancellation = AgentCancellation::new();
         let trigger = cancellation.clone();
+        let calls = provider.clone();
         let trigger_task = tokio::spawn(async move {
-            // Leave enough time for the planner and teammate wave to start;
-            // cancellation may still arrive while either side is awaiting.
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // Wait for the planner plus at least one teammate call instead of
+            // relying on a wall-clock race under parallel workspace tests.
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+            while calls.calls.load(Ordering::SeqCst) < 2 && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
             trigger.cancel();
         });
         let result = run_planned_routed_with_cancellation(

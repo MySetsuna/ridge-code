@@ -2,7 +2,7 @@
   "provider": "openai",
   "model": "glm-4.6",
   "base_url": "https://open.bigmodel.cn/api/paas/v4",
-  "api_key": "把你的密钥明文填在这里即可直接启动(自担明文存盘风险);不想明文就删掉此行,改为设 RIDGE_API_KEY 环境变量",
+  "api_key": "把你的密钥明文填在这里即可直接启动(自担明文存盘风险);不想明文就删掉此行,改为设 RIDGECODE_API_KEY 环境变量",
   "budget_tokens": 200000,
   "skip_danger": false,
   "providers": [
@@ -11,7 +11,7 @@
       "kind": "openai",
       "model": "glm-4.6",
       "base_url": "https://open.bigmodel.cn/api/paas/v4",
-      "key_env": "RIDGE_API_KEY"
+      "key_env": "RIDGECODE_API_KEY"
     },
     {
       "name": "kimi",

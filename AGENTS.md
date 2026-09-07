@@ -22,7 +22,7 @@ cargo run -p agent --bin ridgecode  # 跑 agent 闭环 demo
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings   # CI 会卡这两个
 ```
 
-⚠️ 产品名 **RidgeCode**,二进制/命令是 **`ridgecode`**,但它住在 `crates/agent`(package 名 `agent`)。跑 demo 用 `-p agent --bin ridgecode`。环境变量前缀仍是 `RIDGE_*`(不改,避免破坏现有配置)。
+⚠️ 产品名 **RidgeCode**,二进制/命令是 **`ridgecode`**,但它住在 `crates/agent`(package 名 `agent`)。跑 demo 用 `-p agent --bin ridgecode`。环境变量前缀统一为 `RIDGECODE_*`。
 
 ## 跑起来(交互)
 

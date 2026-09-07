@@ -79,7 +79,7 @@ pub fn looks_like_session_id(value: &str) -> bool {
 }
 
 fn ridge_home_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("RIDGE_HOME") {
+    if let Ok(dir) = std::env::var("RIDGECODE_HOME") {
         return PathBuf::from(dir);
     }
     std::env::var_os("USERPROFILE")
@@ -90,7 +90,7 @@ fn ridge_home_dir() -> PathBuf {
 }
 
 pub fn sessions_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("RIDGE_SESSIONS_DIR") {
+    if let Ok(dir) = std::env::var("RIDGECODE_SESSIONS_DIR") {
         return PathBuf::from(dir);
     }
     ridge_home_dir().join("sessions")
@@ -278,7 +278,7 @@ mod tests {
     fn session_roundtrip_keeps_id_and_history() {
         let root = std::env::temp_dir().join(format!("ridge-sessions-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::env::set_var("RIDGE_SESSIONS_DIR", &root);
+        std::env::set_var("RIDGECODE_SESSIONS_DIR", &root);
         let mut record = SessionRecord::new("pack release", "C:\\proj", vec![Message::user("hi")]);
         assert!(looks_like_session_id(&record.id));
         save_record(&record).unwrap();
@@ -296,6 +296,6 @@ mod tests {
         assert!(listed.contains(&record.id), "{listed}");
         record.id = "other".into();
         let _ = std::fs::remove_dir_all(&root);
-        std::env::remove_var("RIDGE_SESSIONS_DIR");
+        std::env::remove_var("RIDGECODE_SESSIONS_DIR");
     }
 }

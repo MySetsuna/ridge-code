@@ -1,7 +1,7 @@
 use crate::route::{ModelProfile, ProviderRouteConfig};
 
 /// `~/.ridge/config.json`:一处配 provider/model/预算/多 MCP/skills(env 仍可覆盖)。
-/// 密钥优先走 env(`RIDGE_API_KEY` 或档案 `key_env` 指名的变量);也可在档案里内联 `api_key`
+/// 密钥优先走 env(`RIDGECODE_API_KEY` 或档案 `key_env` 指名的变量);也可在档案里内联 `api_key`
 /// (明文存盘,自担风险)。启动取密钥顺序见 `main.rs::real_provider`。
 #[derive(Debug, Default, Clone, serde::Deserialize)]
 #[serde(default)]
@@ -12,7 +12,7 @@ pub struct Config {
     pub effort: Option<String>,
     pub base_url: Option<String>,
     /// 顶层「主 provider」的内联明文密钥(可选,自担明文存盘风险)。填了它,启动即用
-    /// 顶层 provider/model/base_url + 此 key,无需 `RIDGE_API_KEY`。留空则回落到 env 或 `providers[]` 档案。
+    /// 顶层 provider/model/base_url + 此 key,无需 `RIDGECODE_API_KEY`。留空则回落到 env 或 `providers[]` 档案。
     pub api_key: Option<String>,
     /// 顶层主 provider 的密钥**环境变量名**(可选;`login --default` 设它)。用于从 env 或
     /// `~/.ridge/auth.json` 密钥库取顶层 key,而不必把明文写进 config。解析顺序见 `real_provider`。
@@ -47,7 +47,7 @@ pub struct Config {
 }
 
 /// 一个 Hook(iter-40):某事件发生时跑一条 shell 命令,可选拦截。像 git hooks —— 命令是**用户自己**
-/// config 里写的(其机器其配置)。命令运行时注入 env `RIDGE_TOOL`(工具名)/`RIDGE_TOOL_ARG`(主参数)。
+/// config 里写的(其机器其配置)。命令运行时注入 env `RIDGECODE_TOOL`(工具名)/`RIDGECODE_TOOL_ARG`(主参数)。
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct HookCfg {
     /// `pre_tool` | `post_tool` | `session_start` | `stop`。
@@ -81,7 +81,7 @@ pub struct ProviderProfile {
     pub kind: String,
     pub model: String,
     pub base_url: String,
-    /// 读该 provider 密钥的环境变量名,默认 `RIDGE_API_KEY`。
+    /// 读该 provider 密钥的环境变量名,默认 `RIDGECODE_API_KEY`。
     #[serde(default = "default_key_env")]
     pub key_env: String,
     /// 内联明文密钥(可选)。**明文存盘,自担风险**;优先于 `key_env`。
@@ -99,7 +99,7 @@ pub struct ProviderProfile {
 }
 
 fn default_key_env() -> String {
-    "RIDGE_API_KEY".to_string()
+    "RIDGECODE_API_KEY".to_string()
 }
 
 impl ProviderProfile {
@@ -155,13 +155,13 @@ pub fn resolve_key_env(
 }
 
 /// 顶层「主 provider」的 key 解析(iter-41 收敛 —— 原 `real_provider` 前 3 档与 `current_api_key`
-/// 各实现一遍,发散风险):`RIDGE_API_KEY` env → 顶层内联 `api_key`(非空)→ 顶层 `key_env`→(env 或
+/// 各实现一遍,发散风险):`RIDGECODE_API_KEY` env → 顶层内联 `api_key`(非空)→ 顶层 `key_env`→(env 或
 /// auth.json 密钥库,`login --default` 情形)。都无 → None。`providers[]` 档解析另见 `resolve_key_with`。
 pub fn resolve_top_level_key(
     cfg: &Config,
     auth: &std::collections::BTreeMap<String, String>,
 ) -> Option<String> {
-    if let Some(k) = std::env::var("RIDGE_API_KEY")
+    if let Some(k) = std::env::var("RIDGECODE_API_KEY")
         .ok()
         .filter(|k| !k.is_empty())
     {
@@ -253,7 +253,7 @@ fn parse_host_mcp_toml(text: &str) -> Vec<McpServerCfg> {
 }
 
 /// 交互中可 `/config set` 持久化的标量键白名单。
-/// **不含** `mcp`(结构化,直接编辑文件)与任何密钥(密钥只走 `RIDGE_API_KEY` env)。
+/// **不含** `mcp`(结构化,直接编辑文件)与任何密钥(密钥只走 `RIDGECODE_API_KEY` env)。
 pub const CONFIG_KEYS: &[&str] = &[
     "provider",
     "model",
@@ -546,11 +546,11 @@ mod tests {
         assert_eq!(cfg.providers.len(), 2);
         let glm = cfg.providers.iter().find(|p| p.name == "glm").unwrap();
         assert_eq!(glm.model, "glm-4.7");
-        // 缺省 key_env 反序列化为 RIDGE_API_KEY。
+        // 缺省 key_env 反序列化为 RIDGECODE_API_KEY。
         let d = Config::parse(
             r#"{ "providers": [ { "name": "a", "kind": "openai", "model": "m", "base_url": "u" } ] }"#,
         );
-        assert_eq!(d.providers[0].key_env, "RIDGE_API_KEY");
+        assert_eq!(d.providers[0].key_env, "RIDGECODE_API_KEY");
     }
 
     /// `/provider add` 参数解析:合法定位参数 → 档案;缺参/未知 kind → Err;经 config_add_provider
@@ -562,7 +562,7 @@ mod tests {
         assert_eq!(p.kind, "openai");
         assert_eq!(p.model, "gpt-4o");
         assert_eq!(p.base_url, "https://api.x.com/v1");
-        assert_eq!(p.key_env, "RIDGE_API_KEY"); // 缺省
+        assert_eq!(p.key_env, "RIDGECODE_API_KEY"); // 缺省
         assert!(p.api_key.is_none());
         // 显式 key_env + kind 大小写不敏感。
         let p2 = parse_provider_add("m2 Anthropic claude https://a.com/v1 MY_KEY").unwrap();

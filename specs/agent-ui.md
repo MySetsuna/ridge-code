@@ -35,7 +35,7 @@ known_gap:
 
 # TUI state, panels, rendering, and presentation
 
-The hermetic `CompletionFixture + ResizeProbe` path covers combined evidence for the real `read_file -> edit_file -> final` sequence, folded tool output, answer table/highlight rendering, and runtime viewport changes. When `RIDGE_TUI_SNAPSHOT` is enabled, draw telemetry retains at most 4096 exact render samples and reports nearest-rank p95/max. The Windows ConPTY gate defaults to 16 ms p95 and 50 ms max, and fails on missing or truncated samples. This gate measures draw rendering only; reusable golden sequences, snapshot serialization/write and byte percentiles, and end-to-end event-loop latency remain open.
+The hermetic `CompletionFixture + ResizeProbe` path covers combined evidence for the real `read_file -> edit_file -> final` sequence, folded tool output, answer table/highlight rendering, and runtime viewport changes. When `RIDGECODE_TUI_SNAPSHOT` is enabled, draw telemetry retains at most 4096 exact render samples and reports nearest-rank p95/max. The Windows ConPTY gate defaults to 16 ms p95 and 50 ms max, and fails on missing or truncated samples. This gate measures draw rendering only; reusable golden sequences, snapshot serialization/write and byte percentiles, and end-to-end event-loop latency remain open.
 
 TTY 交互由 app/panel/command 维护状态；draw/render/presentation/status 将其投影
 为稳定视口。剪贴板、事件格式化与 transcript/turn view 属同一显示边界，测试

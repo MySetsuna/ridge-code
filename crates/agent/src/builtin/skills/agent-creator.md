@@ -2,7 +2,7 @@
 name: agent-creator
 description: 当用户想新建或定制一个 sub-agent 时,按本规范把 agent 定义写成 md 文件。
 ---
-sub-agent 是一段带 frontmatter 的 Markdown,放在 agents 目录(默认 `~/.ridge/agents/<name>.md`,或环境变量 `RIDGE_AGENTS_DIR` 指定的目录)。用 write_file 创建,格式:
+sub-agent 是一段带 frontmatter 的 Markdown,放在 agents 目录(默认 `~/.ridge/agents/<name>.md`,或环境变量 `RIDGECODE_AGENTS_DIR` 指定的目录)。用 write_file 创建,格式:
 
 ```
 ---

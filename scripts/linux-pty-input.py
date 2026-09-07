@@ -89,19 +89,19 @@ def main() -> int:
     env.update(
         {
             "HOME": str(home),
-            "RIDGE_FORCE_TUI": "1",
-            "RIDGE_TUI_FIXTURE": "input",
-            "RIDGE_TUI_SNAPSHOT": str(snapshot),
-            "RIDGE_TUI_TRACE": str(ridge_home / "tui-trace.log"),
-            "RIDGE_TUI_INPUT_DIAGNOSTICS": "1",
+            "RIDGECODE_FORCE_TUI": "1",
+            "RIDGECODE_TUI_FIXTURE": "input",
+            "RIDGECODE_TUI_SNAPSHOT": str(snapshot),
+            "RIDGECODE_TUI_TRACE": str(ridge_home / "tui-trace.log"),
+            "RIDGECODE_TUI_INPUT_DIAGNOSTICS": "1",
             # Raw LF/HT lose byte provenance on a Unix PTY. Exercise the
             # compatibility bridge explicitly; production defaults keep these
             # semantic Ctrl-J/Tab events on their normal key path.
-            "RIDGE_TUI_UNWRAPPED_BRIDGE": "1",
-            "RIDGE_KEYLOG": "1",
-            "RIDGE_TUI_MOUSE_CAPTURE": "0",
-            "RIDGE_PROXY": "",
-            "RIDGE_CONFIG": str(home / "config.json"),
+            "RIDGECODE_TUI_UNWRAPPED_BRIDGE": "1",
+            "RIDGECODE_KEYLOG": "1",
+            "RIDGECODE_TUI_MOUSE_CAPTURE": "0",
+            "RIDGECODE_PROXY": "",
+            "RIDGECODE_CONFIG": str(home / "config.json"),
             "TERM": "xterm-256color",
         }
     )

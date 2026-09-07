@@ -156,7 +156,7 @@ fn mark_submit_dirty(had_pending_submit: bool, dirty: &mut bool) {
 
 /// Opt-in lifecycle trace for isolated terminal harnesses; normal TUI does no file I/O.
 fn terminal_title_enabled() -> bool {
-    std::env::var("RIDGE_DISABLE_TERMINAL_TITLE")
+    std::env::var("RIDGECODE_DISABLE_TERMINAL_TITLE")
         .ok()
         .as_deref()
         != Some("1")
@@ -207,7 +207,7 @@ fn refresh_terminal_title(ui: &Ui) {
 }
 
 fn tui_trace(stage: &str) {
-    let Some(path) = std::env::var_os("RIDGE_TUI_TRACE") else {
+    let Some(path) = std::env::var_os("RIDGECODE_TUI_TRACE") else {
         return;
     };
     if let Some(parent) = std::path::Path::new(&path).parent() {
@@ -623,7 +623,7 @@ impl TerminalGuard {
 
     fn enter() -> anyhow::Result<(Self, Term)> {
         let base_mouse_capture_enabled =
-            mouse_capture_requested(std::env::var("RIDGE_TUI_MOUSE_CAPTURE").ok().as_deref());
+            mouse_capture_requested(std::env::var("RIDGECODE_TUI_MOUSE_CAPTURE").ok().as_deref());
         // Save the pre-raw console mode.  The guard must outlive raw-mode
         // teardown so Windows returns exactly to the caller's input settings.
         let (native_selection_guard, input_backend) =
@@ -669,7 +669,7 @@ impl TerminalGuard {
         // REPORT_EVENT_TYPES，让 Ctrl+Space 可实现按住审计、松开跟随；decide_key
         // 只放行这一语义键的 Release，其余 press/release 噪声仍去重。
         // Windows keeps Kitty negotiation disabled. The raw-VT byte backend
-        // is automatic when activation succeeds; RIDGE_TUI_VT_INPUT=0 keeps
+        // is automatic when activation succeeds; RIDGECODE_TUI_VT_INPUT=0 keeps
         // the legacy Crossterm reader for diagnosis or compatibility.
         let keyboard_enhancement_pushed = if terminal_keyboard_policy().keyboard_enhancement {
             execute!(
@@ -2196,7 +2196,7 @@ fn keylog_path() -> Option<std::path::PathBuf> {
         .or_else(|| std::env::var_os("HOME"))
         .map(|home| std::path::PathBuf::from(home).join(".ridge"))
         .unwrap_or_else(std::env::temp_dir);
-    let enabled = std::env::var_os("RIDGE_KEYLOG").is_some() || dir.join("keylog.on").exists();
+    let enabled = std::env::var_os("RIDGECODE_KEYLOG").is_some() || dir.join("keylog.on").exists();
     enabled.then(|| dir.join("keylog.txt"))
 }
 
@@ -3663,7 +3663,7 @@ pub(super) async fn run(
     // stream when the host cannot acknowledge the push command (ConPTY does
     // this); ordinary terminals still require a successful negotiated push.
     let allow_bare_kitty = guard.keyboard_enhancement_pushed
-        || std::env::var("RIDGE_TUI_KITTY").ok().as_deref() == Some("1");
+        || std::env::var("RIDGECODE_TUI_KITTY").ok().as_deref() == Some("1");
     tui_trace("terminal.ready");
     let live_cache = LiveOutputCache::default();
     let mut ui = Ui {
@@ -3674,7 +3674,8 @@ pub(super) async fn run(
         ..Ui::default()
     };
     apply_terminal_title(&compose_terminal_title(&ui, "idle"));
-    let commands_fixture = std::env::var("RIDGE_TUI_FIXTURE").ok().as_deref() == Some("commands");
+    let commands_fixture =
+        std::env::var("RIDGECODE_TUI_FIXTURE").ok().as_deref() == Some("commands");
     if commands_fixture {
         ui.model_catalog = Some(vec![
             (
@@ -3711,7 +3712,7 @@ pub(super) async fn run(
     // 统一提交点(iter-33):键入的新提交 or 队首,非 busy 时于主环顶消费(起任务/跑命令),消除重复。
     // Opt-in no-network fixture starts one durable task before the first draw;
     // the real input path remains unchanged and production never auto-submits.
-    let pending_submit: Option<String> = (std::env::var("RIDGE_TUI_FIXTURE").ok().as_deref()
+    let pending_submit: Option<String> = (std::env::var("RIDGECODE_TUI_FIXTURE").ok().as_deref()
         == Some("busy"))
     .then(|| "fixture busy task".to_string());
 
@@ -3752,7 +3753,7 @@ pub(super) async fn run(
         })
     });
 
-    // 诊断开关:env `RIDGE_KEYLOG` **或** 标记文件 `~/.ridge/keylog.on` 任一存在即开(标记文件防呆:
+    // 诊断开关:env `RIDGECODE_KEYLOG` **或** 标记文件 `~/.ridge/keylog.on` 任一存在即开(标记文件防呆:
     // 免 env 未被子进程继承之坑)。日志写**绝对路径** `~/.ridge/keylog.txt`(不依赖 cwd,便于定位)。
     // 供排查「某键(如空格)按了没反应」—— 看它被投递成什么 KeyCode/kind/modifiers,还是根本没到进程。
     // 「已按下集」:去重 Windows 每键的 Press+Release,并识别输入法「仅 Release」的悬空字符注入。

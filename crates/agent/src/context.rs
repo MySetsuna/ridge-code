@@ -1,4 +1,4 @@
-use crate::state::{AgentState, EXPLORE_NUDGE_AFTER, MAX_DISPATCH_BATCHES};
+use crate::state::{AgentState, ToolResultStatus, EXPLORE_NUDGE_AFTER, MAX_DISPATCH_BATCHES};
 use provider::{repair_tool_history, Message, Role};
 
 /// 把当前状态铺成给 provider 的消息序列:system(含注入的技能)+ **真实多轮 history**
@@ -91,6 +91,13 @@ pub(crate) fn context_rotted(s: &AgentState) -> bool {
 /// 体量 O(去重文件数 + 一条报错 + 可选一行 explore nudge),**不随步数膨胀**。
 pub(crate) fn durable_state_block(s: &AgentState) -> Option<String> {
     let explore_nudge = s.explore_streak >= EXPLORE_NUDGE_AFTER;
+    let typed_tool_fact = s.last_tool_result.as_ref().is_some_and(|result| {
+        !result.status.is_success()
+            || result.effect.is_edit()
+            || result.output_truncated
+            || result.read_offset.is_some()
+            || result.match_count.is_some()
+    });
     if s.modified_files.is_empty()
         && s.last_error.is_none()
         && s.issues.is_empty()
@@ -100,6 +107,8 @@ pub(crate) fn durable_state_block(s: &AgentState) -> Option<String> {
         && s.todos.is_empty()
         && s.last_read_paths.is_empty()
         && s.live_shell_jobs.is_empty()
+        && s.task_contract.is_none()
+        && !typed_tool_fact
     {
         return None;
     }
@@ -117,6 +126,68 @@ pub(crate) fn durable_state_block(s: &AgentState) -> Option<String> {
             .map(|todo| format!("[{}] {}", todo.status, todo.content))
             .collect();
         b.push_str(&format!("todos: {}\n", items.join("; ")));
+    }
+    if let Some(contract) = &s.task_contract {
+        let objective: String = contract.objective.chars().take(240).collect();
+        let requirements = contract
+            .requirements
+            .iter()
+            .map(|requirement| format!("{}={}", requirement.id, requirement.status.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        b.push_str(&format!(
+            "task_contract: objective={objective:?}; requirements: {requirements}; revision={}\n",
+            s.workspace_revision
+        ));
+        if s.contract_completion_blocked() {
+            b.push_str(
+                "completion: blocked until every requirement is satisfied with a successful current-revision evidence_call_id. Use requirement_update only after the referenced tool result exists.\n",
+            );
+        }
+        b.push_str(&format!(
+            "evidence_ledger: {} real tool result(s) retained\n",
+            s.evidence_ledger.len()
+        ));
+    }
+    if let Some(result) = &s.last_tool_result {
+        if typed_tool_fact {
+            let exit = result
+                .exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "none".to_string());
+            let paths = if result.changed_paths.is_empty() {
+                "none".to_string()
+            } else {
+                result.changed_paths.join(", ")
+            };
+            b.push_str(&format!(
+                "last_tool_result: tool={} status={:?} exit_code={} retryable={} changed_paths={} revision={}\n",
+                result.tool,
+                result.status,
+                exit,
+                result.retryable,
+                paths,
+                result.workspace_revision
+            ));
+            if result.read_offset.is_some()
+                || result.read_limit.is_some()
+                || result.match_count.is_some()
+                || result.output_truncated
+            {
+                b.push_str(&format!(
+                    "aci: read_offset={:?} read_limit={:?} match_count={:?} output_truncated={}\n",
+                    result.read_offset,
+                    result.read_limit,
+                    result.match_count,
+                    result.output_truncated
+                ));
+            }
+            if let Some(recovery) = tool_recovery_instruction(result.status, result.retryable) {
+                b.push_str("tool_recovery: ");
+                b.push_str(recovery);
+                b.push('\n');
+            }
+        }
     }
     if !s.last_read_paths.is_empty() {
         b.push_str(&format!("located: {}\n", s.last_read_paths.join(", ")));
@@ -161,6 +232,26 @@ pub(crate) fn durable_state_block(s: &AgentState) -> Option<String> {
     Some(b)
 }
 
+/// Turns a typed result into a small, deterministic recovery boundary. This is
+/// deliberately advisory to the model: auto-retrying arbitrary side effects
+/// would be unsafe, while omitting the distinction makes a transient failure
+/// indistinguishable from a blocked or permanently bad call.
+fn tool_recovery_instruction(status: ToolResultStatus, retryable: bool) -> Option<&'static str> {
+    match status {
+        ToolResultStatus::Success => None,
+        ToolResultStatus::Running => Some("poll the existing job; do not restart the command"),
+        ToolResultStatus::Blocked => {
+            Some("do not repeat the blocked call; choose a permitted alternative or report the blocker")
+        }
+        ToolResultStatus::Error if retryable => Some(
+            "inspect the concrete failure, then retry only an idempotent call once or take the smallest corrective action",
+        ),
+        ToolResultStatus::Error => Some(
+            "do not repeat this non-retryable call unchanged; correct its arguments or choose another action",
+        ),
+    }
+}
+
 /// 上下文压缩(`/compact` + 自动,DoD②):历史太长时,**保全早期区的每一条 user 消息**(= 用户历次
 /// 指令/意图)+ 一条摘要标记 + **最近 `keep` 条**,其余早期 assistant/tool 噪声压掉。
 /// 防长会话「上下文腐烂」,更防「**意图漂失**」—— 多轮下用户中段的澄清/纠偏(如「不要 MD 要真页面」)
@@ -199,8 +290,8 @@ mod tests {
     };
     use crate::brain::{tool_output_failed, tool_output_ok};
     use crate::exec::is_error_observation;
-    use crate::state::{AgentState, Todo, EXPLORE_NUDGE_AFTER};
-    use provider::{Message, Role};
+    use crate::state::{AgentState, Todo, ToolResultStatus, ToolResultV1, EXPLORE_NUDGE_AFTER};
+    use provider::{Message, Role, ToolEffect};
 
     /// 上下文腐烂判定:小历史不腐烂;单条超硬上限的巨消息(压不掉)→ 腐烂。
     #[test]
@@ -225,6 +316,81 @@ mod tests {
             ..Default::default()
         };
         assert!(context_rotted(&rot), "单条超硬上限的巨消息应判腐烂");
+    }
+
+    #[test]
+    fn durable_state_projects_failed_typed_result_without_raw_observation() {
+        let state = AgentState {
+            last_tool_result: Some(ToolResultV1 {
+                schema_version: 1,
+                call_id: "build-1".into(),
+                tool: "run_shell".into(),
+                effect: ToolEffect::Verify,
+                status: ToolResultStatus::Error,
+                exit_code: Some(1),
+                retryable: true,
+                changed_paths: Vec::new(),
+                output_truncated: false,
+                read_offset: None,
+                read_limit: None,
+                match_count: None,
+                workspace_revision: 3,
+                summary: "secret compiler output must not be projected".into(),
+            }),
+            ..AgentState::new("fix build")
+        };
+        let block = durable_state_block(&state).expect("failed typed result is durable");
+        assert!(block.contains("tool=run_shell status=Error exit_code=1 retryable=true"));
+        assert!(block.contains("retry only an idempotent call once"));
+        assert!(block.contains("revision=3"));
+        assert!(!block.contains("secret compiler output"));
+    }
+
+    #[test]
+    fn durable_state_projects_bounded_read_window_and_search_count() {
+        let state = AgentState {
+            last_tool_result: Some(ToolResultV1 {
+                schema_version: 1,
+                call_id: "read-1".into(),
+                tool: "read_file".into(),
+                effect: ToolEffect::Explore,
+                status: ToolResultStatus::Success,
+                exit_code: None,
+                retryable: false,
+                changed_paths: Vec::new(),
+                output_truncated: true,
+                read_offset: Some(401),
+                read_limit: Some(80),
+                match_count: None,
+                workspace_revision: 0,
+                summary: "src/lib.rs".into(),
+            }),
+            ..AgentState::new("inspect")
+        };
+        let block = durable_state_block(&state).expect("rich read facts are durable");
+        assert!(block.contains("read_offset=Some(401)"), "{block}");
+        assert!(block.contains("read_limit=Some(80)"), "{block}");
+        assert!(block.contains("output_truncated=true"), "{block}");
+    }
+
+    #[test]
+    fn typed_tool_recovery_distinguishes_running_blocked_and_permanent_errors() {
+        assert_eq!(
+            super::tool_recovery_instruction(ToolResultStatus::Running, false),
+            Some("poll the existing job; do not restart the command")
+        );
+        assert!(
+            super::tool_recovery_instruction(ToolResultStatus::Blocked, false)
+                .is_some_and(|text| text.contains("do not repeat"))
+        );
+        assert!(
+            super::tool_recovery_instruction(ToolResultStatus::Error, false)
+                .is_some_and(|text| text.contains("non-retryable"))
+        );
+        assert_eq!(
+            super::tool_recovery_instruction(ToolResultStatus::Success, false),
+            None
+        );
     }
 
     /// 巨型工具输出确定性截断:超上限 → head+tail 预览;不误伤常规输出;保 verify/durable 判据信号。

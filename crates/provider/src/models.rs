@@ -95,7 +95,7 @@ pub async fn fetch_chatgpt_models(
     let account_id = account_id.ok_or(
         "ChatGPT OAuth token has no chatgpt_account_id; run ridgecode login --codex again",
     )?;
-    let client_version = std::env::var("RIDGE_CODEX_CLIENT_VERSION")
+    let client_version = std::env::var("RIDGECODE_CODEX_CLIENT_VERSION")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_CHATGPT_CLIENT_VERSION.to_string());

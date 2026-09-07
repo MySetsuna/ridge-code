@@ -720,7 +720,7 @@ async fn openai_provider_sends_bearer_auth_and_correct_url() {
 }
 
 #[tokio::test]
-async fn volc_provider_retry_disables_thinking_without_affecting_other_endpoints() {
+async fn volc_plan_openai_compatible_retry_disables_thinking_without_affecting_other_endpoints() {
     let reply = json!({"choices":[{"message":{"content":"ok"}}]});
     let retry_request = CompletionRequest {
         messages: vec![
@@ -738,8 +738,8 @@ async fn volc_provider_retry_disables_thinking_without_affecting_other_endpoints
     };
     let volc_http = Arc::new(CapturingHttp::new(reply.clone()));
     OpenAiProvider::new(
-        "https://ark.cn-beijing.volces.com/api/coding/v3",
-        "deepseek-v4-flash",
+        "https://ark.cn-beijing.volces.com/api/plan/v3",
+        "glm-5.3",
         "key",
     )
     .with_http(volc_http.clone())
@@ -830,6 +830,7 @@ async fn chatgpt_provider_uses_codex_responses_wire() {
         .any(|(k, v)| k.eq_ignore_ascii_case("originator") && v == "codex_cli_rs"));
     assert_eq!(seen.body["model"], "gpt-5");
     assert_eq!(seen.body["reasoning"]["effort"], "high");
+    assert_eq!(seen.body["parallel_tool_calls"], false);
     assert_eq!(seen.body["instructions"], "be concise");
     assert!(seen.body.get("messages").is_none());
     assert_eq!(seen.body["input"][0]["type"], "message");
@@ -955,6 +956,50 @@ fn responses_stream_accumulator_handles_text_reasoning_tools_usage_and_errors() 
         .to_string()
         .contains("cutoff"));
     responses::accumulate_stream(&mut failed, &json!({"type":"unknown"}), &|_| {});
+}
+
+#[test]
+fn responses_stream_preserves_multiple_tool_call_order() {
+    let mut acc = responses::StreamAcc::default();
+    for (call_id, item_id, name) in [
+        ("first", "item-first", "read_file"),
+        ("second", "item-second", "run_shell"),
+    ] {
+        responses::accumulate_stream(
+            &mut acc,
+            &json!({
+                "type": "response.function_call_arguments.delta",
+                "call_id": call_id,
+                "item_id": item_id,
+                "delta": "{}"
+            }),
+            &|_| {},
+        );
+        responses::accumulate_stream(
+            &mut acc,
+            &json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": item_id,
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": "{}"
+                }
+            }),
+            &|_| {},
+        );
+    }
+
+    let completion = acc.into_completion();
+    assert_eq!(
+        completion
+            .tool_calls
+            .iter()
+            .map(|call| (call.id.as_str(), call.name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("first", "read_file"), ("second", "run_shell")]
+    );
 }
 
 #[tokio::test]

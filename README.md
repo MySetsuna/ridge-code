@@ -39,16 +39,16 @@ ridgecode --version
 command -v ridgecode
 ~~~
 
-安装器首次运行会生成 `~/.ridge/config.json`（Windows 为 `%USERPROFILE%\.ridge\config.json`）与 `config.example.json`；填入 API Key 或设置 `RIDGE_API_KEY` 后即可启动真实模型。安装完成后若当前 shell 尚未刷新 PATH，请新开终端。
+安装器首次运行会生成 `~/.ridge/config.json`（Windows 为 `%USERPROFILE%\.ridge\config.json`）与 `config.example.json`；填入 API Key 或设置 `RIDGECODE_API_KEY` 后即可启动真实模型。安装完成后若当前 shell 尚未刷新 PATH，请新开终端。
 
 首次启动示例：
 
 ~~~powershell
-$env:RIDGE_API_KEY = "your-key"
+$env:RIDGECODE_API_KEY = "your-key"
 ridgecode
 ~~~
 
-Linux / macOS 将 `$env:RIDGE_API_KEY` 改为 `export RIDGE_API_KEY="your-key"`。安装器支持 Windows x86_64、Linux x86_64/ARM64、macOS Intel/Apple Silicon；Windows ARM64 可改用 WSL 或从源码构建。企业或审计环境可先下载 `scripts/install.ps1` / `scripts/install.sh` 检查内容，再用本地脚本执行；安装器也支持 `-Dir`、`--dir` 自定义目录。
+Linux / macOS 将 `$env:RIDGECODE_API_KEY` 改为 `export RIDGECODE_API_KEY="your-key"`。安装器支持 Windows x86_64、Linux x86_64/ARM64、macOS Intel/Apple Silicon；Windows ARM64 可改用 WSL 或从源码构建。企业或审计环境可先下载 `scripts/install.ps1` / `scripts/install.sh` 检查内容，再用本地脚本执行；安装器也支持 `-Dir`、`--dir` 自定义目录。
 
 升级时重复执行对应平台的最新版安装命令即可；安装器会覆盖旧二进制，不改已有 `~/.ridge/config.json`。卸载仅需删除安装目录中的二进制（配置默认保留）：Windows 删除 `%LOCALAPPDATA%\Programs\ridgecode\ridgecode.exe`，Linux / macOS 删除 `~/.local/bin/ridgecode`。
 
@@ -98,6 +98,57 @@ npm run spectree:check
 均落入至少一个 `code_targets`/`test_targets`；`spectree:export` 只重建投影，
 不把 Obsidian 反向当作规范源。
 
+## 外部评测与 SWE-bench
+
+`ridgecode run` 是隔离的机器接口：它只输出 JSON/JSONL，且 `approved` 只是
+RidgeCode 的内部诊断信号。真实 benchmark 应在 agent 结束后运行独立 verifier；
+`ridgecode-eval external` 的成功率只认 verifier 退出码。
+
+~~~powershell
+ridgecode-eval external `
+  --cases .\corpus\cases.json `
+  --corpus-root .\corpus `
+  --ridgecode .\target\release\ridgecode.exe `
+  --max-turns 12 --timeout-ms 1200000 --fail-on-unverified
+~~~
+
+SWE-bench 使用官方 prediction JSONL 合同，而不是 RidgeCode 的 `approved`。先把
+dataset JSONL 中每个 `instance_id` 对应的仓库检出到
+`<workspaces-root>/<instance_id>` 的基线 revision；输入行至少包含
+`instance_id` 与 `problem_statement`，上游其余字段会被忽略。导出命令只收集
+`git diff --binary`，不会运行或模拟 SWE-bench 测试：
+
+~~~powershell
+ridgecode-eval swebench-export `
+  --instances .\swebench-verified.jsonl `
+  --workspaces-root .\swe-workspaces `
+  --ridgecode .\target\release\ridgecode.exe `
+  --model-name ridgecode/glm-5.3 `
+  --predictions predictions.jsonl `
+  --max-turns 12 --timeout-ms 1200000
+~~~
+
+`predictions.jsonl` 位于 `workspaces-root` 内，并且每行严格为
+`instance_id`、`model_name_or_path`、`model_patch`。只有随后运行官方 harness
+才会产生 resolved 率，例如：
+
+~~~bash
+swebench eval verified -p /absolute/path/to/swe-workspaces/predictions.jsonl --run-id ridgecode-glm53-001 -j 1
+~~~
+
+官方 harness 使用 Docker 并按 `run_id + instance_id` 缓存结果；更换 patch 后请使用
+新的 run id。建议先用一两个已预置实例和 `--limit 2` 验证工作区、镜像和磁盘配额，再扩展到完整集。
+
+官方 run 完成后，可只读导入同一 run/model 目录下的 `report.json` 并比较两个模型或
+预算配置。此处的 `resolved` 完全来自官方 harness，不会读取 RidgeCode trace：
+
+~~~powershell
+ridgecode-eval swebench-score --reports-root .\logs\evaluation\run-a\ridgecode__glm-5.3
+ridgecode-eval swebench-compare `
+  --baseline-reports .\logs\evaluation\run-a\baseline-model `
+  --candidate-reports .\logs\evaluation\run-b\ridgecode__glm-5.3
+~~~
+
 ## 命令行用法
 
 ~~~text
@@ -116,7 +167,7 @@ ridgecode -V / --version               显示版本
 ridgecode login ...                    接入内置 provider 或 OAuth 订阅
 ~~~
 
---every 接受 30s、5m、1h 或不带单位的秒数，只用于带任务文本的一次性模式。--read-only 也可用 --readonly；环境变量 RIDGE_READ_ONLY=1 与 RIDGE_SKIP_PERMISSIONS=1 分别提供对应默认值。
+--every 接受 30s、5m、1h 或不带单位的秒数，只用于带任务文本的一次性模式。--read-only 也可用 --readonly；环境变量 RIDGECODE_READ_ONLY=1 与 RIDGECODE_SKIP_PERMISSIONS=1 分别提供对应默认值。
 
 管道或 CI 中，stdin 每行作为一个独立任务串行执行，不启用 TUI 和斜杠命令：
 
@@ -126,7 +177,7 @@ printf "检查编译\n检查测试\n" | ridgecode --read-only
 
 ## Goal 长任务收敛
 
-goal 是本地持久化的单目标生命周期；模型自述不会自动把目标标记为完成。状态文件默认写入 .ridge/goal.json，可用 RIDGE_GOAL_FILE 覆盖。
+goal 是本地持久化的单目标生命周期；模型自述不会自动把目标标记为完成。状态文件默认写入 .ridge/goal.json，可用 RIDGECODE_GOAL_FILE 覆盖。
 
 ~~~bash
 ridgecode goal create "ship stable release"
@@ -140,7 +191,7 @@ ridgecode goal status
 
 状态包含 active、blocked、completed、cancelled、phase、evidence、failure、next、running、revision；每次更新先写临时文件并原子替换，重启后可直接执行 goal status 回读。TUI 内使用 /goal、/goal create ...、/goal status 等同一组命令；/goal help 查看完整语法。
 
-外部调用有界：shell 默认 RIDGE_SHELL_TIMEOUT=180 秒，MCP 工具默认 RIDGE_TOOL_TIMEOUT=180 秒；超时会返回失败观测并显示 waiting/timeout，不再无限停留在调查阶段。
+外部调用有界：shell 默认 RIDGECODE_SHELL_TIMEOUT=180 秒，MCP 工具默认 RIDGECODE_TOOL_TIMEOUT=180 秒；超时会返回失败观测并显示 waiting/timeout，不再无限停留在调查阶段。
 
 ## Provider 与登录
 
@@ -149,10 +200,10 @@ ridgecode goal status
 最直接的方式是环境变量：
 
 ~~~bash
-export RIDGE_API_KEY="your-key"
-export RIDGE_PROVIDER="openai"
-export RIDGE_MODEL="gpt-4o"
-export RIDGE_BASE_URL="https://api.openai.com/v1"
+export RIDGECODE_API_KEY="your-key"
+export RIDGECODE_PROVIDER="openai"
+export RIDGECODE_MODEL="gpt-4o"
+export RIDGECODE_BASE_URL="https://api.openai.com/v1"
 ridgecode
 ~~~
 
@@ -179,11 +230,11 @@ ridgecode login --codex
 ridgecode login --codex --device-auth
 ~~~
 
-ChatGPT/Codex 启动时会用 OAuth 账号目录校验当前模型；若配置中的 `gpt-5` 不在账号可用列表，自动切换到目录首个可用模型（例如 `gpt-5.6-sol`），避免把公共 API 模型名误发到订阅端点。`RIDGE_PROVIDER` 优先于配置中的 provider，可用它临时选择 `chatgpt-plus`；`/model` 目录加载后切换会持久化默认模型。
+ChatGPT/Codex 启动时会用 OAuth 账号目录校验当前模型；若配置中的 `gpt-5` 不在账号可用列表，自动切换到目录首个可用模型（例如 `gpt-5.6-sol`），避免把公共 API 模型名误发到订阅端点。`RIDGECODE_PROVIDER` 优先于配置中的 provider，可用它临时选择 `chatgpt-plus`；`/model` 目录加载后切换会持久化默认模型。
 
 程序打开授权流程，用户在浏览器完成授权。凭据独立保存到 ~/.ridge/oauth.json；不把 access token 打进日志、配置或任务内容。OAuth 端点、账号权限和 provider wire 仍以实际账号与服务端结果为准。
 
-`ridgecode login --codex` 使用 ChatGPT/Codex 订阅通道：授权成功后保存 `id_token` 与 `chatgpt_account_id`，补全请求发往 `https://chatgpt.com/backend-api/codex/responses`，并带 `ChatGPT-Account-Id`。已有旧版 `oauth.json` 若缺少账号标识，需重新执行 `ridgecode login --codex`；可用 `RIDGE_CHATGPT_BASE_URL` 覆盖后端地址。API Key 路径仍使用 `RIDGE_BASE_URL` 与 OpenAI 兼容的 Chat Completions。
+`ridgecode login --codex` 使用 ChatGPT/Codex 订阅通道：授权成功后保存 `id_token` 与 `chatgpt_account_id`，补全请求发往 `https://chatgpt.com/backend-api/codex/responses`，并带 `ChatGPT-Account-Id`。已有旧版 `oauth.json` 若缺少账号标识，需重新执行 `ridgecode login --codex`；可用 `RIDGECODE_CHATGPT_BASE_URL` 覆盖后端地址。API Key 路径仍使用 `RIDGECODE_BASE_URL` 与 OpenAI 兼容的 Chat Completions。
 
 `ridgecode login --codex --device-auth` 不占用本机回调端口：浏览器打开设备页，输入一次性设备码，程序自动轮询并保存凭据。
 
@@ -242,7 +293,7 @@ ChatGPT/Codex 启动时会用 OAuth 账号目录校验当前模型；若配置�
 
 实时状态位于顶部活动条与底部状态条：阶段、阶段耗时、工具/思考/回答通道、输入/输出 token、速率、上下文占用、effort 与队列深度均分开显示。长回答与工具输出按终端宽度换行；文件读取默认折叠为一个工具块，`Ctrl+O` 展开当前工具详情，详情保留首尾并折叠中段，`Alt+↑/↓` 切换工具，`Alt+PageUp/PageDown` 查看详情，`/history` 搜索已完成工具记录。`Ctrl+I`/`Alt+I` 或 `/inspect` 检视当前 Answer/Reasoning/Tool 混合块，Enter/Space 展开选中块而不打断模型。`Ctrl+R` 或 `/reasoning` 搜索最近 8 段已完成 reasoning，Enter 展开全文，Alt+PageUp/PageDown 滚动详情。支持释放事件的终端中，`Ctrl+Space` 按住将实时视口置为 `HOLD`，松开回到 `FOLLOW`；不支持释放事件的终端保留原有按键切换。任何情况下都不打断模型。`Ctrl+C` 第一次请求接管并保留输入，2 秒内第二次才退出。
 
-启用 `RIDGE_TUI_SNAPSHOT` 时，诊断 JSON 还会记录当前面板、筛选词、选中项、详情展开/滚动位置、可见行数、`state.live_view`（`hold`/`follow`）、`state.reasoning_expanded`、`state.live_focus`（`answer`/`reasoning`/`tool:<id>`）、`state.activity_kind`、有界 `state.activity_history`、`state.live_blocks` 与 `state.reasoning_history` 数量，便于外部终端/测试工具实时判断用户正在查看什么。
+启用 `RIDGECODE_TUI_SNAPSHOT` 时，诊断 JSON 还会记录当前面板、筛选词、选中项、详情展开/滚动位置、可见行数、`state.live_view`（`hold`/`follow`）、`state.reasoning_expanded`、`state.live_focus`（`answer`/`reasoning`/`tool:<id>`）、`state.activity_kind`、有界 `state.activity_history`、`state.live_blocks` 与 `state.reasoning_history` 数量，便于外部终端/测试工具实时判断用户正在查看什么。
 
 ### Windows Terminal 实机验收
 
@@ -261,7 +312,7 @@ ChatGPT/Codex 启动时会用 OAuth 账号目录校验当前模型；若配置�
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows-pty-e2e.ps1
 ~~~
 
-脚本使用独立临时 `RIDGE_CONFIG`，以仅供诊断的 `RIDGE_FORCE_TUI=1` 进入 TUI，直接拉起 `target\debug\ridgecode.exe`；向 ConPTY 写入 `/help`、Enter、两次 Ctrl+C，并输出 JSON 验收摘要。它不读取或改写用户配置、Cookie、Chrome 状态。默认模式验证首帧、输入/输出管道与双 Ctrl+C 退出；忙态夹具可再验证真实队列行为：
+脚本使用独立临时 `RIDGECODE_CONFIG`，以仅供诊断的 `RIDGECODE_FORCE_TUI=1` 进入 TUI，直接拉起 `target\debug\ridgecode.exe`；向 ConPTY 写入 `/help`、Enter、两次 Ctrl+C，并输出 JSON 验收摘要。它不读取或改写用户配置、Cookie、Chrome 状态。默认模式验证首帧、输入/输出管道与双 Ctrl+C 退出；忙态夹具可再验证真实队列行为：
 
 ~~~powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows-pty-e2e.ps1 -BusyFixture -KeepDiagnostics
@@ -275,16 +326,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows-pty-e2e.ps
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows-pty-e2e.ps1 -InputFixture -KeepDiagnostics
 ~~~
 
-该夹具逐段发送并等待快照确认：`a b` → BS 后 `a ` → 补回 `b` → DEL 后 `a ` → 清理为 `a` → TAB → Shift-Tab → 含 CSI/OSC 的原子 bracketed paste 后 `axyz`。Tab、Shift-Tab、paste 与最终独立物理 LF 各有独立 keylog 边界；首任务完成后，再于同一次 ConPTY 写入发送 bracketed paste + CRLF，keylog 必须恰有一个 Paste、一个 Enter，输入框为空且第二任务已进入 busy。结果必须含 `input_backend=raw-vt` 及 `input_backend_reason`，故最终缓冲不再反推此前动作皆成功。`InputFixture` 显式设置 `RIDGE_TUI_VT_INPUT=1`，不设置 `RIDGE_TUI_UNWRAPPED_BRIDGE=1`，也不注入或断言 `axyzraw\n\ttail`。Parser 识别完整 bracketed envelope 后将正文交给现有 `sanitize_paste`；未知/不完整 VT 序列有界回放，不以事件速度猜测粘贴。每次调用使用 GUID 隔离的临时 profile/config，输入正文只在夹具显式设置的 `RIDGE_TUI_INPUT_DIAGNOSTICS=1` 快照中出现。所有 PTY 模式默认受 `-MaxOutputBytes 4194304`、`-RenderP95BudgetUs 16000` 与 `-RenderMaxBudgetUs 50000` 约束；输出超限、draw-render 样本缺失/截断或延迟越界均失败。draw 闸不含快照序列化/写盘与事件循环延迟。
+该夹具逐段发送并等待快照确认：`a b` → BS 后 `a ` → 补回 `b` → DEL 后 `a ` → 清理为 `a` → TAB → Shift-Tab → 含 CSI/OSC 的原子 bracketed paste 后 `axyz`。Tab、Shift-Tab、paste 与最终独立物理 LF 各有独立 keylog 边界；首任务完成后，再于同一次 ConPTY 写入发送 bracketed paste + CRLF，keylog 必须恰有一个 Paste、一个 Enter，输入框为空且第二任务已进入 busy。结果必须含 `input_backend=raw-vt` 及 `input_backend_reason`，故最终缓冲不再反推此前动作皆成功。`InputFixture` 显式设置 `RIDGECODE_TUI_VT_INPUT=1`，不设置 `RIDGECODE_TUI_UNWRAPPED_BRIDGE=1`，也不注入或断言 `axyzraw\n\ttail`。Parser 识别完整 bracketed envelope 后将正文交给现有 `sanitize_paste`；未知/不完整 VT 序列有界回放，不以事件速度猜测粘贴。每次调用使用 GUID 隔离的临时 profile/config，输入正文只在夹具显式设置的 `RIDGECODE_TUI_INPUT_DIAGNOSTICS=1` 快照中出现。所有 PTY 模式默认受 `-MaxOutputBytes 4194304`、`-RenderP95BudgetUs 16000` 与 `-RenderMaxBudgetUs 50000` 约束；输出超限、draw-render 样本缺失/截断或延迟越界均失败。draw 闸不含快照序列化/写盘与事件循环延迟。
 
 若 Enter/Tab 在某个终端或 IDE PTY 中失真，可在无法进入 TUI 时运行
 `ridgecode terminal doctor`，或在 TUI 内运行 `/doctor`。两者共用同一终端能力策略：
-Windows 默认选择 raw-vt（`RIDGE_TUI_VT_INPUT` 未设或 `auto`）；`1` 强制 raw-vt，`0` 强制 Crossterm，激活失败报告 `crossterm` 及原因；
+Windows 默认选择 raw-vt（`RIDGECODE_TUI_VT_INPUT` 未设或 `auto`）；`1` 强制 raw-vt，`0` 强制 Crossterm，激活失败报告 `crossterm` 及原因；
 两者仅报告白名单环境事实、桥接/复用器识别、Kitty keyboard/输入 backend 及安全回退建议，
 不会输出任意环境变量或密钥。
 PTY 验收的鼠标证据按 backend 分流：raw-vt 必须在完整字节流中出现 VT mouse disable；Crossterm/ConDrv 可能因输出句柄未开 VTP 而不发 ANSI disable，改由 native host-mode 清除 `ENABLE_MOUSE_INPUT`，且验收仍要求无 VT mouse enable。夹具不强行向 classic console 写 ANSI。
 终端名称或 `VTE_VERSION` 仅作识别，默认不自动打开 Kitty keyboard；确认 PTY
-逐字节保留协议后，才显式设置 `RIDGE_TUI_KITTY=1`，否则使用
+逐字节保留协议后，才显式设置 `RIDGECODE_TUI_KITTY=1`，否则使用
 `Alt+Enter/Ctrl+J` 换行回退。
 
 需验证无网络完成态的完整收束链路，可使用 `-CompletionFixture`（与 `-BusyFixture` 互斥）；它可与 `-ResizeProbe` 组合：
@@ -306,7 +357,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows-pty-e2e.ps
 若终端宿主无法读出字符画面，可显式开启应用帧快照（默认关闭，不产生文件 I/O）：
 
 ~~~powershell
-$env:RIDGE_TUI_SNAPSHOT = "$pwd\ridgecode-frame.json"
+$env:RIDGECODE_TUI_SNAPSHOT = "$pwd\ridgecode-frame.json"
 .\target\debug\ridgecode.exe
 ~~~
 
@@ -361,7 +412,7 @@ $env:RIDGE_TUI_SNAPSHOT = "$pwd\ridgecode-frame.json"
 
 ## 配置
 
-默认配置路径是 ~/.ridge/config.json；RIDGE_CONFIG 可覆盖。安装器首次运行会生成配置骨架与 config.example.json。最小真实配置：
+默认配置路径是 ~/.ridge/config.json；RIDGECODE_CONFIG 可覆盖。安装器首次运行会生成配置骨架与 config.example.json。最小真实配置：
 
 ~~~json
 {
@@ -375,7 +426,7 @@ $env:RIDGE_TUI_SNAPSHOT = "$pwd\ridgecode-frame.json"
 }
 ~~~
 
-密钥推荐只放环境变量：RIDGE_API_KEY 或 provider 档案中的 key_env。顶层 api_key 和档案 api_key 也能工作，但会把明文留在配置文件；/provider add 不会序列化明文 key。
+密钥推荐只放环境变量：RIDGECODE_API_KEY 或 provider 档案中的 key_env。顶层 api_key 和档案 api_key 也能工作，但会把明文留在配置文件；/provider add 不会序列化明文 key。
 
 ### 顶层字段
 
@@ -401,7 +452,7 @@ $env:RIDGE_TUI_SNAPSHOT = "$pwd\ridgecode-frame.json"
 
 /config set 允许持久化：provider、model、base_url、budget_tokens、skills_dir、skip_danger、status_bar、allow_jailbreak、proxy。结构化字段（如 mcp、providers、hooks）请直接编辑 JSON。
 
-代理优先级为 `RIDGE_PROXY` > 配置项 `proxy` > 通用 `HTTP_PROXY`/`HTTPS_PROXY`；需临时覆盖配置时用 `RIDGE_PROXY`。
+代理优先级为 `RIDGECODE_PROXY` > 配置项 `proxy` > 通用 `HTTP_PROXY`/`HTTPS_PROXY`；需临时覆盖配置时用 `RIDGECODE_PROXY`。
 
 ### Provider 档案
 
@@ -440,7 +491,7 @@ $env:RIDGE_TUI_SNAPSHOT = "$pwd\ridgecode-frame.json"
 }
 ~~~
 
-每个 server 通过 stdio 启动、初始化并列出工具；工具暴露为 <server>__<tool>。单个 server 启动或握手失败只跳过该 server，不阻塞其余工具。兼容旧式单 server 环境变量：RIDGE_MCP_CMD 与可选的 RIDGE_MCP_NAME。
+每个 server 通过 stdio 启动、初始化并列出工具；工具暴露为 <server>__<tool>。单个 server 启动或握手失败只跳过该 server，不阻塞其余工具。兼容旧式单 server 环境变量：RIDGECODE_MCP_CMD 与可选的 RIDGECODE_MCP_NAME。
 
 `/mcp` 还会只读列出宿主 `CODEX_HOME/config.toml` 中的 `mcp_servers`；这些宿主条目标记为 `host configured`，不会由 RidgeCode 隐式启动。RidgeCode 自己的 `~/.ridge/config.json` MCP 仍按配置启动并显示 configured/started/initialized/tools listed/failed 生命周期。
 
@@ -454,7 +505,7 @@ Ridge 桌面协作总线可直接接入已安装的 `ridge-mcp` companion；它�
 }
 ~~~
 
-启动后 `/mcp` 查看连接，`/tools` 查看 `ridge__<tool>`；RidgeCode 只把它当 MCP 工具/资源边界，Agent-to-agent 的 `AgentEnvelope` 协作协议仍由 `crates/agent/src/communication.rs` 独立负责。Windows 若 companion 不在 PATH，将 `cmd` 改为 `ridge-mcp.exe` 的绝对路径。
+启动后 `/mcp` 查看连接，`/tools` 查看 `RIDGECODE__<tool>`；RidgeCode 只把它当 MCP 工具/资源边界，Agent-to-agent 的 `AgentEnvelope` 协作协议仍由 `crates/agent/src/communication.rs` 独立负责。Windows 若 companion 不在 PATH，将 `cmd` 改为 `ridge-mcp.exe` 的绝对路径。
 
 ### Agent-to-agent（A2A）
 
@@ -472,7 +523,7 @@ ridgecode a2a call --peer ridgecode --peer-arg a2a --peer-arg serve --peer-arg -
 ridgecode a2a smoke
 ~~~
 
-`serve` 执行握手、能力协商、只读/工具授权、上下文限制、关联 ID、超时与取消，并返回结构化 `AgentResponse`/`AgentError`。握手完整 send/recv 阶段限 15 秒，静默 peer 返回 `Timeout`，不会占用 300 秒任务执行窗。配置 `RIDGE_A2A_SECRET` 后，stdio transport 自动启用 HMAC、时间窗与 nonce replay 防护；密钥只从环境变量读取，不进入日志或消息正文。`--fixture` 仅用于无密钥确定性 smoke。
+`serve` 执行握手、能力协商、只读/工具授权、上下文限制、关联 ID、超时与取消，并返回结构化 `AgentResponse`/`AgentError`。握手完整 send/recv 阶段限 15 秒，静默 peer 返回 `Timeout`，不会占用 300 秒任务执行窗。配置 `RIDGECODE_A2A_SECRET` 后，stdio transport 自动启用 HMAC、时间窗与 nonce replay 防护；密钥只从环境变量读取，不进入日志或消息正文。`--fixture` 仅用于无密钥确定性 smoke。
 
 ### Hooks
 
@@ -482,7 +533,7 @@ ridgecode a2a smoke
     {
       "event": "post_tool",
       "matcher": "write_file",
-      "command": "echo formatted $RIDGE_TOOL_ARG"
+      "command": "echo formatted $RIDGECODE_TOOL_ARG"
     },
     {
       "event": "pre_tool",
@@ -495,7 +546,7 @@ ridgecode a2a smoke
 }
 ~~~
 
-Hook 子进程可读取 RIDGE_TOOL 与 RIDGE_TOOL_ARG。pre_tool 的 blocking hook 返回非 0 会拦截工具。
+Hook 子进程可读取 RIDGECODE_TOOL 与 RIDGECODE_TOOL_ARG。pre_tool 的 blocking hook 返回非 0 会拦截工具。
 
 ## 扩展：Skills、Agents 与 Commands
 
@@ -503,13 +554,13 @@ Hook 子进程可读取 RIDGE_TOOL 与 RIDGE_TOOL_ARG。pre_tool 的 blocking ho
 
 把目录放进 `~/.ridge/skills/<name>/SKILL.md`，或放进仓库/当前目录的
 `.ridge/skills`（兼容 `.agents/skills`）。发现优先级为
-`RIDGE_SKILLS_DIR` > `skills_dir` > cwd > repo > `~/.ridge/skills` > 内置；同名只把胜者正文注入 system prompt，冲突会在启动 stderr 显示来源。
+`RIDGECODE_SKILLS_DIR` > `skills_dir` > cwd > repo > `~/.ridge/skills` > 内置；同名只把胜者正文注入 system prompt，冲突会在启动 stderr 显示来源。
 全部 scope 共用最多 256 个候选、每份 128 KiB；最终 Skills + 项目规则块仍受 24 Ki Unicode 字符/6000 估算 token 双限。
 被覆盖的 Skill 仍可用稳定限定命令（如 `/user:name`、`/repo:name`、`/env:name`）显式调用；此轮不提供 hot reload 或 progressive loading。样例见 samples/skills。
 
 ### 只读 sub-agent
 
-内置 fastcontext、explorer、reviewer；用户 agent 放在 ~/.ridge/agents/<name>.md，也可用 RIDGE_AGENTS_DIR 指定目录。flat agents/commands 目录各最多保留路径字典序前 256 份、每份 64 KiB；重复 agent name 由最早路径胜出。全局及项目规则文件各限 128 KiB，超限保留头尾并带 marker。主 agent 可调用 dispatch_agent，子 agent 独立上下文、只读、只返回结论。/agent 查看当前可用列表。
+内置 fastcontext、explorer、reviewer；用户 agent 放在 ~/.ridge/agents/<name>.md，也可用 RIDGECODE_AGENTS_DIR 指定目录。flat agents/commands 目录各最多保留路径字典序前 256 份、每份 64 KiB；重复 agent name 由最早路径胜出。全局及项目规则文件各限 128 KiB，超限保留头尾并带 marker。主 agent 可调用 dispatch_agent，子 agent 独立上下文、只读、只返回结论。/agent 查看当前可用列表。
 
 ### Agent route：按任务选择 provider/model
 
@@ -543,7 +594,7 @@ Hook 子进程可读取 RIDGE_TOOL 与 RIDGE_TOOL_ARG。pre_tool 的 blocking ho
 
 ### 自定义斜杠命令
 
-在 ~/.ridge/commands/<name>.md 写入 prompt 正文，$ARGS 会替换为命令参数；也可由 Skill 暴露同名命令。目录可由 RIDGE_COMMANDS_DIR 或 commands_dir 覆盖。启动后输入 /name args 执行。
+在 ~/.ridge/commands/<name>.md 写入 prompt 正文，$ARGS 会替换为命令参数；也可由 Skill 暴露同名命令。目录可由 RIDGECODE_COMMANDS_DIR 或 commands_dir 覆盖。启动后输入 /name args 执行。
 
 ## 内置工具与安全边界
 
@@ -567,29 +618,29 @@ read_file、search、web_search、fetch_url、todo_write、signal_write 与 disp
 
 | 变量 | 作用 | 默认或备注 |
 |---|---|---|
-| RIDGE_CONFIG | 配置文件路径 | ~/.ridge/config.json |
-| RIDGE_API_KEY | 顶层 API key | 优先于配置 key |
-| RIDGE_PROVIDER / RIDGE_MODEL / RIDGE_BASE_URL | 覆盖顶层 provider 身份 | env 优先于 config |
-| RIDGE_PROXY | 出站代理（http://... 或 socks5h://...） | 也可用 config proxy |
-| RIDGE_AUTH | API key 密钥库路径 | ~/.ridge/auth.json |
-| RIDGE_OAUTH | OAuth 密钥库路径 | ~/.ridge/oauth.json |
-| RIDGE_SESSION | 会话恢复文件 | ~/.ridge/session.json |
-| RIDGE_SKILLS_DIR | Skills 目录 | ~/.ridge/skills |
-| RIDGE_COMMANDS_DIR | 自定义命令目录 | ~/.ridge/commands |
-| RIDGE_AGENTS_DIR | sub-agent 目录 | ~/.ridge/agents |
-| RIDGE_MCP_CMD / RIDGE_MCP_NAME | 兼容旧 MCP 单 server | 优先使用 config mcp 数组 |
-| RIDGE_OUTPUT_ENCODING | 非 UTF-8 文件/命令输出的显式编码标签 | 省略时按 BOM、UTF-8、Windows 系统代码页自动识别；例 `gbk`、`big5`、`shift_jis` |
-| RIDGE_SKIP_PERMISSIONS | 默认跳过普通审批 | 1/true 开启 |
-| RIDGE_READ_ONLY | 默认只读模式 | 1/true 开启 |
-| RIDGE_EXTRACT_SIGNALS | 任务结束后额外抽取跨会话信号 | 默认关闭，避免额外 token |
-| RIDGE_HTTP_TIMEOUT | HTTP 超时秒数 | 默认 180 |
-| RIDGE_SHELL_TIMEOUT | shell/run_argv 超时秒数 | 默认 180；超时返回失败观测 |
-| RIDGE_TOOL_TIMEOUT | MCP 工具调用超时秒数 | 默认 180；超时返回失败观测 |
-| RIDGE_GOAL_FILE | goal 状态文件 | 默认 .ridge/goal.json |
+| RIDGECODE_CONFIG | 配置文件路径 | ~/.ridge/config.json |
+| RIDGECODE_API_KEY | 顶层 API key | 优先于配置 key |
+| RIDGECODE_PROVIDER / RIDGECODE_MODEL / RIDGECODE_BASE_URL | 覆盖顶层 provider 身份 | env 优先于 config |
+| RIDGECODE_PROXY | 出站代理（http://... 或 socks5h://...） | 也可用 config proxy |
+| RIDGECODE_AUTH | API key 密钥库路径 | ~/.ridge/auth.json |
+| RIDGECODE_OAUTH | OAuth 密钥库路径 | ~/.ridge/oauth.json |
+| RIDGECODE_SESSION | 会话恢复文件 | ~/.ridge/session.json |
+| RIDGECODE_SKILLS_DIR | Skills 目录 | ~/.ridge/skills |
+| RIDGECODE_COMMANDS_DIR | 自定义命令目录 | ~/.ridge/commands |
+| RIDGECODE_AGENTS_DIR | sub-agent 目录 | ~/.ridge/agents |
+| RIDGECODE_MCP_CMD / RIDGECODE_MCP_NAME | 兼容旧 MCP 单 server | 优先使用 config mcp 数组 |
+| RIDGECODE_OUTPUT_ENCODING | 非 UTF-8 文件/命令输出的显式编码标签 | 省略时按 BOM、UTF-8、Windows 系统代码页自动识别；例 `gbk`、`big5`、`shift_jis` |
+| RIDGECODE_SKIP_PERMISSIONS | 默认跳过普通审批 | 1/true 开启 |
+| RIDGECODE_READ_ONLY | 默认只读模式 | 1/true 开启 |
+| RIDGECODE_EXTRACT_SIGNALS | 任务结束后额外抽取跨会话信号 | 默认关闭，避免额外 token |
+| RIDGECODE_HTTP_TIMEOUT | HTTP 超时秒数 | 默认 180 |
+| RIDGECODE_SHELL_TIMEOUT | shell/run_argv 超时秒数 | 默认 180；超时返回失败观测 |
+| RIDGECODE_TOOL_TIMEOUT | MCP 工具调用超时秒数 | 默认 180；超时返回失败观测 |
+| RIDGECODE_GOAL_FILE | goal 状态文件 | 默认 .ridge/goal.json |
 | RUST_LOG | tracing 过滤器 | 默认只显示 warn |
-| RIDGE_KEYLOG | TUI 按键诊断 | 输出到 ~/.ridge/keylog.txt |
+| RIDGECODE_KEYLOG | TUI 按键诊断 | 输出到 ~/.ridge/keylog.txt |
 
-Hook 子进程使用的 RIDGE_TOOL、RIDGE_TOOL_ARG 是运行时注入变量，不是启动配置。
+Hook 子进程使用的 RIDGECODE_TOOL、RIDGECODE_TOOL_ARG 是运行时注入变量，不是启动配置。
 
 ## 本地打包与 Release
 
@@ -650,6 +701,13 @@ quality gate; the scan cannot be skipped there. The release workflow blocks on
 the deterministic gates and leaves Sonar to this standalone workflow, because
 its local job requires a self-hosted runner on the same machine as the service;
 GitHub-hosted runners cannot reach localhost.
+
+先运行只读环境检查可快速定位依赖缺口：
+
+~~~powershell
+pwsh -File scripts/quality-preflight.ps1
+~~~
+Unix 环境使用 `bash scripts/quality-preflight.sh`。
 
 ## 引擎 API（最小示例）
 

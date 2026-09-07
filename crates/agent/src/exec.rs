@@ -3,8 +3,12 @@ use crate::guard::{
     run_pre_tool_hooks, sandbox_argv,
 };
 use crate::signals::{signal_create, signal_resolve, SIGNALS_DIR};
-use crate::state::{Patch, Todo};
+use crate::state::{
+    EvidenceRef, Patch, RequirementStatus, RequirementUpdate, TaskContract, Todo, ToolResultStatus,
+    ToolResultV1,
+};
 use provider::{ToolCall, ToolEffect, ToolSpec};
+use sha2::{Digest, Sha256};
 
 /// 内置工具的规格(喂给 LLM 让它按 schema 出结构化 tool_call)。
 pub fn builtin_tool_specs() -> Vec<ToolSpec> {
@@ -24,13 +28,13 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "edit_file".to_string(),
             description: "精准编辑:唯一 old_string→new_string。CRLF 对齐;失败用观察里的锚点再 edit。".to_string(),
-            schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"]}),
+            schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"expected_hash":{"type":"string","description":"可选:最近 read_file 内容的 SHA-256;不匹配则拒绝陈旧编辑"}},"required":["path","old_string","new_string"]}),
             effect: ToolEffect::Edit,
         },
         ToolSpec {
             name: "apply_edits".to_string(),
             description: "**跨文件批量**精准编辑:多处 {path, old_string, new_string} 汇总一份 diff 一次确认、**原子应用**(全成或全不改)。重构/多文件改动用它".to_string(),
-            schema: serde_json::json!({"type":"object","properties":{"edits":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"]}}},"required":["edits"]}),
+            schema: serde_json::json!({"type":"object","properties":{"edits":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"expected_hash":{"type":"string","description":"可选:该文件最近读取内容的 SHA-256"}},"required":["path","old_string","new_string"]}}},"required":["edits"]}),
             effect: ToolEffect::Edit,
         },
         ToolSpec {
@@ -61,6 +65,18 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
             name: "todo_write".to_string(),
             description: "维护任务清单:把计划拆成若干 {content, status}。**多步/复杂任务**开始时列清单、每完成一步更新其状态给用户看进度;简单单步不必用".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"todos":{"type":"array","items":{"type":"object","properties":{"content":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]}},"required":["content","status"]}}},"required":["todos"]}),
+            effect: ToolEffect::Unknown,
+        },
+        ToolSpec {
+            name: "contract_write".to_string(),
+            description: "Record objective + requirements[{id,description}], with optional constraints/deliverables/non_goals, before work.".to_string(),
+            schema: serde_json::json!({"type":"object","properties":{"objective":{"type":"string"},"requirements":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"description":{"type":"string"}},"required":["description"]}},"constraints":{"type":"array","items":{"type":"string"}},"deliverables":{"type":"array","items":{"type":"string"}},"non_goals":{"type":"array","items":{"type":"string"}}},"required":["objective","requirements"]}),
+            effect: ToolEffect::Unknown,
+        },
+        ToolSpec {
+            name: "requirement_update".to_string(),
+            description: "Update requirement statuses with prior evidence_call_ids. Satisfied needs real current success; never invent ids.".to_string(),
+            schema: serde_json::json!({"type":"object","properties":{"requirements":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"status":{"type":"string","enum":["unknown","satisfied","failed","blocked","waived"]},"evidence_call_ids":{"type":"array","items":{"type":"string"}}},"required":["id","status"]}}},"required":["requirements"]}),
             effect: ToolEffect::Unknown,
         },
         ToolSpec {
@@ -139,8 +155,25 @@ pub(crate) fn durable_updates_with_effect(
     effect: ToolEffect,
     observation: &str,
 ) -> Vec<Patch> {
+    durable_updates_with_native_result(
+        call,
+        effect,
+        observation,
+        tool_result_v1(call, effect, observation),
+    )
+}
+
+/// Durable update path for a result produced at an execution boundary. The
+/// caller supplies the typed fields directly; this function must not decode
+/// them from the display observation again.
+pub(crate) fn durable_updates_with_native_result(
+    call: &ToolCall,
+    effect: ToolEffect,
+    observation: &str,
+    typed_result: ToolResultV1,
+) -> Vec<Patch> {
     let mut patches = Vec::new();
-    let failed = is_error_observation(observation);
+    let failed = typed_result.status.is_error();
     if failed {
         let line = observation
             .lines()
@@ -155,9 +188,11 @@ pub(crate) fn durable_updates_with_effect(
     } else {
         Vec::new()
     };
+    let mut advances_revision = false;
     match call.name.as_str() {
         "write_file" | "edit_file" if !failed => {
             if let Some(path) = arg("path") {
+                advances_revision = true;
                 patches.push(Patch::RecordModified(path.to_string()));
                 patches.push(Patch::SetLastError(None));
             }
@@ -165,6 +200,7 @@ pub(crate) fn durable_updates_with_effect(
         "apply_edits" if !failed => {
             let edits = parse_edits(call);
             if !edits.is_empty() {
+                advances_revision = true;
                 patches.extend(edits.into_iter().map(|e| Patch::RecordModified(e.path)));
                 patches.push(Patch::SetLastError(None));
             }
@@ -182,12 +218,14 @@ pub(crate) fn durable_updates_with_effect(
             paths.dedup();
             patches.extend(paths.into_iter().map(Patch::RecordModified));
             if !patches.is_empty() {
+                advances_revision = true;
                 patches.push(Patch::SetLastError(None));
             }
         }
         // An unannotated dynamic tool may still prove a mutation through a
         // bounded structured result. Plain prose never upgrades Unknown.
         _ if !failed && effect == ToolEffect::Unknown && !observed_paths.is_empty() => {
+            advances_revision = true;
             patches.extend(observed_paths.into_iter().map(Patch::RecordModified));
             patches.push(Patch::SetLastError(None));
         }
@@ -197,6 +235,24 @@ pub(crate) fn durable_updates_with_effect(
         }
         _ => {}
     }
+    if advances_revision {
+        patches.insert(0, Patch::AdvanceWorkspaceRevision);
+    }
+    let summary = observation
+        .lines()
+        .next()
+        .unwrap_or(observation)
+        .chars()
+        .take(512)
+        .collect();
+    patches.push(Patch::RecordEvidence(EvidenceRef {
+        call_id: call.id.clone(),
+        tool: call.name.clone(),
+        succeeded: typed_result.status.is_success(),
+        workspace_revision: 0,
+        summary,
+    }));
+    patches.push(Patch::RecordToolResult(typed_result));
     patches
 }
 
@@ -289,6 +345,75 @@ fn argument_paths(call: &ToolCall) -> Vec<String> {
     let mut paths = Vec::new();
     collect_argument_paths(&call.arguments, false, &mut paths);
     paths
+}
+
+fn parse_exit_code(observation: &str) -> Option<i32> {
+    let rest = observation.trim_start().strip_prefix("exit ")?;
+    let code = rest
+        .split_once(':')
+        .map(|(code, _)| code)
+        .unwrap_or(rest)
+        .trim();
+    code.parse().ok()
+}
+
+/// Compatibility projection for every current transport. Built-ins and MCP
+/// may still supply text today, but only this boundary is allowed to decode it
+/// into state. New native transports can construct [`ToolResultV1`] directly.
+pub(crate) fn tool_result_v1(
+    call: &ToolCall,
+    effect: ToolEffect,
+    observation: &str,
+) -> ToolResultV1 {
+    let first = observation
+        .lines()
+        .next()
+        .unwrap_or(observation)
+        .trim_start();
+    let status = if first.starts_with("BLOCKED") || first.starts_with("permission denied") {
+        ToolResultStatus::Blocked
+    } else if parse_running_job_id(observation).is_some() {
+        ToolResultStatus::Running
+    } else if is_error_observation(observation) {
+        ToolResultStatus::Error
+    } else {
+        ToolResultStatus::Success
+    };
+    let exit_code = parse_exit_code(observation);
+    let mut changed_paths = if status.is_success() && effect.is_edit() {
+        argument_paths(call)
+    } else {
+        Vec::new()
+    };
+    if status.is_success() && effect == ToolEffect::Unknown {
+        changed_paths.extend(observation_changed_paths(observation));
+        changed_paths.sort();
+        changed_paths.dedup();
+    }
+    let summary = observation
+        .lines()
+        .next()
+        .unwrap_or(observation)
+        .chars()
+        .take(512)
+        .collect();
+    ToolResultV1 {
+        schema_version: 1,
+        call_id: call.id.clone(),
+        tool: call.name.clone(),
+        effect,
+        status,
+        exit_code,
+        retryable: status == ToolResultStatus::Error
+            && exit_code.is_none_or(|code| matches!(code, 1 | 124 | 429 | 500..=599)),
+        changed_paths,
+        output_truncated: false,
+        read_offset: None,
+        read_limit: None,
+        match_count: None,
+        workspace_revision: 0,
+        summary,
+    }
 }
 
 fn collect_argument_paths(value: &serde_json::Value, path_context: bool, paths: &mut Vec<String>) {
@@ -393,6 +518,178 @@ pub(crate) fn parse_todos(call: &ToolCall) -> Vec<Todo> {
         .collect()
 }
 
+fn bounded_text(value: &str, label: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("{label} cannot be empty"));
+    }
+    if value.chars().count() > 1_000 {
+        return Err(format!("{label} is too long"));
+    }
+    Ok(value.to_string())
+}
+
+fn bounded_text_list(call: &ToolCall, key: &str) -> Result<Vec<String>, String> {
+    let Some(value) = call.arguments.get(key) else {
+        return Ok(Vec::new());
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| format!("{key} must be an array"))?;
+    if array.len() > 32 {
+        return Err(format!("{key} has too many items"));
+    }
+    array
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| format!("{key} items must be strings"))
+                .and_then(|value| bounded_text(value, key))
+        })
+        .collect()
+}
+
+fn valid_requirement_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.chars().count() <= 64
+        && id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+}
+
+/// Parse a bounded task contract. Initial requirements are always `unknown`;
+/// only `requirement_update` can make a completion claim after real evidence.
+pub(crate) fn parse_task_contract(call: &ToolCall) -> Result<TaskContract, String> {
+    let objective = call
+        .arguments
+        .get("objective")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "objective must be a string".to_string())
+        .and_then(|value| bounded_text(value, "objective"))?;
+    let requirements = call
+        .arguments
+        .get("requirements")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "requirements must be an array".to_string())?;
+    if requirements.is_empty() || requirements.len() > 32 {
+        return Err("requirements must contain 1 to 32 items".to_string());
+    }
+    let mut parsed = Vec::with_capacity(requirements.len());
+    for (index, value) in requirements.iter().enumerate() {
+        let object = value
+            .as_object()
+            .ok_or_else(|| "each requirement must be an object".to_string())?;
+        let id = object
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("R{}", index + 1));
+        if !valid_requirement_id(&id)
+            || parsed
+                .iter()
+                .any(|requirement: &crate::state::Requirement| requirement.id == id)
+        {
+            return Err(format!("requirement id `{id}` is invalid or duplicated"));
+        }
+        let description = object
+            .get("description")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| format!("requirement `{id}` needs description"))
+            .and_then(|value| bounded_text(value, "requirement description"))?;
+        parsed.push(crate::state::Requirement {
+            id,
+            description,
+            status: RequirementStatus::Unknown,
+            evidence_call_ids: Vec::new(),
+        });
+    }
+    Ok(TaskContract {
+        objective,
+        requirements: parsed,
+        constraints: bounded_text_list(call, "constraints")?,
+        deliverables: bounded_text_list(call, "deliverables")?,
+        non_goals: bounded_text_list(call, "non_goals")?,
+    })
+}
+
+fn parse_requirement_status(value: &str) -> Option<RequirementStatus> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "unknown" => Some(RequirementStatus::Unknown),
+        "satisfied" => Some(RequirementStatus::Satisfied),
+        "failed" => Some(RequirementStatus::Failed),
+        "blocked" => Some(RequirementStatus::Blocked),
+        "waived" => Some(RequirementStatus::Waived),
+        _ => None,
+    }
+}
+
+/// Parse status updates but deliberately do not trust them yet. The graph
+/// validates ids and evidence references against [`AgentState`]'s ledger.
+pub(crate) fn parse_requirement_updates(call: &ToolCall) -> Result<Vec<RequirementUpdate>, String> {
+    let items = call
+        .arguments
+        .get("requirements")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "requirements must be an array".to_string())?;
+    if items.is_empty() || items.len() > 32 {
+        return Err("requirements must contain 1 to 32 items".to_string());
+    }
+    let mut updates = Vec::with_capacity(items.len());
+    for item in items {
+        let object = item
+            .as_object()
+            .ok_or_else(|| "each requirement update must be an object".to_string())?;
+        let id = object
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|id| valid_requirement_id(id))
+            .ok_or_else(|| "requirement update needs a valid id".to_string())?
+            .to_string();
+        if updates
+            .iter()
+            .any(|update: &RequirementUpdate| update.id == id)
+        {
+            return Err(format!("duplicate requirement update `{id}`"));
+        }
+        let status = object
+            .get("status")
+            .and_then(|value| value.as_str())
+            .and_then(parse_requirement_status)
+            .ok_or_else(|| format!("requirement `{id}` has an invalid status"))?;
+        let evidence_call_ids = object
+            .get("evidence_call_ids")
+            .map(|value| {
+                let values = value
+                    .as_array()
+                    .ok_or_else(|| "evidence_call_ids must be an array".to_string())?;
+                if values.len() > 8 {
+                    return Err("too many evidence_call_ids".to_string());
+                }
+                values
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .ok_or_else(|| "evidence_call_ids must be strings".to_string())
+                            .and_then(|value| bounded_text(value, "evidence call id"))
+                    })
+                    .collect()
+            })
+            .transpose()?
+            .unwrap_or_default();
+        updates.push(RequirementUpdate {
+            id,
+            status,
+            evidence_call_ids,
+        });
+    }
+    Ok(updates)
+}
+
 /// 失败的 run_shell 观察是否该附「Unix 语法撞 PowerShell」纠错提示:
 /// 弱模型惯发 `ls -la`/`grep`/`cat`/`&&`/`~/` 等 bash 语法,撞上 Windows 默认 PowerShell 条条失败、
 /// 空耗回合(半途而废主因之一)。命中 Unix 特征 **且** 用的是 PowerShell/cmd → 给一句可执行的自愈路径。
@@ -432,15 +729,61 @@ fn tool_arg<'a>(call: &'a ToolCall, key: &str) -> &'a str {
         .unwrap_or("")
 }
 
+/// Native result emitted by built-in tools.  Text remains the provider/UI
+/// observation, but the outcome fields are decided at the execution site
+/// rather than parsed from that text later.
+pub(crate) struct ExecutedToolResult {
+    pub observation: String,
+    pub typed: ToolResultV1,
+}
+
 struct ToolResult {
     observation: String,
     run_post_hooks: bool,
+    status: ToolResultStatus,
+    exit_code: Option<i32>,
+    retryable: bool,
+    changed_paths: Vec<String>,
+    output_truncated: bool,
+    read_offset: Option<usize>,
+    read_limit: Option<usize>,
+    match_count: Option<usize>,
 }
 
 fn tool_result(observation: String) -> ToolResult {
     ToolResult {
         observation,
         run_post_hooks: true,
+        status: ToolResultStatus::Success,
+        exit_code: None,
+        retryable: false,
+        changed_paths: Vec::new(),
+        output_truncated: false,
+        read_offset: None,
+        read_limit: None,
+        match_count: None,
+    }
+}
+
+fn changed_result(observation: String, changed_paths: Vec<String>) -> ToolResult {
+    ToolResult {
+        changed_paths,
+        ..tool_result(observation)
+    }
+}
+
+fn error_result(observation: String) -> ToolResult {
+    ToolResult {
+        observation,
+        run_post_hooks: true,
+        status: ToolResultStatus::Error,
+        exit_code: None,
+        retryable: true,
+        changed_paths: Vec::new(),
+        output_truncated: false,
+        read_offset: None,
+        read_limit: None,
+        match_count: None,
     }
 }
 
@@ -448,6 +791,53 @@ fn blocked_result(observation: String) -> ToolResult {
     ToolResult {
         observation,
         run_post_hooks: false,
+        status: ToolResultStatus::Blocked,
+        exit_code: None,
+        retryable: false,
+        changed_paths: Vec::new(),
+        output_truncated: false,
+        read_offset: None,
+        read_limit: None,
+        match_count: None,
+    }
+}
+
+fn running_result(observation: String) -> ToolResult {
+    ToolResult {
+        observation,
+        run_post_hooks: true,
+        status: ToolResultStatus::Running,
+        exit_code: None,
+        retryable: false,
+        changed_paths: Vec::new(),
+        output_truncated: false,
+        read_offset: None,
+        read_limit: None,
+        match_count: None,
+    }
+}
+
+fn finished_shell_result(result: tools::ShellResult, cmd: &str, used_shell: &str) -> ToolResult {
+    let code = result.code;
+    let observation = format_finished_shell(result, cmd, used_shell);
+    if code == 0 {
+        ToolResult {
+            exit_code: Some(code),
+            ..tool_result(observation)
+        }
+    } else {
+        ToolResult {
+            observation,
+            run_post_hooks: true,
+            status: ToolResultStatus::Error,
+            exit_code: Some(code),
+            retryable: matches!(code, 1 | 124 | 429 | 500..=599),
+            changed_paths: Vec::new(),
+            output_truncated: false,
+            read_offset: None,
+            read_limit: None,
+            match_count: None,
+        }
     }
 }
 
@@ -455,23 +845,15 @@ fn execute_shell_tool(call: &ToolCall) -> ToolResult {
     let cancel_job_id = tool_arg(call, "cancel_job_id").trim();
     if !cancel_job_id.is_empty() {
         return match tools::cancel_shell_job(cancel_job_id) {
-            Ok(observation) => tool_result(format_shell_observation(
-                observation,
-                "",
-                tools::default_shell(),
-            )),
-            Err(error) => tool_result(format!("shell error: {error}")),
+            Ok(observation) => format_shell_observation(observation, "", tools::default_shell()),
+            Err(error) => error_result(format!("shell error: {error}")),
         };
     }
     let job_id = tool_arg(call, "job_id").trim();
     if !job_id.is_empty() {
         return match tools::poll_shell_job(job_id) {
-            Ok(observation) => tool_result(format_shell_observation(
-                observation,
-                "",
-                tools::default_shell(),
-            )),
-            Err(error) => tool_result(format!("shell error: {error}")),
+            Ok(observation) => format_shell_observation(observation, "", tools::default_shell()),
+            Err(error) => error_result(format!("shell error: {error}")),
         };
     }
     let cmd = tool_arg(call, "cmd");
@@ -491,8 +873,8 @@ fn execute_shell_tool(call: &ToolCall) -> ToolResult {
             .unwrap_or_default();
         tracing::debug!(sandbox = %sandbox, "run_shell via sandbox");
         return match tools::run_argv(&sandbox_argv(&sandbox, cmd, &cwd)) {
-            Ok(result) => tool_result(format_finished_shell(result, cmd, tools::default_shell())),
-            Err(error) => tool_result(format!("shell error: {error}")),
+            Ok(result) => finished_shell_result(result, cmd, tools::default_shell()),
+            Err(error) => error_result(format!("shell error: {error}")),
         };
     }
     let shell = tool_arg(call, "shell");
@@ -502,8 +884,8 @@ fn execute_shell_tool(call: &ToolCall) -> ToolResult {
         shell
     };
     match tools::run_or_park_shell((!shell.is_empty()).then_some(shell), cmd) {
-        Ok(observation) => tool_result(format_shell_observation(observation, cmd, used)),
-        Err(error) => tool_result(format!("shell error: {error}")),
+        Ok(observation) => format_shell_observation(observation, cmd, used),
+        Err(error) => error_result(format!("shell error: {error}")),
     }
 }
 
@@ -511,19 +893,17 @@ fn format_shell_observation(
     observation: tools::ShellObservation,
     cmd: &str,
     used_shell: &str,
-) -> String {
+) -> ToolResult {
     match observation {
-        tools::ShellObservation::Finished(result) => format_finished_shell(result, cmd, used_shell),
-        tools::ShellObservation::Running(progress) => {
-            format!(
+        tools::ShellObservation::Finished(result) => finished_shell_result(result, cmd, used_shell),
+        tools::ShellObservation::Running(progress) => running_result(format!(
                 "job {} running elapsed={}s\nstdout_tail:\n{}\nstderr_tail:\n{}\nCall run_shell with job_id=\"{}\" to poll. Do not restart this command. A live job blocks completion.",
                 progress.id,
                 progress.elapsed_ms / 1000,
                 tail_text(&progress.stdout, 2000),
                 tail_text(&progress.stderr, 1000),
                 progress.id
-            )
-        }
+            )),
     }
 }
 
@@ -585,8 +965,11 @@ fn execute_write_file_tool(call: &ToolCall) -> ToolResult {
         return blocked_result(message);
     }
     match tools::write_file(path, contents) {
-        Ok(()) => tool_result(format!("wrote {} bytes to {path}", contents.len())),
-        Err(error) => tool_result(format!("write error: {error}")),
+        Ok(()) => changed_result(
+            format!("wrote {} bytes to {path}", contents.len()),
+            vec![path.to_string()],
+        ),
+        Err(error) => error_result(format!("write error: {error}")),
     }
 }
 
@@ -595,14 +978,38 @@ fn execute_edit_file_tool(call: &ToolCall) -> ToolResult {
     if let Err(error) = jail(path) {
         return blocked_result(error);
     }
+    if let Some(expected) = call
+        .arguments
+        .get("expected_hash")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+    {
+        let current = match tools::read_file(path) {
+            Ok(current) => current,
+            Err(error) => return error_result(format!("edit precondition read error: {error}")),
+        };
+        let actual = file_sha256(&current);
+        if !actual.eq_ignore_ascii_case(expected.trim()) {
+            return blocked_result(format!(
+                "BLOCKED (stale edit): expected_hash mismatch for {path}; reread the file before editing"
+            ));
+        }
+    }
     match tools::edit_file(
         path,
         tool_arg(call, "old_string"),
         tool_arg(call, "new_string"),
     ) {
-        Ok(()) => tool_result(format!("edited {path}")),
-        Err(error) => tool_result(format!("edit error: {error}")),
+        Ok(()) => changed_result(format!("edited {path}"), vec![path.to_string()]),
+        Err(error) => error_result(format!("edit error: {error}")),
     }
+}
+
+fn file_sha256(contents: &str) -> String {
+    Sha256::digest(contents.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn execute_apply_edits_tool(call: &ToolCall) -> ToolResult {
@@ -618,10 +1025,61 @@ fn execute_apply_edits_tool(call: &ToolCall) -> ToolResult {
             return blocked_result(message);
         }
     }
-    match tools::apply_edits(&edits) {
-        Ok(count) => tool_result(format!("applied {count} 个文件的批量编辑")),
-        Err(error) => tool_result(format!("apply_edits error: {error}")),
+    if let Some(message) = check_batch_preconditions(call) {
+        return blocked_result(message);
     }
+    match tools::apply_edits(&edits) {
+        Ok(count) => changed_result(
+            format!("applied {count} 个文件的批量编辑"),
+            edits.into_iter().map(|edit| edit.path).collect(),
+        ),
+        Err(error) => error_result(format!("apply_edits error: {error}")),
+    }
+}
+
+fn check_batch_preconditions(call: &ToolCall) -> Option<String> {
+    let mut checks = Vec::new();
+    if let Some(items) = call
+        .arguments
+        .get("edits")
+        .and_then(|value| value.as_array())
+    {
+        for item in items {
+            let path = item
+                .get("path")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let expected = item
+                .get("expected_hash")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("");
+            if !path.is_empty() && !expected.is_empty() {
+                checks.push((path, expected));
+            }
+        }
+    } else if let (Some(path), Some(expected)) = (
+        call.arguments.get("path").and_then(|value| value.as_str()),
+        call.arguments
+            .get("expected_hash")
+            .and_then(|value| value.as_str()),
+    ) {
+        if !path.is_empty() && !expected.trim().is_empty() {
+            checks.push((path, expected));
+        }
+    }
+    for (path, expected) in checks {
+        let current = match tools::read_file(path) {
+            Ok(current) => current,
+            Err(error) => return Some(format!("edit precondition read error: {error}")),
+        };
+        if !file_sha256(&current).eq_ignore_ascii_case(expected.trim()) {
+            return Some(format!(
+                "BLOCKED (stale edit): expected_hash mismatch for {path}; reread the file before editing"
+            ));
+        }
+    }
+    None
 }
 
 fn execute_read_file_tool(call: &ToolCall) -> ToolResult {
@@ -636,10 +1094,13 @@ fn execute_read_file_tool(call: &ToolCall) -> ToolResult {
     } else {
         tools::read_file(tool_arg(call, "path"))
     };
-    match result {
+    let mut output = match result {
         Ok(contents) => tool_result(contents),
-        Err(error) => tool_result(format!("read error: {error}")),
-    }
+        Err(error) => error_result(format!("read error: {error}")),
+    };
+    output.read_offset = offset.map(|value| value as usize);
+    output.read_limit = limit.map(|value| value as usize);
+    output
 }
 
 fn execute_search_tool(call: &ToolCall) -> ToolResult {
@@ -651,15 +1112,28 @@ fn execute_search_tool(call: &ToolCall) -> ToolResult {
             value.to_string()
         }
     };
-    match tools::search(
+    let mut output = match tools::search(
         value_or("path", "."),
         tool_arg(call, "pattern"),
         &value_or("glob", "*"),
     ) {
         Ok(contents) if contents.is_empty() => tool_result("(no matches)".to_string()),
         Ok(contents) => tool_result(contents),
-        Err(error) => tool_result(format!("search error: {error}")),
+        Err(error) => error_result(format!("search error: {error}")),
+    };
+    if output.status.is_success() {
+        output.match_count = Some(if output.observation == "(no matches)" {
+            0
+        } else {
+            output
+                .observation
+                .lines()
+                .filter(|line| !line.starts_with("… (命中超过"))
+                .count()
+        });
+        output.output_truncated = output.observation.contains("已截断");
     }
+    output
 }
 
 fn execute_signal_tool(call: &ToolCall) -> ToolResult {
@@ -682,7 +1156,7 @@ fn execute_signal_tool(call: &ToolCall) -> ToolResult {
     };
     match signal_create(SIGNALS_DIR, kind, body, "manual") {
         Ok(id) => tool_result(format!("signal recorded: {id}")),
-        Err(error) => tool_result(format!("signal error: {error}")),
+        Err(error) => error_result(format!("signal error: {error}")),
     }
 }
 
@@ -695,16 +1169,70 @@ fn execute_tool_body(call: &ToolCall) -> ToolResult {
         "read_file" => execute_read_file_tool(call),
         "search" => execute_search_tool(call),
         "todo_write" => tool_result(format!("已更新任务清单 {} 项", parse_todos(call).len())),
+        "contract_write" => match parse_task_contract(call) {
+            Ok(contract) => tool_result(format!(
+                "task contract recorded: {} requirement(s)",
+                contract.requirements.len()
+            )),
+            Err(error) => error_result(format!("contract error: {error}")),
+        },
+        "requirement_update" => match parse_requirement_updates(call) {
+            Ok(updates) => tool_result(format!(
+                "requirement update parsed: {} item(s)",
+                updates.len()
+            )),
+            Err(error) => error_result(format!("requirement error: {error}")),
+        },
         "signal_write" => execute_signal_tool(call),
-        other => tool_result(format!(
+        other => error_result(format!(
             "tool error: 未知工具 `{other}`;请只调用系统所列工具"
         )),
     }
 }
 
-pub fn execute_tool_call(call: &ToolCall) -> String {
+fn native_tool_result(
+    call: &ToolCall,
+    effect: ToolEffect,
+    result: ToolResult,
+) -> ExecutedToolResult {
+    let mut changed_paths = result.changed_paths;
+    changed_paths.sort();
+    changed_paths.dedup();
+    let summary = result
+        .observation
+        .lines()
+        .next()
+        .unwrap_or(&result.observation)
+        .chars()
+        .take(512)
+        .collect();
+    ExecutedToolResult {
+        typed: ToolResultV1 {
+            schema_version: 1,
+            call_id: call.id.clone(),
+            tool: call.name.clone(),
+            effect,
+            status: result.status,
+            exit_code: result.exit_code,
+            retryable: result.retryable,
+            changed_paths,
+            output_truncated: result.output_truncated,
+            read_offset: result.read_offset,
+            read_limit: result.read_limit,
+            match_count: result.match_count,
+            workspace_revision: 0,
+            summary,
+        },
+        observation: result.observation,
+    }
+}
+
+/// Execute a built-in tool and retain its execution-site outcome metadata.
+/// Dynamic/MCP transports use the compatibility projection until they expose
+/// the same schema natively.
+pub(crate) fn execute_tool_call_native(call: &ToolCall, effect: ToolEffect) -> ExecutedToolResult {
     if let Some(blocked) = run_pre_tool_hooks(call) {
-        return blocked;
+        return native_tool_result(call, effect, blocked_result(blocked));
     }
     tracing::debug!(tool = %call.name, "tool call");
     let result = execute_tool_body(call);
@@ -713,17 +1241,24 @@ pub fn execute_tool_call(call: &ToolCall) -> String {
     }
     tracing::debug!(
         tool = %call.name,
-        ok = !is_error_observation(&result.observation),
+        status = ?result.status,
         "tool done"
     );
-    result.observation
+    native_tool_result(call, effect, result)
+}
+
+/// Compatibility API for tests and legacy callers that only consume display
+/// observations. Runtime graph code uses [`execute_tool_call_native`].
+pub fn execute_tool_call(call: &ToolCall) -> String {
+    execute_tool_call_native(call, ToolEffect::from_name(&call.name)).observation
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         builtin_tool_specs, durable_updates, durable_updates_with_effect, execute_tool_call,
-        unix_syntax_hint,
+        execute_tool_call_native, file_sha256, parse_requirement_updates, parse_task_contract,
+        tool_result_v1, unix_syntax_hint,
     };
     use crate::brain::{tool_output_failed, tool_output_ok};
     use crate::context::durable_state_block;
@@ -859,6 +1394,60 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    #[test]
+    fn edit_file_rejects_stale_expected_hash_before_side_effect() {
+        let path = std::env::current_dir().unwrap().join(format!(
+            "target/ridge-stale-edit-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, "before\n").unwrap();
+        let call = ToolCall {
+            id: "stale-edit".into(),
+            name: "edit_file".into(),
+            arguments: serde_json::json!({
+                "path": path.to_string_lossy(),
+                "old_string": "before",
+                "new_string": "after",
+                "expected_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+            }),
+        };
+        let blocked = execute_tool_call(&call);
+        assert!(blocked.starts_with("BLOCKED (stale edit)"), "{blocked}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "before\n");
+
+        let mut fresh = call.clone();
+        fresh.arguments["expected_hash"] = serde_json::Value::String(file_sha256("before\n"));
+        let edited = execute_tool_call(&fresh);
+        assert!(edited.starts_with("edited"), "{edited}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "after\n");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn batch_edit_rejects_any_stale_precondition_atomically() {
+        let dir = std::env::current_dir()
+            .unwrap()
+            .join(format!("target/ridge-stale-batch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("first.txt");
+        let second = dir.join("second.txt");
+        std::fs::write(&first, "one\n").unwrap();
+        std::fs::write(&second, "two\n").unwrap();
+        let call = ToolCall {
+            id: "stale-batch".into(),
+            name: "apply_edits".into(),
+            arguments: serde_json::json!({"edits": [
+                {"path": first.to_string_lossy(), "old_string": "one", "new_string": "ONE", "expected_hash": file_sha256("one\n")},
+                {"path": second.to_string_lossy(), "old_string": "two", "new_string": "TWO", "expected_hash": "00"}
+            ]}),
+        };
+        let blocked = execute_tool_call(&call);
+        assert!(blocked.starts_with("BLOCKED (stale edit)"), "{blocked}");
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "one\n");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "two\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// 多文件批量编辑:一个 apply_edits 调用改 2 个文件,原子生效;preview 是一份汇总 diff。
     #[test]
     fn apply_edits_batches_multiple_files() {
@@ -923,6 +1512,114 @@ mod tests {
                 s.name
             );
         }
+    }
+
+    #[test]
+    fn task_contract_and_requirement_updates_are_strictly_parsed() {
+        let contract_call = ToolCall {
+            id: "contract".into(),
+            name: "contract_write".into(),
+            arguments: serde_json::json!({
+                "objective": "ship a verified change",
+                "requirements": [
+                    {"id": "edit", "description": "make the requested edit"},
+                    {"description": "run the target test"}
+                ],
+                "constraints": ["do not change tests"]
+            }),
+        };
+        let contract = parse_task_contract(&contract_call).expect("valid contract");
+        assert_eq!(contract.requirements[0].id, "edit");
+        assert_eq!(contract.requirements[1].id, "R2");
+        assert!(contract
+            .requirements
+            .iter()
+            .all(|requirement| requirement.status == crate::RequirementStatus::Unknown));
+
+        let update_call = ToolCall {
+            id: "update".into(),
+            name: "requirement_update".into(),
+            arguments: serde_json::json!({"requirements": [{
+                "id": "edit", "status": "satisfied", "evidence_call_ids": ["edit-1"]
+            }]}),
+        };
+        let updates = parse_requirement_updates(&update_call).expect("valid update");
+        assert_eq!(updates[0].id, "edit");
+        assert_eq!(updates[0].status, crate::RequirementStatus::Satisfied);
+        assert!(parse_requirement_updates(&ToolCall {
+            id: "bad".into(),
+            name: "requirement_update".into(),
+            arguments: serde_json::json!({"requirements": [{"id": "bad id", "status": "done"}]}),
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn tool_result_v1_is_typed_and_never_treats_running_as_success() {
+        let edit = ToolCall {
+            id: "edit-1".into(),
+            name: "edit_file".into(),
+            arguments: serde_json::json!({"path": "src/lib.rs"}),
+        };
+        let changed = tool_result_v1(&edit, ToolEffect::Edit, "edited src/lib.rs");
+        assert_eq!(changed.status, crate::ToolResultStatus::Success);
+        assert_eq!(changed.changed_paths, vec!["src/lib.rs"]);
+
+        let shell = ToolCall {
+            id: "shell-1".into(),
+            name: "run_shell".into(),
+            arguments: serde_json::json!({"cmd": "cargo test"}),
+        };
+        let running = tool_result_v1(
+            &shell,
+            ToolEffect::Verify,
+            "job sh-1 running elapsed=1s\nCall run_shell with job_id=\"sh-1\" to poll.",
+        );
+        assert_eq!(running.status, crate::ToolResultStatus::Running);
+        assert!(!running.status.is_success());
+        assert!(running.status.blocks_completion());
+        let failed = tool_result_v1(&shell, ToolEffect::Verify, "exit 1: failed");
+        assert_eq!(failed.status, crate::ToolResultStatus::Error);
+        assert_eq!(failed.exit_code, Some(1));
+        assert!(failed.retryable);
+        assert!(failed.status.blocks_completion());
+    }
+
+    #[test]
+    fn native_builtin_result_does_not_infer_status_from_file_contents() {
+        let path = std::env::current_dir().unwrap().join(format!(
+            "target/ridge-native-result-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            "read error: this is ordinary file content\nsecond line",
+        )
+        .unwrap();
+        let call = ToolCall {
+            id: "native-read".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({"path": path.to_string_lossy(), "offset": 1, "limit": 1}),
+        };
+        let result = execute_tool_call_native(&call, ToolEffect::Explore);
+        assert_eq!(result.typed.status, crate::ToolResultStatus::Success);
+        assert!(!result.typed.retryable);
+        assert_eq!(result.typed.read_offset, Some(1));
+        assert_eq!(result.typed.read_limit, Some(1));
+        assert!(result.observation.starts_with("read error:"));
+
+        let search = ToolCall {
+            id: "native-search".into(),
+            name: "search".into(),
+            arguments: serde_json::json!({
+                "path": "target",
+                "pattern": "ridgecode-no-such-marker-9e4f"
+            }),
+        };
+        let search_result = execute_tool_call_native(&search, ToolEffect::Explore);
+        assert_eq!(search_result.typed.match_count, Some(0));
+        assert!(!search_result.typed.output_truncated);
+        let _ = std::fs::remove_file(path);
     }
 
     /// 工具调用鲁棒:未知/幻觉工具名归一化为 error(喂失败信号 + 熔断计数),不再静默空转。
@@ -1050,7 +1747,7 @@ mod tests {
                 .map(|b| b.chars().count())
                 .unwrap_or(0)
         };
-        let mut prev = 0;
+        let mut max_len = 0;
         for i in 0..50 {
             let f = if i % 2 == 0 { "a.rs" } else { "b.rs" };
             let call = ToolCall {
@@ -1062,11 +1759,10 @@ mod tests {
                 st.apply(p);
             }
             let now = block_len(&st);
-            if i >= 2 {
-                assert_eq!(now, prev, "事实块应有界恒定,step {i} 却变了");
-            }
-            prev = now;
+            max_len = max_len.max(now);
+            assert!(now <= 512, "事实块应有界(step {i} 的 {now} chars 超出 512)");
         }
+        assert!(max_len > 0, "有工具结果时应注入事实块");
         assert_eq!(st.modified_files.len(), 2, "去重后仅 2 个文件");
     }
 

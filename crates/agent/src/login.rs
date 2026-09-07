@@ -208,9 +208,9 @@ async fn run_oauth_login(
     None
 }
 
-/// `~/.ridge/oauth.json` OAuth 凭据库路径(`RIDGE_OAUTH` 可覆盖;独立于 config/auth)。
+/// `~/.ridge/oauth.json` OAuth 凭据库路径(`RIDGECODE_OAUTH` 可覆盖;独立于 config/auth)。
 pub(crate) fn oauth_path() -> String {
-    std::env::var("RIDGE_OAUTH").unwrap_or_else(|_| format!("{}/oauth.json", ridge_home()))
+    std::env::var("RIDGECODE_OAUTH").unwrap_or_else(|_| format!("{}/oauth.json", ridge_home()))
 }
 
 /// 当前 epoch 秒。刷新判定等**纯逻辑**把 now 当参数传(可测),此仅在运行时取真值。
@@ -237,7 +237,7 @@ pub(crate) fn save_oauth_token(
     Ok(path)
 }
 
-/// 订阅 OAuth 各家默认 (model, base_url)(env RIDGE_MODEL/RIDGE_BASE_URL 或 config 可覆盖)。
+/// 订阅 OAuth 各家默认 (model, base_url)(env RIDGECODE_MODEL/RIDGECODE_BASE_URL 或 config 可覆盖)。
 pub(crate) fn oauth_defaults(provider_id: &str) -> (&'static str, &'static str) {
     match provider_id {
         "openai" => ("gpt-5", "https://chatgpt.com/backend-api/codex"),
@@ -263,17 +263,17 @@ fn oauth_model_and_base(cfg: &Config, provider_id: &str) -> (String, String) {
     } else {
         cfg.model.clone()
     };
-    let model = std::env::var("RIDGE_MODEL")
+    let model = std::env::var("RIDGECODE_MODEL")
         .ok()
         .or(model_from_config)
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| default_model.to_string());
     let base = if provider_id == "openai" {
-        std::env::var("RIDGE_CHATGPT_BASE_URL").unwrap_or_else(|_| default_base.to_string())
+        std::env::var("RIDGECODE_CHATGPT_BASE_URL").unwrap_or_else(|_| default_base.to_string())
     } else if provider_id == "xai" {
-        std::env::var("RIDGE_XAI_BASE_URL").unwrap_or_else(|_| default_base.to_string())
+        std::env::var("RIDGECODE_XAI_BASE_URL").unwrap_or_else(|_| default_base.to_string())
     } else {
-        std::env::var("RIDGE_BASE_URL")
+        std::env::var("RIDGECODE_BASE_URL")
             .ok()
             .or_else(|| cfg.base_url.clone())
             .unwrap_or_else(|| default_base.to_string())
@@ -1046,10 +1046,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!("ridge-login-args-{}", std::process::id()));
         let auth_file = root.join("auth.json");
         let config_file = root.join("config.json");
-        let previous_auth = std::env::var_os("RIDGE_AUTH");
-        let previous_config = std::env::var_os("RIDGE_CONFIG");
-        std::env::set_var("RIDGE_AUTH", &auth_file);
-        std::env::set_var("RIDGE_CONFIG", &config_file);
+        let previous_auth = std::env::var_os("RIDGECODE_AUTH");
+        let previous_config = std::env::var_os("RIDGECODE_CONFIG");
+        std::env::set_var("RIDGECODE_AUTH", &auth_file);
+        std::env::set_var("RIDGECODE_CONFIG", &config_file);
         let registered = run_login(&[
             "openai".into(),
             "test-key".into(),
@@ -1062,12 +1062,12 @@ mod tests {
         ])
         .await;
         match previous_auth {
-            Some(value) => std::env::set_var("RIDGE_AUTH", value),
-            None => std::env::remove_var("RIDGE_AUTH"),
+            Some(value) => std::env::set_var("RIDGECODE_AUTH", value),
+            None => std::env::remove_var("RIDGECODE_AUTH"),
         }
         match previous_config {
-            Some(value) => std::env::set_var("RIDGE_CONFIG", value),
-            None => std::env::remove_var("RIDGE_CONFIG"),
+            Some(value) => std::env::set_var("RIDGECODE_CONFIG", value),
+            None => std::env::remove_var("RIDGECODE_CONFIG"),
         }
         assert!(registered.is_ok());
         assert!(auth_file.is_file());
@@ -1176,9 +1176,9 @@ mod tests {
             result
         }
 
-        without_env("RIDGE_MODEL", || {
-            without_env("RIDGE_CHATGPT_BASE_URL", || {
-                without_env("RIDGE_BASE_URL", || {
+        without_env("RIDGECODE_MODEL", || {
+            without_env("RIDGECODE_CHATGPT_BASE_URL", || {
+                without_env("RIDGECODE_BASE_URL", || {
                     let mut cfg = Config {
                         provider: Some("chatgpt-plus".into()),
                         model: Some("account-model".into()),
@@ -1200,14 +1200,14 @@ mod tests {
                         oauth_model_and_base(&cfg, "anthropic"),
                         ("claude-config".into(), "https://anthropic.example".into())
                     );
-                    std::env::set_var("RIDGE_MODEL", "env-model");
-                    std::env::set_var("RIDGE_BASE_URL", "https://env.example");
+                    std::env::set_var("RIDGECODE_MODEL", "env-model");
+                    std::env::set_var("RIDGECODE_BASE_URL", "https://env.example");
                     assert_eq!(
                         oauth_model_and_base(&cfg, "anthropic"),
                         ("env-model".into(), "https://env.example".into())
                     );
-                    std::env::remove_var("RIDGE_MODEL");
-                    std::env::remove_var("RIDGE_BASE_URL");
+                    std::env::remove_var("RIDGECODE_MODEL");
+                    std::env::remove_var("RIDGECODE_BASE_URL");
                 })
             })
         });
@@ -1276,7 +1276,7 @@ mod tests {
             id_token: None,
             account_id: Some("account".into()),
         };
-        with_envs(&[("RIDGE_OAUTH", oauth_file.to_str().unwrap())], || {
+        with_envs(&[("RIDGECODE_OAUTH", oauth_file.to_str().unwrap())], || {
             let saved = save_oauth_token("openai", &token).unwrap();
             assert_eq!(saved, oauth_file.to_string_lossy());
             let text = std::fs::read_to_string(&oauth_file).unwrap();

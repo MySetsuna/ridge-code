@@ -77,7 +77,7 @@ pub(crate) fn terminal_input_backend_from_env(
     if !host_is_windows {
         return TerminalInputBackend::crossterm("non_windows");
     }
-    match env_value(env, "RIDGE_TUI_VT_INPUT") {
+    match env_value(env, "RIDGECODE_TUI_VT_INPUT") {
         Some("0") => TerminalInputBackend::crossterm("explicit_disable"),
         Some("1") => TerminalInputBackend::raw_vt("explicit_override"),
         Some("auto") | None => TerminalInputBackend::raw_vt("windows_auto"),
@@ -254,13 +254,13 @@ pub(crate) fn terminal_keyboard_policy_from_env(
     env: &HashMap<String, String>,
     host_is_windows: bool,
 ) -> TerminalKeyboardPolicy {
-    if env_value(env, "RIDGE_TUI_KITTY") == Some("1") {
+    if env_value(env, "RIDGECODE_TUI_KITTY") == Some("1") {
         return TerminalKeyboardPolicy {
             keyboard_enhancement: true,
             reason: "explicit_override",
         };
     }
-    if env_value(env, "RIDGE_TUI_KITTY") == Some("0") {
+    if env_value(env, "RIDGECODE_TUI_KITTY") == Some("0") {
         return TerminalKeyboardPolicy {
             keyboard_enhancement: false,
             reason: "explicit_disable",
@@ -356,8 +356,8 @@ fn visible_env_value(env: &HashMap<String, String>, key: &str) -> Option<String>
 fn diagnostic_hints(reason: &'static str) -> Vec<&'static str> {
     match reason {
         "windows_native_input" => vec![
-            "Windows input uses the raw-vt backend when console/ConPTY activation succeeds; RIDGE_TUI_VT_INPUT=0 forces Crossterm",
-            "keep RIDGE_TUI_KITTY=0; raw-vt already parses the bounded CSI/CSI-u key forms",
+            "Windows input uses the raw-vt backend when console/ConPTY activation succeeds; RIDGECODE_TUI_VT_INPUT=0 forces Crossterm",
+            "keep RIDGECODE_TUI_KITTY=0; raw-vt already parses the bounded CSI/CSI-u key forms",
         ],
         "vscode_family" => vec![
             "IDE PTYs may drop Ctrl modifiers; use Alt+Enter/Ctrl+J for a newline",
@@ -370,14 +370,14 @@ fn diagnostic_hints(reason: &'static str) -> Vec<&'static str> {
             "tmux/screen may rewrite keyboard negotiation; configure passthrough or keep KKP disabled",
         ],
         "unknown_terminal" => vec![
-            "Kitty keyboard mode is disabled; set RIDGE_TUI_KITTY=1 only after verifying the PTY",
+            "Kitty keyboard mode is disabled; set RIDGECODE_TUI_KITTY=1 only after verifying the PTY",
         ],
         "known_terminal_legacy" | "vte_known_legacy" => vec![
-            "host identity alone cannot prove KKP survives every PTY hop; set RIDGE_TUI_KITTY=1 only after a verified replay",
-            "use Alt+Enter/Ctrl+J for a newline, or set RIDGE_TUI_KITTY=0 to force the legacy comparison",
+            "host identity alone cannot prove KKP survives every PTY hop; set RIDGECODE_TUI_KITTY=1 only after a verified replay",
+            "use Alt+Enter/Ctrl+J for a newline, or set RIDGECODE_TUI_KITTY=0 to force the legacy comparison",
         ],
         "explicit_override" => vec![
-            "Kitty keyboard mode was forced; set RIDGE_TUI_KITTY=0 to compare the legacy path",
+            "Kitty keyboard mode was forced; set RIDGECODE_TUI_KITTY=0 to compare the legacy path",
         ],
         "explicit_disable" => vec!["Kitty keyboard mode was explicitly disabled"],
         _ => vec!["use Alt+Enter/Ctrl+J if Enter or Tab is not preserved by the host"],
@@ -479,7 +479,7 @@ mod tests {
             .contains("input backend: raw-vt (windows_auto)"));
         for value in ["0", "true", "yes", "2"] {
             let disabled_vt =
-                terminal_diagnostics_from_env(&env(&[("RIDGE_TUI_VT_INPUT", value)]), true);
+                terminal_diagnostics_from_env(&env(&[("RIDGECODE_TUI_VT_INPUT", value)]), true);
             assert_eq!(
                 disabled_vt.input_backend.kind,
                 if ["0", "true", "yes", "2"].contains(&value) {
@@ -490,19 +490,20 @@ mod tests {
                 "value={value}"
             );
         }
-        let enabled_vt = terminal_diagnostics_from_env(&env(&[("RIDGE_TUI_VT_INPUT", "1")]), true);
+        let enabled_vt =
+            terminal_diagnostics_from_env(&env(&[("RIDGECODE_TUI_VT_INPUT", "1")]), true);
         assert!(enabled_vt.virtual_terminal_input);
         assert!(enabled_vt.report().contains("VT input: enabled"));
 
         let forced = terminal_keyboard_policy_from_env(
-            &env(&[("RIDGE_TUI_KITTY", "1"), ("TERM_PROGRAM", "vscode")]),
+            &env(&[("RIDGECODE_TUI_KITTY", "1"), ("TERM_PROGRAM", "vscode")]),
             true,
         );
         assert_eq!(forced.reason, "explicit_override");
         assert!(forced.keyboard_enhancement);
 
         let disabled = terminal_keyboard_policy_from_env(
-            &env(&[("RIDGE_TUI_KITTY", "0"), ("TERM_PROGRAM", "kitty")]),
+            &env(&[("RIDGECODE_TUI_KITTY", "0"), ("TERM_PROGRAM", "kitty")]),
             false,
         );
         assert_eq!(disabled.reason, "explicit_disable");
@@ -520,19 +521,19 @@ mod tests {
             TerminalInputBackend::raw_vt("windows_auto")
         );
         assert_eq!(
-            terminal_input_backend_from_env(&env(&[("RIDGE_TUI_VT_INPUT", "auto")]), true),
+            terminal_input_backend_from_env(&env(&[("RIDGECODE_TUI_VT_INPUT", "auto")]), true),
             TerminalInputBackend::raw_vt("windows_auto")
         );
         assert_eq!(
-            terminal_input_backend_from_env(&env(&[("RIDGE_TUI_VT_INPUT", "1")]), true),
+            terminal_input_backend_from_env(&env(&[("RIDGECODE_TUI_VT_INPUT", "1")]), true),
             TerminalInputBackend::raw_vt("explicit_override")
         );
         assert_eq!(
-            terminal_input_backend_from_env(&env(&[("RIDGE_TUI_VT_INPUT", "0")]), true),
+            terminal_input_backend_from_env(&env(&[("RIDGECODE_TUI_VT_INPUT", "0")]), true),
             TerminalInputBackend::crossterm("explicit_disable")
         );
         assert_eq!(
-            terminal_input_backend_from_env(&env(&[("RIDGE_TUI_VT_INPUT", "bogus")]), true),
+            terminal_input_backend_from_env(&env(&[("RIDGECODE_TUI_VT_INPUT", "bogus")]), true),
             TerminalInputBackend::crossterm("invalid_override")
         );
     }
@@ -545,7 +546,7 @@ mod tests {
                 ("TERM_PROGRAM", "vscode"),
                 ("SSH_TTY", "\\.\\pipe\\ridge"),
                 ("TMUX", "/tmp/tmux,1,1"),
-                ("RIDGE_API_KEY", "must-not-appear"),
+                ("RIDGECODE_API_KEY", "must-not-appear"),
             ]),
             false,
         );
@@ -558,7 +559,7 @@ mod tests {
         assert!(report.contains("bridge: ssh"));
         assert!(report.contains("multiplexer: tmux"));
         assert!(report.contains("keyboard: legacy (vscode_family)"));
-        assert!(!report.contains("RIDGE_API_KEY"));
+        assert!(!report.contains("RIDGECODE_API_KEY"));
         assert!(!report.contains("must-not-appear"));
     }
 
@@ -570,13 +571,13 @@ mod tests {
         );
         assert_eq!(diagnostics.policy.reason, "known_terminal_legacy");
         assert!(!diagnostics.policy.keyboard_enhancement);
-        assert!(diagnostics.report().contains("RIDGE_TUI_KITTY=1"));
+        assert!(diagnostics.report().contains("RIDGECODE_TUI_KITTY=1"));
     }
 
     #[test]
     fn explicit_kitty_opt_in_is_the_only_non_windows_activation() {
         let diagnostics = terminal_diagnostics_from_env(
-            &env(&[("TERM_PROGRAM", "WezTerm"), ("RIDGE_TUI_KITTY", "1")]),
+            &env(&[("TERM_PROGRAM", "WezTerm"), ("RIDGECODE_TUI_KITTY", "1")]),
             false,
         );
         assert_eq!(diagnostics.policy.reason, "explicit_override");

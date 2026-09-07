@@ -36,7 +36,7 @@ falls back to the original task. Routed execution admits at most three
 teammates per wave and aggregates the five-or-fewer results in planner order. A
 shared `DispatchBudget` additionally caps planner/worker/A2A permits across
 waves and independent runs (default three; override with
-`RIDGE_DISPATCH_CONCURRENCY`). Permits are RAII-released on success, fallback,
+`RIDGECODE_DISPATCH_CONCURRENCY`). Permits are RAII-released on success, fallback,
 provider error, or cancellation, so a failed teammate cannot leak capacity.
 The cancellable routed entry point propagates one `AgentCancellation` through
 the planner, every teammate wave, and the in-process A2A handler; waiting for

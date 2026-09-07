@@ -1,5 +1,6 @@
 use std::io::IsTerminal;
 use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent::{
     auth_parse, builtin_tool_specs, discover_skill_scopes, load_commands_from_catalog,
@@ -90,10 +91,16 @@ struct ReplMeta {
 ///   ridgecode --cwd /path/to/project "..."    # 在目标项目里跑
 ///   ridgecode --yolo "..."                    # skip-danger:工具自动放行不问 [y/N]
 ///
-/// 配置(环境变量):RIDGE_API_KEY / RIDGE_PROVIDER(anthropic|openai)/ RIDGE_MODEL / RIDGE_BASE_URL / RIDGE_PROXY
+/// 配置(环境变量):RIDGECODE_API_KEY / RIDGECODE_PROVIDER(anthropic|openai)/ RIDGECODE_MODEL / RIDGECODE_BASE_URL / RIDGECODE_PROXY
 /// `--help` / `--version` 帮助与版本(1.0 级 CLI 该有的),命中就打印并返回 true(不进主流程)。
 fn handle_meta_flags() -> bool {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `ridgecode run --help` belongs to the machine runner rather than the
+    // interactive CLI help. Keep the normal global `--help` behavior for
+    // every other invocation.
+    if args.first().map(String::as_str) == Some("run") {
+        return false;
+    }
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("ridgecode {}", env!("CARGO_PKG_VERSION"));
         return true;
@@ -125,18 +132,18 @@ fn handle_meta_flags() -> bool {
              In the TUI: slash commands /model /provider /config /agent /compact etc.; @path to reference a file, Ctrl-C interrupts; press twice within 2 seconds to exit.\
              Pipe/non-TTY: stdin lines are run as tasks (headless, no slash commands).\n\n\
              Config: ~/.ridge/config.json (provider/model/budget/multiple mcp/skills; env overrides);\
-             /config set <key> <value> in the TUI persists changes. Key: RIDGE_API_KEY env, or a config profile's api_key (plaintext) / key_env (env var name).\
+             /config set <key> <value> in the TUI persists changes. Key: RIDGECODE_API_KEY env, or a config profile's api_key (plaintext) / key_env (env var name).\
              ~/.ridge/skills/*/SKILL.md adds domain skills without touching source.\n  \
-             RIDGE_EXTRACT_SIGNALS=1        opt-in: at run end, use one LLM pass to distill the trace into compounding signals (off by default, saves tokens)."
+             RIDGECODE_EXTRACT_SIGNALS=1        opt-in: at run end, use one LLM pass to distill the trace into compounding signals (off by default, saves tokens)."
         );
         return true;
     }
     false
 }
 
-/// 真实终端默认判定不变；仅显式 `RIDGE_FORCE_TUI=1` 供隔离诊断 harness 进入 TUI。
+/// 真实终端默认判定不变；仅显式 `RIDGECODE_FORCE_TUI=1` 供隔离诊断 harness 进入 TUI。
 fn tui_requested() -> bool {
-    (std::env::var("RIDGE_FORCE_TUI").ok().as_deref() == Some("1"))
+    (std::env::var("RIDGECODE_FORCE_TUI").ok().as_deref() == Some("1"))
         || (std::io::stdin().is_terminal() && std::io::stdout().is_terminal())
 }
 
@@ -145,7 +152,7 @@ fn tui_fixture_provider(fallback: Arc<dyn LlmProvider>) -> Arc<dyn LlmProvider> 
     if !tui_requested() {
         return fallback;
     }
-    match std::env::var("RIDGE_TUI_FIXTURE").ok().as_deref() {
+    match std::env::var("RIDGECODE_TUI_FIXTURE").ok().as_deref() {
         Some("busy") => Arc::new(
             ScriptedProvider::new(vec![Completion {
                 reasoning:
@@ -180,7 +187,7 @@ fn tui_fixture_provider(fallback: Arc<dyn LlmProvider>) -> Arc<dyn LlmProvider> 
                 ..Default::default()
             }])
             .with_delay(std::time::Duration::from_millis(1500));
-            let provider = if std::env::var("RIDGE_TUI_INSPECT_ANSWER").ok().as_deref() == Some("1")
+            let provider = if std::env::var("RIDGECODE_TUI_INSPECT_ANSWER").ok().as_deref() == Some("1")
             {
                 provider.with_post_answer_delay(std::time::Duration::from_millis(1200))
             } else {
@@ -350,12 +357,360 @@ async fn handle_special_command(raw: &[String]) -> Option<anyhow::Result<()>> {
             Err(error) => Err(anyhow::anyhow!(error)),
         }),
         "a2a" => Some(run_a2a_command(&raw[1..]).await),
+        "run" => Some(run_machine_command(&raw[1..]).await),
         "sessions" => {
             println!("{}", agent::format_session_list(&agent::list_records()));
             Some(Ok(()))
         }
         _ => None,
     }
+}
+
+/// Machine-oriented, non-interactive one-shot run.  This deliberately avoids
+/// session history, signal extraction, durable checkpoints, and terminal
+/// rendering so an eval harness can consume stdout as a stable JSON document.
+async fn run_machine_command(args: &[String]) -> anyhow::Result<()> {
+    let options = MachineRunOptions::parse(args)?;
+    if options.help {
+        println!("Usage: ridgecode run --task-file PATH [--jsonl] [--read-only] [--require-api-key] [--isolate-runtime] [--effort LEVEL] [--max-turns N] [--timeout 20m] [--budget-tokens N] [--no-persist] [--state-dir PATH]\n\nRuns one isolated task and writes only machine-readable JSON to stdout. `--require-api-key` rejects OAuth fallback. `--isolate-runtime` keeps provider env/config but disables configured MCP, Skills, sub-agents, hooks, and notifications for reproducible harness runs. `--no-persist` and `--state-dir` are accepted for harness compatibility; this command never resumes or writes a session.");
+        return Ok(());
+    }
+    if let Some(effort) = &options.effort {
+        std::env::set_var("RIDGECODE_EFFORT", effort);
+    }
+
+    init_tracing();
+    let cfg = load_config();
+    apply_config_proxy(&cfg);
+    let auth = load_auth();
+    let effort = resolve_reasoning_effort(&cfg);
+    let configured_provider = real_provider(&cfg, &auth);
+    let using_oauth = configured_provider.is_none();
+    if options.require_api_key && using_oauth {
+        anyhow::bail!("ridgecode run requires RIDGECODE_API_KEY or an API-key provider profile");
+    }
+    // `Option::or` eagerly evaluates its argument.  Do not refresh OAuth or
+    // query its model catalog when an API-key provider is already selected:
+    // that would mix credentials/endpoints and add an unrelated network hop to
+    // every machine run.
+    let provider = match configured_provider {
+        Some(provider) => provider,
+        None => resolve_claude_oauth_provider(&cfg, &effort)
+            .await
+            .ok_or_else(|| {
+                anyhow::anyhow!("ridgecode run requires a configured provider or OAuth login")
+            })?,
+    };
+    let (mcp, skills, agents) = if options.isolate_runtime {
+        // A benchmark must not silently inherit host-specific MCP servers,
+        // prompt files, agent routes, hooks, or notification side effects.
+        // Provider identity still comes from the explicitly injected env/config.
+        configure_runtime(&Config::default());
+        (
+            McpTools::default(),
+            Vec::new(),
+            Arc::new(agent::Agents::default()),
+        )
+    } else {
+        let mcp = resolve_configured_mcp(&cfg).await;
+        let skills = load_configured_skill_catalog(&cfg).skills;
+        configure_runtime(&cfg);
+        let agents = Arc::new(build_agents(&cfg, &auth));
+        (mcp, skills, agents)
+    };
+    let budget = options
+        .budget_tokens
+        .unwrap_or(cfg.budget_tokens.unwrap_or(0));
+    let app = agent::build_llm_agent_full(
+        provider,
+        mcp,
+        Arc::new(agent::AutoApprove),
+        skills,
+        agent::null_token_bus(),
+        agents,
+        options.read_only,
+    )?;
+
+    let run_id = machine_run_id();
+    let (provider_kind, model, _) = resolve_start_model_info(&cfg, &auth, using_oauth);
+    let start = MachineRunStarted {
+        event: "run_started",
+        schema_version: MACHINE_RUN_SCHEMA_VERSION,
+        run_id: &run_id,
+        provider: &provider_kind,
+        model: &model,
+        effort: &effort,
+        auth_mode: if using_oauth { "oauth" } else { "api_key" },
+    };
+    emit_machine_json(options.jsonl, &start)?;
+
+    let state = agent::AgentState::new(agent::expand_mentions(&options.task))
+        .with_budget(budget)
+        .with_reasoning_limit(options.max_turns);
+    let config = langgraph::RunConfig {
+        max_supersteps: options.max_turns.saturating_mul(2).saturating_add(50),
+    };
+    let started = Instant::now();
+    let result =
+        tokio::time::timeout(options.timeout, app.invoke_with(state, &config, None, None)).await;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    match result {
+        Ok(Ok(out)) => {
+            let approved = out.approved && !agent::completion_blocked(&out);
+            let finish = MachineRunFinished {
+                event: "run_finished",
+                schema_version: MACHINE_RUN_SCHEMA_VERSION,
+                run_id: &run_id,
+                // This is deliberately only RidgeCode's internal gate. The
+                // external eval schema records an independent verifier before
+                // a benchmark run may be counted as successful.
+                outcome: machine_outcome(approved),
+                approved,
+                halt_reason: agent::halt_reason(&out).as_str(),
+                steps: out.steps,
+                input_tokens: out.input_tokens,
+                output_tokens: out.output_tokens,
+                total_tokens: out.total_tokens,
+                elapsed_ms,
+                modified_files: out.modified_files.into_iter().collect(),
+                error: None,
+            };
+            emit_machine_json(options.jsonl, &finish)?;
+            if approved {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("machine run ended unverified"))
+            }
+        }
+        Ok(Err(error)) => {
+            let finish = MachineRunFinished::error(&run_id, "error", elapsed_ms, error.to_string());
+            emit_machine_json(options.jsonl, &finish)?;
+            Err(anyhow::anyhow!("machine run failed"))
+        }
+        Err(_) => {
+            let finish = MachineRunFinished::error(&run_id, "timeout", elapsed_ms, "run timeout");
+            emit_machine_json(options.jsonl, &finish)?;
+            Err(anyhow::anyhow!("machine run timed out"))
+        }
+    }
+}
+
+const MACHINE_RUN_SCHEMA_VERSION: u32 = 1;
+
+/// Keep the one-shot runner honest: its deterministic gate is useful
+/// diagnostic evidence, but it is not an independent benchmark verifier.
+fn machine_outcome(approved: bool) -> &'static str {
+    if approved {
+        "agent_approved"
+    } else {
+        "unverified"
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MachineRunOptions {
+    task: String,
+    jsonl: bool,
+    read_only: bool,
+    require_api_key: bool,
+    isolate_runtime: bool,
+    effort: Option<String>,
+    max_turns: usize,
+    timeout: Duration,
+    budget_tokens: Option<usize>,
+    help: bool,
+}
+
+impl MachineRunOptions {
+    fn parse(args: &[String]) -> anyhow::Result<Self> {
+        let mut task = None;
+        let mut jsonl = false;
+        let mut read_only = false;
+        let mut require_api_key = false;
+        let mut isolate_runtime = false;
+        let mut effort = None;
+        let mut max_turns = 80usize;
+        let mut timeout = Duration::from_secs(20 * 60);
+        let mut budget_tokens = None;
+        let mut help = false;
+        let mut index = 0;
+        while index < args.len() {
+            let arg = args[index].as_str();
+            let value = |flag: &str| -> anyhow::Result<&str> {
+                args.get(index + 1)
+                    .map(String::as_str)
+                    .filter(|value| !value.starts_with('-'))
+                    .ok_or_else(|| anyhow::anyhow!("{flag} needs a value"))
+            };
+            match arg {
+                "--help" | "-h" => help = true,
+                "--jsonl" => jsonl = true,
+                "--read-only" | "--readonly" => read_only = true,
+                "--require-api-key" => require_api_key = true,
+                "--isolate-runtime" => isolate_runtime = true,
+                "--no-persist" => {}
+                // Reserve the flag now so harnesses can use a single command
+                // line while checkpoint isolation lands. This runner never
+                // persists state, therefore the value is intentionally unused.
+                "--state-dir" => {
+                    let _ = value("--state-dir")?;
+                    index += 1;
+                }
+                "--task-file" => {
+                    let path = value("--task-file")?;
+                    if task.is_some() {
+                        anyhow::bail!("provide exactly one of --task-file or --task");
+                    }
+                    task = Some(std::fs::read_to_string(path).map_err(|error| {
+                        anyhow::anyhow!("cannot read task file {path}: {error}")
+                    })?);
+                    index += 1;
+                }
+                "--task" => {
+                    let value = value("--task")?;
+                    if task.replace(value.to_string()).is_some() {
+                        anyhow::bail!("provide exactly one of --task-file or --task");
+                    }
+                    index += 1;
+                }
+                "--effort" => {
+                    let value = value("--effort")?;
+                    let Some(normalized) = provider::normalize_reasoning_effort(value) else {
+                        anyhow::bail!("unsupported reasoning effort: {value}");
+                    };
+                    effort = Some(normalized.to_string());
+                    index += 1;
+                }
+                "--max-turns" => {
+                    max_turns = value("--max-turns")?
+                        .parse::<usize>()
+                        .map_err(|_| anyhow::anyhow!("--max-turns must be a positive integer"))?;
+                    if max_turns == 0 {
+                        anyhow::bail!("--max-turns must be a positive integer");
+                    }
+                    index += 1;
+                }
+                "--timeout" => {
+                    timeout = parse_duration(value("--timeout")?).ok_or_else(|| {
+                        anyhow::anyhow!("--timeout needs a positive duration such as 20m")
+                    })?;
+                    index += 1;
+                }
+                "--budget-tokens" => {
+                    budget_tokens = Some(
+                        value("--budget-tokens")?
+                            .parse::<usize>()
+                            .map_err(|_| anyhow::anyhow!("--budget-tokens must be an integer"))?,
+                    );
+                    index += 1;
+                }
+                other => anyhow::bail!("unknown ridgecode run argument: {other}"),
+            }
+            index += 1;
+        }
+        if help {
+            return Ok(Self {
+                task: String::new(),
+                jsonl,
+                read_only,
+                require_api_key,
+                isolate_runtime,
+                effort,
+                max_turns,
+                timeout,
+                budget_tokens,
+                help,
+            });
+        }
+        let task =
+            task.ok_or_else(|| anyhow::anyhow!("ridgecode run requires --task-file or --task"))?;
+        if task.trim().is_empty() {
+            anyhow::bail!("task must not be empty");
+        }
+        Ok(Self {
+            task,
+            jsonl,
+            read_only,
+            require_api_key,
+            isolate_runtime,
+            effort,
+            max_turns,
+            timeout,
+            budget_tokens,
+            help,
+        })
+    }
+}
+
+#[derive(serde::Serialize)]
+struct MachineRunStarted<'a> {
+    event: &'static str,
+    schema_version: u32,
+    run_id: &'a str,
+    provider: &'a str,
+    model: &'a str,
+    effort: &'a str,
+    auth_mode: &'static str,
+}
+
+#[derive(serde::Serialize)]
+struct MachineRunFinished<'a> {
+    event: &'static str,
+    schema_version: u32,
+    run_id: &'a str,
+    outcome: &'static str,
+    approved: bool,
+    halt_reason: &'static str,
+    steps: usize,
+    input_tokens: usize,
+    output_tokens: usize,
+    total_tokens: usize,
+    elapsed_ms: u64,
+    modified_files: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl<'a> MachineRunFinished<'a> {
+    fn error(
+        run_id: &'a str,
+        outcome: &'static str,
+        elapsed_ms: u64,
+        error: impl Into<String>,
+    ) -> Self {
+        Self {
+            event: "run_finished",
+            schema_version: MACHINE_RUN_SCHEMA_VERSION,
+            run_id,
+            outcome,
+            approved: false,
+            halt_reason: outcome,
+            steps: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            elapsed_ms,
+            modified_files: Vec::new(),
+            error: Some(error.into()),
+        }
+    }
+}
+
+fn machine_run_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("run-{nanos}")
+}
+
+fn emit_machine_json<T: serde::Serialize>(jsonl: bool, value: &T) -> anyhow::Result<()> {
+    if jsonl {
+        println!("{}", serde_json::to_string(value)?);
+    } else {
+        println!("{}", serde_json::to_string_pretty(value)?);
+    }
+    Ok(())
 }
 
 async fn run_goal_command(args: &[String]) -> anyhow::Result<()> {
@@ -373,9 +728,12 @@ async fn run_goal_command(args: &[String]) -> anyhow::Result<()> {
     let effort = resolve_reasoning_effort(&cfg);
     let configured_provider = real_provider(&cfg, &auth);
     let using_oauth = configured_provider.is_none();
-    let provider = configured_provider
-        .or(resolve_claude_oauth_provider(&cfg, &effort).await)
-        .ok_or_else(|| anyhow::anyhow!("goal run requires a configured provider/API key"))?;
+    let provider = match configured_provider {
+        Some(provider) => provider,
+        None => resolve_claude_oauth_provider(&cfg, &effort)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("goal run requires a configured provider/API key"))?,
+    };
     run_with_provider(ProviderRun {
         cfg: &cfg,
         auth: &auth,
@@ -398,7 +756,7 @@ async fn run_a2a_command(args: &[String]) -> anyhow::Result<()> {
         Some("smoke") => run_a2a_smoke().await,
         _ => {
             println!(
-                "Usage:\n  ridgecode a2a serve [--id ID] [--once] [--fixture]\n  ridgecode a2a call --peer COMMAND --task TASK [--peer-arg ARG] [--to ID]\n  ridgecode a2a smoke\n\nEnvironment:\n  RIDGE_A2A_SECRET   optional shared secret; enables HMAC + replay protection\n  RIDGE_A2A_KEY_ID   shared key id (default: ridgecode)"
+                "Usage:\n  ridgecode a2a serve [--id ID] [--once] [--fixture]\n  ridgecode a2a call --peer COMMAND --task TASK [--peer-arg ARG] [--to ID]\n  ridgecode a2a smoke\n\nEnvironment:\n  RIDGECODE_A2A_SECRET   optional shared secret; enables HMAC + replay protection\n  RIDGECODE_A2A_KEY_ID   shared key id (default: ridgecode)"
             );
             Ok(())
         }
@@ -459,13 +817,13 @@ fn a2a_context(args: &[String]) -> anyhow::Result<std::collections::BTreeMap<Str
 }
 
 fn a2a_secret() -> Option<String> {
-    std::env::var("RIDGE_A2A_SECRET")
+    std::env::var("RIDGECODE_A2A_SECRET")
         .ok()
         .filter(|secret| !secret.is_empty())
 }
 
 fn a2a_key_id() -> String {
-    std::env::var("RIDGE_A2A_KEY_ID").unwrap_or_else(|_| "ridgecode".to_string())
+    std::env::var("RIDGECODE_A2A_KEY_ID").unwrap_or_else(|_| "ridgecode".to_string())
 }
 
 fn a2a_message_id(prefix: &str) -> String {
@@ -486,7 +844,7 @@ async fn run_a2a_serve(args: &[String]) -> anyhow::Result<()> {
     let agent_id = a2a_value(args, "--id")?.unwrap_or_else(|| "ridgecode-worker".to_string());
     let once = a2a_has(args, "--once");
     let fixture = a2a_has(args, "--fixture")
-        || std::env::var("RIDGE_A2A_FIXTURE").ok().as_deref() == Some("1");
+        || std::env::var("RIDGECODE_A2A_FIXTURE").ok().as_deref() == Some("1");
     let cfg = load_config();
     apply_config_proxy(&cfg);
     let auth = load_auth();
@@ -954,7 +1312,7 @@ async fn run_without_provider(
     if task.is_some() || !tui_requested() {
         eprintln!(
             "[ridgecode] no key found, running the offline scripted demo. Provide a key to use a real LLM / TUI, pick one:\n  \
-             路 set the RIDGE_API_KEY env var; or\n  \
+             路 set the RIDGECODE_API_KEY env var; or\n  \
              路 put \"api_key\" in one of the providers profiles in ~/.ridge/config.json (plaintext, at your own risk),\n    \
              or point \"key_env\" at an already-exported env var name. See config.example.json in the same directory.\n"
         );
@@ -999,9 +1357,9 @@ fn missing_key_provider() -> Arc<dyn LlmProvider> {
     }]))
 }
 
-/// 配置文件路径:`RIDGE_CONFIG` env > `~/.ridge/config.json`。加载与 `/config` 回写共用。
+/// 配置文件路径:`RIDGECODE_CONFIG` env > `~/.ridge/config.json`。加载与 `/config` 回写共用。
 fn config_path() -> String {
-    std::env::var("RIDGE_CONFIG").unwrap_or_else(|_| format!("{}/config.json", ridge_home()))
+    std::env::var("RIDGECODE_CONFIG").unwrap_or_else(|_| format!("{}/config.json", ridge_home()))
 }
 
 /// 加载配置(JSON)。读不到/坏 → 默认空配置(回落 env)。
@@ -1027,12 +1385,15 @@ pub(crate) fn apply_proxy_env(proxy: &str) {
     }
 }
 
-/// 启动时据 config 落代理:`RIDGE_PROXY` > config(`proxy`) > 通用 `HTTP(S)_PROXY` > 直连。
-/// 专用配置优先于 shell 的通用代理；临时覆盖请用 `RIDGE_PROXY`。
+/// 启动时据 config 落代理:`RIDGECODE_PROXY` > config(`proxy`) > 通用 `HTTP(S)_PROXY` > 直连。
+/// 专用配置优先于 shell 的通用代理；临时覆盖请用 `RIDGECODE_PROXY`。
 /// 见 [`apply_proxy_env`]。
 fn apply_config_proxy(cfg: &Config) {
-    if let Some(v) = std::env::var("RIDGE_PROXY").ok().filter(|s| !s.is_empty()) {
-        eprintln!("[ridgecode] proxy ← env RIDGE_PROXY: {v}");
+    if let Some(v) = std::env::var("RIDGECODE_PROXY")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        eprintln!("[ridgecode] proxy ← env RIDGECODE_PROXY: {v}");
         apply_proxy_env(&v);
         return;
     }
@@ -1079,7 +1440,7 @@ fn ridge_home() -> String {
 
 /// `~/.ridge/auth.json` 密钥库路径(`login` 存的 API key 的家;**独立于 config,key 不进 config**)。
 fn auth_path() -> String {
-    std::env::var("RIDGE_AUTH").unwrap_or_else(|_| format!("{}/auth.json", ridge_home()))
+    std::env::var("RIDGECODE_AUTH").unwrap_or_else(|_| format!("{}/auth.json", ridge_home()))
 }
 
 /// 读密钥库 → `key_env → key` 映射(读不到/坏 → 空表)。供启动解析各 provider 的 key。
@@ -1101,10 +1462,10 @@ fn secure_file(path: &str) {
 mod login;
 mod run;
 
-/// 会话持久化文件:`RIDGE_SESSION` 或 `~/.ridge/session.json`。存 TUI/headless 会话的对话 history,
+/// 会话持久化文件:`RIDGECODE_SESSION` 或 `~/.ridge/session.json`。存 TUI/headless 会话的对话 history,
 /// 供 `--resume` 在 kill-9 / 关掉重开后**恢复多轮上下文**(像 Claude Code 的续接会话)。
 fn session_path() -> String {
-    std::env::var("RIDGE_SESSION").unwrap_or_else(|_| format!("{}/session.json", ridge_home()))
+    std::env::var("RIDGECODE_SESSION").unwrap_or_else(|_| format!("{}/session.json", ridge_home()))
 }
 
 /// 把对话 history 落盘(best-effort,失败不打断使用)。
@@ -1176,12 +1537,12 @@ fn load_resume_history() -> Vec<Message> {
 const MAX_PROMPT_HISTORY: usize = 200;
 
 fn global_input_history_path() -> String {
-    std::env::var("RIDGE_INPUT_HISTORY")
+    std::env::var("RIDGECODE_INPUT_HISTORY")
         .unwrap_or_else(|_| format!("{}/input-history.json", ridge_home()))
 }
 
 fn session_input_history_path() -> String {
-    std::env::var("RIDGE_SESSION_INPUT_HISTORY")
+    std::env::var("RIDGECODE_SESSION_INPUT_HISTORY")
         .unwrap_or_else(|_| format!("{}.inputs.json", session_path()))
 }
 
@@ -1232,7 +1593,7 @@ fn save_session_input_history(values: &[String]) {
     save_prompt_history(&session_input_history_path(), values);
 }
 
-/// 接入 MCP 服务器:**config 里的多个 `mcp`** + 兼容旧的单个 env `RIDGE_MCP_CMD`。
+/// 接入 MCP 服务器:**config 里的多个 `mcp`** + 兼容旧的单个 env `RIDGECODE_MCP_CMD`。
 /// 降级不崩:单个起不来 → 跳过;都没有 → 空,agent 只用内置工具。
 fn spawn_mcp_transport(cmd: &str, args: &[String]) -> Result<StdioTransport, McpError> {
     match StdioTransport::spawn(cmd, args) {
@@ -1294,9 +1655,9 @@ async fn resolve_configured_mcp(cfg: &Config) -> McpTools {
         }
     }
     // 兼容旧 env 单 server。
-    if let Ok(cmd) = std::env::var("RIDGE_MCP_CMD") {
+    if let Ok(cmd) = std::env::var("RIDGECODE_MCP_CMD") {
         if !cmd.is_empty() {
-            let name = std::env::var("RIDGE_MCP_NAME").unwrap_or_else(|_| "mcp".to_string());
+            let name = std::env::var("RIDGECODE_MCP_NAME").unwrap_or_else(|_| "mcp".to_string());
             statuses.push(McpServerStatus::configured(name.clone()));
             match spawn_mcp_transport(&cmd, &[]) {
                 Ok(t) => clients.push(Arc::new(McpClient::new(name, Box::new(t)))),
@@ -1329,9 +1690,9 @@ async fn resolve_configured_mcp(cfg: &Config) -> McpTools {
     tools
 }
 
-/// 加载 Skills:`RIDGE_SKILLS_DIR` env > config `skills_dir` > 默认 `~/.ridge/skills`。
+/// 加载 Skills:`RIDGECODE_SKILLS_DIR` env > config `skills_dir` > 默认 `~/.ridge/skills`。
 fn load_configured_skill_catalog(cfg: &Config) -> SkillCatalog {
-    let env_dir = std::env::var("RIDGE_SKILLS_DIR").ok();
+    let env_dir = std::env::var("RIDGECODE_SKILLS_DIR").ok();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let user_dir = std::path::PathBuf::from(format!("{}/skills", ridge_home()));
     let scopes = discover_skill_scopes(
@@ -1415,10 +1776,10 @@ fn append_project_rules(mut catalog: SkillCatalog) -> SkillCatalog {
     catalog
 }
 
-/// 加载自定义斜杠命令(iter-39):`RIDGE_COMMANDS_DIR` env > config `commands_dir` > `~/.ridge/commands`;
+/// 加载自定义斜杠命令(iter-39):`RIDGECODE_COMMANDS_DIR` env > config `commands_dir` > `~/.ridge/commands`;
 /// 目录里 `*.md` 各成 `/名字` + 每个 skill 也暴露为同名命令。供 TUI 斜杠命令扩展。
 fn load_configured_commands(cfg: &Config, catalog: &SkillCatalog) -> Vec<SlashCommand> {
-    let dir = std::env::var("RIDGE_COMMANDS_DIR")
+    let dir = std::env::var("RIDGECODE_COMMANDS_DIR")
         .ok()
         .or_else(|| cfg.commands_dir.clone())
         .unwrap_or_else(|| format!("{}/commands", ridge_home()));
@@ -1435,17 +1796,17 @@ fn load_configured_commands(cfg: &Config, catalog: &SkillCatalog) -> Vec<SlashCo
 }
 
 /// 解析参数:非 flag 拼成任务(无 → TUI/headless);`--cwd <dir>` 切换工作目录;
-/// `--yolo` / `--skip-permissions` / `--dangerously-skip-permissions` 或 env `RIDGE_SKIP_PERMISSIONS=1`
+/// `--yolo` / `--skip-permissions` / `--dangerously-skip-permissions` 或 env `RIDGECODE_SKIP_PERMISSIONS=1`
 /// 开 skip-danger 模式(工具自动放行,不再 [y/N])。
 fn parse_args() -> ParsedArgs {
     let mut task = String::new();
     let mut cwd = None;
     let mut resume = false;
     let mut resume_id = None;
-    let mut skip_danger = std::env::var("RIDGE_SKIP_PERMISSIONS")
+    let mut skip_danger = std::env::var("RIDGECODE_SKIP_PERMISSIONS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    let mut read_only = std::env::var("RIDGE_READ_ONLY")
+    let mut read_only = std::env::var("RIDGECODE_READ_ONLY")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     let mut every = None;
@@ -1539,7 +1900,7 @@ fn resolve_provider_label(cfg: &Config, provider: &str, base_url: &str) -> Strin
         left.trim_end_matches('/')
             .eq_ignore_ascii_case(right.trim_end_matches('/'))
     };
-    let selected = std::env::var("RIDGE_PROVIDER")
+    let selected = std::env::var("RIDGECODE_PROVIDER")
         .ok()
         .or_else(|| cfg.provider.clone());
     if let Some(profile) = selected
@@ -1560,12 +1921,12 @@ fn resolve_provider_label(cfg: &Config, provider: &str, base_url: &str) -> Strin
 }
 
 fn resolve_model_info(cfg: &Config) -> (String, String, String) {
-    let selector = std::env::var("RIDGE_PROVIDER")
+    let selector = std::env::var("RIDGECODE_PROVIDER")
         .ok()
         .or_else(|| cfg.provider.clone())
         .unwrap_or_else(|| "openai".to_string());
-    let model = std::env::var("RIDGE_MODEL").ok();
-    let base = std::env::var("RIDGE_BASE_URL").ok();
+    let model = std::env::var("RIDGECODE_MODEL").ok();
+    let base = std::env::var("RIDGECODE_BASE_URL").ok();
     if let Some(profile) = configured_profile(cfg, &selector) {
         return (
             profile.kind.clone(),
@@ -1591,7 +1952,7 @@ fn resolve_configured_model_info(
     cfg: &Config,
     auth: &std::collections::BTreeMap<String, String>,
 ) -> (String, String, String) {
-    let selector = std::env::var("RIDGE_PROVIDER")
+    let selector = std::env::var("RIDGECODE_PROVIDER")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(|| cfg.provider.clone());
@@ -1635,9 +1996,9 @@ fn resolve_start_model_info(
 
 /// 从零件造一个真实 provider(供启动装配与 `/model` 热切换共用)。
 fn resolve_reasoning_effort(cfg: &Config) -> String {
-    std::env::var("RIDGE_EFFORT")
+    std::env::var("RIDGECODE_EFFORT")
         .ok()
-        .or_else(|| std::env::var("RIDGE_REASONING_EFFORT").ok())
+        .or_else(|| std::env::var("RIDGECODE_REASONING_EFFORT").ok())
         .or_else(|| cfg.effort.clone())
         .and_then(|value| provider::normalize_reasoning_effort(&value).map(str::to_owned))
         .unwrap_or_else(|| provider::DEFAULT_REASONING_EFFORT.to_string())
@@ -1653,8 +2014,8 @@ fn make_provider(kind: &str, model: &str, base_url: &str, key: String) -> Arc<dy
 /// 组装 sub-agent 注册表:**内置 agent**(fastcontext/explorer/reviewer)+ 用户 `agents` 目录
 /// (同名覆盖内置)+ 命名 provider 档案(能从各自 KEY_ENV 取到密钥的那些,供 agent 的 `provider:` 引用)。
 fn build_agents(cfg: &Config, auth: &std::collections::BTreeMap<String, String>) -> agent::Agents {
-    let dir =
-        std::env::var("RIDGE_AGENTS_DIR").unwrap_or_else(|_| format!("{}/agents", ridge_home()));
+    let dir = std::env::var("RIDGECODE_AGENTS_DIR")
+        .unwrap_or_else(|_| format!("{}/agents", ridge_home()));
     let mut defs = agent::builtin_agents();
     for a in agent::load_agents(&dir) {
         match defs.iter_mut().find(|d| d.name == a.name) {
@@ -1690,9 +2051,9 @@ fn build_agents(cfg: &Config, auth: &std::collections::BTreeMap<String, String>)
 }
 
 /// 装配真实 provider。密钥来源(任一命中即用,否则 None → demo)。密钥绝不打印:
-/// 1. **`RIDGE_API_KEY` env**(传统/最高优先)→ 配 env>config 解析出的 provider 身份;
+/// 1. **`RIDGECODE_API_KEY` env**(传统/最高优先)→ 配 env>config 解析出的 provider 身份;
 /// 2. **config `providers[]` 档案**:取第一个能解析出密钥的档案(内联 `api_key` 或 `key_env`→env),
-///    直接用它的 kind/model/base_url 启动 —— **config.json 即可跑,无需 `RIDGE_API_KEY`**。
+///    直接用它的 kind/model/base_url 启动 —— **config.json 即可跑,无需 `RIDGECODE_API_KEY`**。
 fn real_provider(
     cfg: &Config,
     auth: &std::collections::BTreeMap<String, String>,
@@ -1700,7 +2061,7 @@ fn real_provider(
     // A named profile is the active selection.  Resolve its credential and
     // endpoint before the legacy top-level key so switching profiles cannot
     // send one provider's key to another provider's endpoint.
-    let selector = std::env::var("RIDGE_PROVIDER")
+    let selector = std::env::var("RIDGECODE_PROVIDER")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(|| cfg.provider.clone());
@@ -1720,7 +2081,7 @@ fn real_provider(
             return None;
         }
     }
-    // 顶层 key(iter-41 收敛):RIDGE_API_KEY env → 顶层内联 api_key → 顶层 key_env→(env/auth)。
+    // 顶层 key(iter-41 收敛):RIDGECODE_API_KEY env → 顶层内联 api_key → 顶层 key_env→(env/auth)。
     // 命中即用顶层 provider/model/base_url 身份启动(用户设的默认 model 生效)。
     if let Some(key) = agent::resolve_top_level_key(cfg, auth) {
         let (kind, model, base) = resolve_model_info(cfg);
@@ -1757,10 +2118,10 @@ fn init_tracing() {
 mod tests {
     use super::{
         apply_proxy_env, configured_profile, global_input_history_path, load_prompt_history,
-        load_session, missing_key_provider, parse_duration, real_provider,
+        load_session, machine_outcome, missing_key_provider, parse_duration, real_provider,
         resolve_configured_model_info, resolve_model_info, resolve_provider_label,
         resolve_start_model_info, save_prompt_history, save_session, session_input_history_path,
-        MAX_PROMPT_HISTORY,
+        MachineRunOptions, MAX_PROMPT_HISTORY,
     };
     use crate::Config;
     use provider::Message;
@@ -1776,6 +2137,49 @@ mod tests {
         assert_eq!(parse_duration("0s"), None, "零间隔无意义");
         assert_eq!(parse_duration("abc"), None);
         assert_eq!(parse_duration(""), None);
+    }
+
+    #[test]
+    fn machine_run_options_are_strict_and_isolated() {
+        let args = vec![
+            "--task".to_string(),
+            "repair the failing test".to_string(),
+            "--jsonl".to_string(),
+            "--read-only".to_string(),
+            "--isolate-runtime".to_string(),
+            "--effort".to_string(),
+            "high".to_string(),
+            "--max-turns".to_string(),
+            "12".to_string(),
+            "--timeout".to_string(),
+            "30s".to_string(),
+            "--budget-tokens".to_string(),
+            "456".to_string(),
+            "--no-persist".to_string(),
+            "--state-dir".to_string(),
+            "C:/tmp/ridge-eval".to_string(),
+        ];
+        let options = MachineRunOptions::parse(&args).unwrap();
+        assert_eq!(options.task, "repair the failing test");
+        assert!(options.jsonl && options.read_only && options.isolate_runtime);
+        assert_eq!(options.effort.as_deref(), Some("high"));
+        assert_eq!(options.max_turns, 12);
+        assert_eq!(options.timeout, std::time::Duration::from_secs(30));
+        assert_eq!(options.budget_tokens, Some(456));
+        assert!(MachineRunOptions::parse(&["--task".into(), "x".into(), "--bad".into()]).is_err());
+        assert!(MachineRunOptions::parse(&[
+            "--task".into(),
+            "x".into(),
+            "--max-turns".into(),
+            "0".into()
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn machine_runner_does_not_claim_external_verification() {
+        assert_eq!(machine_outcome(true), "agent_approved");
+        assert_eq!(machine_outcome(false), "unverified");
     }
 
     #[test]
@@ -1872,6 +2276,25 @@ mod tests {
             .complete(&provider::CompletionRequest::default())
             .await
             .is_ok());
+    }
+
+    #[test]
+    fn ridgecode_api_key_environment_selects_api_provider_before_oauth() {
+        let previous_key = std::env::var_os("RIDGECODE_API_KEY");
+        let previous_provider = std::env::var_os("RIDGECODE_PROVIDER");
+        std::env::set_var("RIDGECODE_API_KEY", "test-key");
+        std::env::set_var("RIDGECODE_PROVIDER", "openai");
+
+        assert!(real_provider(&Config::default(), &std::collections::BTreeMap::new()).is_some());
+
+        match previous_key {
+            Some(value) => std::env::set_var("RIDGECODE_API_KEY", value),
+            None => std::env::remove_var("RIDGECODE_API_KEY"),
+        }
+        match previous_provider {
+            Some(value) => std::env::set_var("RIDGECODE_PROVIDER", value),
+            None => std::env::remove_var("RIDGECODE_PROVIDER"),
+        }
     }
 
     #[test]

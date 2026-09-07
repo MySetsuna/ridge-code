@@ -45,11 +45,11 @@ pub struct ReqwestClient {
     client: reqwest::Client,
 }
 
-/// LLM 请求超时秒数(env `RIDGE_HTTP_TIMEOUT` 可调,默认 180)。**防端点卡住令任务永久 hang** ——
+/// LLM 请求超时秒数(env `RIDGECODE_HTTP_TIMEOUT` 可调,默认 180)。**防端点卡住令任务永久 hang** ——
 /// 无超时时,GLM 等端点偶发流式卡住会冻住整个 reason 节点(超步内 await 永不返回,`max_supersteps`
 /// 拦不住)。非流式=整请求超时;流式=响应头等待 + **逐块 idle** 超时(不误杀正常慢流)。
 fn timeout_secs() -> u64 {
-    std::env::var("RIDGE_HTTP_TIMEOUT")
+    std::env::var("RIDGECODE_HTTP_TIMEOUT")
         .ok()
         .and_then(|s| s.trim().parse().ok())
         .filter(|&n| n > 0)

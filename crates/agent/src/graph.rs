@@ -6,18 +6,20 @@ use crate::brain::{
 use crate::context::{bound_observation, to_messages};
 use crate::dispatch_budget::{default_dispatch_budget, DispatchBudget};
 use crate::exec::{
-    builtin_tool_specs, durable_updates_with_effect, effective_tool_effect, execute_tool_call,
-    is_error_observation, parse_todos,
+    builtin_tool_specs, durable_updates_with_effect, durable_updates_with_native_result,
+    effective_tool_effect, execute_tool_call_native, is_error_observation,
+    parse_requirement_updates, parse_task_contract, parse_todos,
 };
 use crate::guard::{is_mutating_tool, read_only_block_with_effect};
 use crate::knowledge::{
-    dispatch_batch_obs_with_budget, dispatch_batch_spec, dispatch_obs_with_budget, dispatch_spec,
-    Agents, Skill,
+    dispatch_batch_result_with_budget, dispatch_batch_spec, dispatch_result_with_budget,
+    dispatch_spec, Agents, Skill,
 };
 use crate::mcp_tools::McpTools;
-use crate::observe::{fetch_url_obs, preview_call, web_search_obs};
+use crate::observe::{fetch_url_result, preview_call, web_search_result};
 use crate::state::{
-    needs_approval, AgentState, Approver, AutoApprove, Patch, MAX_DISPATCH_BATCHES,
+    needs_approval, AgentState, Approver, AutoApprove, Patch, ToolResultStatus, ToolResultV1,
+    MAX_DISPATCH_BATCHES,
 };
 use langgraph::{CompiledGraph, GraphError, StateGraph};
 use provider::{CompletionRequest, LlmProvider, Message, Role, StreamChunk, ToolEffect};
@@ -107,7 +109,7 @@ fn steer_message(text: &str) -> String {
 const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 180;
 
 fn graph_trace(stage: &str) {
-    let Some(path) = std::env::var_os("RIDGE_TUI_TRACE") else {
+    let Some(path) = std::env::var_os("RIDGECODE_TUI_TRACE") else {
         return;
     };
     if let Some(parent) = std::path::Path::new(&path).parent() {
@@ -124,7 +126,7 @@ fn graph_trace(stage: &str) {
 }
 
 fn mcp_tool_timeout() -> Duration {
-    std::env::var("RIDGE_TOOL_TIMEOUT")
+    std::env::var("RIDGECODE_TOOL_TIMEOUT")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|secs| *secs > 0)
@@ -132,6 +134,7 @@ fn mcp_tool_timeout() -> Duration {
         .unwrap_or_else(|| Duration::from_secs(DEFAULT_TOOL_TIMEOUT_SECS))
 }
 
+#[cfg(test)]
 async fn call_mcp_with_timeout(
     client: &mcp::McpClient,
     tool: &str,
@@ -142,6 +145,45 @@ async fn call_mcp_with_timeout(
         Ok(Ok(text)) => text,
         Ok(Err(error)) => format!("mcp error: {}", error.redacted_summary()),
         Err(_) => format!("mcp error: timed out after {}ms", timeout.as_millis()),
+    }
+}
+
+/// Agent-runtime MCP path: retain `isError` as a protocol-level result status
+/// rather than inferring failure from a text observation. Transport/RPC
+/// failures remain redacted, but are also typed as retryable errors.
+async fn call_mcp_with_timeout_native(
+    client: &mcp::McpClient,
+    tool: &str,
+    arguments: serde_json::Value,
+    timeout: Duration,
+    call: &provider::ToolCall,
+    effect: ToolEffect,
+) -> CallExecution {
+    match tokio::time::timeout(timeout, client.call_tool_result(tool, arguments)).await {
+        Ok(Ok(result)) if result.is_error => CallExecution::native(
+            call,
+            effect,
+            ToolResultStatus::Error,
+            false,
+            "mcp error: MCP tool error".to_string(),
+        ),
+        Ok(Ok(result)) => {
+            CallExecution::native(call, effect, ToolResultStatus::Success, false, result.text)
+        }
+        Ok(Err(error)) => CallExecution::native(
+            call,
+            effect,
+            ToolResultStatus::Error,
+            true,
+            format!("mcp error: {}", error.redacted_summary()),
+        ),
+        Err(_) => CallExecution::native(
+            call,
+            effect,
+            ToolResultStatus::Error,
+            true,
+            format!("mcp error: timed out after {}ms", timeout.as_millis()),
+        ),
     }
 }
 
@@ -369,7 +411,17 @@ fn build_tool_specs(mcp: &McpTools, agents: &Agents, read_only: bool) -> Vec<pro
     if let Some(dispatch) = dispatch_batch_spec(agents) {
         specs.push(dispatch);
     }
-    if !read_only {
+    if read_only {
+        // MCP metadata is conservative: only an explicitly resolved Explore
+        // capability is safe to offer in read-only runs. Unknown tools stay
+        // hidden rather than relying on names/descriptions to infer safety.
+        specs.extend(
+            mcp.specs
+                .iter()
+                .filter(|spec| spec.effect.is_explore())
+                .cloned(),
+        );
+    } else {
         specs.extend(mcp.specs.clone());
     }
     graph_trace("specs.ready");
@@ -416,7 +468,7 @@ fn add_reason_node(
                 return Ok::<_, provider::ProviderError>(reason_patch(
                     &state,
                     deterministic_wrapup(&state, HaltReason::Approved),
-                    None,
+                    Vec::new(),
                     provider::Usage::default(),
                     guidance,
                 ));
@@ -482,7 +534,7 @@ fn add_reason_node(
             Ok::<_, provider::ProviderError>(reason_patch(
                 &state,
                 completion.text,
-                completion.tool_calls.into_iter().next(),
+                completion.tool_calls,
                 usage,
                 guidance,
             ))
@@ -613,7 +665,7 @@ fn available_tool_specs(
 fn reason_patch(
     state: &AgentState,
     text: String,
-    call: Option<provider::ToolCall>,
+    calls: Vec<provider::ToolCall>,
     usage: provider::Usage,
     guidance: Vec<String>,
 ) -> Patch {
@@ -625,24 +677,8 @@ fn reason_patch(
             .iter()
             .map(|message| Patch::PushHistory(Message::user(steer_message(message)))),
     );
-    match call {
-        Some(call) => {
-            patches.push(Patch::Issues(Vec::new()));
-            patches.push(Patch::SetLastError(None));
-            patches.push(Patch::SetErrStreak(0));
-            patches.push(Patch::Message(format!(
-                "reason#{}: tool_call {} {}",
-                state.steps + 1,
-                call.name,
-                call.arguments
-            )));
-            patches.push(Patch::PushHistory(
-                Message::assistant(text).with_tool_calls(vec![call.clone()]),
-            ));
-            patches.push(Patch::PendingCall(Some(call)));
-            patches.push(Patch::Action(Some("tool".to_string())));
-        }
-        None => {
+    match calls.as_slice() {
+        [] => {
             if text.trim().is_empty() {
                 patches.push(Patch::Message(format!(
                     "reason#{}: empty completion (no text or tool call) -> retry",
@@ -652,7 +688,7 @@ fn reason_patch(
                     "provider returned an empty completion without a tool call".to_string(),
                 )));
                 patches.push(Patch::SetErrStreak(state.err_streak + 1));
-                patches.push(Patch::PendingCall(None));
+                patches.push(Patch::PendingCalls(Vec::new()));
                 patches.push(Patch::Action(Some("retry".to_string())));
                 return Patch::Batch(patches);
             }
@@ -663,8 +699,26 @@ fn reason_patch(
             patches.push(Patch::PushHistory(Message::assistant(text)));
             patches.push(Patch::SetLastError(None));
             patches.push(Patch::SetErrStreak(0));
-            patches.push(Patch::PendingCall(None));
+            patches.push(Patch::PendingCalls(Vec::new()));
             patches.push(Patch::Action(Some("finish".to_string())));
+        }
+        _ => {
+            patches.push(Patch::Issues(Vec::new()));
+            patches.push(Patch::SetLastError(None));
+            patches.push(Patch::SetErrStreak(0));
+            for call in &calls {
+                patches.push(Patch::Message(format!(
+                    "reason#{}: tool_call {} {}",
+                    state.steps + 1,
+                    call.name,
+                    call.arguments
+                )));
+            }
+            patches.push(Patch::PushHistory(
+                Message::assistant(text).with_tool_calls(calls.clone()),
+            ));
+            patches.push(Patch::PendingCalls(calls));
+            patches.push(Patch::Action(Some("tool".to_string())));
         }
     }
     Patch::Batch(patches)
@@ -682,11 +736,64 @@ struct ActContext {
     dispatch_budget: Arc<DispatchBudget>,
 }
 
+/// Observation plus optional execution-site metadata. External providers keep
+/// the compatibility path until their transports emit ToolResultV1 natively.
+struct CallExecution {
+    observation: String,
+    native_result: Option<ToolResultV1>,
+}
+
+impl From<String> for CallExecution {
+    fn from(observation: String) -> Self {
+        Self {
+            observation,
+            native_result: None,
+        }
+    }
+}
+
+impl CallExecution {
+    fn native(
+        call: &provider::ToolCall,
+        effect: ToolEffect,
+        status: ToolResultStatus,
+        retryable: bool,
+        observation: String,
+    ) -> Self {
+        let summary = observation
+            .lines()
+            .next()
+            .unwrap_or(&observation)
+            .chars()
+            .take(512)
+            .collect();
+        Self {
+            native_result: Some(ToolResultV1 {
+                schema_version: 1,
+                call_id: call.id.clone(),
+                tool: call.name.clone(),
+                effect,
+                status,
+                exit_code: None,
+                retryable,
+                changed_paths: Vec::new(),
+                output_truncated: false,
+                read_offset: None,
+                read_limit: None,
+                match_count: None,
+                workspace_revision: 0,
+                summary,
+            }),
+            observation,
+        }
+    }
+}
+
 fn add_act_node(graph: &mut StateGraph<AgentState>, context: ActContext) {
     graph.add_node("act", move |state: AgentState| {
         let context = context.clone();
         async move {
-            let patch = match state.pending_call.as_ref() {
+            let patch = match state.next_pending_call() {
                 Some(call) => {
                     let effective_call = normalize_explicit_run_shell(&state, call);
                     let effect = context.mcp.effect_for(&call.name);
@@ -702,43 +809,49 @@ fn add_act_node(graph: &mut StateGraph<AgentState>, context: ActContext) {
                                 .scope_with_attempt_limit(dispatch_remaining),
                         )
                     });
-                    let observation = if let Some(blocked) = explicit_sequence_block(&state, call) {
-                        blocked
+                    let execution = if let Some(blocked) = explicit_sequence_block(&state, call) {
+                        blocked.into()
                     } else if state.dispatch_wave_count() >= MAX_DISPATCH_BATCHES
                         && call.name == "dispatch_agents"
                     {
                         format!(
                             "BLOCKED (dispatch budget): {}/{} dispatch waves used; continue the main task without another batch",
                             state.dispatch_wave_count(), MAX_DISPATCH_BATCHES
-                        )
+                        ).into()
                     } else if is_dispatch && dispatch_remaining == 0 {
                         format!(
                             "BLOCKED (dispatch budget): {}/{} dispatch attempts used; no provider call issued",
                             state.dispatch_attempts_used,
                             context.dispatch_budget.attempt_limit()
-                        )
+                        ).into()
                     } else if state.codegraph_unavailable && call.name.starts_with("codegraph__") {
                         "BLOCKED (codegraph unavailable): use built-in read_file/search or act; do not retry CodeGraph"
-                            .to_string()
+                            .to_string().into()
                     } else if state.explore_handoff && effect.is_explore() {
                         format!(
                             "BLOCKED (explore handoff): {} is read-only; choose an edit or verification action",
                             call.name
-                        )
+                        ).into()
                     } else if is_broad_search_after_target(&state, call) {
                         format!(
                             "BLOCKED (target known): located {}; use edit_file/write_file/apply_edits or run_shell to verify. Do not restart full-repo search.",
                             state.last_read_paths.join(", ")
-                        )
+                        ).into()
                     } else if is_explore_shell_after_target(&state, call) {
                         format!(
                             "BLOCKED (target known): located {}; use edit_file/write_file/apply_edits, not run_shell as an editor or search.",
                             state.last_read_paths.join(", ")
-                        )
+                        ).into()
                     } else {
                         execute_pending_call(&effective_call, &context, dispatch_scope.as_ref()).await
                     };
-                    let patch = act_patch_with_effect(&state, call, effect, observation);
+                    let patch = act_patch_with_native_result(
+                        &state,
+                        call,
+                        effect,
+                        execution.observation,
+                        execution.native_result,
+                    );
                     let consumed = dispatch_scope
                         .as_ref()
                         .map(|budget| budget.stats().attempts)
@@ -827,49 +940,108 @@ async fn execute_pending_call(
     call: &provider::ToolCall,
     context: &ActContext,
     dispatch_budget: Option<&Arc<DispatchBudget>>,
-) -> String {
+) -> CallExecution {
     let effect = context.mcp.effect_for(&call.name);
     if let Some(message) = read_only_block_with_effect(context.read_only, &call.name, effect) {
-        return message;
+        return message.into();
     }
     if needs_approval(&call.name) && !context.approver.approve(&call.name, &preview_call(call)) {
-        return format!("permission denied by user: {}", call.name);
+        return format!("permission denied by user: {}", call.name).into();
     }
     if call.name == "dispatch_agent" {
         let Some(budget) = dispatch_budget else {
-            return "dispatch budget unavailable; no provider call issued".to_string();
+            return "dispatch budget unavailable; no provider call issued"
+                .to_string()
+                .into();
         };
-        return dispatch_obs_with_budget(
+        let result = dispatch_result_with_budget(
             &context.agents,
             &context.main_provider,
             call,
             budget.clone(),
         )
         .await;
+        return CallExecution::native(
+            call,
+            effect,
+            if result.completed {
+                ToolResultStatus::Success
+            } else {
+                ToolResultStatus::Error
+            },
+            result.retryable,
+            result.observation,
+        );
     }
     if call.name == "dispatch_agents" {
         let Some(budget) = dispatch_budget else {
-            return "dispatch budget unavailable; no provider call issued".to_string();
+            return "dispatch budget unavailable; no provider call issued"
+                .to_string()
+                .into();
         };
-        return dispatch_batch_obs_with_budget(
+        let result = dispatch_batch_result_with_budget(
             &context.agents,
             &context.main_provider,
             call,
             budget.clone(),
         )
         .await;
+        return CallExecution::native(
+            call,
+            effect,
+            if result.completed {
+                ToolResultStatus::Success
+            } else {
+                ToolResultStatus::Error
+            },
+            result.retryable,
+            result.observation,
+        );
     }
     if call.name == "web_search" {
-        return web_search_obs(context.fetch.as_ref(), &context.net, call).await;
+        let result = web_search_result(context.fetch.as_ref(), &context.net, call).await;
+        return CallExecution::native(
+            call,
+            effect,
+            if result.failed {
+                ToolResultStatus::Error
+            } else {
+                ToolResultStatus::Success
+            },
+            result.retryable,
+            result.observation,
+        );
     }
     if call.name == "fetch_url" {
-        return fetch_url_obs(context.fetch.as_ref(), call).await;
+        let result = fetch_url_result(context.fetch.as_ref(), call).await;
+        return CallExecution::native(
+            call,
+            effect,
+            if result.failed {
+                ToolResultStatus::Error
+            } else {
+                ToolResultStatus::Success
+            },
+            result.retryable,
+            result.observation,
+        );
     }
     if let Some((client, raw)) = context.mcp.router.get(&call.name) {
-        return call_mcp_with_timeout(client, raw, call.arguments.clone(), mcp_tool_timeout())
-            .await;
+        return call_mcp_with_timeout_native(
+            client,
+            raw,
+            call.arguments.clone(),
+            mcp_tool_timeout(),
+            call,
+            effect,
+        )
+        .await;
     }
-    execute_tool_call(call)
+    let result = execute_tool_call_native(call, effect);
+    CallExecution {
+        observation: result.observation,
+        native_result: Some(result.typed),
+    }
 }
 
 #[allow(dead_code)]
@@ -888,7 +1060,21 @@ fn act_patch_with_effect(
     effect: ToolEffect,
     observation: String,
 ) -> Patch {
+    act_patch_with_native_result(state, call, effect, observation, None)
+}
+
+fn act_patch_with_native_result(
+    state: &AgentState,
+    call: &provider::ToolCall,
+    effect: ToolEffect,
+    observation: String,
+    native_result: Option<ToolResultV1>,
+) -> Patch {
     let effect = effective_tool_effect(effect.resolved_for(&call.name), &observation);
+    let execution_failed = native_result
+        .as_ref()
+        .map(|result| result.status.is_error())
+        .unwrap_or_else(|| is_error_observation(&observation));
     let display_observation = observation.clone();
     let observation = bound_observation(observation);
     let stall = if state.tool_output.as_deref() == Some(observation.as_str()) {
@@ -896,12 +1082,12 @@ fn act_patch_with_effect(
     } else {
         0
     };
-    let err_streak = if is_error_observation(&observation) {
+    let err_streak = if execution_failed {
         state.err_streak + 1
     } else {
         0
     };
-    let explore_streak = next_explore_streak(state, call, effect, &observation);
+    let explore_streak = next_explore_streak(state, call, effect, &observation, execution_failed);
     let mut patches = vec![
         Patch::Message(format!("act: {} -> {}", call.name, observation)),
         Patch::DisplayMessage(format!("act: {} -> {}", call.name, display_observation)),
@@ -911,22 +1097,38 @@ fn act_patch_with_effect(
         Patch::SetExploreStreak(explore_streak),
         Patch::SetLastToolEffect(effect),
         Patch::ToolOutput(Some(observation.clone())),
-        Patch::PendingCall(None),
+        Patch::DequeuePendingCall,
     ];
     if state.explore_handoff {
         patches.push(Patch::SetExploreActionUsed(satisfies_handoff_action(
             state,
             call,
             effect,
-            &observation,
+            execution_failed,
         )));
     }
-    if state.explore_handoff && effect.is_edit() && !is_error_observation(&observation) {
+    if state.explore_handoff && effect.is_edit() && !execution_failed {
         patches.push(Patch::SetExploreHandoff(false));
         patches.push(Patch::SetExploreActionUsed(false));
     }
     if call.name == "todo_write" {
         patches.push(Patch::SetTodos(parse_todos(call)));
+    }
+    if call.name == "contract_write" && !execution_failed {
+        if let Ok(contract) = parse_task_contract(call) {
+            patches.push(Patch::SetTaskContract(contract));
+        }
+    }
+    if call.name == "requirement_update" && !execution_failed {
+        if let Ok(updates) = parse_requirement_updates(call) {
+            if state.validate_requirement_updates(&updates).is_ok() {
+                patches.push(Patch::UpdateRequirements(updates));
+            } else {
+                patches.push(Patch::SetLastError(Some(
+                    "requirement update rejected: unknown, stale, or failed evidence".into(),
+                )));
+            }
+        }
     }
     if call.name == "dispatch_agents" {
         patches.push(Patch::SetDispatchBatches(
@@ -939,7 +1141,17 @@ fn act_patch_with_effect(
     if call.name.starts_with("codegraph__") && codegraph_unavailable(&observation) {
         patches.push(Patch::SetCodegraphUnavailable(true));
     }
-    patches.extend(durable_updates_with_effect(call, effect, &observation));
+    if let Some(mut typed_result) = native_result {
+        typed_result.effect = effect;
+        patches.extend(durable_updates_with_native_result(
+            call,
+            effect,
+            &observation,
+            typed_result,
+        ));
+    } else {
+        patches.extend(durable_updates_with_effect(call, effect, &observation));
+    }
     Patch::Batch(patches)
 }
 
@@ -968,9 +1180,9 @@ fn satisfies_handoff_action(
     state: &AgentState,
     _call: &provider::ToolCall,
     effect: ToolEffect,
-    observation: &str,
+    execution_failed: bool,
 ) -> bool {
-    if is_error_observation(observation) {
+    if execution_failed {
         return false;
     }
     if effect.is_edit() {
@@ -1019,17 +1231,45 @@ fn is_explore_shell_after_target(state: &AgentState, call: &provider::ToolCall) 
 
 fn next_explore_streak(
     state: &AgentState,
-    _call: &provider::ToolCall,
+    call: &provider::ToolCall,
     effect: ToolEffect,
     observation: &str,
+    execution_failed: bool,
 ) -> usize {
-    if effect.is_edit() && !is_error_observation(observation) {
+    if effect.is_edit() && !execution_failed {
         0
-    } else if effect.is_explore() {
+    } else if effect.is_explore()
+        && !exploration_made_progress(state, call, observation, execution_failed)
+    {
         state.explore_streak + 1
+    } else if effect.is_explore() {
+        0
     } else {
         state.explore_streak
     }
+}
+
+/// Evidence progress for exploration is deliberately narrower than "a tool was
+/// called": a newly located path or changed observation advances the search;
+/// re-reading the same path with the same result does not. This prevents a
+/// fixed read-count budget from cutting off a legitimate large-repository
+/// investigation while preserving the anti-thrash guard.
+fn exploration_made_progress(
+    state: &AgentState,
+    call: &provider::ToolCall,
+    observation: &str,
+    execution_failed: bool,
+) -> bool {
+    if execution_failed {
+        return false;
+    }
+    let path = call
+        .arguments
+        .get("path")
+        .or_else(|| call.arguments.get("file_path"))
+        .and_then(serde_json::Value::as_str);
+    path.is_some_and(|path| !state.last_read_paths.iter().any(|known| known == path))
+        || state.tool_output.as_deref() != Some(observation)
 }
 
 fn add_verify_node(graph: &mut StateGraph<AgentState>, reviewer: Option<Arc<dyn LlmProvider>>) {
@@ -1084,6 +1324,20 @@ fn add_wrapup_node(
         let system = system.clone();
         async move {
             let reason = halt_reason(&state);
+            // `ridgecode run --max-turns` is an exact provider-call budget for
+            // benchmark runs. Once its smaller per-run cap is reached, use the
+            // deterministic handoff rather than spending an unbudgeted model
+            // call merely to polish the wrapup. Interactive long runs keep the
+            // richer model-written handoff at the global default cap.
+            if state.reasoning_limit() < crate::MAX_STEPS
+                && state.steps >= state.reasoning_limit()
+            {
+                let text = deterministic_wrapup(&state, reason);
+                return Ok::<_, Infallible>(Patch::Batch(vec![
+                    Patch::Message(format!("(final) ⏸[{}] {}", reason.as_str(), text)),
+                    Patch::PushHistory(Message::assistant(text)),
+                ]));
+            }
             let mut messages = to_messages(&system, &state);
             messages.push(Message::new(
                 Role::System,
@@ -1208,9 +1462,9 @@ fn review_request(s: &AgentState) -> CompletionRequest {
 #[cfg(test)]
 mod tests {
     use super::{
-        call_mcp_with_timeout, halt_reason, is_error_observation, pending_steer, push_steer,
-        reason_patch, requeue_steer, take_steer, verify_route_llm, MAX_STEER_CHARS,
-        MAX_STEER_MESSAGES,
+        act_patch_with_effect, call_mcp_with_timeout, call_mcp_with_timeout_native, halt_reason,
+        is_error_observation, pending_steer, push_steer, reason_patch, requeue_steer, take_steer,
+        verify_route_llm, MAX_STEER_CHARS, MAX_STEER_MESSAGES,
     };
     use crate::{
         build_agent, build_llm_agent, build_llm_agent_full_with_steer, build_llm_agent_reviewed,
@@ -1228,6 +1482,80 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+
+    #[test]
+    fn contract_updates_only_accept_real_current_evidence() {
+        let mut state = AgentState::new("make and prove a change");
+        let contract = ToolCall {
+            id: "contract".into(),
+            name: "contract_write".into(),
+            arguments: serde_json::json!({
+                "objective": "make and prove a change",
+                "requirements": [{"id": "R1", "description": "verify result"}]
+            }),
+        };
+        state.apply(act_patch_with_effect(
+            &state,
+            &contract,
+            ToolEffect::Unknown,
+            "task contract recorded: 1 requirement(s)".into(),
+        ));
+        assert!(state.task_contract.is_some());
+
+        let first_edit = ToolCall {
+            id: "edit-1".into(),
+            name: "edit_file".into(),
+            arguments: serde_json::json!({"path": "src/lib.rs"}),
+        };
+        state.apply(act_patch_with_effect(
+            &state,
+            &first_edit,
+            ToolEffect::Edit,
+            "edited src/lib.rs".into(),
+        ));
+
+        let evidence = ToolCall {
+            id: "verify-1".into(),
+            name: "run_shell".into(),
+            arguments: serde_json::json!({"cmd": "cargo test"}),
+        };
+        state.apply(act_patch_with_effect(
+            &state,
+            &evidence,
+            ToolEffect::Verify,
+            "exit 0: tests passed".into(),
+        ));
+        let update = ToolCall {
+            id: "requirement-update".into(),
+            name: "requirement_update".into(),
+            arguments: serde_json::json!({"requirements": [{
+                "id": "R1", "status": "satisfied", "evidence_call_ids": ["verify-1"]
+            }]}),
+        };
+        state.apply(act_patch_with_effect(
+            &state,
+            &update,
+            ToolEffect::Unknown,
+            "requirement update parsed: 1 item(s)".into(),
+        ));
+        assert!(!completion_blocked(&state));
+
+        let edit = ToolCall {
+            id: "edit-2".into(),
+            name: "edit_file".into(),
+            arguments: serde_json::json!({"path": "src/lib.rs"}),
+        };
+        state.apply(act_patch_with_effect(
+            &state,
+            &edit,
+            ToolEffect::Edit,
+            "edited src/lib.rs".into(),
+        ));
+        assert!(
+            completion_blocked(&state),
+            "old evidence cannot survive an edit"
+        );
+    }
 
     #[derive(Clone, Default)]
     struct RecordingProvider {
@@ -1289,7 +1617,7 @@ mod tests {
         output.apply(reason_patch(
             &state,
             String::new(),
-            None,
+            Vec::new(),
             provider::Usage::default(),
             Vec::new(),
         ));
@@ -1307,11 +1635,11 @@ mod tests {
         output.apply(reason_patch(
             &retry_state,
             String::new(),
-            Some(ToolCall {
+            vec![ToolCall {
                 id: "recovered-call".into(),
                 name: "read_file".into(),
                 arguments: serde_json::json!({"path": "Cargo.toml"}),
-            }),
+            }],
             provider::Usage::default(),
             Vec::new(),
         ));
@@ -1797,7 +2125,7 @@ mod tests {
         patched.apply(reason_patch(
             &state,
             "I will inspect it".into(),
-            Some(call),
+            vec![call],
             provider::Usage::default(),
             guidance,
         ));
@@ -1889,6 +2217,29 @@ mod tests {
 
         assert!(state.explore_handoff);
         assert!(!state.explore_action_used);
+    }
+
+    #[test]
+    fn repeated_exploration_without_new_evidence_triggers_handoff_counter() {
+        let call = ToolCall {
+            id: "same-read".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({"path": "src/lib.rs"}),
+        };
+        let mut state = AgentState::new("inspect source");
+        state.last_read_paths = vec!["src/lib.rs".into()];
+        state.tool_output = Some("same source".into());
+        state.explore_streak = MAX_EXPLORE - 1;
+        state.apply(super::act_patch(&state, &call, "same source".into()));
+        assert_eq!(state.explore_streak, MAX_EXPLORE);
+
+        let new_path = ToolCall {
+            id: "new-read".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({"path": "src/other.rs"}),
+        };
+        state.apply(super::act_patch(&state, &new_path, "other source".into()));
+        assert_eq!(state.explore_streak, 0, "new evidence resets the guard");
     }
 
     #[test]
@@ -1999,6 +2350,32 @@ mod tests {
             .map(|spec| spec.name)
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["records__write_opaque".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn read_only_mode_keeps_only_declared_explore_mcp_tools() {
+        use mcp::FnTransport;
+
+        let transport = FnTransport(|method: &str, _params: &serde_json::Value| match method {
+            "initialize" => Ok(serde_json::json!({})),
+            "tools/list" => Ok(serde_json::json!({"tools": [
+                {"name": "inspect", "description": "read records", "effect": "explore"},
+                {"name": "mutate", "description": "change records", "effect": "edit"},
+                {"name": "opaque", "description": "unknown capability"}
+            ]})),
+            other => Err(mcp::McpError::BadResponse(other.to_string())),
+        });
+        let mcp = resolve_mcp(vec![Arc::new(McpClient::new(
+            "records",
+            Box::new(transport),
+        ))])
+        .await;
+        let names = super::build_tool_specs(&mcp, &Agents::default(), true)
+            .into_iter()
+            .map(|spec| spec.name)
+            .filter(|name| name.starts_with("records__"))
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["records__inspect"]);
     }
 
     #[test]
@@ -2184,14 +2561,135 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_exploration_gets_one_real_action_turn() {
+    async fn strict_reasoning_limit_executes_last_tool_without_a_second_model_turn() {
+        use provider::{Completion, ScriptedProvider};
+        let scripted = Arc::new(ScriptedProvider::new(vec![Completion {
+            tool_calls: vec![ToolCall {
+                id: "last-allowed-tool".to_string(),
+                name: "run_shell".to_string(),
+                arguments: serde_json::json!({"cmd": "exit 0"}),
+            }],
+            ..Default::default()
+        }]));
+        let app = build_llm_agent(scripted.clone()).unwrap();
+        let out = app
+            .invoke(AgentState::new("run exactly one command").with_reasoning_limit(1))
+            .await
+            .unwrap();
+
+        assert_eq!(out.steps, 1, "the machine cap permits one reason turn");
+        assert_eq!(
+            scripted.request_count(),
+            1,
+            "the agent must not make a hidden follow-up reasoning request"
+        );
+        assert!(
+            out.messages
+                .iter()
+                .any(|message| message.contains("run_shell")),
+            "the final allowed turn's requested tool must still execute"
+        );
+    }
+
+    /// P0: a provider completion may contain multiple tool calls. They must
+    /// remain in the assistant history, execute in provider order, and all
+    /// receive a matching result before the next reasoning turn starts.
+    #[tokio::test]
+    async fn llm_agent_executes_every_tool_call_from_one_completion_in_order() {
+        use provider::{Completion, Role, ScriptedProvider};
+        let scripted = ScriptedProvider::new(vec![
+            Completion {
+                tool_calls: vec![
+                    ToolCall {
+                        id: "first".into(),
+                        name: "run_shell".into(),
+                        arguments: serde_json::json!({"cmd": "echo first"}),
+                    },
+                    ToolCall {
+                        id: "second".into(),
+                        name: "run_shell".into(),
+                        arguments: serde_json::json!({"cmd": "exit 0"}),
+                    },
+                ],
+                ..Default::default()
+            },
+            Completion {
+                text: "both commands completed".into(),
+                ..Default::default()
+            },
+        ]);
+        let app = build_llm_agent(Arc::new(scripted)).unwrap();
+        let out = app
+            .invoke(AgentState::new("run both commands"))
+            .await
+            .unwrap();
+
+        let executed = out
+            .history
+            .iter()
+            .filter(|message| message.role == Role::Tool)
+            .filter_map(|message| message.tool_call_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(executed, vec!["first", "second"]);
+        let assistant_calls = out
+            .history
+            .iter()
+            .find(|message| message.role == Role::Assistant && !message.tool_calls.is_empty())
+            .expect("assistant tool-call message");
+        assert_eq!(
+            assistant_calls
+                .tool_calls
+                .iter()
+                .map(|call| call.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+        assert!(!out.has_pending_calls());
+        assert!(out.approved);
+    }
+
+    #[tokio::test]
+    async fn graph_consumes_native_builtin_status_not_observation_prefix() {
+        use provider::{Completion, ScriptedProvider};
+        let path = std::env::current_dir().unwrap().join(format!(
+            "target/ridge-native-graph-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, "read error: ordinary source text").unwrap();
+        let provider = ScriptedProvider::new(vec![
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "native-read".into(),
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": path.to_string_lossy()}),
+                }],
+                ..Default::default()
+            },
+            Completion {
+                text: "inspection complete".into(),
+                ..Default::default()
+            },
+        ]);
+        let app = build_llm_agent(Arc::new(provider)).unwrap();
+        let out = app.invoke(AgentState::new("inspect a file")).await.unwrap();
+        assert_eq!(
+            out.last_tool_result.as_ref().map(|result| result.status),
+            Some(crate::ToolResultStatus::Success),
+            "ordinary file content must not be reclassified as a tool failure"
+        );
+        assert_eq!(out.err_streak, 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn distinct_exploration_evidence_is_not_cut_off_by_a_fixed_count() {
         use provider::{Completion, ScriptedProvider};
         let mut steps = Vec::with_capacity(MAX_EXPLORE + 1);
         let mut paths = Vec::with_capacity(MAX_EXPLORE);
         for index in 0..MAX_EXPLORE {
             let mut path = std::env::temp_dir();
             path.push(format!(
-                "ridge-explore-handoff-{}-{index}.txt",
+                "ridge-explore-progress-{}-{index}.txt",
                 std::process::id()
             ));
             std::fs::write(&path, format!("handoff target {index}")).unwrap();
@@ -2221,10 +2719,14 @@ mod tests {
             .await
             .unwrap();
         assert!(out.approved, "messages: {:?}", out.messages);
-        assert!(out
-            .messages
-            .iter()
-            .any(|message| message.contains("exploration guard triggered")));
+        assert!(
+            !out.messages
+                .iter()
+                .any(|message| message.contains("exploration guard triggered")),
+            "distinct paths are evidence progress, not exploration thrash: {:?}",
+            out.messages
+        );
+        assert!(!out.explore_handoff);
         assert!(out
             .messages
             .iter()
@@ -2310,6 +2812,48 @@ mod tests {
         assert!(out.approved, "MCP 工具返回 passed 应满足确定性闸");
         assert!(out.messages.iter().any(|m| m.contains("ci__check")));
         assert_eq!(out.tool_output.as_deref(), Some("tests: passed"));
+        assert_eq!(
+            out.last_tool_result.as_ref().map(|result| result.status),
+            Some(crate::ToolResultStatus::Success),
+            "MCP success must retain its protocol-level status"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_mcp_error_is_typed_without_leaking_server_diagnostic() {
+        use mcp::FnTransport;
+        let client = mcp::McpClient::new(
+            "ci",
+            Box::new(FnTransport(
+                |method: &str, _params: &serde_json::Value| match method {
+                    "tools/call" => Ok(serde_json::json!({
+                        "isError": true,
+                        "content": [{"type": "text", "text": "secret backend detail"}]
+                    })),
+                    other => Err(mcp::McpError::BadResponse(other.into())),
+                },
+            )),
+        );
+        let call = ToolCall {
+            id: "mcp-error".into(),
+            name: "ci__check".into(),
+            arguments: serde_json::json!({}),
+        };
+        let result = call_mcp_with_timeout_native(
+            &client,
+            "check",
+            serde_json::json!({}),
+            Duration::from_millis(20),
+            &call,
+            ToolEffect::Verify,
+        )
+        .await;
+        assert_eq!(
+            result.native_result.as_ref().map(|typed| typed.status),
+            Some(crate::ToolResultStatus::Error)
+        );
+        assert!(!result.native_result.unwrap().retryable);
+        assert!(!result.observation.contains("secret"));
     }
 
     #[tokio::test]

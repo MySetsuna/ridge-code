@@ -208,7 +208,7 @@ pub(crate) fn rapid_paste_bridge_char(event: &Event) -> Option<char> {
 /// input. Keep the compatibility bridge explicit so the default route never
 /// delays or swallows a real Enter/Tab action.
 pub(crate) fn legacy_unwrapped_bridge_enabled() -> bool {
-    std::env::var("RIDGE_TUI_UNWRAPPED_BRIDGE").is_ok_and(|value| value == "1")
+    std::env::var("RIDGECODE_TUI_UNWRAPPED_BRIDGE").is_ok_and(|value| value == "1")
 }
 
 fn rapid_event_char(event: &Event, allow_legacy_bridge: bool) -> Option<char> {

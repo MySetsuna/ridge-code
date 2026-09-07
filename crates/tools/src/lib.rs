@@ -53,10 +53,10 @@ pub fn read_file(path: impl AsRef<Path>) -> io::Result<String> {
 /// Decode bytes from files and child processes without assuming UTF-8.
 ///
 /// UTF-8 is preferred when valid; BOMs select UTF-8/UTF-16; Windows legacy
-/// output falls back to GBK (the common CP936 code page). `RIDGE_OUTPUT_ENCODING`
+/// output falls back to GBK (the common CP936 code page). `RIDGECODE_OUTPUT_ENCODING`
 /// can override the fallback with any label understood by `encoding_rs`.
 pub fn decode_bytes(bytes: &[u8]) -> String {
-    let explicit = std::env::var("RIDGE_OUTPUT_ENCODING").ok();
+    let explicit = std::env::var("RIDGECODE_OUTPUT_ENCODING").ok();
     decode_bytes_with_encoding(bytes, explicit.as_deref())
 }
 
@@ -579,7 +579,7 @@ pub fn run_argv(argv: &[String]) -> io::Result<ShellResult> {
 }
 
 fn shell_timeout() -> Duration {
-    std::env::var("RIDGE_SHELL_TIMEOUT")
+    std::env::var("RIDGECODE_SHELL_TIMEOUT")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|seconds| *seconds > 0)

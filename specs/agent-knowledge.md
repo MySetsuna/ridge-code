@@ -10,6 +10,7 @@ code_targets:
   - crates/agent/src/orchestrate.rs
   - crates/agent/src/graph.rs
   - crates/agent/src/exec.rs
+  - crates/agent/src/builtin/skills/*.md
 test_targets:
   - crates/agent/src/brain.rs
   - crates/agent/src/knowledge.rs
@@ -29,7 +30,7 @@ public_interface:
 
 # Declarative skills and read-only sub-agents
 
-Skill discovery now uses deterministic high-to-low scopes: `RIDGE_SKILLS_DIR`
+Skill discovery now uses deterministic high-to-low scopes: `RIDGECODE_SKILLS_DIR`
 (env), configured `skills_dir`, cwd `.ridge/skills`/`.agents/skills`, repository
 `.ridge/skills`/`.agents/skills`, user `~/.ridge/skills`, then built-ins. Missing
 scope directories are harmless; cwd/repository duplicates are removed by

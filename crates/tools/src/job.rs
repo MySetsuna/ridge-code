@@ -59,11 +59,11 @@ fn new_job_id() -> String {
 }
 
 pub fn shell_slice_timeout() -> Duration {
-    env_secs("RIDGE_SHELL_TIMEOUT").unwrap_or(Duration::from_secs(180))
+    env_secs("RIDGECODE_SHELL_TIMEOUT").unwrap_or(Duration::from_secs(180))
 }
 
 pub fn shell_hard_timeout() -> Duration {
-    env_secs("RIDGE_SHELL_HARD_TIMEOUT")
+    env_secs("RIDGECODE_SHELL_HARD_TIMEOUT")
         .unwrap_or(Duration::from_secs(DEFAULT_SHELL_HARD_TIMEOUT_SECS))
 }
 

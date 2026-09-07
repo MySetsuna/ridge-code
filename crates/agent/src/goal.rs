@@ -282,7 +282,7 @@ impl Goal {
 }
 
 pub fn goal_path() -> PathBuf {
-    std::env::var_os("RIDGE_GOAL_FILE")
+    std::env::var_os("RIDGECODE_GOAL_FILE")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_GOAL_PATH))

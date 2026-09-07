@@ -2,7 +2,7 @@
 name: skill-creator
 description: 当用户想新建一个 skill(领域知识或操作规范)时,按本规范把 SKILL.md 写到技能目录。
 ---
-skill 是注入 system prompt 的领域知识,放在 `<skills_dir>/<name>/SKILL.md`(默认 `~/.ridge/skills/`,或 config.json 的 skills_dir / 环境变量 `RIDGE_SKILLS_DIR`)。用 write_file 创建,格式:
+skill 是注入 system prompt 的领域知识,放在 `<skills_dir>/<name>/SKILL.md`(默认 `~/.ridge/skills/`,或 config.json 的 skills_dir / 环境变量 `RIDGECODE_SKILLS_DIR`)。用 write_file 创建,格式:
 
 ```
 ---

@@ -254,16 +254,10 @@ pub(crate) fn sanitize_paste(s: &str) -> String {
             },
             '\u{9b}' => skip_csi(&mut chars),
             '\u{9d}' | '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => skip_string_control(&mut chars),
-            '[' => {
-                if !skip_bare_csi(&mut chars) {
-                    output.push('[');
-                }
-            }
-            ']' | 'P' | '^' | '_' => {
-                if !skip_bare_string_control(&mut chars) {
-                    output.push(c);
-                }
-            }
+            '[' if !skip_bare_csi(&mut chars) => output.push('['),
+            '[' => {}
+            ']' | 'P' | '^' | '_' if !skip_bare_string_control(&mut chars) => output.push(c),
+            ']' | 'P' | '^' | '_' => {}
             c if !c.is_control() || matches!(c, '\n' | '\t') => output.push(c),
             _ => {}
         }

@@ -8,6 +8,10 @@ code_targets:
   - crates/eval/Cargo.toml
   - crates/eval/src/lib.rs
   - crates/eval/src/main.rs
+  - eval/harbor/ridgecode_agent.py
+  - scripts/harbor-preflight.ps1
+  - scripts/quality-preflight.ps1
+  - scripts/quality-preflight.sh
   - scripts/bounded-soak.ps1
   - scripts/recovery-soak.ps1
   - scripts/windows-pty-e2e.ps1
@@ -18,6 +22,13 @@ test_targets:
   - scripts/windows-pty-e2e.ps1
 public_interface:
   - eval::HarnessOptions
+  - eval::ExternalEvalOptions
+  - eval::ExternalEvalCaseV1
+  - eval::run_external_eval
+  - eval::run_swebench_export
+  - eval::SweBenchPredictionV1
+  - eval::SweBenchScoreV1
+  - eval::score_swebench_reports
   - eval::CaseResult
   - eval::InvariantEvidence
   - eval::EvalReport
@@ -79,3 +90,42 @@ Completion+Resize ConPTY fixtures after building the workspace; the Unix gate
 runs the dependency-free Linux PTY replay.
 
 每个 case 经 `build_llm_agent` 执行；可并发但结果按输入索引复原。invariant 数量、并发度与超时均有上限，最终报告仅保留稳定的类别与数值证据。Windows PTY 默认将 `status=partial` 视为非零失败；仅显式 `-AllowPartial` 可作诊断运行。
+
+`ridgecode-eval external` 是真实 provider 的 batch 入口：输入 JSON case 文件和
+corpus root，显式提供 `ridgecode` 可执行文件。每个 case 将 task 写到自己的工作
+目录，并以 `--isolate-runtime --require-api-key --read-only` 或调用者明确选择的权限模式运行；随后执行
+同一 case 的 verifier argv。verifier 退出码 `0` 才映射为 `Passed`，其余退出码映射
+为 `Failed`，进程错误或 deadline 映射为 `Error`。这个路径的 `--fail-on-unverified`
+检查的是 external verifier，而不是 `approved`；空 case 集也必须失败。CLI 只输出
+版本化 `ExperimentManifestV1` JSON，供 A/B 实验与回归 CI 直接比较。
+
+`ridgecode-eval swebench-export` 消费含 `instance_id` 和 `problem_statement` 的本地
+JSONL（其他 SWE-bench dataset 字段可存在但被忽略），约定每个已 checkout 的实例工作区
+位于 `<workspaces-root>/<instance_id>`。它运行 machine-run 后以非 shell `git diff --binary`
+导出官方 prediction JSONL，不运行或模拟 SWE-bench 测试容器。`--predictions` 文件是可
+直接传给 `swebench eval ... -p` 的工件；需要真实 resolved 率时必须由官方 Docker/云端
+harness 的结果文件给出。输出路径和 workspace 都受 root containment 验证，避免 dataset
+字段驱动任意路径读写。
+
+`ridgecode-eval swebench-score` 递归读取某一个官方 run/model 目录下的 `report.json`，
+只接受 `{instance_id: {"resolved": bool}}` 这一官方判定形状，并输出版本化 scorecard；
+`swebench-compare` 对两个 scorecard 计算 resolved delta 与 percentage-point delta。它们
+只读官方评测工件，不会调用模型、Docker 或重跑测试。
+
+`eval/harbor/ridgecode_agent.py::RidgeCode` 是 Harbor 的
+`BaseInstalledAgent` adapter：只允许从 HTTPS 下载显式 pin 的 Linux 二进制，并在
+安装前用 `RIDGECODE_BINARY_SHA256` 验证；运行时将 task 写入容器临时文件，调用
+`ridgecode run --jsonl --no-persist --require-api-key`。它不把 trace、`approved` 或
+进程退出码翻译为 Harbor reward，reward 仍仅来自 Harbor task verifier。API key 必须走
+Harbor secret 注入；adapter 不读取或写入 host 配置，也不负责安装 Docker。
+
+`scripts/harbor-preflight.ps1` 是只读 host 前置检查：以 JSON 输出 adapter 是否存在、
+Harbor/Docker CLI 与 engine 是否可用，以及指定 benchmark 存储盘是否至少有 120 GiB 可用
+
+完整质量门另有 `scripts/quality-preflight.ps1` 只读检查。它验证 Cargo/npm、
+`cargo-llvm-cov`、Sonar scanner 与 `SONAR_TOKEN` 是否具备；token 只输出存在性，
+不输出值。预检失败时应先补齐环境，再运行 `scripts/quality-gate.ps1`。
+PowerShell 质量门会自动先执行该预检并在缺依赖时立即失败；手动执行预检用于在 CI
+或本地收集结构化诊断。
+Unix 质量门使用同目录的 `quality-preflight.sh`，输出相同 schema。
+空间；任一必需检查失败时返回非零。它不安装依赖，也不读取或输出 provider credential。

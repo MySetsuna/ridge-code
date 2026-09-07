@@ -66,15 +66,15 @@ Windows native input, VS Code/xterm.js, Apple Terminal, JetBrains terminals,
 legacy/new VTE, known Kitty/Ghostty/WezTerm/Alacritty/Rio/iTerm/Warp terminals,
 unknown multiplexers, and unknown terminals all remain on the legacy path by
 default: environment identity cannot prove that every PTY hop preserves KKP.
-`RIDGE_TUI_KITTY=1` is the only explicit opt-in override, while
-`RIDGE_TUI_KITTY=0` is an explicit disable. The status hint follows the
+`RIDGECODE_TUI_KITTY=1` is the only explicit opt-in override, while
+`RIDGECODE_TUI_KITTY=0` is an explicit disable. The status hint follows the
 negotiated result: enhanced terminals advertise `Shift/Alt+Enter`, legacy
   terminals advertise `Alt+Enter/Ctrl+J`.
-On Windows, input has one owner. The default (`RIDGE_TUI_VT_INPUT` unset or
+On Windows, input has one owner. The default (`RIDGECODE_TUI_VT_INPUT` unset or
 `auto`) attempts `ENABLE_VIRTUAL_TERMINAL_INPUT` on a console and uses a raw
 byte reader; a ConPTY/redirected pipe is treated as an already-byte-oriented
-raw-VT transport. `RIDGE_TUI_VT_INPUT=1` forces the same request,
-`RIDGE_TUI_VT_INPUT=0` forces the legacy Crossterm reader, and an invalid value
+raw-VT transport. `RIDGECODE_TUI_VT_INPUT=1` forces the same request,
+`RIDGECODE_TUI_VT_INPUT=0` forces the legacy Crossterm reader, and an invalid value
 falls back to Crossterm. Console activation is atomic: a failed mode change
 does not start the raw reader. Raw reader failure is logged as a bounded
 reason and falls back on the same reader thread, so the two readers never race.
@@ -117,7 +117,7 @@ Thus the final buffer cannot falsely prove an earlier deletion or transport
 event. The result records `input_backend=raw-vt` and its reason, and requires
 that backend for this fixture; Shift-Tab and paste therefore arrive as parser
 events rather than semantic-key guesses. The
-fixture does not set `RIDGE_TUI_UNWRAPPED_BRIDGE` and does not inject or assert
+fixture does not set `RIDGECODE_TUI_UNWRAPPED_BRIDGE` and does not inject or assert
 an unwrapped `raw\n\ttail` body. After the `axyz`/Tab/Shift-Tab evidence is
 observed, it sends a separate physical LF; only the keylog bytes appended after
 that boundary prove the LF reached the application. After that task completes,
@@ -139,7 +139,7 @@ a normal space, and decoded semantic `Enter`/`Tab` events route immediately;
 they never start the rapid collector or wait behind its timeout. By default the
 collector earns its bounded 100ms continuation window only after a literal raw C0 boundary. The
 legacy Unix Ctrl-J+Tab Press bridge and the ConPTY dangling `Enter`/`Tab`
-Release fallback require the explicit `RIDGE_TUI_UNWRAPPED_BRIDGE=1` opt-in.
+Release fallback require the explicit `RIDGECODE_TUI_UNWRAPPED_BRIDGE=1` opt-in.
 That flag enables a narrow compatibility decoder; it does not make paired
 semantic Ctrl+Enter/Tab events safe to reinterpret.
 A multiline shape is coalesced only when it contains a literal raw C0
@@ -163,7 +163,7 @@ reader publishes into a bounded 4096-event Tokio channel; backpressure is
 preferred to dropping keys or allowing unbounded memory growth.
 
 The Linux smoke harness is dependency-free and uses a real POSIX PTY. It sets
-`RIDGE_TUI_UNWRAPPED_BRIDGE=1` only for the legacy raw-LF/HT compatibility
+`RIDGECODE_TUI_UNWRAPPED_BRIDGE=1` only for the legacy raw-LF/HT compatibility
 assertion; unit replay separately proves the default safe route:
 
 ```text

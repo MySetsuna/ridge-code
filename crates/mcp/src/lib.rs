@@ -125,6 +125,17 @@ pub struct McpTool {
     pub effect: provider::ToolEffect,
 }
 
+/// Raw `tools/call` outcome before a caller chooses its presentation policy.
+/// MCP uses a successful JSON-RPC response with `isError: true` for a tool
+/// execution failure, so collapsing this to `String` loses a protocol-level
+/// status signal needed by an agent runtime.
+#[derive(Clone, Debug, PartialEq)]
+pub struct McpToolCallResult {
+    pub text: String,
+    pub is_error: bool,
+    pub structured_content: Option<Value>,
+}
+
 /// 传输抽象:发一个 JSON-RPC 请求(method + params),拿回 `result`(错误映射成 [`McpError`])。
 /// JSON-RPC 信封(jsonrpc/id 关联)由实现内部处理。
 #[async_trait::async_trait]
@@ -223,25 +234,39 @@ impl McpClient {
         Ok(tools)
     }
 
-    /// 调用一个工具(传**未加命名空间**的原始工具名),返回文本结果。
-    pub async fn call_tool(&self, tool: &str, arguments: Value) -> Result<String, McpError> {
+    /// 调用一个工具(传未加命名空间的原始工具名),保留 MCP 原生执行状态。
+    pub async fn call_tool_result(
+        &self,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<McpToolCallResult, McpError> {
         let res = self
             .transport
             .request("tools/call", json!({"name": tool, "arguments": arguments}))
             .await?;
-        // content 是块数组,拼接其中的 text 块。
-        // MCP execution failures are successful JSON-RPC responses carrying
-        // `isError: true`; do not turn them into an empty successful
-        // observation. Preserve only a bounded diagnostic at this boundary.
-        if res["isError"].as_bool() == Some(true) {
-            let message = content_text(&res);
+        Ok(McpToolCallResult {
+            text: content_text(&res),
+            is_error: res["isError"].as_bool() == Some(true),
+            structured_content: res
+                .get("structuredContent")
+                .filter(|value| !value.is_null())
+                .cloned(),
+        })
+    }
+
+    /// Compatibility text API. New agent runtime paths should consume
+    /// [`Self::call_tool_result`] so `isError` is not guessed from prose.
+    pub async fn call_tool(&self, tool: &str, arguments: Value) -> Result<String, McpError> {
+        let result = self.call_tool_result(tool, arguments).await?;
+        if result.is_error {
+            let message = result.text;
             return Err(McpError::Tool(if message.is_empty() {
                 "MCP tool reported an error".to_string()
             } else {
                 message
             }));
         }
-        Ok(content_text(&res))
+        Ok(result.text)
     }
 }
 
@@ -280,7 +305,7 @@ impl StdioTransport {
     }
 
     /// Spawn with a deliberately small inherited environment. Provider keys,
-    /// `RIDGE_*`, proxy credentials, and arbitrary shell state stay out of MCP
+    /// `RIDGECODE_*`, proxy credentials, and arbitrary shell state stay out of MCP
     /// children unless explicitly declared for that server.
     pub fn spawn_with_env(
         command: &str,
@@ -499,6 +524,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn raw_tool_result_preserves_protocol_error_and_structured_content() {
+        let client = McpClient::new(
+            "server",
+            Box::new(FnTransport(|method: &str, _params: &Value| match method {
+                "tools/call" => Ok(json!({
+                    "isError": true,
+                    "content": [{"type": "text", "text": "bounded diagnostic"}],
+                    "structuredContent": {"code": "E_DENIED"}
+                })),
+                _ => Ok(json!({})),
+            })),
+        );
+        let result = client.call_tool_result("check", json!({})).await.unwrap();
+        assert!(result.is_error);
+        assert_eq!(result.text, "bounded diagnostic");
+        assert_eq!(result.structured_content, Some(json!({"code": "E_DENIED"})));
+    }
+
+    #[tokio::test]
     async fn list_tools_rejects_missing_name_and_defaults_schema() {
         let missing = McpClient::new(
             "server",
@@ -578,7 +622,7 @@ mod tests {
         }
         assert!(!names.contains("ridge_api_key"));
         assert!(!names.iter().any(|name| {
-            name.starts_with("ridge_")
+            name.starts_with("RIDGECODE_")
                 || name.contains("api_key")
                 || name.contains("token")
                 || name.contains("secret")
@@ -592,8 +636,8 @@ mod tests {
 
     #[tokio::test]
     async fn stdio_child_receives_allowlisted_path_without_parent_secret() {
-        let prior = std::env::var_os("RIDGE_TEST_SECRET");
-        std::env::set_var("RIDGE_TEST_SECRET", "must-not-reach-child");
+        let prior = std::env::var_os("RIDGECODE_TEST_SECRET");
+        std::env::set_var("RIDGECODE_TEST_SECRET", "must-not-reach-child");
         let path = std::env::temp_dir().join(format!(
             "ridge_mcp_env_probe_{}_{}{}",
             std::process::id(),
@@ -609,13 +653,13 @@ mod tests {
                 "/c".to_string(),
                 path.to_string_lossy().into_owned(),
             ],
-            "@echo off\nset \"line=\"\nset /p line=\nif defined RIDGE_TEST_SECRET (set \"secret=true\") else (set \"secret=false\")\nif defined PATH (set \"path=true\") else (set \"path=false\")\necho {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"secret\":%secret%,\"path\":%path%}}\n",
+            "@echo off\nset \"line=\"\nset /p line=\nif defined RIDGECODE_TEST_SECRET (set \"secret=true\") else (set \"secret=false\")\nif defined PATH (set \"path=true\") else (set \"path=false\")\necho {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"secret\":%secret%,\"path\":%path%}}\n",
         );
         #[cfg(not(windows))]
         let (command, args, script) = (
             "sh",
             vec![path.to_string_lossy().into_owned()],
-            "read line\nif [ -n \"${RIDGE_TEST_SECRET+x}\" ]; then secret=true; else secret=false; fi\nif [ -n \"${PATH+x}\" ]; then path=true; else path=false; fi\nprintf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"secret\":%s,\"path\":%s}}\\n' \"$secret\" \"$path\"\n",
+            "read line\nif [ -n \"${RIDGECODE_TEST_SECRET+x}\" ]; then secret=true; else secret=false; fi\nif [ -n \"${PATH+x}\" ]; then path=true; else path=false; fi\nprintf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"secret\":%s,\"path\":%s}}\\n' \"$secret\" \"$path\"\n",
         );
         std::fs::write(&path, script).unwrap();
         #[cfg(unix)]
@@ -633,8 +677,8 @@ mod tests {
         drop(transport);
         let _ = std::fs::remove_file(&path);
         match prior {
-            Some(value) => std::env::set_var("RIDGE_TEST_SECRET", value),
-            None => std::env::remove_var("RIDGE_TEST_SECRET"),
+            Some(value) => std::env::set_var("RIDGECODE_TEST_SECRET", value),
+            None => std::env::remove_var("RIDGECODE_TEST_SECRET"),
         }
         assert_eq!(response["secret"], false);
         assert_eq!(response["path"], true);

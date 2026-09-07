@@ -33,10 +33,159 @@ pub struct Todo {
     pub status: String,
 }
 
+/// A requirement is a first-class completion target rather than an implicit
+/// sentence somewhere in the chat history.  `Satisfied` is meaningful only
+/// when the requirement names evidence from the current workspace revision.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementStatus {
+    #[default]
+    Unknown,
+    Satisfied,
+    Failed,
+    Blocked,
+    Waived,
+}
+
+impl RequirementStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Satisfied => "satisfied",
+            Self::Failed => "failed",
+            Self::Blocked => "blocked",
+            Self::Waived => "waived",
+        }
+    }
+}
+
+/// One explicitly named acceptance requirement in [`TaskContract`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Requirement {
+    pub id: String,
+    pub description: String,
+    #[serde(default)]
+    pub status: RequirementStatus,
+    #[serde(default)]
+    pub evidence_call_ids: Vec<String>,
+}
+
+/// Structured, bounded task intent.  It is optional during the migration so
+/// older checkpoints and simple one-shot questions retain their behaviour.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskContract {
+    pub objective: String,
+    #[serde(default)]
+    pub requirements: Vec<Requirement>,
+    #[serde(default)]
+    pub constraints: Vec<String>,
+    #[serde(default)]
+    pub deliverables: Vec<String>,
+    #[serde(default)]
+    pub non_goals: Vec<String>,
+}
+
+/// An immutable, bounded reference to an actual completed tool call.  The
+/// reducer stamps the revision, so a model cannot claim a later revision by
+/// fabricating a number in its tool arguments.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceRef {
+    pub call_id: String,
+    pub tool: String,
+    pub succeeded: bool,
+    #[serde(default)]
+    pub workspace_revision: usize,
+    pub summary: String,
+}
+
+/// Stable outcome category for a tool call.  The text observation remains for
+/// humans and legacy providers, while state transitions consume this enum.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultStatus {
+    #[default]
+    Success,
+    Error,
+    Blocked,
+    Running,
+}
+
+impl ToolResultStatus {
+    pub fn is_success(self) -> bool {
+        self == Self::Success
+    }
+
+    pub fn is_error(self) -> bool {
+        matches!(self, Self::Error | Self::Blocked)
+    }
+
+    /// A verifier may proceed only after a successful, settled tool result.
+    /// `blocked` and `running` are operationally distinct, but neither is
+    /// evidence that the requested work completed.
+    pub fn blocks_completion(self) -> bool {
+        !self.is_success()
+    }
+}
+
+/// Versioned, bounded machine-readable projection of an executed tool call.
+/// It is deliberately separate from UI text so verification and recovery do
+/// not have to infer status from prose.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResultV1 {
+    pub schema_version: u8,
+    pub call_id: String,
+    pub tool: String,
+    pub effect: ToolEffect,
+    pub status: ToolResultStatus,
+    pub exit_code: Option<i32>,
+    pub retryable: bool,
+    #[serde(default)]
+    pub changed_paths: Vec<String>,
+    /// Rich ACI facts for bounded read/search tools. Optional for checkpoint
+    /// compatibility with pre-rich-result state.
+    #[serde(default)]
+    pub output_truncated: bool,
+    #[serde(default)]
+    pub read_offset: Option<usize>,
+    #[serde(default)]
+    pub read_limit: Option<usize>,
+    #[serde(default)]
+    pub match_count: Option<usize>,
+    #[serde(default)]
+    pub workspace_revision: usize,
+    pub summary: String,
+}
+
+/// A requested requirement state transition emitted by `requirement_update`.
+/// Validation happens against the current ledger before the reducer applies it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequirementUpdate {
+    pub id: String,
+    pub status: RequirementStatus,
+    pub evidence_call_ids: Vec<String>,
+}
+
 /// agent 的共享状态。`messages` 是事件轨迹(reducer 追加),其余字段覆盖。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AgentState {
     pub task: String,
+    /// Optional structured contract emitted by the `contract_write` tool.
+    /// Keeping this optional is a checkpoint-compatible migration path.
+    #[serde(default)]
+    pub task_contract: Option<TaskContract>,
+    /// Monotonic revision for successful edit effects. Evidence is stamped at
+    /// this value so a later edit invalidates older completion proof.
+    #[serde(default)]
+    pub workspace_revision: usize,
+    /// Bounded ledger of real tool results. This never accepts model prose as
+    /// evidence and is the source used to validate requirement transitions.
+    #[serde(default)]
+    pub evidence_ledger: Vec<EvidenceRef>,
+    /// Most recent typed tool result and bounded history for context/recovery.
+    #[serde(default)]
+    pub last_tool_result: Option<ToolResultV1>,
+    #[serde(default)]
+    pub recent_tool_results: Vec<ToolResultV1>,
     pub messages: Vec<String>,
     /// Presentation-only event stream. Unlike `messages`, tool observations
     /// keep their original text so the TUI can offer a complete audit view;
@@ -46,9 +195,24 @@ pub struct AgentState {
     pub tool_output: Option<String>,
     pub approved: bool,
     pub steps: usize,
+    /// Per-run cap on model reasoning turns. `0` retains [`MAX_STEPS`] so
+    /// checkpoints produced before this field existed remain long-task safe.
+    #[serde(default)]
+    pub reasoning_step_limit: usize,
     pub issues: Vec<String>,
     /// 由 reason 节点(真实 LLM 路径)产出、待 act 节点执行的结构化工具调用。
+    ///
+    /// This is retained as a compatibility mirror of the queue head for
+    /// older checkpoints and presentation code. Runtime control flow must use
+    /// [`Self::next_pending_call`] / [`Self::has_pending_calls`] so a provider
+    /// response containing more than one call is never silently discarded.
+    #[serde(default)]
     pub pending_call: Option<ToolCall>,
+    /// Ordered tool-call queue returned by the most recent model completion.
+    /// `act` executes exactly one entry per graph turn and dequeues it only
+    /// after recording that entry's observation.
+    #[serde(default)]
+    pub pending_calls: Vec<ToolCall>,
     /// 累计消耗的 token(成本记账)。
     pub total_tokens: usize,
     /// provider 回传的输入 token 累计，用于 TUI 成本分栏。
@@ -62,9 +226,9 @@ pub struct AgentState {
     /// 连续**工具/provider 报错**轮数(与 `stall` 正交:stall 认「输出相同」,本字段认「输出为错误」,
     /// 故报错内容**每轮不同**时 stall 不触发、由本字段兜底)。到 [`MAX_ERR_STREAK`] 熔断,防无人值守烧预算。
     pub err_streak: usize,
-    /// 连续**纯侦察**轮数(read_file/search/web_search/fetch_url/dispatch_agent,输出每轮不同故 stall 不触发)。
-    /// 成功写改(`write_file`/`edit_file`/`apply_edits`)或模型收尾时清零。到 [`MAX_EXPLORE`] 软暂停,
-    /// 防「无休止只查不改 → 撞 step_cap → 再开一轮又从侦察重来」。
+    /// 连续**没有新增证据的纯侦察**轮数。新的定位路径或不同的工具结果会清零；重复读取/搜索
+    /// 才累加。成功写改(`write_file`/`edit_file`/`apply_edits`)也清零。到 [`MAX_EXPLORE`] 软暂停，
+    /// 防「无休止只查不改 → 撞 step_cap → 再开一轮又从侦察重来」，但不误伤复杂定位。
     pub explore_streak: usize,
     pub explore_handoff: bool,
     pub explore_action_used: bool,
@@ -129,6 +293,21 @@ impl AgentState {
         self
     }
 
+    /// Restrict this run's model reasoning turns without changing the global
+    /// long-task default used by interactive sessions.
+    pub fn with_reasoning_limit(mut self, limit: usize) -> Self {
+        self.reasoning_step_limit = limit.clamp(1, MAX_STEPS);
+        self
+    }
+
+    pub fn reasoning_limit(&self) -> usize {
+        if self.reasoning_step_limit == 0 {
+            MAX_STEPS
+        } else {
+            self.reasoning_step_limit.min(MAX_STEPS)
+        }
+    }
+
     /// Number of dispatch waves consumed, including the pre-counter boolean
     /// field used by checkpoints written during the migration to wave budgets.
     pub fn dispatch_wave_count(&self) -> usize {
@@ -145,6 +324,92 @@ impl AgentState {
     pub fn with_signals(mut self, block: Option<String>) -> Self {
         self.signal_block = block;
         self
+    }
+
+    /// Whether this run still has model-requested tool work. The legacy
+    /// single-call field is included so checkpoints written before the queue
+    /// migration resume safely instead of skipping their pending action.
+    pub fn has_pending_calls(&self) -> bool {
+        !self.pending_calls.is_empty() || self.pending_call.is_some()
+    }
+
+    /// The next call to execute, preserving provider return order.
+    pub fn next_pending_call(&self) -> Option<&ToolCall> {
+        self.pending_calls.first().or(self.pending_call.as_ref())
+    }
+
+    fn set_pending_calls(&mut self, calls: Vec<ToolCall>) {
+        self.pending_call = calls.first().cloned();
+        self.pending_calls = calls;
+    }
+
+    fn dequeue_pending_call(&mut self) {
+        if self.pending_calls.is_empty() {
+            self.pending_call = None;
+            return;
+        }
+        self.pending_calls.remove(0);
+        self.pending_call = self.pending_calls.first().cloned();
+    }
+
+    pub fn evidence_is_current_success(&self, call_id: &str) -> bool {
+        self.evidence_ledger.iter().any(|evidence| {
+            evidence.call_id == call_id
+                && evidence.succeeded
+                && evidence.workspace_revision == self.workspace_revision
+        })
+    }
+
+    /// A contract can opt into the strict requirement gate only after the
+    /// model has explicitly created it. Every requirement must be satisfied
+    /// with current-revision, successful tool evidence.
+    pub fn contract_completion_blocked(&self) -> bool {
+        let Some(contract) = &self.task_contract else {
+            return false;
+        };
+        contract.requirements.iter().any(|requirement| {
+            requirement.status != RequirementStatus::Satisfied
+                || requirement.evidence_call_ids.is_empty()
+                || requirement
+                    .evidence_call_ids
+                    .iter()
+                    .any(|call_id| !self.evidence_is_current_success(call_id))
+        })
+    }
+
+    pub fn validate_requirement_updates(
+        &self,
+        updates: &[RequirementUpdate],
+    ) -> Result<(), String> {
+        let contract = self
+            .task_contract
+            .as_ref()
+            .ok_or_else(|| "no task contract has been recorded".to_string())?;
+        if updates.is_empty() {
+            return Err("at least one requirement update is required".to_string());
+        }
+        for update in updates {
+            if !contract
+                .requirements
+                .iter()
+                .any(|requirement| requirement.id == update.id)
+            {
+                return Err(format!("unknown requirement id `{}`", update.id));
+            }
+            if update.status == RequirementStatus::Satisfied
+                && (update.evidence_call_ids.is_empty()
+                    || update
+                        .evidence_call_ids
+                        .iter()
+                        .any(|id| !self.evidence_is_current_success(id)))
+            {
+                return Err(format!(
+                    "requirement `{}` needs current successful tool evidence",
+                    update.id
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -207,6 +472,10 @@ pub enum Patch {
     Approved(bool),
     Issues(Vec<String>),
     PendingCall(Option<ToolCall>),
+    /// Replace the full ordered queue returned by a completion.
+    PendingCalls(Vec<ToolCall>),
+    /// Consume the queue head after its tool result has been persisted.
+    DequeuePendingCall,
     AddTokens(usize),
     AddUsage(Usage),
     SetStall(usize),
@@ -219,6 +488,11 @@ pub enum Patch {
     SetCodegraphUnavailable(bool),
     PushHistory(Message),
     SetTodos(Vec<Todo>),
+    SetTaskContract(TaskContract),
+    UpdateRequirements(Vec<RequirementUpdate>),
+    AdvanceWorkspaceRevision,
+    RecordEvidence(EvidenceRef),
+    RecordToolResult(ToolResultV1),
     RecordModified(String),
     RecordRead(String),
     AddLiveShellJob(String),
@@ -248,7 +522,9 @@ impl GraphState for AgentState {
             Patch::ToolOutput(o) => self.tool_output = o,
             Patch::Approved(b) => self.approved = b,
             Patch::Issues(v) => self.issues = v,
-            Patch::PendingCall(c) => self.pending_call = c,
+            Patch::PendingCall(c) => self.set_pending_calls(c.into_iter().collect()),
+            Patch::PendingCalls(calls) => self.set_pending_calls(calls),
+            Patch::DequeuePendingCall => self.dequeue_pending_call(),
             Patch::AddTokens(n) => self.total_tokens += n,
             Patch::AddUsage(usage) => {
                 self.input_tokens += usage.prompt_tokens as usize;
@@ -267,6 +543,56 @@ impl GraphState for AgentState {
             Patch::SetCodegraphUnavailable(value) => self.codegraph_unavailable = value,
             Patch::PushHistory(m) => self.history.push(m),
             Patch::SetTodos(t) => self.todos = t,
+            Patch::SetTaskContract(contract) => self.task_contract = Some(contract),
+            Patch::UpdateRequirements(updates) => {
+                let Some(contract) = self.task_contract.as_mut() else {
+                    return;
+                };
+                for update in updates {
+                    if let Some(requirement) = contract
+                        .requirements
+                        .iter_mut()
+                        .find(|requirement| requirement.id == update.id)
+                    {
+                        requirement.status = update.status;
+                        requirement.evidence_call_ids = update.evidence_call_ids;
+                    }
+                }
+            }
+            Patch::AdvanceWorkspaceRevision => {
+                self.workspace_revision = self.workspace_revision.saturating_add(1)
+            }
+            Patch::RecordEvidence(mut evidence) => {
+                const MAX_EVIDENCE: usize = 128;
+                evidence.workspace_revision = self.workspace_revision;
+                self.evidence_ledger
+                    .retain(|existing| existing.call_id != evidence.call_id);
+                self.evidence_ledger.push(evidence);
+                if self.evidence_ledger.len() > MAX_EVIDENCE {
+                    let excess = self.evidence_ledger.len() - MAX_EVIDENCE;
+                    self.evidence_ledger.drain(..excess);
+                }
+            }
+            Patch::RecordToolResult(mut result) => {
+                const MAX_TOOL_RESULTS: usize = 64;
+                const MAX_ID_CHARS: usize = 128;
+                const MAX_TOOL_CHARS: usize = 128;
+                const MAX_SUMMARY_CHARS: usize = 512;
+                const MAX_PATHS: usize = 32;
+                result.call_id = result.call_id.chars().take(MAX_ID_CHARS).collect();
+                result.tool = result.tool.chars().take(MAX_TOOL_CHARS).collect();
+                result.summary = result.summary.chars().take(MAX_SUMMARY_CHARS).collect();
+                result.changed_paths.truncate(MAX_PATHS);
+                result.workspace_revision = self.workspace_revision;
+                self.recent_tool_results
+                    .retain(|existing| existing.call_id != result.call_id);
+                self.recent_tool_results.push(result.clone());
+                if self.recent_tool_results.len() > MAX_TOOL_RESULTS {
+                    let excess = self.recent_tool_results.len() - MAX_TOOL_RESULTS;
+                    self.recent_tool_results.drain(..excess);
+                }
+                self.last_tool_result = Some(result);
+            }
             Patch::RecordModified(p) => {
                 self.modified_files.insert(p);
             }
@@ -301,7 +627,7 @@ pub const MAX_STALL: usize = 3;
 /// 连续工具/provider 报错多少轮就熔断(circuit breaker,防无人值守 `--every` 循环持续失败烧预算)。
 pub const MAX_ERR_STREAK: usize = 5;
 
-/// 连续纯侦察多少轮就软暂停(explore thrash)。低于此数仅在 durable 事实块里轻 nudge;
+/// 连续无新增证据的纯侦察多少轮就软暂停(explore thrash)。低于此数仅在 durable 事实块里轻 nudge;
 /// 达此数 → `must_stop`/`no_progress`,逼模型先交接已定位的问题再开新轮,而非空烧到 `MAX_STEPS`。
 pub const MAX_EXPLORE: usize = 12;
 
@@ -335,7 +661,14 @@ impl Approver for AutoDeny {
 pub(crate) fn needs_approval(tool: &str) -> bool {
     !matches!(
         tool,
-        "read_file" | "search" | "web_search" | "fetch_url" | "todo_write" | "signal_write"
+        "read_file"
+            | "search"
+            | "web_search"
+            | "fetch_url"
+            | "todo_write"
+            | "contract_write"
+            | "requirement_update"
+            | "signal_write"
     )
 }
 
@@ -378,8 +711,192 @@ mod tests {
         assert!(!needs_approval("search"));
         assert!(!needs_approval("web_search"));
         assert!(!needs_approval("fetch_url"));
+        assert!(!needs_approval("contract_write"));
+        assert!(!needs_approval("requirement_update"));
         assert!(needs_approval("edit_file"));
         assert!(needs_approval("write_file"));
         assert!(needs_approval("run_shell"));
+    }
+
+    #[test]
+    fn pending_call_queue_preserves_order_and_legacy_head() {
+        let first = ToolCall {
+            id: "first".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({"path": "first"}),
+        };
+        let second = ToolCall {
+            id: "second".into(),
+            name: "run_shell".into(),
+            arguments: serde_json::json!({"cmd": "exit 0"}),
+        };
+        let mut state = AgentState::new("run both");
+        state.apply(Patch::PendingCalls(vec![first, second]));
+        assert_eq!(
+            state.next_pending_call().map(|call| call.id.as_str()),
+            Some("first")
+        );
+        assert_eq!(
+            state.pending_call.as_ref().map(|call| call.id.as_str()),
+            Some("first")
+        );
+
+        state.apply(Patch::DequeuePendingCall);
+        assert_eq!(
+            state.next_pending_call().map(|call| call.id.as_str()),
+            Some("second")
+        );
+        assert_eq!(
+            state.pending_call.as_ref().map(|call| call.id.as_str()),
+            Some("second")
+        );
+
+        state.apply(Patch::DequeuePendingCall);
+        assert!(!state.has_pending_calls());
+        assert!(state.pending_call.is_none());
+    }
+
+    #[test]
+    fn contract_requires_real_current_revision_evidence() {
+        let contract = TaskContract {
+            objective: "change and verify".into(),
+            requirements: vec![Requirement {
+                id: "R1".into(),
+                description: "target test passes".into(),
+                status: RequirementStatus::Unknown,
+                evidence_call_ids: Vec::new(),
+            }],
+            constraints: Vec::new(),
+            deliverables: Vec::new(),
+            non_goals: Vec::new(),
+        };
+        let mut state = AgentState::new("change and verify");
+        state.apply(Patch::SetTaskContract(contract));
+        assert!(state.contract_completion_blocked());
+
+        state.apply(Patch::RecordEvidence(EvidenceRef {
+            call_id: "test-1".into(),
+            tool: "run_shell".into(),
+            succeeded: true,
+            workspace_revision: 999,
+            summary: "exit 0".into(),
+        }));
+        let update = RequirementUpdate {
+            id: "R1".into(),
+            status: RequirementStatus::Satisfied,
+            evidence_call_ids: vec!["test-1".into()],
+        };
+        assert!(state
+            .validate_requirement_updates(std::slice::from_ref(&update))
+            .is_ok());
+        state.apply(Patch::UpdateRequirements(vec![update]));
+        assert!(!state.contract_completion_blocked());
+
+        state.apply(Patch::AdvanceWorkspaceRevision);
+        assert!(
+            state.contract_completion_blocked(),
+            "a later edit must invalidate old completion evidence"
+        );
+        assert!(state
+            .validate_requirement_updates(&[RequirementUpdate {
+                id: "R1".into(),
+                status: RequirementStatus::Satisfied,
+                evidence_call_ids: vec!["missing".into()],
+            }])
+            .is_err());
+    }
+
+    #[test]
+    fn typed_tool_results_are_revision_stamped_deduplicated_and_bounded() {
+        let mut state = AgentState::new("record results");
+        state.apply(Patch::AdvanceWorkspaceRevision);
+        let base = ToolResultV1 {
+            schema_version: 1,
+            call_id: "same".into(),
+            tool: "write_file".into(),
+            effect: ToolEffect::Edit,
+            status: ToolResultStatus::Success,
+            exit_code: Some(0),
+            retryable: false,
+            changed_paths: (0..40).map(|i| format!("src/{i}.rs")).collect(),
+            output_truncated: false,
+            read_offset: None,
+            read_limit: None,
+            match_count: None,
+            workspace_revision: 0,
+            summary: "x".repeat(600),
+        };
+        state.apply(Patch::RecordToolResult(base));
+        let first = state.last_tool_result.as_ref().expect("recorded result");
+        assert_eq!(first.workspace_revision, 1);
+        assert_eq!(first.changed_paths.len(), 32);
+        assert_eq!(first.summary.chars().count(), 512);
+
+        for i in 0..70 {
+            state.apply(Patch::RecordToolResult(ToolResultV1 {
+                call_id: format!("call-{i}"),
+                tool: "read_file".into(),
+                effect: ToolEffect::Explore,
+                status: ToolResultStatus::Success,
+                exit_code: None,
+                retryable: false,
+                changed_paths: Vec::new(),
+                output_truncated: false,
+                read_offset: None,
+                read_limit: None,
+                match_count: None,
+                workspace_revision: 0,
+                summary: "ok".into(),
+                schema_version: 1,
+            }));
+        }
+        assert_eq!(state.recent_tool_results.len(), 64);
+        assert_eq!(
+            state
+                .last_tool_result
+                .as_ref()
+                .map(|result| result.call_id.as_str()),
+            Some("call-69")
+        );
+
+        state.apply(Patch::RecordToolResult(ToolResultV1 {
+            call_id: "call-69".into(),
+            tool: "search".into(),
+            effect: ToolEffect::Explore,
+            status: ToolResultStatus::Blocked,
+            exit_code: None,
+            retryable: false,
+            changed_paths: Vec::new(),
+            output_truncated: false,
+            read_offset: None,
+            read_limit: None,
+            match_count: None,
+            workspace_revision: 0,
+            summary: "blocked".into(),
+            schema_version: 1,
+        }));
+        assert_eq!(state.recent_tool_results.len(), 64);
+        assert_eq!(
+            state.last_tool_result.as_ref().map(|result| result.status),
+            Some(ToolResultStatus::Blocked)
+        );
+    }
+
+    #[test]
+    fn machine_reasoning_limit_is_clamped_and_checkpoint_safe() {
+        let state = AgentState::new("bounded").with_reasoning_limit(1);
+        assert_eq!(state.reasoning_limit(), 1);
+        let mut legacy = serde_json::to_value(AgentState::new("legacy")).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("reasoning_step_limit");
+        assert_eq!(
+            serde_json::from_value::<AgentState>(legacy)
+                .unwrap()
+                .reasoning_limit(),
+            MAX_STEPS,
+            "old checkpoints retain the long-task default"
+        );
     }
 }

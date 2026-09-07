@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ -x scripts/quality-preflight.sh ]]; then
+  scripts/quality-preflight.sh
+fi
+
 readonly MIN_LINE_COVERAGE=80
 readonly QUALITY_DIR="target/quality"
 readonly LCOV_PATH="${QUALITY_DIR}/lcov.info"

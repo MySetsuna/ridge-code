@@ -34,7 +34,7 @@ bounded tasks and requires a new instance for reconnect; its JSON-RPC loopback
 regression covers both paths. `a2a smoke` now sends two bounded tasks over one
 real external fixture peer, then starts a fresh peer after teardown, exercising
 both transport reuse and reconnect;
-`RIDGE_A2A_SECRET` applies HMAC, time-window, and nonce replay protection to
+`RIDGECODE_A2A_SECRET` applies HMAC, time-window, and nonce replay protection to
 both sessions. The CLI client path also goes through `AgentClientSession`, so
 the shipped transport uses the same handshake/session validation as the
 library boundary. In-process routed teammates share `AgentCancellation`,
