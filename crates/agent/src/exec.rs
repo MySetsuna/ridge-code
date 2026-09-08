@@ -1262,7 +1262,7 @@ mod tests {
     use super::{
         builtin_tool_specs, durable_updates, durable_updates_with_effect, execute_tool_call,
         execute_tool_call_native, file_sha256, parse_requirement_updates, parse_task_contract,
-        tool_result_v1, unix_syntax_hint,
+        signal_create, tool_result_v1, unix_syntax_hint, SIGNALS_DIR,
     };
     use crate::brain::{tool_output_failed, tool_output_ok};
     use crate::context::durable_state_block;
@@ -1910,6 +1910,27 @@ mod tests {
         };
         assert!(done.starts_with("exit 0:"), "{done}");
         assert!(done.contains("exec-park"), "{done}");
+    }
+
+    #[test]
+    fn signal_resolution_is_a_successful_control_plane_result() {
+        let body = format!(
+            "exec-signal-resolution-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        );
+        let id = signal_create(SIGNALS_DIR, "friction", &body, "exec-test")
+            .expect("create signal fixture");
+        let result = super::execute_signal_tool(&ToolCall {
+            id: "signal-resolve-test".into(),
+            name: "signal_write".into(),
+            arguments: serde_json::json!({"resolve": id}),
+        });
+        assert!(result.status.is_success());
+        assert!(result.observation.starts_with("signal resolved:"));
     }
 
     /// 30 秒任务超时上限 -> parked;shipped `execute_tool_call` 的 `cancel_job_id` 入口能取消它;
