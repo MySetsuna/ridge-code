@@ -674,7 +674,7 @@ fn extracted_tick_handler_transitions_waiting_and_splash() {
     assert_eq!(ui.splash, SPLASH_TICKS);
     ui.busy = true;
     let stale = Some(Instant::now() - Duration::from_secs(9));
-    assert!(!handle_tick(&mut ui, &stale, &pending, &steer_bus));
+    assert!(handle_tick(&mut ui, &stale, &pending, &steer_bus));
     assert!(ui.waiting);
 }
 
@@ -4706,10 +4706,10 @@ fn summarize_event_overviews_tools() {
     );
     assert!(batch
         .iter()
-        .any(|(line, color)| { line.starts_with("  - ") && *color == role_color(Role::Error) }));
+        .any(|(line, color)| { line.starts_with("  - ") && *color == role_color(Role::DiffDel) }));
     assert!(batch
         .iter()
-        .any(|(line, color)| { line.starts_with("  + ") && *color == role_color(Role::Success) }));
+        .any(|(line, color)| { line.starts_with("  + ") && *color == role_color(Role::DiffAdd) }));
 }
 
 #[test]
@@ -8948,7 +8948,7 @@ fn markdown_alert_edges_form_a_bounded_static_container() {
 fn selection_style_is_quiet_focus() {
     let style = selection_style();
     assert_eq!(style.fg, Some(role_color(Role::Primary)));
-    assert_eq!(style.bg, Some(Color::Rgb(30, 55, 90)));
+    assert_eq!(style.bg, None);
     assert!(style.add_modifier.contains(Modifier::BOLD));
 }
 

@@ -3,15 +3,16 @@ use std::collections::VecDeque;
 use std::sync::{mpsc, Mutex, OnceLock};
 
 use super::{
-    alert_edges, char_cells, clip_display_cells, compact_status_line, context_pressure_role,
-    ctx_percent, cwd_name, fence_language, fence_without_language, fmt_busy_phase, fmt_busy_signal,
-    fmt_progress_diagnostic, input_chrome, input_height, live_markdown_spans_with_alert_edge,
-    prompt_input_lines, queue_preview, render_status_template, role_color, sanitize_display_text,
-    selection_style, shell_input_title, status_line_projection, str_cells, stream_channel_badge,
-    tail_display_cells, telemetry_surface, todo_progress, wrap_input, wrapped_rows, ActivityEntry,
-    ActivityKind, AlertEdge, AnswerEntry, ApprovalRequest, InputChromeArgs, LiveBlockFocus,
-    LiveChannel, LiveLine, LiveLineAnchor, LiveLineKind, LiveTranscript, Panel, PanelKind,
-    PanelRow, ReasoningEntry, ReplMeta, Role, StatusVars, Ui, Vitals, INPUT_PROMPT,
+    alert_edges, annotate_diff_line_numbers, char_cells, clip_display_cells, compact_status_line,
+    context_pressure_role, ctx_percent, cwd_name, fence_language, fence_without_language,
+    fmt_busy_phase, fmt_busy_signal, fmt_progress_diagnostic, input_chrome, input_height,
+    live_markdown_spans_with_alert_edge, prompt_input_lines, queue_preview, render_status_template,
+    role_color, sanitize_display_text, selection_style, shell_input_title, status_line_projection,
+    str_cells, stream_channel_badge, tail_display_cells, telemetry_surface, todo_progress,
+    wrap_input, wrapped_rows, ActivityEntry, ActivityKind, AlertEdge, AnswerEntry, ApprovalRequest,
+    InputChromeArgs, LiveBlockFocus, LiveChannel, LiveLine, LiveLineAnchor, LiveLineKind,
+    LiveTranscript, Panel, PanelKind, PanelRow, ReasoningEntry, ReplMeta, Role, StatusVars, Ui,
+    Vitals, INPUT_PROMPT,
 };
 use ratatui::buffer::Buffer;
 use ratatui::{
@@ -5371,7 +5372,9 @@ pub(crate) fn draw_with_cache(
             )),
             Line::default(),
         ];
-        for l in req.detail.lines() {
+        let detail_lines =
+            annotate_diff_line_numbers(req.detail.lines().map(str::to_owned).collect());
+        for l in detail_lines {
             let trimmed = l.trim_start();
             let role = if trimmed.starts_with("+ ") {
                 Role::DiffAdd

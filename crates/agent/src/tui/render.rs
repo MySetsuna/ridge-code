@@ -1795,7 +1795,7 @@ pub(crate) fn static_tool_lines(tool: &ToolBlock, width: u16) -> Vec<(String, Co
     };
     let mut lines = vec![(format!("{prefix}{}", tool.summary()), tool.summary_color())];
     let detail = tool.details_text();
-    let details = compact_diff_detail_lines(&detail);
+    let details = annotate_diff_line_numbers(compact_diff_detail_lines(&detail));
     lines.extend(details.into_iter().enumerate().map(|(index, line)| {
         let color = if is_diff_row(&line, '+') {
             role_color(Role::DiffAdd)
@@ -1812,11 +1812,9 @@ pub(crate) fn static_tool_lines(tool: &ToolBlock, width: u16) -> Vec<(String, Co
 
 fn is_diff_row(line: &str, marker: char) -> bool {
     let trimmed = line.trim_start();
-    trimmed.starts_with(marker)
-        && trimmed
-            .chars()
-            .nth(1)
-            .is_some_and(|next| next.is_whitespace())
+    trimmed
+        .strip_prefix(marker)
+        .is_some_and(|rest| !rest.starts_with(marker))
 }
 
 /// Keep review output short without discarding the audit copy held by ToolBlock.
@@ -1870,9 +1868,84 @@ fn compact_diff_detail_lines(detail: &str) -> Vec<String> {
     out
 }
 
+/// Add the old/new line coordinates carried by unified-diff hunk headers.
+/// Ordinary tool output and diff metadata remain unchanged when no hunk is
+/// present. A blank coordinate means that the line exists only on that side.
+pub(crate) fn annotate_diff_line_numbers(lines: Vec<String>) -> Vec<String> {
+    let mut old_line = None;
+    let mut new_line = None;
+    let mut has_hunk = false;
+    let mut annotated = Vec::with_capacity(lines.len());
+    for line in lines {
+        if let Some((old, new)) = parse_hunk_header(&line) {
+            old_line = Some(old);
+            new_line = Some(new);
+            has_hunk = true;
+            annotated.push(line);
+            continue;
+        }
+        if !has_hunk {
+            annotated.push(line);
+            continue;
+        }
+        let trimmed = line.trim_start();
+        let marker = trimmed.chars().next();
+        let is_added = marker == Some('+') && !trimmed.starts_with("+++");
+        let is_removed = marker == Some('-') && !trimmed.starts_with("---");
+        let is_context = line.starts_with(' ') && !trimmed.starts_with("@@");
+        let omitted = trimmed
+            .strip_prefix("… ")
+            .and_then(|rest| rest.strip_suffix(" unchanged lines"))
+            .and_then(|count| count.parse::<usize>().ok());
+        if is_added || is_removed || is_context {
+            let old = if is_added { None } else { old_line };
+            let new = if is_removed { None } else { new_line };
+            annotated.push(format_diff_line_numbers(old, new, &line));
+            if is_added {
+                new_line = new_line.map(|line| line.saturating_add(1));
+            } else if is_removed {
+                old_line = old_line.map(|line| line.saturating_add(1));
+            } else {
+                old_line = old_line.map(|line| line.saturating_add(1));
+                new_line = new_line.map(|line| line.saturating_add(1));
+            }
+        } else {
+            annotated.push(line);
+            if let Some(count) = omitted {
+                old_line = old_line.map(|line| line.saturating_add(count));
+                new_line = new_line.map(|line| line.saturating_add(count));
+            }
+        }
+    }
+    annotated
+}
+
+fn parse_hunk_header(line: &str) -> Option<(usize, usize)> {
+    let mut old = None;
+    let mut new = None;
+    for token in line.split_whitespace() {
+        if let Some(value) = token.strip_prefix('-') {
+            old = Some(parse_diff_start(value)?);
+        } else if let Some(value) = token.strip_prefix('+') {
+            new = Some(parse_diff_start(value)?);
+        }
+    }
+    Some((old?, new?))
+}
+
+fn parse_diff_start(value: &str) -> Option<usize> {
+    value.split(',').next()?.parse().ok()
+}
+
+fn format_diff_line_numbers(old: Option<usize>, new: Option<usize>, line: &str) -> String {
+    let old = old.map_or_else(|| "    ".to_owned(), |line| format!("{line:>4}"));
+    let new = new.map_or_else(|| "    ".to_owned(), |line| format!("{line:>4}"));
+    format!("{old} {new} {line}")
+}
+
 #[cfg(test)]
 mod compact_diff_tests {
-    use super::compact_diff_detail_lines;
+    use super::{annotate_diff_line_numbers, compact_diff_detail_lines};
 
     #[test]
     fn compact_diff_keeps_one_context_row_on_each_side_of_a_hunk() {
@@ -1894,6 +1967,19 @@ mod compact_diff_tests {
                 "tail",
             ]
         );
+    }
+
+    #[test]
+    fn diff_rows_include_old_and_new_line_numbers() {
+        let lines = annotate_diff_line_numbers(vec![
+            "@@ -10,2 +12,3 @@".into(),
+            " context".into(),
+            "-old".into(),
+            "+new".into(),
+        ]);
+        assert_eq!(lines[1], "  10   12  context");
+        assert_eq!(lines[2], "  11      -old");
+        assert_eq!(lines[3], "       13 +new");
     }
 }
 
@@ -1978,7 +2064,7 @@ fn diff_line_marker(text: &str, marker: char) -> bool {
         .map(str::trim_start)
         .unwrap_or(text);
     text.strip_prefix(marker)
-        .is_some_and(|rest| rest.starts_with(' '))
+        .is_some_and(|rest| !rest.starts_with(marker))
 }
 
 #[derive(Clone, Copy)]
