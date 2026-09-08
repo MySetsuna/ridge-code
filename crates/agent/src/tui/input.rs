@@ -1155,6 +1155,7 @@ pub(crate) const SLASH_COMMANDS: &[&str] = &[
     "/config",
     "/cost",
     "/doctor",
+    "/density",
     "/exit",
     "/effort",
     "/find",
@@ -1177,6 +1178,7 @@ pub(crate) const SLASH_COMMANDS: &[&str] = &[
     "/skills",
     "/steer",
     "/tools",
+    "/theme",
 ];
 
 /// 动态斜杠命令名(iter-39,含前导 `/`):启动从命令表填一次,供补全浮窗与静态表并列。

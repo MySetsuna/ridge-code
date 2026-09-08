@@ -2,7 +2,7 @@
 
 RidgeCode 是一个模块化、跨领域可扩展的通用 agent 框架，发布为单一命令 ridgecode。它既能做代码任务，也能做调研、摘要、翻译、分诊等工作；新增能力主要靠 SKILL.md、MCP 配置或自定义命令，不必改 Rust 内核。
 
-底层是纯 Rust 的 LangGraph 风格有状态图引擎，外层接 provider、工具、MCP、Skills 与 TUI。TUI 重点呈现实际收到的 Answer 与 reasoning_content：Reasoning 单独显示，工具默认收起，长回答可在终端原生 scrollback 中保留。
+底层是纯 Rust 的 LangGraph 风格有状态图引擎，外层接 provider、工具、MCP、Skills 与 TUI。TUI 默认使用高对比深色专注视图：终端历史只保留最终 Answer 与必要错误/审批，Reasoning、工具和活动链仍完整保留在按需面板中。
 
 ## 先跑起来
 
@@ -254,11 +254,13 @@ ChatGPT/Codex 启动时会用 OAuth 账号目录校验当前模型；若配置�
 
 ## 交互式 TUI
 
-直接运行 ridgecode 即进入 inline TUI。输出会落入终端历史，可用终端自己的滚轮、选择和复制；活动区域只占终端底部固定空间。
+直接运行 ridgecode 即进入 inline TUI。默认是高对比深色、专注密度：输出会以不透明表面绘制，避免终端透明背景或壁纸干扰阅读；终端历史只保留最终 Answer 与必要错误/审批。活动区域只占终端底部固定空间。
+
+可用 `/theme dark|light|auto` 切换并持久化配色（`auto` 仅在终端提供可靠背景提示时跟随，否则安全回退深色）；用 `/density focus|standard|debug` 切换信息密度。`focus` 只显示答案与当前状态，`standard` 额外提交关键活动边界，`debug` 恢复完整 Reasoning、工具与活动轨迹。无论密度如何，`Alt+R`、`Alt+T`、`Alt+G` 与 `Alt+I` 都可打开完整的对应信息。
 
 ### Answer、Reasoning 与工具
 
-- Answer 展示模型实际回答；收到的 reasoning_content 单独作为 Reasoning 展示，不生成或伪造隐藏思考。
+- Answer 展示模型实际回答；收到的 reasoning_content 单独保存为 Reasoning，不生成或伪造隐藏思考。默认专注视图不把它重复写入主区，按 Alt+R 或 `/reasoning` 查看。
 - Answer 支持有界行级 Markdown 展示：标题、粗体、行内 code、代码围栏与 ANSI 16 色语义角色。
 - Markdown 告警（`NOTE`/`TIP`/`IMPORTANT`/`WARNING`/`CAUTION`）及其后续引用行共享语义侧轨；正文仍按普通 Markdown 折行，不额外挤占输出槽。
 - fenced code 的 Live 可见行与落入终端历史的 Answer 都按有限词法规则区分关键字、类型、字符串、数字、字面量和注释；未知文本保持普通 Muted 色，不猜测跨行语法。
@@ -312,10 +314,10 @@ ChatGPT/Codex 启动时会用 OAuth 账号目录校验当前模型；若配置�
 
 ### Windows Terminal 实机验收
 
-发布包使用 inline TUI，不进入备用屏；已提交的 Answer、Reasoning 与工具记录应进入终端原生历史。可按以下顺序验收：
+发布包使用 inline TUI，不进入备用屏；默认 `focus` 密度仅把 Answer 与必要的错误/审批写入终端原生历史，Reasoning、工具和活动记录可由对应面板查看（切到 `debug` 才会完整写入历史）。可按以下顺序验收：
 
 1. 在 Windows Terminal 或 PowerShell 解压发布包并运行 `ridgecode.exe`，输入 `/help` 后按 Enter，确认帮助文本进入历史。
-2. 用终端自身的滚轮或历史查看、选择并复制一段 Answer 与一段工具摘要；再用当前终端绑定的原生搜索快捷键搜索其中的英文、CJK 与 emoji 文本。复制内容不应包含 ANSI 转义片段。
+2. 用终端自身的滚轮或历史查看、选择并复制一段 Answer；再用当前终端绑定的原生搜索快捷键搜索其中的英文、CJK 与 emoji 文本。复制内容不应包含 ANSI 转义片段。需要审计工具摘要时按 `Alt+T`，或输入 `/density debug` 后重跑。
 3. 任务进行时验证 `Alt+PageUp/PageDown` 能检视 Live Answer/Reasoning，`Alt+End` 能回到最新尾部；展开工具详情后，同组快捷键应优先滚动工具详情。
 4. 将窗口缩至约 `48×12`，确认 Answer、输入框、状态提示与退出命令仍可见且无越界；恢复窗口后输入 `/exit` 退出。
 
@@ -389,6 +391,8 @@ $env:RIDGECODE_TUI_SNAPSHOT = "$pwd\ridgecode-frame.json"
 | /compact | 压缩历史消息，保留最近上下文 |
 | /cost | 查看本会话 token 与任务数 |
 | /tools | 查看当前内置/MCP 工具 |
+| /theme [dark\|light\|auto] | 查看或切换 TUI 配色并写入配置 |
+| /density [focus\|standard\|debug] | 查看或切换主区信息密度并写入配置 |
 | /activity | 查看最近 5 个 Agent 活动阶段 |
 | /reasoning | 检索最近 8 段已完成 reasoning；↑↓ 选择、Enter 展开 |
 | /inspect | 检视当前流式 Answer/Reasoning/Tool 与 pending；↑↓ 选择、Enter/Space 展开、Delete 删除待执行项 |
@@ -437,6 +441,8 @@ $env:RIDGECODE_TUI_SNAPSHOT = "$pwd\ridgecode-frame.json"
   "base_url": "https://api.openai.com/v1",
   "budget_tokens": 0,
   "skip_danger": false,
+  "theme": "dark",
+  "ui_density": "focus",
   "providers": [],
   "mcp": []
 }
@@ -458,6 +464,8 @@ $env:RIDGECODE_TUI_SNAPSHOT = "$pwd\ridgecode-frame.json"
 | commands_dir | 自定义命令目录；默认 ~/.ridge/commands |
 | skip_danger | true 自动批准工具；灾难命令仍硬拦 |
 | status_bar | 输入框下状态条模板 |
+| theme | TUI 配色：dark（默认）、light、auto；auto 无可靠终端提示时回退 dark |
+| ui_density | 主区信息密度：focus（默认）、standard、debug |
 | keybindings | 全局动作到快捷键数组的映射；结构化字段 |
 | allow_jailbreak | 是否允许 cwd 子树外写入；默认关 |
 | notify | 每个任务完成时响终端铃 |
@@ -467,7 +475,7 @@ $env:RIDGECODE_TUI_SNAPSHOT = "$pwd\ridgecode-frame.json"
 | mcp | MCP server 数组 |
 | hooks | pre_tool、post_tool、session_start、stop hook 数组 |
 
-/config set 允许持久化：provider、model、base_url、budget_tokens、skills_dir、skip_danger、status_bar、allow_jailbreak、proxy。结构化字段（如 mcp、providers、hooks）请直接编辑 JSON。
+/config set 允许持久化：provider、model、base_url、budget_tokens、skills_dir、skip_danger、status_bar、theme、ui_density、allow_jailbreak、proxy。结构化字段（如 mcp、providers、hooks）请直接编辑 JSON。
 
 快捷键可按稳定 action id 覆盖；配置会整组校验，出现未知动作、非法 chord、保留键或冲突时整组回退默认值，并在 TUI 显示提示。空数组可禁用一个可配置动作：
 

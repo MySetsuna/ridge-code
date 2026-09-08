@@ -1262,6 +1262,8 @@ async fn run_interactive(run: InteractiveRun<'_>) -> anyhow::Result<()> {
             commands,
             effort,
             cfg.keybindings.clone(),
+            cfg.theme.clone(),
+            cfg.ui_density.clone(),
         )
         .await
     } else {
@@ -1348,6 +1350,8 @@ async fn run_without_provider(
         commands,
         effort,
         cfg.keybindings.clone(),
+        cfg.theme.clone(),
+        cfg.ui_density.clone(),
     )
     .await
 }

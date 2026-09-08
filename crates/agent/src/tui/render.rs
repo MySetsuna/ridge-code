@@ -1,4 +1,7 @@
-use std::borrow::Cow;
+use std::{
+    borrow::Cow,
+    sync::atomic::{AtomicU8, Ordering},
+};
 
 use agent::Todo;
 use ratatui::{
@@ -396,16 +399,84 @@ pub(crate) enum Role {
     DiffDel,
 }
 
-// Renaissance chrome: gold / wine / bronze / parchment / ink.
-// Splash pixel contract keeps its own hardcoded RGB.
-pub(crate) const THEME_OLIVE: Color = Color::Rgb(201, 162, 39);
-pub(crate) const THEME_VIOLET: Color = Color::Rgb(122, 42, 50);
-pub(crate) const THEME_BLUE: Color = Color::Rgb(184, 124, 48);
-pub(crate) const THEME_ICE: Color = Color::Rgb(244, 232, 204);
-pub(crate) const THEME_BORDER: Color = Color::Rgb(92, 64, 40);
-pub(crate) const THEME_MUTED: Color = Color::Rgb(148, 120, 88);
+/// The palette is deliberately independent from the splash art.  The old
+/// parchment colors were designed for an opaque illustration, but collapse on
+/// transparent terminals and wallpaper backgrounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Theme {
+    Dark = 0,
+    Light = 1,
+}
+
+impl Theme {
+    pub(crate) fn parse(value: Option<&str>) -> Self {
+        match value.unwrap_or("dark").trim().to_ascii_lowercase().as_str() {
+            "light" => Self::Light,
+            "auto" => terminal_theme_hint().unwrap_or(Self::Dark),
+            "dark" | "" => Self::Dark,
+            _ => Self::Dark,
+        }
+    }
+}
+
+/// `COLORFGBG` is advisory and absent from many terminals.  Treat only a
+/// numeric final background component as a hint; the safe fallback is the
+/// high-contrast dark palette.
+fn terminal_theme_hint() -> Option<Theme> {
+    let value = std::env::var("COLORFGBG").ok()?;
+    let background = value.rsplit(';').next()?.trim().parse::<u8>().ok()?;
+    Some(if background < 8 {
+        Theme::Dark
+    } else {
+        Theme::Light
+    })
+}
+
+static ACTIVE_THEME: AtomicU8 = AtomicU8::new(Theme::Dark as u8);
+
+pub(crate) fn set_theme(theme: Theme) {
+    ACTIVE_THEME.store(theme as u8, Ordering::Relaxed);
+}
+
+pub(crate) fn active_theme() -> Theme {
+    match ACTIVE_THEME.load(Ordering::Relaxed) {
+        1 => Theme::Light,
+        _ => Theme::Dark,
+    }
+}
+
+// Dark palette: opaque slate surface, near-white body, and restrained accents.
+pub(crate) const THEME_OLIVE: Color = Color::Rgb(63, 185, 80);
+pub(crate) const THEME_VIOLET: Color = Color::Rgb(255, 123, 114);
+pub(crate) const THEME_BLUE: Color = Color::Rgb(88, 166, 255);
+pub(crate) const THEME_ICE: Color = Color::Rgb(230, 237, 243);
+pub(crate) const THEME_BORDER: Color = Color::Rgb(48, 54, 61);
+pub(crate) const THEME_MUTED: Color = Color::Rgb(139, 148, 158);
+
+pub(crate) fn theme_surface() -> Color {
+    match active_theme() {
+        Theme::Dark => Color::Rgb(13, 17, 23),
+        Theme::Light => Color::Rgb(246, 248, 250),
+    }
+}
+
+fn light_color(role: Role) -> Color {
+    match role {
+        Role::Primary | Role::Info => Color::Rgb(9, 105, 218),
+        Role::Command | Role::Success | Role::DiffAdd => Color::Rgb(26, 127, 55),
+        Role::Answer | Role::Metric => Color::Rgb(31, 35, 40),
+        Role::Reasoning => Color::Rgb(130, 80, 0),
+        Role::Error | Role::DiffDel => Color::Rgb(207, 34, 46),
+        Role::Warn => Color::Rgb(154, 103, 0),
+        Role::Border => Color::Rgb(208, 215, 222),
+        Role::Muted | Role::Label => Color::Rgb(87, 96, 106),
+    }
+}
 
 pub(crate) fn role_color(r: Role) -> Color {
+    if active_theme() == Theme::Light {
+        return light_color(r);
+    }
     match r {
         Role::Primary => THEME_BLUE,
         Role::Command => THEME_OLIVE,
@@ -428,15 +499,19 @@ pub(crate) fn role_color(r: Role) -> Color {
 /// gray band.  This keeps muted context text readable on both dark and light
 /// terminal themes and leaves the cyan rail as the single focus accent.
 pub(crate) fn telemetry_surface() -> Style {
-    Style::default().bg(Color::Reset)
+    Style::default().bg(theme_surface())
 }
 
 /// Quiet selection affordance: retain a background only for focus, with no
 /// high-contrast neon block competing with the transcript.
 pub(crate) fn selection_style() -> Style {
+    let background = match active_theme() {
+        Theme::Dark => Color::Rgb(30, 55, 90),
+        Theme::Light => Color::Rgb(221, 235, 255),
+    };
     Style::default()
         .fg(role_color(Role::Primary))
-        .bg(Color::Rgb(48, 35, 78))
+        .bg(background)
         .add_modifier(Modifier::BOLD)
 }
 

@@ -8864,7 +8864,7 @@ fn role_colors_share_splash_theme() {
 #[test]
 fn telemetry_surface_keeps_muted_status_text_readable() {
     let style = telemetry_surface().fg(role_color(Role::Muted));
-    assert_eq!(style.bg, Some(Color::Reset));
+    assert_eq!(style.bg, Some(theme_surface()));
     assert_ne!(style.fg, style.bg);
 }
 
@@ -8961,7 +8961,7 @@ fn markdown_alert_edges_form_a_bounded_static_container() {
 fn selection_style_is_quiet_focus() {
     let style = selection_style();
     assert_eq!(style.fg, Some(role_color(Role::Primary)));
-    assert_eq!(style.bg, Some(Color::Rgb(48, 35, 78)));
+    assert_eq!(style.bg, Some(Color::Rgb(30, 55, 90)));
     assert!(style.add_modifier.contains(Modifier::BOLD));
 }
 
@@ -11743,7 +11743,9 @@ use ratatui::{
     Terminal, TerminalOptions, Viewport,
 };
 
-use super::render::{THEME_BLUE, THEME_BORDER, THEME_ICE, THEME_MUTED, THEME_OLIVE, THEME_VIOLET};
+use super::render::{
+    theme_surface, THEME_BLUE, THEME_BORDER, THEME_ICE, THEME_MUTED, THEME_OLIVE, THEME_VIOLET,
+};
 use super::{
     active_reasoning_tail_role, activity_commit_lines, activity_panel, agent_panel,
     answer_commit_lines, answer_commit_lines_with_status,

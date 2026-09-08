@@ -308,6 +308,8 @@ pub(crate) fn config_value(cfg: &Config, key: &str) -> String {
         "skills_dir" => cfg.skills_dir.clone().unwrap_or_default(),
         "skip_danger" => cfg.skip_danger.map(|b| b.to_string()).unwrap_or_default(),
         "status_bar" => cfg.status_bar.clone().unwrap_or_default(),
+        "theme" => cfg.theme.clone().unwrap_or_default(),
+        "ui_density" => cfg.ui_density.clone().unwrap_or_default(),
         "allow_jailbreak" => cfg
             .allow_jailbreak
             .map(|b| b.to_string())

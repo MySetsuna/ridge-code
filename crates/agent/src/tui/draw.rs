@@ -28,6 +28,9 @@ fn rounded_surface_block() -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
+        // A TUI cannot turn off host-terminal transparency, but every surface
+        // it owns must be opaque so a wallpaper never competes with text.
+        .style(Style::default().bg(super::theme_surface()))
 }
 
 fn snapshot_symbol(symbol: &str) -> String {
@@ -2029,6 +2032,7 @@ struct LiveOutputCacheKey {
     width: u16,
     rows: u16,
     busy: bool,
+    density: super::UiDensity,
 }
 
 struct RenderedLiveTail {
@@ -2062,6 +2066,7 @@ impl LiveOutputCache {
         width: u16,
         rows: usize,
         busy: bool,
+        density: super::UiDensity,
         _vitals: &Vitals,
     ) {
         let key = LiveOutputCacheKey {
@@ -2069,6 +2074,7 @@ impl LiveOutputCache {
             width,
             rows: rows.min(u16::MAX as usize) as u16,
             busy,
+            density,
         };
         if self.key != Some(key) {
             let preferred_anchor = self.key.filter(|old| {
@@ -2076,12 +2082,13 @@ impl LiveOutputCache {
                     && (old.width != key.width || old.rows != key.rows)
                     && transcript.is_inspecting()
             });
-            let rendered = render_live_tail_projection(
+            let rendered = render_live_tail_projection_for_density(
                 transcript,
                 width,
                 rows,
                 busy,
                 preferred_anchor.and(self.anchor),
+                density,
             );
             self.line_count = rendered.lines.len();
             self.last_line_cells = rendered
@@ -2121,7 +2128,14 @@ impl LiveOutputCache {
         busy: bool,
         vitals: &Vitals,
     ) -> Vec<Line<'static>> {
-        self.prepare(transcript, width, rows, busy, vitals);
+        self.prepare(
+            transcript,
+            width,
+            rows,
+            busy,
+            super::UiDensity::Debug,
+            vitals,
+        );
         self.lines.clone()
     }
 
@@ -2672,6 +2686,7 @@ fn render_live_tail_lines(
     render_live_tail_projection(transcript, width, max_rows, busy, None).lines
 }
 
+#[cfg(test)]
 fn render_live_tail_projection(
     transcript: &LiveTranscript,
     width: u16,
@@ -2679,13 +2694,35 @@ fn render_live_tail_projection(
     busy: bool,
     preferred_anchor: Option<LiveLineAnchor>,
 ) -> RenderedLiveTail {
+    render_live_tail_projection_for_density(
+        transcript,
+        width,
+        max_rows,
+        busy,
+        preferred_anchor,
+        super::UiDensity::Debug,
+    )
+}
+
+fn render_live_tail_projection_for_density(
+    transcript: &LiveTranscript,
+    width: u16,
+    max_rows: usize,
+    busy: bool,
+    preferred_anchor: Option<LiveLineAnchor>,
+    density: super::UiDensity,
+) -> RenderedLiveTail {
     if max_rows == 0 {
         return RenderedLiveTail {
             lines: Vec::new(),
             anchor: None,
         };
     }
-    let visible_lines = transcript.visible_lines(max_rows);
+    let visible_lines = transcript
+        .visible_lines(max_rows)
+        .into_iter()
+        .filter(|line| density.shows_live_line(line.kind))
+        .collect::<Vec<_>>();
     let anchor_start = preferred_anchor.and_then(|anchor| {
         visible_lines
             .iter()
@@ -3710,6 +3747,7 @@ fn live_surface_block(ui: &Ui, area: Rect) -> Option<Block<'static>> {
     };
     let mut block = Block::default()
         .borders(borders)
+        .style(Style::default().bg(super::theme_surface()))
         .border_style(Style::default().fg(role_color(role)));
     if full {
         block = block
@@ -5176,6 +5214,7 @@ fn draw_live_output(
         content_area.width,
         output_rows,
         ui.busy,
+        ui.density,
         vitals,
     );
 
@@ -5294,6 +5333,12 @@ pub(crate) fn draw_with_cache(
     live_cache: &mut LiveOutputCache,
 ) {
     let draw_started = std::time::Instant::now();
+    // Own the live viewport background. A terminal may be transparent or use
+    // a wallpaper; Reset leaves the transcript unreadable in that situation.
+    frame.render_widget(
+        Paragraph::new("").style(Style::default().bg(super::theme_surface())),
+        frame.area(),
+    );
     let LiveFramePlan {
         area,
         queue_preview,

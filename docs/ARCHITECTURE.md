@@ -105,7 +105,7 @@ agent 侧 `resolve_mcp`:多 client 各自握手 + 列工具 → 归一化 `McpTo
 
 ## 7. config(`~/.ridge/config.json`,env 覆盖)+ auth 密钥库(iter-37)+ OAuth 订阅登录(iter-43)
 
-providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/base_url` + 可选内联 `api_key` / 可选顶层 **`key_env`**(iter-37,`login --default` 设)/ budget_tokens / skip_danger / 多 `mcp{name,cmd,args}` / skills_dir / **`status_bar`**(iter-31 底栏模板,占位 `{provider}{model}{ctx}{tokens}{cwd}`,空用默认)。`RIDGE_CONFIG` 指路径;TUI `/config set` 持久化回写;TUI `/provider add ...` 经 `parse_provider_add`+`config_add_provider` 增/覆盖档(`api_key` skip_serializing,明文永不因工具落 config)。
+providers 命名档(kind/model/base_url/**key_env**)/ 顶层 `provider/model/base_url` + 可选内联 `api_key` / 可选顶层 **`key_env`**(iter-37,`login --default` 设)/ budget_tokens / skip_danger / 多 `mcp{name,cmd,args}` / skills_dir / **`status_bar`**(iter-31 底栏模板,占位 `{provider}{model}{ctx}{tokens}{cwd}`,空用默认) / **`theme`**(`dark` 默认、`light`、best-effort `auto`) / **`ui_density`**(`focus` 默认、`standard`、`debug`)。`RIDGE_CONFIG` 指路径;TUI `/config set` 持久化回写;TUI `/provider add ...` 经 `parse_provider_add`+`config_add_provider` 增/覆盖档(`api_key` skip_serializing,明文永不因工具落 config)。
 
 - **内置供应商 preset 表**(iter-37,`PROVIDER_PRESETS`,编进二进制,纯静态):世界顶级 `openai/anthropic/gemini/grok` + 中国顶级 `glm/kimi/deepseek/qwen/hunyuan/minimax` + 聚合 `openrouter/siliconflow/together/groq`;每条 `{id,label,kind,base_url,default_model,key_env}`。纯核 `preset_by_id`/`preset_to_profile`/`apply_login`(据 preset 加档 +(make_default)set 顶层四键 + 抹顶层残留 `api_key`,产物**绝不含 key**)。
 - **`~/.ridge/auth.json` 密钥库**(iter-37):`login` 存 API key 处,**独立于 config,key 不进 config**;按 `key_env` 名索引(纯核 `auth_parse`/`auth_upsert`/`auth_get`,坏/空不崩;仅收字符串值,**OAuth 凭据另存独立 `oauth.json`**,此处跳过任何对象值);写盘 best-effort chmod 600(unix)。`RIDGE_AUTH` 可指路径。

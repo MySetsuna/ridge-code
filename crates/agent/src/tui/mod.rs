@@ -3698,8 +3698,11 @@ pub(super) async fn run(
     commands: Vec<agent::SlashCommand>,
     initial_effort: String,
     keybindings: std::collections::BTreeMap<String, Vec<String>>,
+    initial_theme: Option<String>,
+    initial_density: Option<String>,
 ) -> anyhow::Result<()> {
     tui_trace("run.enter");
+    set_theme(Theme::parse(initial_theme.as_deref()));
     let keymap_warning = install_keymap(&keybindings).err();
     set_dynamic_commands(&commands); // 自定义/skill 命令名进补全源(iter-39)
     let mcp_statuses = mcp.statuses().to_vec();
@@ -3734,6 +3737,7 @@ pub(super) async fn run(
     let live_cache = LiveOutputCache::default();
     let mut ui = Ui {
         effort: Some(initial_effort),
+        density: UiDensity::parse(initial_density.as_deref()),
         allow_bare_kitty,
         mcp_statuses,
         session_id: agent::current_session_id(),

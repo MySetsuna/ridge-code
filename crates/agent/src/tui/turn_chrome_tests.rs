@@ -72,8 +72,8 @@ fn theme_frame_marks_ask_folds_process_and_uses_roman_chrome() {
     assert_eq!(role_color(Role::Answer), THEME_ICE);
     assert_eq!(role_color(Role::Command), THEME_OLIVE);
     assert_eq!(role_color(Role::Border), THEME_BORDER);
-    assert_eq!(THEME_BLUE, ratatui::style::Color::Rgb(184, 124, 48));
-    assert_eq!(THEME_ICE, ratatui::style::Color::Rgb(244, 232, 204));
+    assert_eq!(THEME_BLUE, ratatui::style::Color::Rgb(88, 166, 255));
+    assert_eq!(THEME_ICE, ratatui::style::Color::Rgb(230, 237, 243));
 }
 
 #[test]

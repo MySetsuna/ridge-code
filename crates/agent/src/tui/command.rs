@@ -16,7 +16,7 @@ use provider::{AnthropicProvider, Message, SwapProvider};
 use super::{
     agent_panel, config_panel, effort_panel, keybindings_panel, login_panel, mcp_panel,
     models_panel, skills_panel, tools_panel, ModelCatalog, PanelKind, PendingModelSelection, Role,
-    Ui, CLAUDE_OAUTH_ROW, CODEX_OAUTH_ROW, DEFAULT_STATUS_BAR, GROK_OAUTH_ROW,
+    Theme, Ui, UiDensity, CLAUDE_OAUTH_ROW, CODEX_OAUTH_ROW, DEFAULT_STATUS_BAR, GROK_OAUTH_ROW,
 };
 use crate::tui::{self, role_color};
 use agent::preset_by_id;
@@ -893,6 +893,8 @@ pub(crate) fn apply_config_live(
             }
         }
         "effort" => apply_effort_live(val, meta, swap, ui),
+        "theme" => tui::set_theme(Theme::parse(Some(val))),
+        "ui_density" => ui.density = UiDensity::parse(Some(val)),
         // 代理即时注入 env:下一次登录 verify / 新建 provider 立即走它,无需重启。
         "proxy" => crate::apply_proxy_env(val),
         _ => {} // budget_tokens/skills_dir/skip_danger:仅持久化,下次启动生效。
@@ -1485,6 +1487,24 @@ fn show_model_catalog(ui: &mut Ui, meta: &mut ReplMeta) -> bool {
 
 fn handle_security_command(input: &str, ui: &mut Ui) -> bool {
     match input {
+        "/theme" => {
+            ui.note(
+                format!(
+                    "theme: {:?} · use /theme dark|light|auto",
+                    tui::active_theme()
+                ),
+                role_color(Role::Muted),
+            );
+        }
+        "/density" => {
+            ui.note(
+                format!(
+                    "density: {:?} · use /density focus|standard|debug",
+                    ui.density
+                ),
+                role_color(Role::Muted),
+            );
+        }
         "/jailbreak" => {
             let on = agent::allow_jailbreak();
             let message = if on {
@@ -1513,6 +1533,32 @@ fn handle_security_command(input: &str, ui: &mut Ui) -> bool {
             );
         }
         "/config" => ui.panel = Some(config_panel()),
+        _ if input.starts_with("/theme ") => {
+            let value = input.trim_start_matches("/theme ").trim();
+            match persist_config("theme", value) {
+                Ok(_) => {
+                    tui::set_theme(Theme::parse(Some(value)));
+                    ui.note(
+                        format!("theme switched to {value}"),
+                        role_color(Role::Success),
+                    );
+                }
+                Err(error) => ui.note(error, role_color(Role::Error)),
+            }
+        }
+        _ if input.starts_with("/density ") => {
+            let value = input.trim_start_matches("/density ").trim();
+            match persist_config("ui_density", value) {
+                Ok(_) => {
+                    ui.density = UiDensity::parse(Some(value));
+                    ui.note(
+                        format!("density switched to {value}"),
+                        role_color(Role::Success),
+                    );
+                }
+                Err(error) => ui.note(error, role_color(Role::Error)),
+            }
+        }
         _ if input.starts_with("/config set ") => return persist_config_command(input, ui),
         _ => return false,
     }
@@ -1523,10 +1569,14 @@ fn persist_config_command(input: &str, ui: &mut Ui) -> bool {
     let parts: Vec<_> = input.splitn(4, ' ').collect();
     if parts.len() == 4 {
         match persist_config(parts[2], parts[3]) {
-            Ok(path) => ui.note(
-                format!("wrote {path}; takes effect next start"),
-                role_color(Role::Success),
-            ),
+            Ok(path) => {
+                match parts[2] {
+                    "theme" => tui::set_theme(Theme::parse(Some(parts[3]))),
+                    "ui_density" => ui.density = UiDensity::parse(Some(parts[3])),
+                    _ => {}
+                }
+                ui.note(format!("wrote {path}"), role_color(Role::Success));
+            }
             Err(error) => ui.note(format!("write failed: {error}"), role_color(Role::Error)),
         }
     } else {
