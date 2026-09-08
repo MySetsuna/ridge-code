@@ -50,6 +50,10 @@ jobs:
         run: >-
           ./scripts/windows-pty-e2e.ps1 -CompletionFixture -ResizeProbe
           -TimeoutMs 12000
+      - name: Windows recovery soak
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/recovery-soak.ps1 -TimeoutMs 30000
       - name: Harbor adapter syntax check
         if: matrix.os == 'ubuntu-latest'
         run: python3 -m py_compile eval/harbor/ridgecode_agent.py
