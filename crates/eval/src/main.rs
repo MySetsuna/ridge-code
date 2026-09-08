@@ -60,6 +60,9 @@ async fn main() -> anyhow::Result<()> {
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "pass_rate": report.pass_rate(),
+                "timeout_rate": report.timeout_rate(),
+                "resumed_rate": report.resumed_rate(),
+                "average_tokens": report.average_tokens(),
                 "report": &report,
             }))?
         );
@@ -80,10 +83,12 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         println!(
-            "\n== {}/{} passed  ({:.0}%)  total_tokens={} resumed={} executed={} ==",
+            "\n== {}/{} passed  ({:.0}%)  timeout={:.0}%  avg_tokens={:.1}  total_tokens={} resumed={} executed={} ==",
             report.passed,
             report.total,
             report.pass_rate() * 100.0,
+            report.timeout_rate() * 100.0,
+            report.average_tokens(),
             report.total_tokens,
             report.resumed,
             report.executed

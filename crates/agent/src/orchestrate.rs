@@ -2100,7 +2100,10 @@ mod tests {
         let trigger_task = tokio::spawn(async move {
             // Wait for the planner plus at least one teammate call instead of
             // relying on a wall-clock race under parallel workspace tests.
-            let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+            // Workspace tests can be heavily contended; keep the assertion
+            // about cancellation semantics while giving the planner and one
+            // teammate enough scheduling time to start.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
             while calls.calls.load(Ordering::SeqCst) < 2 && tokio::time::Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }

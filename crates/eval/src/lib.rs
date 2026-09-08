@@ -1541,6 +1541,40 @@ impl EvalReport {
             self.passed as f64 / self.total as f64
         }
     }
+
+    /// Fraction of cases that hit the harness timeout.  This is deliberately
+    /// derived from the case results rather than the process exit status so a
+    /// mixed batch remains measurable.
+    pub fn timeout_rate(&self) -> f64 {
+        if self.total == 0 {
+            0.0
+        } else {
+            self.results
+                .iter()
+                .filter(|result| result.timed_out)
+                .count() as f64
+                / self.total as f64
+        }
+    }
+
+    /// Fraction of cases served from a prior manifest record.  It measures
+    /// deterministic resume coverage, not benchmark success.
+    pub fn resumed_rate(&self) -> f64 {
+        if self.total == 0 {
+            0.0
+        } else {
+            self.resumed as f64 / self.total as f64
+        }
+    }
+
+    /// Mean token cost for the cases represented by this report.
+    pub fn average_tokens(&self) -> f64 {
+        if self.total == 0 {
+            0.0
+        } else {
+            self.total_tokens as f64 / self.total as f64
+        }
+    }
 }
 
 /// 批量跑:使用默认有界选项执行 case(确定性闸判 pass),聚合成功率 + 成本。
@@ -2138,6 +2172,9 @@ mod tests {
         assert_eq!(report.total, 2);
         assert_eq!(report.passed, 1);
         assert!((report.pass_rate() - 0.5).abs() < 1e-9);
+        assert!((report.timeout_rate()).abs() < 1e-9);
+        assert!((report.resumed_rate()).abs() < 1e-9);
+        assert!((report.average_tokens() - report.total_tokens as f64 / 2.0).abs() < 1e-9);
         assert!(report.total_tokens >= 10);
     }
 
