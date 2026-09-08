@@ -2,7 +2,7 @@
 
 更新时间：2026-09-08
 当前分支：`main`
-基线：`0fa3dbf`（`origin/main`，跨平台 CI 与交接证据已推送）
+基线：`2d2ced6`（`origin/main`，只读验证与 Windows shell 测试修复已推送）
 
 ## 当前结论
 
@@ -39,6 +39,8 @@ cargo run -p agent --bin ridgecode -- terminal doctor
 关键结果：agent 263 tests、TUI 509 tests、eval 31 tests；bounded soak 3/3 轮通过；recovery 3/3 恢复通过；ConPTY fixtures 全部通过；release 二进制可执行。
 
 GitHub Actions 独立验证：`quality-gate` run `34146251345`（commit `0054b8d`）于 2026-09-08 通过；Linux runner 上 workspace tests、fmt、diff check、Clippy、build、`cargo llvm-cov --fail-under-lines 80` 和报告上传全部通过。随后 `ci` run `34146688237`（commit `7743f2a`）及包含本交接文档的 `34183085491`（commit `0fa3dbf`）均通过 Ubuntu/macOS/Windows 构建测试、fmt/Clippy 和 Ubuntu Linux PTY smoke。Sonar self-hosted job 因 runner 不存在而按条件跳过。Unix fixture 修复将 `echo` 改为 `printf`，避免 `/bin/sh` 去除 JSON 引号；Windows fixture 行为保持不变。
+
+后续 `ci` run `34183876195`（commit `2d2ced6`）再次通过三平台构建测试、fmt/Clippy、coverage quality gate 和 Ubuntu Linux PTY smoke。真实 OAuth 只读 smoke 成功完成 search/read_file 并返回正确仓库信息；首次失败的 `unverified` 根因是“不要修改任何文件”被误识别为变更任务，已在 `7331096` 修复。Windows parked-shell 测试的 8 秒误报上限已在 `2d2ced6` 调整为 15 秒，且该 CI 已验证通过。
 
 ## 当前阻塞
 
