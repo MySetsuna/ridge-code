@@ -590,6 +590,25 @@ function Read-SharedText {
     }
 }
 
+function Read-SnapshotText {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    # The Rust writer replaces the snapshot atomically; a final read can still
+    # race the replacement window after the ConPTY child exits.  Keep this
+    # bounded and return the last complete payload instead of failing the run.
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        try {
+            $value = Read-SharedText $Path
+            if (-not [string]::IsNullOrWhiteSpace($value)) {
+                return $value
+            }
+        } catch [System.IO.IOException] {
+            # Retry transient sharing violations.
+        }
+        Start-Sleep -Milliseconds 10
+    }
+    return ''
+}
+
 try {
     New-Item -ItemType Directory -Path $isolatedWorkspace -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $isolatedHome '.ridge') -Force | Out-Null
@@ -1367,7 +1386,7 @@ try {
     $keylogHasCtrlC = $keylog -match 'CONTROL'
     $crosstermEventsObserved = $keylogHasEnter -and $keylogHasCtrlC
     $snapshotRaw = if (Test-Path -LiteralPath $isolatedSnapshot) {
-        [IO.File]::ReadAllText($isolatedSnapshot)
+        Read-SnapshotText $isolatedSnapshot
     } else {
         ''
     }
