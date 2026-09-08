@@ -38,7 +38,7 @@ cargo run -p agent --bin ridgecode -- terminal doctor
 
 关键结果：agent 263 tests、TUI 509 tests、eval 31 tests；bounded soak 3/3 轮通过；recovery 3/3 恢复通过；ConPTY fixtures 全部通过；release 二进制可执行。
 
-GitHub Actions 独立验证：`quality-gate` run `34146251345`（commit `0054b8d`）于 2026-09-08 通过；Linux runner 上 workspace tests、fmt、diff check、Clippy、build、`cargo llvm-cov --fail-under-lines 80` 和报告上传全部通过。该修复将 Unix fixture 从 `echo` 改为 `printf`，避免 `/bin/sh` 去除 JSON 引号；Windows fixture 行为保持不变。
+GitHub Actions 独立验证：`quality-gate` run `34146251345`（commit `0054b8d`）于 2026-09-08 通过；Linux runner 上 workspace tests、fmt、diff check、Clippy、build、`cargo llvm-cov --fail-under-lines 80` 和报告上传全部通过。随后 `ci` run `34146688237`（commit `7743f2a`）的 Ubuntu/macOS/Windows 构建测试、fmt/Clippy 和 Ubuntu Linux PTY smoke 全部通过。Sonar self-hosted job 因 runner 不存在而按条件跳过。Unix fixture 修复将 `echo` 改为 `printf`，避免 `/bin/sh` 去除 JSON 引号；Windows fixture 行为保持不变。
 
 ## 当前阻塞
 
@@ -49,7 +49,7 @@ GitHub Actions 独立验证：`quality-gate` run `34146251345`（commit `0054b8d
 .\scripts\quality-preflight.ps1
 ```
 
-当前已确认：Docker engine 不可达、Harbor CLI 不在 PATH、PATH 上的 Python 是不可执行 shim、C 盘约 64 GiB（要求 120 GiB）、本机 Sonar scanner/`SONAR_TOKEN` 缺失。GitHub Linux runner 已补齐 `cargo-llvm-cov` 并通过 coverage gate；WSL `Ubuntu-22.04` 存在但没有 cargo，因此本机 Linux PTY smoke 尚未执行。
+当前已确认：Docker engine 不可达、Harbor CLI 不在 PATH、PATH 上的 Python 是不可执行 shim、C 盘约 64 GiB（要求 120 GiB）、本机 Sonar scanner/`SONAR_TOKEN` 缺失。GitHub Linux runner 已补齐 `cargo-llvm-cov` 并通过 coverage gate，且 CI 已通过 Linux PTY smoke；本机 WSL 仍未安装 cargo。Sonar 仍需具备 self-hosted runner、服务和 token 才能执行真实质量门。
 
 ## 恢复步骤
 
