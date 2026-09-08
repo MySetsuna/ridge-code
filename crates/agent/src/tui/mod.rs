@@ -791,6 +791,7 @@ mod eventfmt;
 mod idle_submit_tests;
 mod input;
 mod keymap;
+mod layout;
 mod panel;
 mod presentation;
 #[cfg(target_os = "windows")]

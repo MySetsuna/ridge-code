@@ -6,13 +6,13 @@ use super::{
     alert_edges, annotate_diff_line_numbers, char_cells, clip_display_cells, compact_status_line,
     context_pressure_role, ctx_percent, cwd_name, fence_language, fence_without_language,
     fmt_busy_phase, fmt_busy_signal, fmt_progress_diagnostic, input_chrome, input_height,
-    live_markdown_spans_with_alert_edge, prompt_input_lines, queue_preview, render_status_template,
-    role_color, sanitize_display_text, selection_style, shell_input_title, status_line_projection,
-    str_cells, stream_channel_badge, tail_display_cells, telemetry_surface, todo_progress,
-    wrap_input, wrapped_rows, ActivityEntry, ActivityKind, AlertEdge, AnswerEntry, ApprovalRequest,
-    InputChromeArgs, LiveBlockFocus, LiveChannel, LiveLine, LiveLineAnchor, LiveLineKind,
-    LiveTranscript, Panel, PanelKind, PanelRow, ReasoningEntry, ReplMeta, Role, StatusVars, Ui,
-    Vitals, INPUT_PROMPT,
+    live_markdown_spans_with_alert_edge, pad_display_cells, prompt_input_lines, queue_preview,
+    render_status_template, role_color, sanitize_display_text, selection_style, shell_input_title,
+    status_line_projection, str_cells, stream_channel_badge, tail_display_cells, telemetry_surface,
+    todo_progress, wrap_input, wrapped_rows, ActivityEntry, ActivityKind, AlertEdge, AnswerEntry,
+    ApprovalRequest, InputChromeArgs, LiveBlockFocus, LiveChannel, LiveLine, LiveLineAnchor,
+    LiveLineKind, LiveTranscript, Panel, PanelKind, PanelRow, ReasoningEntry, ReplMeta, Role,
+    StatusVars, Ui, Vitals, INPUT_PROMPT,
 };
 use ratatui::buffer::Buffer;
 use ratatui::{
@@ -5388,7 +5388,10 @@ pub(crate) fn draw_with_cache(
                 Role::DiffDel => Style::default().fg(Color::White).bg(role_color(role)),
                 _ => Style::default().fg(role_color(role)),
             };
-            lines.push(Line::from(Span::styled(l.to_owned(), style)));
+            let line = matches!(role, Role::DiffAdd | Role::DiffDel)
+                .then(|| pad_display_cells(l.to_owned(), area.width))
+                .unwrap_or_else(|| l.to_owned());
+            lines.push(Line::from(Span::styled(line, style)));
         }
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(

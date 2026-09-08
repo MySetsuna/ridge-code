@@ -9,6 +9,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
+use super::layout;
 use super::presentation::PresentationMetrics;
 use super::{fmt_reasoning_meta, wrap_live_spans_greedy, ActivityKind, ToolBlock};
 use unicode_segmentation::UnicodeSegmentation;
@@ -20,43 +21,19 @@ pub(crate) fn should_draw(dirty: bool, animation_due: bool) -> bool {
 
 /// 单字符终端单元格宽度(wcwidth 口径):CJK/emoji=2、控制/零宽=0、常规=1(iter-30)。
 pub(crate) fn char_cells(c: char) -> usize {
-    unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+    layout::char_cells(c)
 }
 
 /// 字符串显示单元格宽度(iter-30):替代 `.chars().count()`,CJK/emoji 按实占计。
 pub(crate) fn str_cells(s: &str) -> usize {
-    unicode_width::UnicodeWidthStr::width(s)
+    layout::str_cells(s)
 }
 
 /// 将实时单行裁到终端 cell 宽度，保留省略号；静态 scrollback 仍走完整折行。
 /// Live 区每帧只处理可见尾部，避免宽度溢出触发不可控的 Paragraph 换行。
 pub(crate) fn clip_display_cells(text: &str, width: u16) -> String {
-    let width = width as usize;
-    if width == 0 {
-        return String::new();
-    }
-    if str_cells(text) <= width {
-        return text.to_owned();
-    }
-    if width == 1 {
-        return "…".to_owned();
-    }
-    let limit = width - 1;
-    let mut out = String::new();
-    let mut cells = 0;
-    for grapheme in text.graphemes(true) {
-        if matches!(grapheme, "\n" | "\r") {
-            break;
-        }
-        let used = str_cells(grapheme);
-        if cells + used > limit {
-            break;
-        }
-        out.push_str(grapheme);
-        cells += used;
-    }
-    out.push('…');
-    out
+    let first_line = text.split(['\n', '\r']).next().unwrap_or_default();
+    layout::clip(first_line, width as usize, "…")
 }
 
 /// Return a bounded tail for a single logical live line. Reverse UTF-8
@@ -103,17 +80,7 @@ pub(crate) fn wrapped_rows(content: &str, width: u16) -> usize {
 /// 一条逻辑行按显示单元格宽做**贪心字符折行**占的可视行数(≥1)。与 [`wrap_input`] 同口径 ——
 /// 宽字符(CJK 占 2 格)不整除宽度时也精确(旧 `div_ceil` 会低估致边框/光标错位)。
 pub(crate) fn line_visual_rows(line: &str, w: usize) -> usize {
-    let mut rows = 1usize;
-    let mut cells = 0usize;
-    for grapheme in line.graphemes(true) {
-        let cw = str_cells(grapheme);
-        if cells + cw > w && cells > 0 {
-            rows += 1;
-            cells = 0;
-        }
-        cells += cw;
-    }
-    rows
+    layout::wrap(line, w).len()
 }
 
 /// 输入框字符折行(按显示单元格宽,含显式 `\n`)+ 光标可视 (row, col)。**渲染与光标共用同一折行** ——
@@ -2055,9 +2022,26 @@ pub(crate) fn colored_commit_lines(
         } else {
             Style::default().fg(color)
         };
+        let text = if is_diff_add || is_diff_del {
+            pad_display_cells(text, width)
+        } else {
+            text
+        };
         Line::from(Span::styled(text, style))
     }));
     wrap_commit_lines(lines, width)
+}
+
+/// Fill a diff row to the viewport width so its background is a true row
+/// highlight instead of a short coloured fragment. Padding is added only when
+/// the source fits on one physical row; long rows are safely wrapped later.
+pub(crate) fn pad_display_cells(mut text: String, width: u16) -> String {
+    let used = str_cells(&text);
+    let width = width as usize;
+    if used < width {
+        text.extend(std::iter::repeat_n(' ', width - used));
+    }
+    text
 }
 
 fn diff_line_marker(text: &str, marker: char) -> bool {
