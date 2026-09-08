@@ -2,7 +2,7 @@
 
 更新时间：2026-09-08
 当前分支：`main`
-基线：`0054b8d`（`origin/main`，修复 Unix shell 下外部评测 JSON fixture 转义）
+基线：`0fa3dbf`（`origin/main`，跨平台 CI 与交接证据已推送）
 
 ## 当前结论
 
@@ -38,7 +38,7 @@ cargo run -p agent --bin ridgecode -- terminal doctor
 
 关键结果：agent 263 tests、TUI 509 tests、eval 31 tests；bounded soak 3/3 轮通过；recovery 3/3 恢复通过；ConPTY fixtures 全部通过；release 二进制可执行。
 
-GitHub Actions 独立验证：`quality-gate` run `34146251345`（commit `0054b8d`）于 2026-09-08 通过；Linux runner 上 workspace tests、fmt、diff check、Clippy、build、`cargo llvm-cov --fail-under-lines 80` 和报告上传全部通过。随后 `ci` run `34146688237`（commit `7743f2a`）的 Ubuntu/macOS/Windows 构建测试、fmt/Clippy 和 Ubuntu Linux PTY smoke 全部通过。Sonar self-hosted job 因 runner 不存在而按条件跳过。Unix fixture 修复将 `echo` 改为 `printf`，避免 `/bin/sh` 去除 JSON 引号；Windows fixture 行为保持不变。
+GitHub Actions 独立验证：`quality-gate` run `34146251345`（commit `0054b8d`）于 2026-09-08 通过；Linux runner 上 workspace tests、fmt、diff check、Clippy、build、`cargo llvm-cov --fail-under-lines 80` 和报告上传全部通过。随后 `ci` run `34146688237`（commit `7743f2a`）及包含本交接文档的 `34183085491`（commit `0fa3dbf`）均通过 Ubuntu/macOS/Windows 构建测试、fmt/Clippy 和 Ubuntu Linux PTY smoke。Sonar self-hosted job 因 runner 不存在而按条件跳过。Unix fixture 修复将 `echo` 改为 `printf`，避免 `/bin/sh` 去除 JSON 引号；Windows fixture 行为保持不变。
 
 ## 当前阻塞
 
