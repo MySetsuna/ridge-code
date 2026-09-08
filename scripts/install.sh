@@ -2,7 +2,7 @@
 # RidgeCode 安装器(Unix:Linux / macOS)—— 零 cargo、零源码,只需一个独立二进制。
 #
 #   在线装最新版:  curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.sh | sh
-#   指定版本:      curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.28/scripts/install.sh | sh -s -- --version v0.5.28
+#   指定版本:      curl -fsSL https://raw.githubusercontent.com/MySetsuna/ridge-code/v0.5.29/scripts/install.sh | sh -s -- --version v0.5.29
 #   装本地已构建:  ./scripts/install.sh --local target/release/ridgecode
 #
 # 装到 $RIDGECODE_BIN_DIR(默认 ~/.local/bin);若不在 PATH,脚本会提示如何加。
@@ -13,12 +13,14 @@ BIN="ridgecode"
 BIN_DIR="${RIDGECODE_BIN_DIR:-$HOME/.local/bin}"
 VERSION="latest"
 LOCAL=""
+NO_CONFIG=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
     --local)   LOCAL="$2";   shift 2 ;;
     --dir)     BIN_DIR="$2"; shift 2 ;;
+    --no-config) NO_CONFIG=1; shift ;;
     -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "未知参数: $1" >&2; exit 2 ;;
   esac
@@ -89,10 +91,14 @@ else
 fi
 
 # ---- 配置骨架:写 config.example.json 到安装目录 + 首次生成 ~/.ridge/config.json ----
+if [ "$NO_CONFIG" -eq 1 ]; then
+  echo "跳过配置骨架（--no-config）"
+  exit 0
+fi
 EXAMPLE='{
   "provider": "openai",
-  "model": "glm-4.6",
-  "base_url": "https://open.bigmodel.cn/api/paas/v4",
+  "model": "gpt-4o",
+  "base_url": "https://api.openai.com/v1",
   "api_key": "把你的 API Key 明文填这里即可直接启动;不想明文就删掉此行,改为设 RIDGECODE_API_KEY 环境变量",
   "budget_tokens": 200000,
   "skip_danger": false,
@@ -115,8 +121,8 @@ mkdir -p "$(dirname "$CFG")"
 if [ ! -f "$CFG" ]; then
   printf '%s\n' '{
   "provider": "openai",
-  "model": "glm-4.6",
-  "base_url": "https://open.bigmodel.cn/api/paas/v4",
+  "model": "gpt-4o",
+  "base_url": "https://api.openai.com/v1",
   "api_key": "",
   "budget_tokens": 200000,
   "skip_danger": false,

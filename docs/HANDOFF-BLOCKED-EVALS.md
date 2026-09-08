@@ -1,7 +1,7 @@
 # 外部验收阻塞项交接
 
 更新时间：2026-09-08  
-基线：`main@8e8e24f`（`docs: add OpenAI-compatible Ark provider example`）
+基线：`main@73942b3`（`feat(tui): unify commands keybindings and performance gates`）
 
 本文只交接必须依赖另一台设备、凭据或长期 runner 的验收工作。不要在本文、提交、CI 日志或诊断附件中写入 API key、OAuth token、Cookie、用户会话正文与本机绝对临时路径。
 
@@ -12,6 +12,7 @@
 - ChatGPT OAuth 真实 smoke 已以可用订阅模型完成一次 `verify PASS`，结果为 `approved=true`、`steps=1`。
 - 本地有界 eval soak 连续 100 轮通过（300 cases）；recovery soak 连续 5 轮通过，每轮均验证首进程终止后恢复且 `manifest=3`、`unique=3`、`resumed=2`、`passed=3`。
 - Windows ConPTY 的 Completion+Resize、InputFixture 与基础 busy cancellation 已通过。`BusyFixture + InspectLive` 尚不能稳定观测 active live block：fixture 的 reasoning 会先提交进 history，当前证据为 `live_blocks=0`；这是 fixture/active-tail 语义缺口，不能表述成已确认的产品故障。
+- 2026-09-08 在本机临时直连环境（不读取保存的代理配置）以 ChatGPT OAuth / `gpt-5.6-sol` 跑通一次真实端到端写入：agent 独立生成并验证 `ridgecode-demo.svg`。该 SVG 是纯向量元素（无嵌入/外链图片）；本地验证产物不提交。Ridge desktop `ridge-mcp` 的 custom pane 当前会返回 `identity has no session_id`，因此可抓屏但不能投递任务；这是宿主 pane 会话绑定问题，不能以此替代 provider E2E 或归咎于 agent 图。
 
 ## 1. Ark OpenAI-compatible 真实 E2E
 

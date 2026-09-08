@@ -3,7 +3,7 @@
   RidgeCode 安装器(Windows)—— 零 cargo、零源码,只需一个独立 .exe。
 .DESCRIPTION
   在线装最新版:  irm https://raw.githubusercontent.com/MySetsuna/ridge-code/main/scripts/install.ps1 | iex
-  指定版本:      &([scriptblock]::Create((irm .../v0.5.28/scripts/install.ps1))) -Version v0.5.28
+  指定版本:      &([scriptblock]::Create((irm .../v0.5.29/scripts/install.ps1))) -Version v0.5.29
   装本地已构建:  .\scripts\install.ps1 -Local .\target\release\ridgecode.exe
   装到 $env:LOCALAPPDATA\Programs\ridgecode,并把该目录加入「用户 PATH」(新终端生效)。
 .PARAMETER Version
@@ -12,12 +12,18 @@
   改为安装一个本地已构建的 ridgecode.exe(不联网、不需 cargo)。
 .PARAMETER Dir
   自定义安装目录。
+.PARAMETER NoPath
+  不改用户 PATH（适合 CI、排障和可移植安装）。
+.PARAMETER NoConfig
+  不创建 config.example.json 或 ~/.ridge/config.json。
 #>
 [CmdletBinding()]
 param(
   [string]$Version = "latest",
   [string]$Local = "",
-  [string]$Dir = "$env:LOCALAPPDATA\Programs\ridgecode"
+  [string]$Dir = "$env:LOCALAPPDATA\Programs\ridgecode",
+  [switch]$NoPath,
+  [switch]$NoConfig
 )
 $ErrorActionPreference = "Stop"
 $Repo = "MySetsuna/ridge-code"
@@ -68,7 +74,9 @@ Write-Host "[OK] 已安装: $dest" -ForegroundColor Green
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 $parts = @()
 if ($userPath) { $parts = $userPath.Split(';') | Where-Object { $_ -ne "" } }
-if ($parts -notcontains $Dir) {
+if ($NoPath) {
+  Write-Host "跳过用户 PATH（-NoPath）" -ForegroundColor DarkGray
+} elseif ($parts -notcontains $Dir) {
   [Environment]::SetEnvironmentVariable("Path", (($parts + $Dir) -join ';'), "User")
   Write-Host "[OK] 已把 $Dir 加入用户 PATH（新开终端生效）" -ForegroundColor Green
 } else {
@@ -81,8 +89,8 @@ $noBom = New-Object System.Text.UTF8Encoding $false
 $exampleJson = @'
 {
   "provider": "openai",
-  "model": "glm-4.6",
-  "base_url": "https://open.bigmodel.cn/api/paas/v4",
+  "model": "gpt-4o",
+  "base_url": "https://api.openai.com/v1",
   "api_key": "把你的 API Key 明文填这里即可直接启动;不想明文就删掉此行,改为设 RIDGECODE_API_KEY 环境变量",
   "budget_tokens": 0,
   "skip_danger": false,
@@ -106,18 +114,21 @@ $exampleJson = @'
 }
 '@
 $examplePath = Join-Path $Dir "config.example.json"
-[System.IO.File]::WriteAllText($examplePath, $exampleJson, $noBom)
-Write-Host "[OK] 示例配置: $examplePath" -ForegroundColor Green
+if ($NoConfig) {
+  Write-Host "跳过配置骨架（-NoConfig）" -ForegroundColor DarkGray
+} else {
+  [System.IO.File]::WriteAllText($examplePath, $exampleJson, $noBom)
+  Write-Host "[OK] 示例配置: $examplePath" -ForegroundColor Green
 
-$cfgPath = if ($env:RIDGECODE_CONFIG) { $env:RIDGECODE_CONFIG } else { Join-Path $env:USERPROFILE ".ridge\config.json" }
-$cfgDir = Split-Path -Parent $cfgPath
-New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
-if (-not (Test-Path $cfgPath)) {
+  $cfgPath = if ($env:RIDGECODE_CONFIG) { $env:RIDGECODE_CONFIG } else { Join-Path $env:USERPROFILE ".ridge\config.json" }
+  $cfgDir = Split-Path -Parent $cfgPath
+  New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+  if (-not (Test-Path $cfgPath)) {
   $initJson = @'
 {
   "provider": "openai",
-  "model": "glm-4.6",
-  "base_url": "https://open.bigmodel.cn/api/paas/v4",
+  "model": "gpt-4o",
+  "base_url": "https://api.openai.com/v1",
   "api_key": "",
   "budget_tokens": 0,
   "skip_danger": false,
@@ -125,12 +136,13 @@ if (-not (Test-Path $cfgPath)) {
   "mcp": []
 }
 '@
-  [System.IO.File]::WriteAllText($cfgPath, $initJson, $noBom)
-  Write-Host "[OK] 已生成配置: $cfgPath  —— 填顶层 api_key（或设 RIDGECODE_API_KEY）即可启动真实 LLM" -ForegroundColor Green
-} else {
-  Write-Host "已有配置，未改动: $cfgPath（参照 $examplePath 补 api_key）" -ForegroundColor DarkGray
+    [System.IO.File]::WriteAllText($cfgPath, $initJson, $noBom)
+    Write-Host "[OK] 已生成配置: $cfgPath  —— 填顶层 api_key（或设 RIDGECODE_API_KEY）即可启动真实 LLM" -ForegroundColor Green
+  } else {
+    Write-Host "已有配置，未改动: $cfgPath（参照 $examplePath 补 api_key）" -ForegroundColor DarkGray
+  }
 }
 
 # 当前会话即时可用
-if (($env:Path -split ';') -notcontains $Dir) { $env:Path = "$env:Path;$Dir" }
+if (-not $NoPath -and ($env:Path -split ';') -notcontains $Dir) { $env:Path = "$env:Path;$Dir" }
 Write-Host "现在可运行: ridgecode" -ForegroundColor Cyan
