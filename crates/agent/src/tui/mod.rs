@@ -2886,7 +2886,9 @@ async fn process_pending_submit(context: &mut PendingSubmitContext<'_>) -> anyho
         *context.task_started = Some(Instant::now());
         *context.last_activity = *context.task_started;
         *context.printed = 0;
+        tui_trace("task.spawn.begin");
         *context.task = Some((context.start_task)(&task_input, context.history));
+        tui_trace("task.spawn.end");
     }
     Ok(false)
 }

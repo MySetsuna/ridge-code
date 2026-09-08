@@ -516,6 +516,7 @@ fn add_reason_node(
                 msgs = request.messages.len(),
                 "llm request"
             );
+            graph_trace("llm.request.begin");
             let completion = match provider.complete_streaming(&request, &on_token).await {
                 Ok(completion) => completion,
                 Err(error) => {
@@ -523,6 +524,7 @@ fn add_reason_node(
                     return Ok(provider_retry_patch(&state, error.to_string()));
                 }
             };
+            graph_trace("llm.request.end");
             let usage = completion.usage.clone();
             let tokens = usage.total() as usize;
             tracing::debug!(
