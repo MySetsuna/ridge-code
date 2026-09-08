@@ -160,6 +160,7 @@ pub fn preview_call(call: &ToolCall) -> String {
             )
         }
         "run_shell" => arg("cmd").to_string(),
+        "remove_skill" => format!("remove user skill: {}", arg("name")),
         _ => call.arguments.to_string(),
     }
 }

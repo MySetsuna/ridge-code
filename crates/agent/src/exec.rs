@@ -38,6 +38,12 @@ pub fn builtin_tool_specs() -> Vec<ToolSpec> {
             effect: ToolEffect::Edit,
         },
         ToolSpec {
+            name: "remove_skill".to_string(),
+            description: "从用户 RidgeCode skills 目录移除一个已安装 skill；只能传单个安全名称，不允许任意路径".to_string(),
+            schema: serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"skill 目录名，例如 install-notebooklm-mcp"}},"required":["name"]}),
+            effect: ToolEffect::Edit,
+        },
+        ToolSpec {
             name: "read_file".to_string(),
             description: "读取文件。可选 offset(起始行,1 起)+ limit(行数)只读一段,大文件别整读".to_string(),
             schema: serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}),
@@ -196,6 +202,10 @@ pub(crate) fn durable_updates_with_native_result(
                 patches.push(Patch::RecordModified(path.to_string()));
                 patches.push(Patch::SetLastError(None));
             }
+        }
+        "remove_skill" if !failed => {
+            advances_revision = true;
+            patches.push(Patch::SetLastError(None));
         }
         "apply_edits" if !failed => {
             let edits = parse_edits(call);
@@ -1037,6 +1047,57 @@ fn execute_apply_edits_tool(call: &ToolCall) -> ToolResult {
     }
 }
 
+fn ridge_home_dir() -> std::path::PathBuf {
+    std::env::var_os("RIDGE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(|home| std::path::PathBuf::from(home).join(".ridge"))
+        })
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".ridge"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from(".ridge"))
+}
+
+fn valid_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 96
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn execute_remove_skill_tool(call: &ToolCall) -> ToolResult {
+    let name = tool_arg(call, "name");
+    if !valid_skill_name(name) {
+        return blocked_result(
+            "remove_skill blocked: name must be one safe skill directory name".to_string(),
+        );
+    }
+    let path = ridge_home_dir().join("skills").join(name);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return tool_result(format!("skill not installed: {name}"));
+        }
+        Err(error) => return error_result(format!("remove_skill inspect error: {error}")),
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return blocked_result(format!(
+            "remove_skill blocked: target is not a real skill directory: {}",
+            path.display()
+        ));
+    }
+    match std::fs::remove_dir_all(&path) {
+        Ok(()) => changed_result(
+            format!("removed skill {name}"),
+            vec![path.display().to_string()],
+        ),
+        Err(error) => error_result(format!("remove_skill error: {error}")),
+    }
+}
+
 fn check_batch_preconditions(call: &ToolCall) -> Option<String> {
     let mut checks = Vec::new();
     if let Some(items) = call
@@ -1170,6 +1231,7 @@ fn execute_tool_body(call: &ToolCall) -> ToolResult {
         "write_file" => execute_write_file_tool(call),
         "edit_file" => execute_edit_file_tool(call),
         "apply_edits" => execute_apply_edits_tool(call),
+        "remove_skill" => execute_remove_skill_tool(call),
         "read_file" => execute_read_file_tool(call),
         "search" => execute_search_tool(call),
         "todo_write" => tool_result(format!("已更新任务清单 {} 项", parse_todos(call).len())),
