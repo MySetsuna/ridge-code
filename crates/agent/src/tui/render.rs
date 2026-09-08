@@ -1113,9 +1113,13 @@ pub(crate) fn md_line_spans_with_alert(
     }
     if trimmed.starts_with('#') {
         *alert_role = None;
+        let level = trimmed.chars().take_while(|ch| *ch == '#').count();
+        let title = trimmed[level..].trim_start();
+        let marker = if level == 1 { "◆ " } else { "◇ " };
+        let heading = format!("{marker}{title}");
         return (
             vec![Span::styled(
-                line.to_owned(),
+                format!("{}{}", &line[..line.len() - trimmed.len()], heading),
                 Style::default()
                     .fg(role_color(Role::Primary))
                     .add_modifier(Modifier::BOLD),

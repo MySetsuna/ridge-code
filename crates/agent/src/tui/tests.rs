@@ -8885,6 +8885,22 @@ fn markdown_alerts_render_semantic_rails_without_leaking_syntax() {
 }
 
 #[test]
+fn markdown_answer_headings_use_preview_markers_without_hashes() {
+    let (level_one, _) = md_line_spans("# Confirmed facts", false);
+    let (level_two, _) = md_line_spans("## Follow-up", false);
+    let one = level_one
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    let two = level_two
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert_eq!(one, "◆ Confirmed facts");
+    assert_eq!(two, "◇ Follow-up");
+}
+
+#[test]
 fn markdown_alert_continuation_keeps_semantic_rail() {
     let lines = markdown_lines(
         "🤖 > [!WARNING] Protect the boundary\n> Continue **this** conclusion\nplain",
