@@ -484,6 +484,27 @@ $env:RIDGECODE_TUI_SNAPSHOT = "$pwd\ridgecode-frame.json"
 
 档案 key 解析顺序为内联 api_key、key_env 对应的进程环境变量、~/.ridge/auth.json 对应槽。/provider use kimi 会热切换，不重建 agent 图。
 
+火山方舟等 OpenAI 兼容服务可直接使用 `kind: "openai"`；`base_url` 填到
+服务商 API 版本前缀，程序会追加 `/chat/completions`。例如（密钥只放环境变量）：
+
+~~~json
+{
+  "providers": [
+    {
+      "name": "ark-glm",
+      "kind": "openai",
+      "model": "glm-5.3",
+      "base_url": "https://ark.cn-beijing.volces.com/api/plan/v3",
+      "key_env": "RIDGECODE_API_KEY"
+    }
+  ]
+}
+~~~
+
+运行前设置 `RIDGECODE_PROVIDER=openai` 与 `RIDGECODE_API_KEY`，再用
+`ridgecode run --require-api-key` 做带硬超时的连通性 smoke；不要把 key 写入
+配置文件或提交到仓库。
+
 ### MCP
 
 ~~~json
