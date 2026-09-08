@@ -44,6 +44,9 @@ jobs:
       - name: Linux PTY input smoke
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/linux-pty-input.py --binary target/debug/ridgecode --timeout 12
+      - name: Harbor adapter syntax check
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 -m py_compile eval/harbor/ridgecode_agent.py
 
   quality:
     name: deterministic quality gates (local Sonar runs on release runner)
