@@ -470,6 +470,7 @@ $sentInterrupt = $false
 $sentFront = $false
 $sentQueueTail = $false
 $sentInspect = $false
+$sentInspectFallback = $false
 $sentInspectSpace = $false
 $sentInspectCollapse = $false
 $inspectCollapsedObserved = $false
@@ -1177,6 +1178,14 @@ try {
                 # The writer may be between truncate/write; retry next loop.
             }
         }
+        if ($BusyFixture -and $InspectLive -and $sentInspect -and
+            -not $sentInspectFallback -and -not $inspectObserved -and $elapsed -ge 2300) {
+            # Some ConPTY hosts drop the Alt modifier from Kitty CSI-u.  The
+            # documented Ctrl+I byte is the deterministic fallback and should
+            # exercise the same production inspector route.
+            $session.Send([byte[]](0x09))
+            $sentInspectFallback = $true
+        }
         if ($inspectObserved -and -not $sentInspectSpace -and $elapsed -ge 2100) {
             # LiveHistory maps an unmodified Space to expand the selected block.
             $session.Send([byte[]](0x20))
@@ -1850,6 +1859,7 @@ try {
         resize_sent_count = $resizeTargetIndex
         resize_observed_count = $resizeObservedCount
         live_inspector_sent = $sentInspect
+        live_inspector_fallback_sent = $sentInspectFallback
         live_inspector_observed = $inspectObserved
         live_inspector_space_sent = $sentInspectSpace
         live_inspector_expanded_observed = $inspectExpandedObserved
