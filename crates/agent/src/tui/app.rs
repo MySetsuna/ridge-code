@@ -25,7 +25,7 @@ use super::{
     process_bundle_commit_lines, queue_panel, reasoning_commit_lines, reasoning_history_panel,
     render::{sanitize_display_text, SPLASH_TICKS},
     role_color, static_tool_lines, tool_history_panel,
-    transcript::{LiveBlockFocus, LiveChannel, LiveLineKind, LiveTranscript, ToolBlock},
+    transcript::{LiveBlockFocus, LiveChannel, LiveTranscript, ToolBlock},
     ModelCatalog, Role, MAX_TOOL_HISTORY,
 };
 #[cfg(test)]
@@ -113,52 +113,6 @@ pub(crate) struct PendingModelSelection {
 
 pub(crate) const MAX_ACTIVITY_HISTORY: usize = 12;
 
-/// Controls projection only; all history remains available to the inspector
-/// panels regardless of the selected density. The interactive entry point
-/// explicitly parses a missing config value as `Focus`; `Default` remains
-/// `Debug` for isolated UI fixtures that assert the complete projection.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum UiDensity {
-    Focus,
-    Standard,
-    #[default]
-    Debug,
-}
-
-impl UiDensity {
-    pub(crate) fn parse(value: Option<&str>) -> Self {
-        match value
-            .unwrap_or("focus")
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "standard" => Self::Standard,
-            "debug" => Self::Debug,
-            _ => Self::Focus,
-        }
-    }
-
-    pub(crate) fn shows_activity_scrollback(self) -> bool {
-        !matches!(self, Self::Focus)
-    }
-
-    pub(crate) fn shows_reasoning_scrollback(self) -> bool {
-        matches!(self, Self::Debug)
-    }
-
-    pub(crate) fn shows_tool_scrollback(self) -> bool {
-        matches!(self, Self::Debug)
-    }
-
-    /// Focus is deliberately answer-only while a task is running. Standard
-    /// keeps the same clean live view but emits lifecycle boundaries to native
-    /// scrollback; Debug restores the diagnostic transcript projection.
-    pub(crate) fn shows_live_line(self, kind: LiveLineKind) -> bool {
-        !matches!(self, Self::Focus) || matches!(kind, LiveLineKind::Answer | LiveLineKind::Splash)
-    }
-}
-
 /// Presentation-only activity category. It is derived from observed UI
 /// transitions and never participates in execution or routing decisions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,15 +172,6 @@ impl ActivityKind {
                 | Self::Takeover
                 | Self::Completed
                 | Self::Error
-        )
-    }
-
-    /// Lifecycle chatter stays in Ctrl+T history; only user-actionable
-    /// boundaries occupy native scrollback.
-    fn is_scrollback_signal(self) -> bool {
-        matches!(
-            self,
-            Self::Plan | Self::Approval | Self::Takeover | Self::Error
         )
     }
 
@@ -343,7 +288,6 @@ pub(crate) struct ActivityEntry {
 
 #[derive(Default)]
 pub(crate) struct Ui {
-    pub(crate) density: UiDensity,
     /// Most recent external event accepted by the loop; cleared after the next frame.
     pub(crate) event_received_at: Option<std::time::Instant>,
     pub(crate) input: InputState,
@@ -659,13 +603,14 @@ impl Ui {
             kind,
             text: text.clone(),
         });
-        if self.density.shows_activity_scrollback() && kind.is_scrollback_signal() {
-            self.commits.push(CommitBlock::Activity {
-                sequence: self.activity_sequence,
-                kind,
-                text,
-            });
-        }
+        // Scrollback is the canonical current-session timeline.  Keep every
+        // de-duplicated lifecycle boundary instead of requiring a live view
+        // or a density switch to recover it later.
+        self.commits.push(CommitBlock::Activity {
+            sequence: self.activity_sequence,
+            kind,
+            text,
+        });
         if self
             .panel
             .as_ref()
@@ -772,15 +717,13 @@ impl Ui {
             .complete_reasoning_deltas(&mut self.reasoning_scrollback.offsets);
         for (id, end, delta) in deltas {
             self.reasoning_scrollback.offsets.insert(id, end);
-            if self.density.shows_reasoning_scrollback() {
-                self.commits.push(CommitBlock::Reasoning {
-                    id,
-                    text: delta,
-                    step: self.superstep,
-                    elapsed_s: 0,
-                    tokens: self.stream_tokens,
-                });
-            }
+            self.commits.push(CommitBlock::Reasoning {
+                id,
+                text: delta,
+                step: self.superstep,
+                elapsed_s: 0,
+                tokens: self.stream_tokens,
+            });
         }
     }
     pub(crate) fn push_tool(&mut self, tool: ToolBlock) {
@@ -852,7 +795,7 @@ impl Ui {
                         chars: text.chars().count(),
                     },
                 );
-                if self.density.shows_reasoning_scrollback() && committed == 0 {
+                if committed == 0 {
                     self.commits.push(CommitBlock::Reasoning {
                         id,
                         text,
@@ -860,7 +803,7 @@ impl Ui {
                         elapsed_s,
                         tokens,
                     });
-                } else if self.density.shows_reasoning_scrollback() && committed < text.len() {
+                } else if committed < text.len() {
                     self.commits.push(CommitBlock::Reasoning {
                         id,
                         text: text[committed..].to_owned(),
@@ -1344,9 +1287,7 @@ impl Ui {
                 self.tool_history.pop_front();
             }
             self.tool_history.push_back(tool.clone());
-            if self.density.shows_tool_scrollback() {
-                self.commits.push(CommitBlock::Tool(tool));
-            }
+            self.commits.push(CommitBlock::Tool(tool));
         }
     }
 

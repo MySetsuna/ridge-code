@@ -1,6 +1,6 @@
 //! RidgeCode 的交互式终端界面 —— **主屏内联 REPL**(iter-26)。
 //! 不再霸占备用屏:历史内容经 `Terminal::insert_before` 静态提交进终端原生 scrollback
-//! (原生滚动/选取/搜索全保留),ratatui 只渲染底部一小块 Live 视口(状态行 + 流式尾巴 + 输入框)。
+//! (原生滚动/选取/搜索全保留),ratatui 只渲染底部紧凑命令栏(状态行 + 输入框)。
 //! 执行图跑在后台 Tokio task,token 流、工具事件和权限门都不会卡住界面(iter-23 事件驱动主环)。
 
 use std::io;
@@ -41,9 +41,10 @@ type Term = Terminal<CrosstermBackend<io::Stdout>>;
 
 pub(crate) type ModelCatalog = Vec<(String, Vec<provider::models::ModelInfo>)>;
 
-/// Live 视口总高:状态行 1 + 流式尾巴 ≥5 + 输入框 3..=8。内联模式下 ratatui 只管这块,
-/// 高度恒小于终端 —— 从根上杜绝「动态高度超视口触发全屏清屏」的闪烁根因。
-const LIVE_HEIGHT: u16 = 14;
+/// 内联命令栏的固定上限；任务输出不占用该区域。
+/// The permanent inline surface is intentionally only a command bar.  Task
+/// output belongs to native scrollback, not a competing live transcript.
+const LIVE_HEIGHT: u16 = 6;
 /// 单次 token 唤醒最多合并的 chunk。保持小批次，避免长流在一次事件步内
 /// 占住主环，让键盘、审批与 Ctrl-C 能在下一轮 `select!` 及时抢占。
 const MAX_STREAM_CHUNKS_PER_WAKE: usize = 32;
@@ -3699,7 +3700,6 @@ pub(super) async fn run(
     initial_effort: String,
     keybindings: std::collections::BTreeMap<String, Vec<String>>,
     initial_theme: Option<String>,
-    initial_density: Option<String>,
 ) -> anyhow::Result<()> {
     tui_trace("run.enter");
     set_theme(Theme::parse(initial_theme.as_deref()));
@@ -3737,7 +3737,6 @@ pub(super) async fn run(
     let live_cache = LiveOutputCache::default();
     let mut ui = Ui {
         effort: Some(initial_effort),
-        density: UiDensity::parse(initial_density.as_deref()),
         allow_bare_kitty,
         mcp_statuses,
         session_id: agent::current_session_id(),

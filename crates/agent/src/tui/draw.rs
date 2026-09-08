@@ -2032,7 +2032,6 @@ struct LiveOutputCacheKey {
     width: u16,
     rows: u16,
     busy: bool,
-    density: super::UiDensity,
 }
 
 struct RenderedLiveTail {
@@ -2066,7 +2065,6 @@ impl LiveOutputCache {
         width: u16,
         rows: usize,
         busy: bool,
-        density: super::UiDensity,
         _vitals: &Vitals,
     ) {
         let key = LiveOutputCacheKey {
@@ -2074,7 +2072,6 @@ impl LiveOutputCache {
             width,
             rows: rows.min(u16::MAX as usize) as u16,
             busy,
-            density,
         };
         if self.key != Some(key) {
             let preferred_anchor = self.key.filter(|old| {
@@ -2082,13 +2079,12 @@ impl LiveOutputCache {
                     && (old.width != key.width || old.rows != key.rows)
                     && transcript.is_inspecting()
             });
-            let rendered = render_live_tail_projection_for_density(
+            let rendered = render_live_tail_projection(
                 transcript,
                 width,
                 rows,
                 busy,
                 preferred_anchor.and(self.anchor),
-                density,
             );
             self.line_count = rendered.lines.len();
             self.last_line_cells = rendered
@@ -2128,14 +2124,7 @@ impl LiveOutputCache {
         busy: bool,
         vitals: &Vitals,
     ) -> Vec<Line<'static>> {
-        self.prepare(
-            transcript,
-            width,
-            rows,
-            busy,
-            super::UiDensity::Debug,
-            vitals,
-        );
+        self.prepare(transcript, width, rows, busy, vitals);
         self.lines.clone()
     }
 
@@ -2686,7 +2675,6 @@ fn render_live_tail_lines(
     render_live_tail_projection(transcript, width, max_rows, busy, None).lines
 }
 
-#[cfg(test)]
 fn render_live_tail_projection(
     transcript: &LiveTranscript,
     width: u16,
@@ -2694,35 +2682,13 @@ fn render_live_tail_projection(
     busy: bool,
     preferred_anchor: Option<LiveLineAnchor>,
 ) -> RenderedLiveTail {
-    render_live_tail_projection_for_density(
-        transcript,
-        width,
-        max_rows,
-        busy,
-        preferred_anchor,
-        super::UiDensity::Debug,
-    )
-}
-
-fn render_live_tail_projection_for_density(
-    transcript: &LiveTranscript,
-    width: u16,
-    max_rows: usize,
-    busy: bool,
-    preferred_anchor: Option<LiveLineAnchor>,
-    density: super::UiDensity,
-) -> RenderedLiveTail {
     if max_rows == 0 {
         return RenderedLiveTail {
             lines: Vec::new(),
             anchor: None,
         };
     }
-    let visible_lines = transcript
-        .visible_lines(max_rows)
-        .into_iter()
-        .filter(|line| density.shows_live_line(line.kind))
-        .collect::<Vec<_>>();
+    let visible_lines = transcript.visible_lines(max_rows);
     let anchor_start = preferred_anchor.and_then(|anchor| {
         visible_lines
             .iter()
@@ -4075,25 +4041,22 @@ fn push_reasoning_visibility(above: &mut ChromeRail, ui: &Ui, width: usize) {
     }
 }
 
-/// 主 Live 四槽的响应式垂直预算：输出与输入优先，低高时收缩 chrome/底栏。
-/// 约束总高永不超过终端高，避免高输入把 Answer 槽挤成不可预测的零行。
+/// Compact command-bar layout. Task output is committed to native scrollback,
+/// so the permanent inline surface reserves no rows for a live transcript.
 pub(crate) fn responsive_live_layout(
     area: Rect,
     requested_input_rows: u16,
     requested_status_rows: u16,
 ) -> [Rect; 4] {
     let height = area.height;
-    let output_floor = u16::from(height > 0);
-    // At four rows, a one-row chrome plus a two-row bordered editor leaves
-    // no inner row for the draft.  Keep output + editable input truthful;
-    // the input title remains the compact activity affordance at this height.
-    let chrome_rows = u16::from(height >= 5);
+    let output_floor = 0;
+    let chrome_rows = u16::from(height >= 3);
     let input_floor = match height {
         0 => 0,
         1..=2 => 1,
         _ => 2,
     };
-    let status_rows = if height >= 6 {
+    let status_rows = if height >= 5 {
         requested_status_rows.min(height.saturating_sub(output_floor + chrome_rows + input_floor))
     } else {
         0
@@ -4105,10 +4068,10 @@ pub(crate) fn responsive_live_layout(
     let slots = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(output_floor),
+            Constraint::Length(output_floor),
             Constraint::Length(chrome_rows),
             Constraint::Length(input_rows),
-            Constraint::Length(status_rows),
+            Constraint::Min(status_rows),
         ])
         .split(area);
     [slots[0], slots[1], slots[2], slots[3]]
@@ -5214,7 +5177,6 @@ fn draw_live_output(
         content_area.width,
         output_rows,
         ui.busy,
-        ui.density,
         vitals,
     );
 
@@ -5346,10 +5308,9 @@ pub(crate) fn draw_with_cache(
         ctx,
         outer,
     } = LiveFramePlan::build(frame.area(), ui, meta, tokens, vitals);
-    // Four stable slots: live output / top activity chrome / editor / wrapped
-    // telemetry.  The plan owns measurement; this function only paints.
-    // Live tail uses the cached bounded projection, then adds only transient
-    // anchor/cursor decoration for this frame.
+    // Compact command bar: the output slot has zero height, so output is
+    // committed only to native scrollback. Keep the renderer invocation for
+    // shared panel/cache bookkeeping and zero-area safety.
     draw_live_output(frame, ui, vitals, outer[0], live_cache);
     // [1] 输入框上状态条(常驻):badge + 越狱标 + (busy → 实时忙碌条 | idle → ready+todo)。
     // **不含 provider/model/ctx/tokens** —— 那些在下方状态条,避免旧顶栏那种重复。

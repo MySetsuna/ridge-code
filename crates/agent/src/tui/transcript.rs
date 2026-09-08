@@ -9,7 +9,6 @@ const MAX_LIVE_TEXT_CHARS: usize = 32_768;
 const MAX_READ_BATCH_PATHS: usize = 8;
 const MAX_READ_BATCH_PATH_CHARS: usize = 96;
 const TOOL_DETAIL_SCROLL_STEP: usize = 4;
-const TOOL_FOLD_THRESHOLD: usize = 8;
 const LIVE_SCROLL_STEP: usize = 4;
 const MAX_LIVE_INSPECT_OFFSET: usize = 512;
 const MAX_LIVE_PHASE_TRACE: usize = 5;
@@ -352,6 +351,10 @@ impl ToolBlock {
         &self.summary
     }
 
+    pub(crate) fn summary_color(&self) -> Color {
+        self.summary_color
+    }
+
     /// Static scrollback keeps the same phase vocabulary as the live
     /// projection; this is presentation metadata, not execution state.
     pub(crate) fn phase_label(&self) -> &'static str {
@@ -404,16 +407,6 @@ impl ToolBlock {
         let text = super::render::sanitize_display_text(text);
         self.audit_details = (!text.trim().is_empty()).then_some(text);
         self
-    }
-
-    pub(crate) fn collapsed_lines(&self) -> Vec<(String, Color)> {
-        let mut lines = vec![(self.summary.clone(), self.summary_color)];
-        if self.details.len() > TOOL_FOLD_THRESHOLD {
-            lines.push((self.collapsed_hint.clone(), role_color(Role::Muted)));
-        } else {
-            lines.extend(self.details.iter().cloned());
-        }
-        lines
     }
 
     pub(crate) fn presentation_chars(&self) -> usize {

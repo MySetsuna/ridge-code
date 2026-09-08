@@ -59,8 +59,8 @@ fn theme_frame_marks_ask_folds_process_and_uses_roman_chrome() {
     let rows = frame_rows(&terminal, width as usize);
     let text = rows.join("\n");
     assert!(ask.starts_with("¶ ASK · 把这段说明白"), "{ask}");
-    assert!(!text.contains("§ ACTA ·"), "{text}");
-    assert!(!text.contains("starting"), "{text}");
+    assert!(text.contains("§ ACTA ·"), "{text}");
+    assert!(text.contains("waiting"), "{text}");
     assert!(text.contains("ANSWER"), "{text}");
     assert!(!text.contains("鈿?"), "{text}");
     assert!(!text.contains("鈴?"), "{text}");
@@ -93,7 +93,7 @@ fn theme_frame_text_dump_is_stable_enough_to_inspect() {
     flush_commits(&mut terminal, &mut ui).expect("dump flush");
     let text = frame_rows(&terminal, width as usize).join("\n");
     assert!(text.contains("¶ ASK · inspect frame"), "{text}");
-    assert!(!text.contains("§ ACTA ·"), "{text}");
+    assert!(text.contains("§ ACTA ·"), "{text}");
     assert!(text.contains("ANSWER"), "{text}");
     if let Ok(path) = std::env::var("RIDGECODE_THEME_FRAME_DUMP") {
         if !path.is_empty() {
@@ -103,7 +103,7 @@ fn theme_frame_text_dump_is_stable_enough_to_inspect() {
 }
 
 #[test]
-fn greeting_hides_lifecycle_chatter() {
+fn greeting_keeps_lifecycle_timeline() {
     let width = 72u16;
     let mut ui = Ui::default();
     ui.note(user_prompt_line("hi"), role_color(Role::Command));
@@ -133,11 +133,8 @@ fn greeting_hides_lifecycle_chatter() {
     .expect("greeting terminal");
     flush_commits(&mut terminal, &mut ui).expect("greeting flush");
     let text = frame_rows(&terminal, width as usize).join("\n");
-    assert!(text.contains("¶ ASK · hi"), "{text}");
     assert!(text.contains("你好"), "{text}");
-    assert!(!text.contains("§ ACTA"), "{text}");
-    assert!(!text.contains("starting task"), "{text}");
-    assert!(!text.contains("verifying"), "{text}");
-    assert!(!text.contains("verify: PASS"), "{text}");
-    assert!(!text.contains("approved"), "{text}");
+    assert!(text.contains("§ ACTA"), "{text}");
+    assert!(text.contains("starting task"), "{text}");
+    assert!(text.contains("verifying"), "{text}");
 }

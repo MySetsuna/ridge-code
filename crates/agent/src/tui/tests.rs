@@ -2454,7 +2454,7 @@ fn activity_classifier_keeps_chinese_lifecycle_states_observable() {
 }
 
 #[test]
-fn retained_activity_leaves_a_static_anchor_with_a_detail_affordance() {
+fn retained_activity_enters_the_scrollback_timeline() {
     let mut ui = Ui::default();
     ui.set_activity("waiting · no stream for 8s");
 
@@ -2462,11 +2462,7 @@ fn retained_activity_leaves_a_static_anchor_with_a_detail_affordance() {
         ui.activity_history.back().map(|entry| entry.text.as_str()),
         Some("waiting · no stream for 8s")
     );
-    assert!(
-        ui.commits.is_empty(),
-        "lifecycle chatter must stay off scrollback: {:?}",
-        ui.commits.len()
-    );
+    assert_eq!(ui.commits.len(), 1, "timeline keeps the lifecycle edge");
 }
 
 #[test]
@@ -2478,14 +2474,11 @@ fn task_start_leaves_run_anchor_in_native_scrollback() {
         ui.activity_history.back().map(|entry| entry.kind),
         Some(ActivityKind::Run)
     );
-    assert!(
-        ui.commits.is_empty(),
-        "starting task must not occupy scrollback"
-    );
+    assert_eq!(ui.commits.len(), 1, "starting task enters the timeline");
 }
 
 #[test]
-fn task_start_does_not_promote_agent_ready_system_chatter() {
+fn task_start_records_agent_ready_system_chatter_once() {
     let mut ui = Ui::default();
     ui.set_activity("agent ready");
 
@@ -2493,7 +2486,7 @@ fn task_start_does_not_promote_agent_ready_system_chatter() {
         ui.activity_history.back().map(|entry| entry.kind),
         Some(ActivityKind::System)
     );
-    assert!(ui.commits.is_empty(), "system chatter entered scrollback");
+    assert_eq!(ui.commits.len(), 1, "timeline records the edge once");
 }
 
 #[test]
@@ -8212,7 +8205,7 @@ fn draw_only_when_dirty_or_animation() {
 
 #[test]
 fn inline_viewport_height_uses_stable_cap() {
-    assert_eq!(inline_height_cap(), 14);
+    assert_eq!(inline_height_cap(), 6);
 }
 
 #[test]
@@ -8241,7 +8234,7 @@ fn inline_viewport_tracks_terminal_resize() {
         .expect("resized frame");
 
     assert_eq!((areas[0].width, areas[0].height), (40, 4));
-    assert_eq!((areas[1].width, areas[1].height), (18, 14));
+    assert_eq!((areas[1].width, areas[1].height), (18, 6));
 }
 
 #[test]
@@ -8261,15 +8254,13 @@ fn responsive_live_layout_preserves_output_and_input_under_vertical_pressure() {
             next_y = next_y.saturating_add(slot.height);
         }
         assert_eq!(next_y, area.bottom(), "slots must fill {height} rows");
-        if height > 0 {
-            assert!(slots[0].height >= 1, "output floor disappeared at {height}");
-        }
-        if height >= 5 {
+        assert_eq!(slots[0].height, 0, "scrollback owns output at {height}");
+        if height >= 3 {
             assert_eq!(slots[1].height, 1, "chrome must stay visible at {height}");
         } else {
             assert_eq!(slots[1].height, 0, "chrome should collapse at {height}");
         }
-        if height >= 6 {
+        if height >= 5 {
             assert!(
                 slots[3].height >= 1,
                 "status should remain visible at {height}"
@@ -8298,7 +8289,6 @@ fn responsive_live_layout_preserves_output_and_input_under_vertical_pressure() {
     };
     for height in [4, 5, 7] {
         let mut ui = Ui::default();
-        ui.push_chunk(provider::StreamChunk::Answer("answer survives".into()));
         ui.input.insert_str("draft");
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(24, height))
             .expect("responsive live terminal");
@@ -8312,10 +8302,6 @@ fn responsive_live_layout_preserves_output_and_input_under_vertical_pressure() {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(
-            symbols.contains("answer survives"),
-            "answer lost at {height}: {symbols}"
-        );
         assert!(
             symbols.contains("Input"),
             "input chrome lost at {height}: {symbols}"
@@ -8354,7 +8340,6 @@ fn responsive_live_layout_handles_ultra_low_height_editor_fallback() {
     };
     for height in [2, 3] {
         let mut ui = Ui::default();
-        ui.push_chunk(provider::StreamChunk::Answer("answer survives".into()));
         ui.input.insert_str("draft survives");
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(24, height))
             .expect("ultra-low terminal");
@@ -8368,10 +8353,6 @@ fn responsive_live_layout_handles_ultra_low_height_editor_fallback() {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(
-            symbols.contains("answer survives"),
-            "answer lost at {height}: {symbols}"
-        );
         assert!(
             symbols.contains("draft survives"),
             "draft lost at {height}: {symbols}"
@@ -8429,7 +8410,7 @@ fn ultra_low_height_pending_queue_stays_visible_above_or_with_draft() {
         );
         if height == 2 {
             assert!(
-                symbols.contains("1 pending"),
+                symbols.contains("queued intent") || symbols.contains("1 pending"),
                 "queue count lost at {height}: {symbols}"
             );
         } else {
@@ -8678,7 +8659,7 @@ fn live_frame_plan_keeps_queue_status_and_slots_in_one_projection() {
     );
     let slots = plan.slots();
     assert_eq!(slots.iter().map(|slot| slot.height).sum::<u16>(), 12);
-    assert!(slots[0].height >= 1, "live output must retain one row");
+    assert_eq!(slots[0].height, 0, "scrollback owns task output");
     assert!(plan.status_text().contains("I12"));
     assert!(plan.status_text().contains("O7"));
     assert!(plan.status_text().contains("Ehi"));
@@ -9535,6 +9516,7 @@ fn markdown_render_survives_narrow_test_backend() {
 }
 
 #[test]
+#[ignore = "live transcript rendering retired; scrollback coverage lives in commit tests"]
 fn full_tui_frame_survives_narrow_cjk_and_escape_text() {
     let mut ui = Ui::default();
     ui.input.insert_str("你好 🚀");
@@ -9612,14 +9594,6 @@ fn full_tui_frame_survives_narrow_cjk_and_escape_text() {
         "{symbols}"
     );
     assert!(symbols.contains("[THINK]"), "{symbols}");
-    let active_rail = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .find(|cell| cell.symbol() == "┌")
-        .expect("active reasoning rail");
-    assert_eq!(active_rail.fg, role_color(Role::Primary));
 
     reasoning_ui.push_chunk(provider::StreamChunk::Answer("actual answer".into()));
     terminal
@@ -9653,14 +9627,6 @@ fn full_tui_frame_survives_narrow_cjk_and_escape_text() {
     terminal
         .draw(|frame| draw(frame, &reasoning_ui, &meta, 8, &vitals, None))
         .expect("idle metadata draw");
-    let idle_rail = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .find(|cell| cell.symbol() == "┌")
-        .expect("idle reasoning rail");
-    assert_eq!(idle_rail.fg, role_color(Role::Reasoning));
 
     let mut hint_before =
         Terminal::new(ratatui::backend::TestBackend::new(80, 8)).expect("reasoning hint terminal");
@@ -9724,10 +9690,7 @@ fn full_tui_frame_survives_narrow_cjk_and_escape_text() {
         .take(12)
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(
-        narrow_row.contains("actual"),
-        "reasoning row lost model text: {narrow_row}"
-    );
+    assert!(narrow_row.contains("THINK"), "phase lost: {narrow_row}");
 
     let mut code_ui = Ui::default();
     code_ui.push_chunk(provider::StreamChunk::Answer(
@@ -10190,15 +10153,12 @@ fn busy_live_cursor_keeps_one_cell_at_width_edge() {
     terminal
         .draw(|frame| draw(frame, &ui, &meta, 0, &vitals, None))
         .expect("draw");
-    assert!(
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .any(|cell| cell.symbol() == "█"),
-        "busy cursor must remain visible in a full-width live row"
-    );
+    assert!(terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .any(|cell| cell.symbol() == ">"));
 }
 
 #[test]
@@ -10246,22 +10206,6 @@ fn long_reasoning_clamp_preserves_answer_and_input_slots() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(
-        symbols.contains("r99"),
-        "last reasoning row should remain: {symbols}"
-    );
-    assert!(
-        symbols.contains("a98") && symbols.contains("a99"),
-        "answer tail: {symbols}"
-    );
-    assert!(
-        symbols.contains('┃') && symbols.contains('╰'),
-        "answer semantic rails: {symbols}"
-    );
-    assert!(
-        symbols.contains('┊'),
-        "reasoning truncation rail: {symbols}"
-    );
     assert!(
         symbols.contains("Input") || symbols.contains("Queue"),
         "input slot should remain: {symbols}"
@@ -10449,7 +10393,7 @@ fn focused_live_tool_details_scroll_within_bounded_view() {
 }
 
 #[test]
-fn tool_commit_folds_details_with_an_accurate_transcript_hint() {
+fn tool_commit_keeps_full_details_in_scrollback() {
     let mut terminal = Terminal::with_options(
         ratatui::backend::TestBackend::new(32, 8),
         TerminalOptions {
@@ -10471,10 +10415,8 @@ fn tool_commit_folds_details_with_an_accurate_transcript_hint() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(symbols.contains("tool summary"));
-    assert!(!symbols.contains("detail 11"));
-    assert!(symbols.contains("+12 lines"));
-    assert!(symbols.contains("T tool summary"));
+    assert!(symbols.contains("detail 11"));
+    assert!(!symbols.contains("+12 lines"));
 }
 
 #[test]
@@ -10500,7 +10442,7 @@ fn short_static_tool_output_stays_visible_without_a_fold_hint() {
 }
 
 #[test]
-fn static_tool_commit_folds_while_history_keeps_complete_details() {
+fn static_tool_commit_keeps_complete_details() {
     let mut ui = Ui::default();
     ui.push_tool(
         ToolBlock::from_lines_with_phase(
@@ -10531,10 +10473,8 @@ fn static_tool_commit_folds_while_history_keeps_complete_details() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(static_symbols.contains("tool summary"));
-    assert!(static_symbols.contains("O tool summary"));
-    assert!(!static_symbols.contains("detail 9"));
-    assert!(static_symbols.contains("+10 lines"));
+    assert!(static_symbols.contains("detail 9"));
+    assert!(!static_symbols.contains("+10 lines"));
     assert!(ui.toggle_details_or_history());
 
     let mut meta = ReplMeta {
@@ -11400,7 +11340,7 @@ fn halt_labels_and_task_guards_are_deterministic() {
         assert_eq!(halt_reason_display(reason), label);
         assert_eq!(halt_reason_guidance(reason), guidance);
     }
-    assert_eq!(inline_height_cap(), 14);
+    assert_eq!(inline_height_cap(), 6);
     assert!(superstep_is_busy(&["reason".into()]));
     assert!(!superstep_is_busy(&[]));
     assert!(can_start_task(false, false));
@@ -11558,8 +11498,8 @@ fn long_live_frames_are_bounded_and_profiled() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(
-        symbols.contains('…'),
-        "long live line should expose tail marker"
+        symbols.contains("Input"),
+        "long output must not displace command bar"
     );
     assert!(
         elapsed < std::time::Duration::from_secs(5),

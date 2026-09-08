@@ -1155,7 +1155,6 @@ pub(crate) const SLASH_COMMANDS: &[&str] = &[
     "/config",
     "/cost",
     "/doctor",
-    "/density",
     "/exit",
     "/effort",
     "/find",

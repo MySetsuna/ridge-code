@@ -27,8 +27,6 @@ pub struct Config {
     pub status_bar: Option<String>,
     /// TUI palette: `dark` (default), `light`, or best-effort `auto`.
     pub theme: Option<String>,
-    /// TUI information projection: `focus` (default), `standard`, or `debug`.
-    pub ui_density: Option<String>,
     /// TUI 全局动作快捷键覆盖。键是稳定 action id，值是 `ctrl+p` 一类 chord；
     /// 空数组禁用该动作。编辑/审批/取消等安全键不在此接口内。
     pub keybindings: std::collections::BTreeMap<String, Vec<String>>,
@@ -271,7 +269,6 @@ pub const CONFIG_KEYS: &[&str] = &[
     "skip_danger",
     "status_bar",
     "theme",
-    "ui_density",
     "allow_jailbreak",
     "proxy",
 ];
@@ -324,16 +321,6 @@ pub fn config_set(text: &str, key: &str, value: &str) -> Result<String, String> 
         "theme" => match value.trim().to_ascii_lowercase().as_str() {
             "dark" | "light" | "auto" => serde_json::Value::from(value.trim().to_ascii_lowercase()),
             _ => return Err(format!("theme 无效,可选: dark, light, auto; 得到 {value}")),
-        },
-        "ui_density" => match value.trim().to_ascii_lowercase().as_str() {
-            "focus" | "standard" | "debug" => {
-                serde_json::Value::from(value.trim().to_ascii_lowercase())
-            }
-            _ => {
-                return Err(format!(
-                    "ui_density 无效,可选: focus, standard, debug; 得到 {value}"
-                ))
-            }
         },
         _ => serde_json::Value::from(value),
     };
@@ -642,14 +629,11 @@ mod tests {
     }
 
     #[test]
-    fn config_set_validates_and_persists_tui_theme_and_density() {
+    fn config_set_validates_and_persists_tui_theme() {
         let out = config_set("{}", "theme", "LIGHT").unwrap();
-        let out = config_set(&out, "ui_density", "standard").unwrap();
         let cfg = Config::parse(&out);
         assert_eq!(cfg.theme.as_deref(), Some("light"));
-        assert_eq!(cfg.ui_density.as_deref(), Some("standard"));
         assert!(config_set("{}", "theme", "sepia").is_err());
-        assert!(config_set("{}", "ui_density", "verbose").is_err());
     }
 
     #[test]

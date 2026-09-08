@@ -1797,23 +1797,21 @@ pub(crate) fn activity_commit_lines(
 }
 
 pub(crate) fn static_tool_lines(tool: &ToolBlock, width: u16) -> Vec<(String, Color)> {
-    let lines = tool.collapsed_lines();
+    let prefix = if width >= 72 {
+        format!("◈ {} ", tool.phase_label())
+    } else {
+        format!("{} ", tool.phase_short_label())
+    };
+    let mut lines = vec![(format!("{prefix}{}", tool.summary()), tool.summary_color())];
+    // Native scrollback is the audit record: do not reuse the bounded live
+    // projection or its fold hint here.  Physical insertion remains batched
+    // by `insert_bounded_commit_lines`, so a large observation stays usable.
+    lines.extend(
+        tool.details_text()
+            .lines()
+            .map(|line| (format!("  │ {line}"), role_color(Role::Info))),
+    );
     lines
-        .into_iter()
-        .enumerate()
-        .map(|(index, (text, color))| {
-            if index == 0 {
-                let prefix = if width >= 72 {
-                    format!("◈ {} ", tool.phase_label())
-                } else {
-                    format!("{} ", tool.phase_short_label())
-                };
-                (format!("{prefix}{text}"), color)
-            } else {
-                (format!("  ┆ {text}"), color)
-            }
-        })
-        .collect()
 }
 
 pub(crate) fn commit_lines(
