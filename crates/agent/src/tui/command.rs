@@ -1369,13 +1369,61 @@ fn handle_context_navigation(
     tokens: usize,
     turns: usize,
 ) -> bool {
+    if input == "/resume" {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let records = agent::list_records_for_cwd(&cwd);
+        ui.note(
+            format!(
+                "sessions for {} · resume with /resume <id>\n{}",
+                cwd.display(),
+                agent::format_session_list(&records)
+            ),
+            role_color(Role::Muted),
+        );
+        return true;
+    }
+    if let Some(id) = input.strip_prefix("/resume ").map(str::trim) {
+        if id.is_empty() {
+            ui.note("usage: /resume <session-id>", role_color(Role::Warn));
+            return true;
+        }
+        if ui.busy {
+            ui.note(
+                "cannot resume while a task is running; wait or interrupt it first",
+                role_color(Role::Warn),
+            );
+            return true;
+        }
+        let cwd = std::env::current_dir().unwrap_or_default();
+        match agent::load_record_for_cwd(id, &cwd) {
+            Ok(record) => {
+                *history = record.history;
+                clear_session_presentation(ui);
+                agent::set_current_session_id(record.id.clone());
+                ui.session_id = record.id.clone();
+                ui.input
+                    .set_history(resumed_input_history(history), !history.is_empty());
+                ui.note(
+                    format!(
+                        "resumed session {} · restored {} messages",
+                        record.id,
+                        history.len()
+                    ),
+                    role_color(Role::Success),
+                );
+            }
+            Err(error) => ui.note(error, role_color(Role::Error)),
+        }
+        return true;
+    }
     match input {
         "/sessions" => {
+            let cwd = std::env::current_dir().unwrap_or_default();
             ui.note(
                 format!(
-                    "session {} · resume with ridgecode --resume <id>\n{}",
+                    "session {} · resume with /resume <id>\n{}",
                     agent::current_session_id(),
-                    agent::format_session_list(&agent::list_records())
+                    agent::format_session_list(&agent::list_records_for_cwd(&cwd))
                 ),
                 role_color(Role::Muted),
             );
@@ -1412,6 +1460,36 @@ fn handle_context_navigation(
         _ => return false,
     }
     true
+}
+
+fn clear_session_presentation(ui: &mut Ui) {
+    ui.transcript = Default::default();
+    ui.tool_history.clear();
+    ui.reasoning_history.clear();
+    ui.answer_history.clear();
+    ui.presentation = Default::default();
+    ui.reasoning_scrollback = Default::default();
+    ui.todos.clear();
+    ui.panel = None;
+    ui.popup = None;
+    ui.queued.clear();
+    ui.run_task = None;
+    ui.pending_call = None;
+    ui.stream_tokens = 0;
+    ui.input_tokens = 0;
+    ui.output_tokens = 0;
+    ui.superstep = 0;
+    ui.stall = 0;
+    ui.err_streak = 0;
+    ui.explore_streak = 0;
+}
+
+fn resumed_input_history(history: &[Message]) -> Vec<String> {
+    history
+        .iter()
+        .filter(|message| message.role == provider::Role::User)
+        .map(|message| message.content.clone())
+        .collect()
 }
 
 fn compact_context(ui: &mut Ui, history: &mut Vec<Message>) {
@@ -1933,6 +2011,8 @@ mod tests {
             "/answers",
             "/queue",
             "/history",
+            "/sessions",
+            "/resume",
             "/reset",
             "/compact",
             "/cost",

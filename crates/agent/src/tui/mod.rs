@@ -25,8 +25,8 @@ use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal, TerminalOptions
 use agent::{
     active_run_dir_for, agent_run_config, build_llm_agent_full_with_steer, clear_steer, est_tokens,
     expand_mentions, halt_reason, invoke_durable, mark_durable_cancelled, null_steer_bus,
-    null_token_bus, preset_by_id, push_steer, take_steer, AgentState, Approver, AutoApprove,
-    HaltReason, McpTools, Skill, SteerBus, TokenBus,
+    null_token_bus, preset_by_id, push_steer, take_applied_steer, take_steer, AgentState, Approver,
+    AutoApprove, HaltReason, McpTools, Skill, SteerBus, TokenBus,
 };
 use langgraph::StreamEvent;
 use provider::Message;
@@ -120,6 +120,7 @@ pub(crate) fn halt_reason_display(reason: HaltReason) -> &'static str {
         HaltReason::ConstraintBreach => "safety constraint",
         HaltReason::ContextRot => "context limit",
         HaltReason::CircuitBroken => "repeated tool errors",
+        HaltReason::PolicyBlocked => "repeated policy blocks",
         HaltReason::Unverified => "not verified",
     }
 }
@@ -135,6 +136,9 @@ pub(crate) fn halt_reason_guidance(reason: HaltReason) -> &'static str {
         HaltReason::ConstraintBreach => "inspect the blocked action and revise the request",
         HaltReason::ContextRot => "start the next task with a smaller context",
         HaltReason::CircuitBroken => "inspect the last tool error before retrying",
+        HaltReason::PolicyBlocked => {
+            "inspect the blocked action and choose a permitted alternative"
+        }
         HaltReason::Unverified => "inspect the activity log before retrying",
     }
 }
@@ -2131,7 +2135,9 @@ fn send_steer(ui: &mut Ui, steer_bus: &SteerBus, guidance: &str) {
         Ok(pending) => {
             ui.record_activity(ActivityKind::Queue, "steer sent to current task");
             ui.note(
-                format!("steer sent · current turn continues · {pending} guidance pending"),
+                format!(
+                    "› GUIDE · {guidance}\n  received · waiting for next reasoning boundary · {pending} pending"
+                ),
                 role_color(Role::Primary),
             );
         }
@@ -2235,7 +2241,7 @@ fn note_initial_ui(ui: &mut Ui, skip_danger: bool, history: &[Message]) {
     );
     if skip_danger {
         ui.note(
-            "⚠ skip-danger: tools auto-approved (disaster commands still hard-blocked)",
+            "⚠ YOLO: tools auto-approved; writes outside cwd enabled for this session (disaster commands / protected paths / read-only still hard-blocked)",
             role_color(Role::Error),
         );
     }
@@ -2860,7 +2866,7 @@ async fn run_event_step(context: EventStepContext<'_>) -> anyhow::Result<EventSt
                 }
                 dirty = true;
             }
-            dirty || handle_tick(ui, &*last_activity, &*pending)
+            dirty || handle_tick(ui, &*last_activity, &*pending, steer_bus)
         }
         else => return Ok(EventStepResult { exit: true, dirty: false }),
     };
@@ -2935,9 +2941,10 @@ async fn process_pending_submit(context: &mut PendingSubmitContext<'_>) -> anyho
         } else {
             input.clone()
         };
-        context
-            .ui
-            .note(user_prompt_line(&shown), role_color(Role::Command));
+        context.ui.note(
+            format!("{}\n  received · processing", user_prompt_line(&shown)),
+            role_color(Role::Command),
+        );
         context
             .history
             .push(Message::user(expand_mentions(&task_input)));
@@ -3509,7 +3516,19 @@ fn handle_tick(
     ui: &mut Ui,
     last_activity: &Option<Instant>,
     pending: &Option<ApprovalRequest>,
+    steer_bus: &SteerBus,
 ) -> bool {
+    let applied = take_applied_steer(steer_bus);
+    for guidance in applied {
+        ui.record_activity(ActivityKind::Queue, "guidance applied to model request");
+        ui.note(
+            format!(
+                "  guide applied to model request · {}",
+                queue_preview(&guidance, 72)
+            ),
+            role_color(Role::Success),
+        );
+    }
     refresh_terminal_title(ui);
     let was_waiting = ui.waiting;
     ui.waiting = ui.busy && last_activity.is_some_and(|at| at.elapsed() >= Duration::from_secs(8));
@@ -3517,7 +3536,7 @@ fn handle_tick(
         ui.record_activity(ActivityKind::Waiting, "waiting · no stream for 8s");
     }
     if ui.splash >= SPLASH_TICKS || ui.busy || pending.is_some() {
-        return false;
+        return !ui.commits.is_empty();
     }
     ui.splash += 1;
     ui.splash = SPLASH_TICKS;
@@ -3681,6 +3700,10 @@ async fn run_event_loop(context: TuiLoopContext) -> anyhow::Result<()> {
     if ui.active_goal_path.is_some() {
         settle_active_goal(&mut ui, false, "TUI exited before goal completion");
     }
+    let session_id = ui.session_id.clone();
+    drop(terminal);
+    drop(guard);
+    println!("RidgeCode · session {session_id}");
     Ok(())
 }
 

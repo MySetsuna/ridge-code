@@ -226,6 +226,11 @@ pub struct AgentState {
     /// 连续**工具/provider 报错**轮数(与 `stall` 正交:stall 认「输出相同」,本字段认「输出为错误」,
     /// 故报错内容**每轮不同**时 stall 不触发、由本字段兜底)。到 [`MAX_ERR_STREAK`] 熔断,防无人值守烧预算。
     pub err_streak: usize,
+    /// Consecutive policy denials in this run. Unlike `stall`, this is based
+    /// on structured status so changing prose or switching explore tools does
+    /// not evade the loop guard. A successful edit or verification clears it.
+    #[serde(default)]
+    pub policy_blocked_streak: usize,
     /// 连续**没有新增证据的纯侦察**轮数。新的定位路径或不同的工具结果会清零；重复读取/搜索
     /// 才累加。成功写改(`write_file`/`edit_file`/`apply_edits`)也清零。到 [`MAX_EXPLORE`] 软暂停，
     /// 防「无休止只查不改 → 撞 step_cap → 再开一轮又从侦察重来」，但不误伤复杂定位。
@@ -480,6 +485,7 @@ pub enum Patch {
     AddUsage(Usage),
     SetStall(usize),
     SetErrStreak(usize),
+    SetPolicyBlockedStreak(usize),
     SetExploreStreak(usize),
     SetExploreHandoff(bool),
     SetExploreActionUsed(bool),
@@ -533,6 +539,7 @@ impl GraphState for AgentState {
             }
             Patch::SetStall(n) => self.stall = n,
             Patch::SetErrStreak(n) => self.err_streak = n,
+            Patch::SetPolicyBlockedStreak(n) => self.policy_blocked_streak = n,
             Patch::SetExploreStreak(n) => self.explore_streak = n,
             Patch::SetExploreHandoff(value) => self.explore_handoff = value,
             Patch::SetExploreActionUsed(value) => self.explore_action_used = value,
@@ -626,6 +633,11 @@ pub const MAX_STALL: usize = 3;
 
 /// 连续工具/provider 报错多少轮就熔断(circuit breaker,防无人值守 `--every` 循环持续失败烧预算)。
 pub const MAX_ERR_STREAK: usize = 5;
+
+/// Repeating policy-rejected actions cannot make progress. Keep this small so
+/// a model gets a chance to choose a permitted alternative without burning a
+/// long-task budget when it keeps changing superficial arguments.
+pub const MAX_POLICY_BLOCKED_STREAK: usize = 3;
 
 /// 连续无新增证据的纯侦察多少轮就软暂停(explore thrash)。低于此数仅在 durable 事实块里轻 nudge;
 /// 达此数 → `must_stop`/`no_progress`,逼模型先交接已定位的问题再开新轮,而非空烧到 `MAX_STEPS`。

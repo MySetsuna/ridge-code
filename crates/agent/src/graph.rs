@@ -51,14 +51,22 @@ pub fn null_token_bus() -> TokenBus {
 /// Guidance sent while a TUI task is running. The active graph consumes it at
 /// the next reasoning boundary, so the in-flight provider request is never
 /// cancelled or mutated underneath the model.
-pub type SteerBus = Arc<std::sync::Mutex<VecDeque<String>>>;
+pub type SteerBus = Arc<std::sync::Mutex<SteerQueue>>;
+
+/// Presentation receipts let the TUI distinguish locally queued guidance from
+/// guidance that was actually attached to a provider request.
+#[derive(Default)]
+pub struct SteerQueue {
+    pending: VecDeque<String>,
+    applied: VecDeque<String>,
+}
 
 pub const MAX_STEER_MESSAGES: usize = 32;
 pub const MAX_STEER_CHARS: usize = 32_768;
 const MAX_STEER_BUFFER_MESSAGES: usize = MAX_STEER_MESSAGES * 2;
 
 pub fn null_steer_bus() -> SteerBus {
-    Arc::new(std::sync::Mutex::new(VecDeque::new()))
+    Arc::new(std::sync::Mutex::new(SteerQueue::default()))
 }
 
 pub fn push_steer(bus: &SteerBus, text: impl Into<String>) -> Result<usize, String> {
@@ -72,34 +80,44 @@ pub fn push_steer(bus: &SteerBus, text: impl Into<String>) -> Result<usize, Stri
         ));
     }
     let mut queue = bus.lock().unwrap();
-    if queue.len() >= MAX_STEER_MESSAGES {
+    if queue.pending.len() >= MAX_STEER_MESSAGES {
         return Err(format!(
             "steer queue is full ({MAX_STEER_MESSAGES} messages)"
         ));
     }
-    queue.push_back(text);
-    Ok(queue.len())
+    queue.pending.push_back(text);
+    Ok(queue.pending.len())
 }
 
 pub fn take_steer(bus: &SteerBus) -> Vec<String> {
-    bus.lock().unwrap().drain(..).collect()
+    bus.lock().unwrap().pending.drain(..).collect()
+}
+
+pub fn mark_steer_applied(bus: &SteerBus, messages: &[String]) {
+    bus.lock().unwrap().applied.extend(messages.iter().cloned());
+}
+
+pub fn take_applied_steer(bus: &SteerBus) -> Vec<String> {
+    bus.lock().unwrap().applied.drain(..).collect()
 }
 
 pub fn requeue_steer(bus: &SteerBus, messages: Vec<String>) {
     let mut queue = bus.lock().unwrap();
     for message in messages.into_iter().rev() {
-        if queue.len() < MAX_STEER_BUFFER_MESSAGES {
-            queue.push_front(message);
+        if queue.pending.len() < MAX_STEER_BUFFER_MESSAGES {
+            queue.pending.push_front(message);
         }
     }
 }
 
 pub fn clear_steer(bus: &SteerBus) {
-    bus.lock().unwrap().clear();
+    let mut queue = bus.lock().unwrap();
+    queue.pending.clear();
+    queue.applied.clear();
 }
 
 pub fn pending_steer(bus: &SteerBus) -> usize {
-    bus.lock().unwrap().len()
+    bus.lock().unwrap().pending.len()
 }
 
 fn steer_message(text: &str) -> String {
@@ -506,6 +524,9 @@ fn add_reason_node(
                 messages,
                 tools,
             };
+            if !guidance.is_empty() {
+                mark_steer_applied(&steer_bus, &guidance);
+            }
             let on_token = move |chunk: StreamChunk| {
                 if let Some(sender) = bus.lock().unwrap().as_ref() {
                     let _ = sender.send(chunk);
@@ -789,6 +810,10 @@ impl CallExecution {
             observation,
         }
     }
+
+    fn blocked(call: &provider::ToolCall, effect: ToolEffect, observation: String) -> Self {
+        Self::native(call, effect, ToolResultStatus::Blocked, false, observation)
+    }
 }
 
 fn add_act_node(graph: &mut StateGraph<AgentState>, context: ActContext) {
@@ -812,38 +837,41 @@ fn add_act_node(graph: &mut StateGraph<AgentState>, context: ActContext) {
                         )
                     });
                     let execution = if let Some(blocked) = explicit_sequence_block(&state, call) {
-                        blocked.into()
+                        CallExecution::blocked(call, effect, blocked)
                     } else if state.dispatch_wave_count() >= MAX_DISPATCH_BATCHES
                         && call.name == "dispatch_agents"
                     {
-                        format!(
+                        CallExecution::blocked(call, effect, format!(
                             "BLOCKED (dispatch budget): {}/{} dispatch waves used; continue the main task without another batch",
                             state.dispatch_wave_count(), MAX_DISPATCH_BATCHES
-                        ).into()
+                        ))
                     } else if is_dispatch && dispatch_remaining == 0 {
-                        format!(
+                        CallExecution::blocked(call, effect, format!(
                             "BLOCKED (dispatch budget): {}/{} dispatch attempts used; no provider call issued",
                             state.dispatch_attempts_used,
                             context.dispatch_budget.attempt_limit()
-                        ).into()
+                        ))
                     } else if state.codegraph_unavailable && call.name.starts_with("codegraph__") {
-                        "BLOCKED (codegraph unavailable): use built-in read_file/search or act; do not retry CodeGraph"
-                            .to_string().into()
+                        CallExecution::blocked(
+                            call,
+                            effect,
+                            "BLOCKED (codegraph unavailable): use built-in read_file/search or act; do not retry CodeGraph".to_string(),
+                        )
                     } else if state.explore_handoff && effect.is_explore() {
-                        format!(
+                        CallExecution::blocked(call, effect, format!(
                             "BLOCKED (explore handoff): {} is read-only; choose an edit or verification action",
                             call.name
-                        ).into()
+                        ))
                     } else if is_broad_search_after_target(&state, call) {
-                        format!(
+                        CallExecution::blocked(call, effect, format!(
                             "BLOCKED (target known): located {}; use edit_file/write_file/apply_edits or run_shell to verify. Do not restart full-repo search.",
                             state.last_read_paths.join(", ")
-                        ).into()
+                        ))
                     } else if is_explore_shell_after_target(&state, call) {
-                        format!(
+                        CallExecution::blocked(call, effect, format!(
                             "BLOCKED (target known): located {}; use edit_file/write_file/apply_edits, not run_shell as an editor or search.",
                             state.last_read_paths.join(", ")
-                        ).into()
+                        ))
                     } else {
                         execute_pending_call(&effective_call, &context, dispatch_scope.as_ref()).await
                     };
@@ -1077,6 +1105,16 @@ fn act_patch_with_native_result(
         .as_ref()
         .map(|result| result.status.is_error())
         .unwrap_or_else(|| is_error_observation(&observation));
+    let policy_blocked = native_result
+        .as_ref()
+        .is_some_and(|result| result.status == ToolResultStatus::Blocked);
+    let policy_blocked_streak = if policy_blocked {
+        state.policy_blocked_streak + 1
+    } else if !execution_failed && (effect.is_edit() || effect.is_verify()) {
+        0
+    } else {
+        state.policy_blocked_streak
+    };
     let display_observation = observation.clone();
     let observation = bound_observation(observation);
     let stall = if state.tool_output.as_deref() == Some(observation.as_str()) {
@@ -1096,6 +1134,7 @@ fn act_patch_with_native_result(
         Patch::PushHistory(Message::tool_result(call.id.clone(), observation.clone())),
         Patch::SetStall(stall),
         Patch::SetErrStreak(err_streak),
+        Patch::SetPolicyBlockedStreak(policy_blocked_streak),
         Patch::SetExploreStreak(explore_streak),
         Patch::SetLastToolEffect(effect),
         Patch::ToolOutput(Some(observation.clone())),
@@ -1465,8 +1504,9 @@ fn review_request(s: &AgentState) -> CompletionRequest {
 mod tests {
     use super::{
         act_patch_with_effect, call_mcp_with_timeout, call_mcp_with_timeout_native, halt_reason,
-        is_error_observation, pending_steer, push_steer, reason_patch, requeue_steer, take_steer,
-        verify_route_llm, MAX_STEER_CHARS, MAX_STEER_MESSAGES,
+        is_error_observation, mark_steer_applied, pending_steer, push_steer, reason_patch,
+        requeue_steer, take_applied_steer, take_steer, verify_route_llm, MAX_STEER_CHARS,
+        MAX_STEER_MESSAGES,
     };
     use crate::{
         build_agent, build_llm_agent, build_llm_agent_full_with_steer, build_llm_agent_reviewed,
@@ -2140,6 +2180,17 @@ mod tests {
             push_steer(&bus, format!("guide-{index}")).unwrap();
         }
         assert!(push_steer(&bus, "overflow").is_err());
+    }
+
+    #[test]
+    fn steer_application_receipt_is_separate_from_pending_guidance() {
+        let bus = super::null_steer_bus();
+        push_steer(&bus, "keep the change small").unwrap();
+        let taken = take_steer(&bus);
+        assert_eq!(pending_steer(&bus), 0);
+        assert!(take_applied_steer(&bus).is_empty());
+        mark_steer_applied(&bus, &taken);
+        assert_eq!(take_applied_steer(&bus), taken);
     }
 
     #[test]

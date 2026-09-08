@@ -111,10 +111,10 @@ fn handle_meta_flags() -> bool {
              Usage:\n  \
              ridgecode                      interactive TUI (no key required to open; use /login inside; non-TTY falls back to headless)\n  \
              ridgecode \"task\"               one-shot task\n  \
-             ridgecode --resume             resume the last session (continue after kill-9 / reopen)\n  \
-             ridgecode --resume <id>        resume a named session id\n  \
+             ridgecode --resume             resume the latest session for the current cwd\n  \
+             ridgecode --resume <id>        resume a named session in the current cwd\n  \
              ridgecode --session <id>       same as --resume <id>\n  \
-             ridgecode sessions             list saved session ids\n\n\
+             ridgecode sessions             list saved session ids for the current cwd\n\n\
              ridgecode terminal doctor      report terminal input capabilities and fallbacks\n  \
              ridgecode goal ...             persist and advance one long-running goal\n  \
              ridgecode goal run             execute the active goal with durable recovery\n  \
@@ -126,8 +126,8 @@ fn handle_meta_flags() -> bool {
              --every <30s|5m|1h>            time trigger: re-run the task on an interval (resident; reloads compounding signals each round, Ctrl-C to stop)\n  \
              --yolo/--skip-permissions      skip-danger: auto-approve tools without [y/N] (disaster commands still blocked)\n  \
              --read-only                    read-only mode: only offer read/search/research tools, reject all write/shell side effects\n  \
-             --resume/--continue [id]       resume the last session, or a named session id\n  \
-             --session <id>                 resume a named session\n  \
+             --resume/--continue [id]       resume the latest current-cwd session, or a named one\n  \
+             --session <id>                 resume a named current-cwd session\n  \
              -h/--help, -V/--version        this help / version\n\n\
              In the TUI: slash commands /model /provider /config /agent /compact etc.; @path to reference a file, Ctrl-C interrupts; press twice within 2 seconds to exit.\
              Pipe/non-TTY: stdin lines are run as tasks (headless, no slash commands).\n\n\
@@ -287,10 +287,10 @@ async fn run_cli() -> anyhow::Result<()> {
         read_only,
         every,
     } = parse_args();
-    bind_session(resume, resume_id);
     if let Some(dir) = &cwd {
         std::env::set_current_dir(dir)?;
     }
+    bind_session(resume, resume_id)?;
     if task.is_none() && tui_requested() {
         tui::play_startup_animation()?;
     }
@@ -358,10 +358,16 @@ async fn handle_special_command(raw: &[String]) -> Option<anyhow::Result<()>> {
         }),
         "a2a" => Some(run_a2a_command(&raw[1..]).await),
         "run" => Some(run_machine_command(&raw[1..]).await),
-        "sessions" => {
-            println!("{}", agent::format_session_list(&agent::list_records()));
-            Some(Ok(()))
-        }
+        "sessions" => Some(
+            std::env::current_dir()
+                .map_err(anyhow::Error::from)
+                .map(|cwd| {
+                    println!(
+                        "{}",
+                        agent::format_session_list(&agent::list_records_for_cwd(&cwd))
+                    );
+                }),
+        ),
         _ => None,
     }
 }
@@ -405,7 +411,7 @@ async fn run_machine_command(args: &[String]) -> anyhow::Result<()> {
         // A benchmark must not silently inherit host-specific MCP servers,
         // prompt files, agent routes, hooks, or notification side effects.
         // Provider identity still comes from the explicitly injected env/config.
-        configure_runtime(&Config::default());
+        configure_runtime(&Config::default(), false);
         (
             McpTools::default(),
             Vec::new(),
@@ -414,7 +420,7 @@ async fn run_machine_command(args: &[String]) -> anyhow::Result<()> {
     } else {
         let mcp = resolve_configured_mcp(&cfg).await;
         let skills = load_configured_skill_catalog(&cfg).skills;
-        configure_runtime(&cfg);
+        configure_runtime(&cfg, cfg.skip_danger.unwrap_or(false));
         let agents = Arc::new(build_agents(&cfg, &auth));
         (mcp, skills, agents)
     };
@@ -1161,7 +1167,8 @@ async fn run_with_provider(run: ProviderRun<'_>) -> anyhow::Result<()> {
     let skill_catalog = load_configured_skill_catalog(cfg);
     let skills = skill_catalog.skills.clone();
     let budget = cfg.budget_tokens.unwrap_or(0);
-    configure_runtime(cfg);
+    let effective_skip_permissions = effective_skip_permissions(cli_skip_danger, cfg);
+    configure_runtime(cfg, effective_skip_permissions);
     let agents = Arc::new(build_agents(cfg, auth));
     match task {
         Some(task) => {
@@ -1200,8 +1207,19 @@ async fn run_with_provider(run: ProviderRun<'_>) -> anyhow::Result<()> {
     }
 }
 
-fn configure_runtime(cfg: &Config) {
-    agent::set_allow_jailbreak(cfg.allow_jailbreak.unwrap_or(false));
+/// Permission-skipping is the explicit YOLO mode.  It widens the write jail
+/// for this process only; the config bit remains the persistent opt-in for
+/// ordinary runs.
+fn effective_skip_permissions(cli_skip_danger: bool, cfg: &Config) -> bool {
+    cli_skip_danger || cfg.skip_danger.unwrap_or(false)
+}
+
+fn runtime_jailbreak_enabled(cfg: &Config, skip_permissions: bool) -> bool {
+    cfg.allow_jailbreak.unwrap_or(false) || skip_permissions
+}
+
+fn configure_runtime(cfg: &Config, skip_permissions: bool) {
+    agent::set_allow_jailbreak(runtime_jailbreak_enabled(cfg, skip_permissions));
     agent::set_hooks(cfg.hooks.clone());
     agent::set_notify(cfg.notify.unwrap_or(false));
     agent::set_sandbox_cmd(cfg.sandbox_cmd.clone());
@@ -1253,7 +1271,7 @@ async fn run_interactive(run: InteractiveRun<'_>) -> anyhow::Result<()> {
             swap,
             mcp,
             skills,
-            cli_skip_danger || cfg.skip_danger.unwrap_or(false),
+            effective_skip_permissions(cli_skip_danger, cfg),
             budget,
             initial,
             meta,
@@ -1324,7 +1342,8 @@ async fn run_without_provider(
     let skill_catalog = load_configured_skill_catalog(cfg);
     let skills = skill_catalog.skills.clone();
     let budget = cfg.budget_tokens.unwrap_or(0);
-    configure_runtime(cfg);
+    let effective_skip_permissions = effective_skip_permissions(cli_skip_danger, cfg);
+    configure_runtime(cfg, effective_skip_permissions);
     let agents = Arc::new(build_agents(cfg, auth));
     let initial = if resume {
         load_resume_history()
@@ -1340,7 +1359,7 @@ async fn run_without_provider(
         swap,
         mcp,
         skills,
-        cli_skip_danger || cfg.skip_danger.unwrap_or(false),
+        effective_skip_permissions,
         budget,
         initial,
         meta,
@@ -1487,55 +1506,33 @@ fn save_session(path: &str, history: &[Message]) {
     }
 }
 
-fn bind_session(resume: bool, resume_id: Option<String>) {
+fn bind_session(resume: bool, resume_id: Option<String>) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
     if let Some(id) = resume_id {
-        agent::set_current_session_id(id);
-        return;
+        let record = agent::load_record_for_cwd(&id, &cwd).map_err(anyhow::Error::msg)?;
+        agent::set_current_session_id(record.id);
+        return Ok(());
     }
     if resume {
-        if let Some(id) = agent::last_session_id() {
+        if let Some(id) = agent::last_session_id_for_cwd(&cwd) {
             agent::set_current_session_id(id);
-            return;
+            return Ok(());
         }
-        let history = load_session(&session_path());
-        let cwd = std::env::current_dir()
-            .map(|path| path.display().to_string())
-            .unwrap_or_default();
-        let title = history
-            .iter()
-            .find(|message| message.role == provider::Role::User)
-            .map(|message| message.content.chars().take(72).collect::<String>())
-            .unwrap_or_else(|| "session".into());
-        let record = agent::SessionRecord::new(title, cwd, history);
+        let record = agent::SessionRecord::new("session", cwd.display().to_string(), Vec::new());
         let id = record.id.clone();
         let _ = agent::save_record(&record);
         agent::set_current_session_id(id);
-        return;
+        return Ok(());
     }
-    let cwd = std::env::current_dir()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
-    let record = agent::SessionRecord::new("session", cwd, Vec::new());
+    let record = agent::SessionRecord::new("session", cwd.display().to_string(), Vec::new());
     let id = record.id.clone();
     let _ = agent::save_record(&record);
     agent::set_current_session_id(id);
-}
-
-/// 读回落盘的对话 history(读不到/坏 → 空)。
-fn load_session(path: &str) -> Vec<Message> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    Ok(())
 }
 
 fn load_resume_history() -> Vec<Message> {
-    let named = agent::load_history(&agent::current_session_id());
-    if named.is_empty() {
-        load_session(&session_path())
-    } else {
-        named
-    }
+    agent::load_history(&agent::current_session_id())
 }
 
 const MAX_PROMPT_HISTORY: usize = 200;
@@ -1801,7 +1798,7 @@ fn load_configured_commands(cfg: &Config, catalog: &SkillCatalog) -> Vec<SlashCo
 
 /// 解析参数:非 flag 拼成任务(无 → TUI/headless);`--cwd <dir>` 切换工作目录;
 /// `--yolo` / `--skip-permissions` / `--dangerously-skip-permissions` 或 env `RIDGECODE_SKIP_PERMISSIONS=1`
-/// 开 skip-danger 模式(工具自动放行,不再 [y/N])。
+/// 开 YOLO 模式(工具自动放行且本进程允许 cwd 外写入,不再 [y/N])。
 fn parse_args() -> ParsedArgs {
     let mut task = String::new();
     let mut cwd = None;
@@ -2121,11 +2118,11 @@ fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_proxy_env, configured_profile, global_input_history_path, load_prompt_history,
-        load_session, machine_outcome, missing_key_provider, parse_duration, real_provider,
+        apply_proxy_env, configured_profile, effective_skip_permissions, global_input_history_path,
+        load_prompt_history, machine_outcome, missing_key_provider, parse_duration, real_provider,
         resolve_configured_model_info, resolve_model_info, resolve_provider_label,
-        resolve_start_model_info, save_prompt_history, save_session, session_input_history_path,
-        MachineRunOptions, MAX_PROMPT_HISTORY,
+        resolve_start_model_info, runtime_jailbreak_enabled, save_prompt_history, save_session,
+        session_input_history_path, MachineRunOptions, MAX_PROMPT_HISTORY,
     };
     use crate::Config;
     use provider::Message;
@@ -2141,6 +2138,21 @@ mod tests {
         assert_eq!(parse_duration("0s"), None, "零间隔无意义");
         assert_eq!(parse_duration("abc"), None);
         assert_eq!(parse_duration(""), None);
+    }
+
+    #[test]
+    fn permission_skip_modes_enable_process_local_jailbreak() {
+        let default_cfg = Config::default();
+        assert!(!effective_skip_permissions(false, &default_cfg));
+        assert!(effective_skip_permissions(true, &default_cfg));
+        assert!(runtime_jailbreak_enabled(&default_cfg, true));
+
+        let configured_yolo = Config::parse(r#"{"skip_danger":true}"#);
+        assert!(effective_skip_permissions(false, &configured_yolo));
+        assert!(runtime_jailbreak_enabled(&configured_yolo, true));
+
+        let configured_jailbreak = Config::parse(r#"{"allow_jailbreak":true}"#);
+        assert!(runtime_jailbreak_enabled(&configured_jailbreak, false));
     }
 
     #[test]
@@ -2212,12 +2224,15 @@ mod tests {
         let p = p.to_str().unwrap();
         let history = vec![Message::user("你好"), Message::assistant("在的")];
         save_session(p, &history);
-        let loaded = load_session(p);
+        let loaded = std::fs::read_to_string(p)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Vec<Message>>(&text).ok())
+            .unwrap_or_default();
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].content, "你好");
         assert_eq!(loaded[1].content, "在的");
         let _ = std::fs::remove_file(p);
-        assert!(load_session("C:/no/such/ridge-session-xyz.json").is_empty());
+        assert!(std::fs::read_to_string("C:/no/such/ridge-session-xyz.json").is_err());
     }
 
     #[test]

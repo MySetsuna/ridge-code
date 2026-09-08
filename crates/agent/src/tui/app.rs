@@ -31,7 +31,7 @@ use super::{
 #[cfg(test)]
 use super::{activity_commit_text, activity_role, reasoning_commit_text};
 use crate::{DeviceOAuthFlow, LocalOAuthCallback};
-use ratatui::widgets::{Widget, Wrap};
+use ratatui::widgets::Widget;
 pub(crate) struct TuiApprover {
     pub(crate) tx: tokio::sync::mpsc::UnboundedSender<ApprovalRequest>,
 }
@@ -1365,6 +1365,9 @@ pub(crate) fn flush_commits<B: Backend>(terminal: &mut Terminal<B>, ui: &mut Ui)
             process.push(step);
             continue;
         }
+        if suppress_scrollback_activity(block) {
+            continue;
+        }
         flush_process_bundle(&mut process, &mut lines, width);
         match block {
             CommitBlock::Text { text, color } => {
@@ -1419,11 +1422,46 @@ pub(crate) fn flush_commits<B: Backend>(terminal: &mut Terminal<B>, ui: &mut Ui)
         }
     }
     flush_process_bundle(&mut process, &mut lines, width);
+    let lines = normalize_commit_spacing(lines);
     let result = insert_bounded_commit_lines(terminal, lines);
     if result.is_err() {
         ui.commits.splice(0..0, blocks);
     }
     result
+}
+
+/// Keep native scrollback readable without adding a large visual gap between
+/// every streamed event. Renderers may contribute a leading separator for a
+/// block; collapse those contributions to exactly one blank row.
+fn normalize_commit_spacing(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    let mut normalized = Vec::with_capacity(lines.len());
+    let mut pending_blank = false;
+    for line in lines {
+        if line.width() == 0 {
+            pending_blank = true;
+            continue;
+        }
+        if pending_blank && !normalized.is_empty() {
+            normalized.push(Line::default());
+        }
+        normalized.push(line);
+        pending_blank = false;
+    }
+    normalized
+}
+
+/// The live chrome already reports the current phase.  Keep transient
+/// reasoning/tool heartbeats out of native scrollback; their real answer or
+/// tool observation blocks remain visible and the full activity ledger stays
+/// available from Ctrl+T.
+pub(crate) fn suppress_scrollback_activity(block: &CommitBlock) -> bool {
+    matches!(
+        block,
+        CommitBlock::Activity {
+            kind: ActivityKind::Reasoning | ActivityKind::Tool,
+            ..
+        }
+    )
 }
 
 fn foldable_process_step(block: &CommitBlock) -> Option<(String, ActivityKind)> {
@@ -1468,8 +1506,7 @@ fn insert_bounded_commit_lines<B: Backend>(
         let batch = lines.drain(..count).collect::<Vec<_>>();
         terminal.insert_before(count as u16, |buf| {
             Paragraph::new(Text::from(batch))
-                .style(Style::default().bg(super::theme_surface()))
-                .wrap(Wrap { trim: false })
+                .style(Style::default())
                 .render(buf.area, buf);
         })?;
     }

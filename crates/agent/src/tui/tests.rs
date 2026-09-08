@@ -667,13 +667,14 @@ fn extracted_tick_handler_transitions_waiting_and_splash() {
     let mut ui = Ui::default();
     let idle = None;
     let pending = None;
+    let steer_bus = agent::null_steer_bus();
     for _ in 0..SPLASH_TICKS {
-        let _ = handle_tick(&mut ui, &idle, &pending);
+        let _ = handle_tick(&mut ui, &idle, &pending, &steer_bus);
     }
     assert_eq!(ui.splash, SPLASH_TICKS);
     ui.busy = true;
     let stale = Some(Instant::now() - Duration::from_secs(9));
-    assert!(!handle_tick(&mut ui, &stale, &pending));
+    assert!(!handle_tick(&mut ui, &stale, &pending, &steer_bus));
     assert!(ui.waiting);
 }
 
@@ -684,6 +685,11 @@ fn extracted_session_and_catalog_helpers_cover_idle_configuration_paths() {
     let mut ui = Ui::default();
     note_initial_ui(&mut ui, true, &history);
     assert!(!ui.commits.is_empty());
+    assert!(ui.commits.iter().any(|commit| matches!(
+        commit,
+        CommitBlock::Text { text, .. }
+            if text.contains("YOLO") && text.contains("outside cwd") && text.contains("read-only")
+    )));
 
     let (approval_tx, _approval_rx) = tokio::sync::mpsc::unbounded_channel();
     let _ = tui_approver(true, approval_tx.clone());
@@ -8834,7 +8840,7 @@ fn commit_queue_drains_in_order() {
 #[test]
 fn role_colors_share_splash_theme() {
     assert_eq!(role_color(Role::Success), THEME_OLIVE);
-    assert_eq!(role_color(Role::DiffAdd), THEME_OLIVE);
+    assert_ne!(role_color(Role::DiffAdd), THEME_OLIVE);
     assert_eq!(role_color(Role::Reasoning), THEME_VIOLET);
     assert_eq!(role_color(Role::Primary), THEME_BLUE);
     assert_eq!(role_color(Role::Answer), THEME_ICE);
@@ -8845,8 +8851,8 @@ fn role_colors_share_splash_theme() {
 #[test]
 fn telemetry_surface_keeps_muted_status_text_readable() {
     let style = telemetry_surface().fg(role_color(Role::Muted));
-    assert_eq!(style.bg, Some(theme_surface()));
-    assert_ne!(style.fg, style.bg);
+    assert_eq!(style.bg, None);
+    assert!(style.fg.is_some());
 }
 
 #[test]
@@ -11683,9 +11689,7 @@ use ratatui::{
     Terminal, TerminalOptions, Viewport,
 };
 
-use super::render::{
-    theme_surface, THEME_BLUE, THEME_BORDER, THEME_ICE, THEME_MUTED, THEME_OLIVE, THEME_VIOLET,
-};
+use super::render::{THEME_BLUE, THEME_BORDER, THEME_ICE, THEME_MUTED, THEME_OLIVE, THEME_VIOLET};
 use super::{
     active_reasoning_tail_role, activity_commit_lines, activity_panel, agent_panel,
     answer_commit_lines, answer_commit_lines_with_status,
@@ -11712,17 +11716,40 @@ use super::{
     render_todo_block, responsive_live_layout, role_color, run_command, sanitize_display_text,
     sanitize_paste, selection_style, semantic_focus_action, send_queue_selection_now, should_draw,
     splash_canvas, status_line_projection, str_cells, stream_channel_badge, stream_tail,
-    summarize_event, superstep_is_busy, tail_display_cells, telemetry_surface,
-    terminal_event_action, todo_progress, token_rate, tool_detail_scroll_action, tool_focus_action,
-    tool_history_panel, tool_preview, tools_panel, top_chrome, unfinished_answer_reason,
-    up_fallback_is_home, wrap_commit_lines, wrap_input, wrap_live_spans, wrap_live_spans_tail,
-    wrapped_rows, ActivityKind, ApprovalAction, ApprovalRequest, CommandCatalog, CommandStats,
-    DetailLayoutCache, InputAction, InputChromeArgs, InputState, LiveBlockFocus, LiveChannel,
-    LiveFramePlan, LiveLineKind, LiveOutputCache, LiveScrollAction, LiveTranscript, Panel,
-    PanelAction, PanelItemsCache, PanelKind, PanelRow, PanelRowAction, Popup, PresentationChannel,
-    PresentationMetrics, PresentationStatus, Role, StatusVars, TerminalEventAction, ToolBlock,
-    ToolPhase, Ui, Vitals, CHATGPT_MODEL_GROUP, CLAUDE_OAUTH_ROW, CODEX_OAUTH_ROW, GROK_OAUTH_ROW,
-    MAX_ACTIVITY_HISTORY, MAX_ANSWER_HISTORY, MAX_ANSWER_HISTORY_CHARS, MAX_PENDING_PREVIEW_ROWS,
-    MAX_PRESENTATION_RECORDS, MAX_REASONING_HISTORY, MAX_REASONING_HISTORY_CHARS, MAX_TOOL_HISTORY,
-    SLASH_COMMANDS, SPLASH, SPLASH_DURATION_SECS, SPLASH_FPS, SPLASH_H, SPLASH_TICKS, SPLASH_W,
+    summarize_event, superstep_is_busy, suppress_scrollback_activity, tail_display_cells,
+    telemetry_surface, terminal_event_action, todo_progress, token_rate, tool_detail_scroll_action,
+    tool_focus_action, tool_history_panel, tool_preview, tools_panel, top_chrome,
+    unfinished_answer_reason, up_fallback_is_home, wrap_commit_lines, wrap_input, wrap_live_spans,
+    wrap_live_spans_tail, wrapped_rows, ActivityKind, ApprovalAction, ApprovalRequest,
+    CommandCatalog, CommandStats, DetailLayoutCache, InputAction, InputChromeArgs, InputState,
+    LiveBlockFocus, LiveChannel, LiveFramePlan, LiveLineKind, LiveOutputCache, LiveScrollAction,
+    LiveTranscript, Panel, PanelAction, PanelItemsCache, PanelKind, PanelRow, PanelRowAction,
+    Popup, PresentationChannel, PresentationMetrics, PresentationStatus, Role, StatusVars,
+    TerminalEventAction, ToolBlock, ToolPhase, Ui, Vitals, CHATGPT_MODEL_GROUP, CLAUDE_OAUTH_ROW,
+    CODEX_OAUTH_ROW, GROK_OAUTH_ROW, MAX_ACTIVITY_HISTORY, MAX_ANSWER_HISTORY,
+    MAX_ANSWER_HISTORY_CHARS, MAX_PENDING_PREVIEW_ROWS, MAX_PRESENTATION_RECORDS,
+    MAX_REASONING_HISTORY, MAX_REASONING_HISTORY_CHARS, MAX_TOOL_HISTORY, SLASH_COMMANDS, SPLASH,
+    SPLASH_DURATION_SECS, SPLASH_FPS, SPLASH_H, SPLASH_TICKS, SPLASH_W,
 };
+
+#[test]
+fn transient_reasoning_and_tool_activity_stays_out_of_scrollback() {
+    let reasoning = CommitBlock::Activity {
+        sequence: 1,
+        kind: ActivityKind::Reasoning,
+        text: "next · reasoning".into(),
+    };
+    let tool = CommitBlock::Activity {
+        sequence: 2,
+        kind: ActivityKind::Tool,
+        text: "tool · search".into(),
+    };
+    let done = CommitBlock::Activity {
+        sequence: 3,
+        kind: ActivityKind::Completed,
+        text: "completed".into(),
+    };
+    assert!(suppress_scrollback_activity(&reasoning));
+    assert!(suppress_scrollback_activity(&tool));
+    assert!(!suppress_scrollback_activity(&done));
+}

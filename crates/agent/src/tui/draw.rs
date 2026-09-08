@@ -28,9 +28,7 @@ fn rounded_surface_block() -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        // A TUI cannot turn off host-terminal transparency, but every surface
-        // it owns must be opaque so a wallpaper never competes with text.
-        .style(Style::default().bg(super::theme_surface()))
+        .style(Style::default())
 }
 
 fn snapshot_symbol(symbol: &str) -> String {
@@ -3713,7 +3711,7 @@ fn live_surface_block(ui: &Ui, area: Rect) -> Option<Block<'static>> {
     };
     let mut block = Block::default()
         .borders(borders)
-        .style(Style::default().bg(super::theme_surface()))
+        .style(Style::default())
         .border_style(Style::default().fg(role_color(role)));
     if full {
         block = block
@@ -3872,9 +3870,8 @@ fn top_chrome_narrow_busy(
     let mut above = ChromeRail::new(area_width);
     if agent::allow_jailbreak() {
         let style = Style::default()
-            .fg(Color::Black)
-            .bg(role_color(Role::Error))
-            .add_modifier(Modifier::BOLD);
+            .fg(role_color(Role::Error))
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
         let _ = above.push_fit(" [JAIL] ", style);
     }
     let phase_chip = format!(" {}", compact_busy_phase(ui));
@@ -3932,9 +3929,8 @@ fn push_brand_and_jail(above: &mut ChromeRail, ui: &Ui, width: usize) {
     }
     if agent::allow_jailbreak() {
         let style = Style::default()
-            .fg(Color::Black)
-            .bg(role_color(Role::Error))
-            .add_modifier(Modifier::BOLD);
+            .fg(role_color(Role::Error))
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
         if !above.push_fit(" ⚠JAILBREAK ", style) {
             let _ = above.push_fit(" [JAIL] ", style);
         }
@@ -5297,10 +5293,6 @@ pub(crate) fn draw_with_cache(
     let draw_started = std::time::Instant::now();
     // Own the live viewport background. A terminal may be transparent or use
     // a wallpaper; Reset leaves the transcript unreadable in that situation.
-    frame.render_widget(
-        Paragraph::new("").style(Style::default().bg(super::theme_surface())),
-        frame.area(),
-    );
     let LiveFramePlan {
         area,
         queue_preview,

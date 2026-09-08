@@ -1,4 +1,6 @@
-use crate::brain::{circuit_broken, completion_blocked, explore_exhausted, over_budget, stalled};
+use crate::brain::{
+    circuit_broken, completion_blocked, explore_exhausted, over_budget, policy_blocked, stalled,
+};
 use crate::communication::{
     in_process_exchange, in_process_exchange_with_cancellation, AgentCancellation, AgentEnvelope,
     AgentError, AgentHello, AgentMessage, AgentProtocolError, AgentResponse, AgentRole,
@@ -190,6 +192,9 @@ pub enum HaltReason {
     ContextRot,
     /// **熔断**:连续工具/provider 报错达 [`MAX_ERR_STREAK`],无人值守下提前停机防烧预算。
     CircuitBroken,
+    /// Repeated structured policy denials: continuing would only repeat a
+    /// forbidden or equivalent exploration action.
+    PolicyBlocked,
     Unverified,
 }
 
@@ -203,6 +208,7 @@ impl HaltReason {
             HaltReason::ConstraintBreach => "constraint_breach",
             HaltReason::ContextRot => "context_rot",
             HaltReason::CircuitBroken => "circuit_broken",
+            HaltReason::PolicyBlocked => "policy_blocked",
             HaltReason::Unverified => "unverified",
         }
     }
@@ -278,6 +284,8 @@ pub fn halt_reason(s: &AgentState) -> HaltReason {
         HaltReason::ContextRot
     } else if circuit_broken(s) {
         HaltReason::CircuitBroken
+    } else if policy_blocked(s) {
+        HaltReason::PolicyBlocked
     } else if stalled(s) || explore_exhausted(s) {
         // 同标签 no_progress:输出重复 或 纯侦察耗尽(一直查不落盘),用户侧语义都是「没推进」
         HaltReason::Stall
@@ -1520,7 +1528,7 @@ mod tests {
             "应记录明确恢复指令: {:?}",
             out.messages
         );
-        assert_eq!(halt_reason(&out), HaltReason::CircuitBroken);
+        assert_eq!(halt_reason(&out), HaltReason::PolicyBlocked);
         assert!(
             out.steps < MAX_STEPS,
             "侦察熔断应远早于 step_cap: steps={}",
@@ -1597,6 +1605,12 @@ mod tests {
         };
         assert_eq!(halt_reason(&circuit), HaltReason::CircuitBroken);
 
+        let policy = AgentState {
+            policy_blocked_streak: crate::MAX_POLICY_BLOCKED_STREAK,
+            ..Default::default()
+        };
+        assert_eq!(halt_reason(&policy), HaltReason::PolicyBlocked);
+
         // 上下文腐烂:压缩后单条巨消息仍超硬上限 → context_rot,优先于熔断(结构性根因)。
         let big = "字".repeat(CONTEXT_ROT_TOKENS + 1); // 每 CJK 字≈1tok,单条即超硬上限,压不掉
         let rot = AgentState {
@@ -1615,6 +1629,7 @@ mod tests {
             HaltReason::ConstraintBreach,
             HaltReason::ContextRot,
             HaltReason::CircuitBroken,
+            HaltReason::PolicyBlocked,
             HaltReason::Unverified,
         ] {
             assert!(!r.is_success(), "{} 不应算成功", r.as_str());

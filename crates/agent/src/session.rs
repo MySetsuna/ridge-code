@@ -7,6 +7,7 @@
 use provider::Message;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SESSION_SCHEMA: u32 = 1;
@@ -14,6 +15,7 @@ const MAX_INDEXED_SESSIONS: usize = 64;
 
 static CURRENT_SESSION_ID: std::sync::OnceLock<std::sync::Mutex<String>> =
     std::sync::OnceLock::new();
+static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn set_current_session_id(id: impl Into<String>) {
     let id = id.into();
@@ -67,9 +69,11 @@ impl SessionRecord {
 
 pub fn new_session_id(now: u64) -> String {
     let stamp = format_day(now);
+    let sequence = SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let mix = now
         .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add(std::process::id() as u64);
+        .wrapping_add(std::process::id() as u64)
+        .wrapping_add(sequence);
     format!("ridge-{stamp}-{mix:08x}")
 }
 
@@ -133,6 +137,35 @@ pub fn list_records() -> Vec<SessionRecord> {
     records
 }
 
+/// Return only sessions created for this working directory. Session history is
+/// project-local context, so a global "last" pointer must never cross cwd.
+pub fn list_records_for_cwd(cwd: &Path) -> Vec<SessionRecord> {
+    list_records()
+        .into_iter()
+        .filter(|record| same_cwd(cwd, Path::new(&record.cwd)))
+        .collect()
+}
+
+pub fn last_session_id_for_cwd(cwd: &Path) -> Option<String> {
+    list_records_for_cwd(cwd)
+        .into_iter()
+        .next()
+        .map(|record| record.id)
+}
+
+pub fn load_record_for_cwd(id: &str, cwd: &Path) -> Result<SessionRecord, String> {
+    let record = load_record(id).ok_or_else(|| format!("session not found: {id}"))?;
+    if same_cwd(cwd, Path::new(&record.cwd)) {
+        Ok(record)
+    } else {
+        Err(format!(
+            "session {id} belongs to {}; current cwd is {}",
+            record.cwd,
+            cwd.display()
+        ))
+    }
+}
+
 pub fn last_session_id() -> Option<String> {
     load_index()
         .last
@@ -192,6 +225,27 @@ pub fn format_session_list(records: &[SessionRecord]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn same_cwd(left: &Path, right: &Path) -> bool {
+    let left = normalized_cwd(left);
+    let right = normalized_cwd(right);
+    #[cfg(windows)]
+    {
+        left.eq_ignore_ascii_case(&right)
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
+fn normalized_cwd(path: &Path) -> String {
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .trim_end_matches(['/', '\\'])
+        .to_string()
 }
 
 fn touch_index(id: &str) {
@@ -273,9 +327,16 @@ fn is_leap(year: u64) -> bool {
 mod tests {
     use super::*;
     use provider::Message;
+    use std::sync::{Mutex, OnceLock};
+
+    fn session_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn session_roundtrip_keeps_id_and_history() {
+        let _guard = session_test_lock().lock().unwrap();
         let root = std::env::temp_dir().join(format!("ridge-sessions-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::env::set_var("RIDGECODE_SESSIONS_DIR", &root);
@@ -295,6 +356,31 @@ mod tests {
         let listed = format_session_list(&list_records());
         assert!(listed.contains(&record.id), "{listed}");
         record.id = "other".into();
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::remove_var("RIDGECODE_SESSIONS_DIR");
+    }
+
+    #[test]
+    fn sessions_are_filtered_by_cwd() {
+        let _guard = session_test_lock().lock().unwrap();
+        let root = std::env::temp_dir().join(format!("ridge-sessions-cwd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("RIDGECODE_SESSIONS_DIR", &root);
+        let first = SessionRecord::new("one", root.join("one").display().to_string(), Vec::new());
+        let second = SessionRecord::new("two", root.join("two").display().to_string(), Vec::new());
+        assert_ne!(first.id, second.id);
+        save_record(&first).unwrap();
+        save_record(&second).unwrap();
+
+        let one = root.join("one");
+        assert_eq!(list_records_for_cwd(&one).len(), 1);
+        assert_eq!(
+            last_session_id_for_cwd(&one).as_deref(),
+            Some(first.id.as_str())
+        );
+        assert!(load_record_for_cwd(&second.id, &one).is_err());
+
         let _ = std::fs::remove_dir_all(&root);
         std::env::remove_var("RIDGECODE_SESSIONS_DIR");
     }

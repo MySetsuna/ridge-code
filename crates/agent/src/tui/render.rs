@@ -445,31 +445,30 @@ pub(crate) fn active_theme() -> Theme {
     }
 }
 
-// Dark palette: opaque slate surface, near-white body, and restrained accents.
-pub(crate) const THEME_OLIVE: Color = Color::Rgb(63, 185, 80);
-pub(crate) const THEME_VIOLET: Color = Color::Rgb(255, 123, 114);
-pub(crate) const THEME_BLUE: Color = Color::Rgb(88, 166, 255);
-pub(crate) const THEME_ICE: Color = Color::Rgb(230, 237, 243);
-pub(crate) const THEME_BORDER: Color = Color::Rgb(48, 54, 61);
-pub(crate) const THEME_MUTED: Color = Color::Rgb(139, 148, 158);
-
-pub(crate) fn theme_surface() -> Color {
-    match active_theme() {
-        Theme::Dark => Color::Rgb(13, 17, 23),
-        Theme::Light => Color::Rgb(246, 248, 250),
-    }
-}
+// Warm archaeological palette.  The terminal owns the canvas; RidgeCode only
+// paints foreground ink, except for deliberately exceptional action blocks.
+pub(crate) const THEME_OLIVE: Color = Color::Rgb(126, 157, 91); // laurel
+pub(crate) const THEME_VIOLET: Color = Color::Rgb(198, 113, 83); // terracotta
+pub(crate) const THEME_BLUE: Color = Color::Rgb(202, 157, 82); // bronze
+pub(crate) const THEME_ICE: Color = Color::Rgb(232, 221, 199); // limestone
+pub(crate) const THEME_BORDER: Color = Color::Rgb(122, 105, 82);
+pub(crate) const THEME_MUTED: Color = Color::Rgb(157, 141, 116);
+/// Conventional patch colours deliberately stay independent from the Roman palette.
+pub(crate) const DIFF_ADD_BG: Color = Color::Rgb(46, 160, 67);
+pub(crate) const DIFF_DEL_BG: Color = Color::Rgb(218, 54, 51);
 
 fn light_color(role: Role) -> Color {
     match role {
-        Role::Primary | Role::Info => Color::Rgb(9, 105, 218),
-        Role::Command | Role::Success | Role::DiffAdd => Color::Rgb(26, 127, 55),
-        Role::Answer | Role::Metric => Color::Rgb(31, 35, 40),
-        Role::Reasoning => Color::Rgb(130, 80, 0),
-        Role::Error | Role::DiffDel => Color::Rgb(207, 34, 46),
-        Role::Warn => Color::Rgb(154, 103, 0),
-        Role::Border => Color::Rgb(208, 215, 222),
-        Role::Muted | Role::Label => Color::Rgb(87, 96, 106),
+        Role::Primary | Role::Info => Color::Rgb(117, 78, 31),
+        Role::Command | Role::Success => Color::Rgb(55, 104, 51),
+        Role::Answer | Role::Metric => Color::Rgb(48, 38, 26),
+        Role::Reasoning => Color::Rgb(137, 77, 49),
+        Role::Error => Color::Rgb(168, 49, 43),
+        Role::Warn => Color::Rgb(139, 96, 27),
+        Role::Border => Color::Rgb(145, 128, 101),
+        Role::Muted | Role::Label => Color::Rgb(105, 91, 72),
+        Role::DiffAdd => DIFF_ADD_BG,
+        Role::DiffDel => DIFF_DEL_BG,
     }
 }
 
@@ -490,29 +489,21 @@ pub(crate) fn role_color(r: Role) -> Color {
         Role::Muted => THEME_MUTED,
         Role::Metric => THEME_ICE,
         Role::Label => THEME_MUTED,
-        Role::DiffAdd => THEME_OLIVE,
-        Role::DiffDel => THEME_VIOLET,
+        Role::DiffAdd => DIFF_ADD_BG,
+        Role::DiffDel => DIFF_DEL_BG,
     }
 }
 
-/// Telemetry chrome uses the terminal surface instead of painting a full
-/// gray band.  This keeps muted context text readable on both dark and light
-/// terminal themes and leaves the cyan rail as the single focus accent.
+/// Normal chrome deliberately inherits the host terminal background.
 pub(crate) fn telemetry_surface() -> Style {
-    Style::default().bg(theme_surface())
+    Style::default()
 }
 
-/// Quiet selection affordance: retain a background only for focus, with no
-/// high-contrast neon block competing with the transcript.
+/// Focus is visible without replacing the terminal's background.
 pub(crate) fn selection_style() -> Style {
-    let background = match active_theme() {
-        Theme::Dark => Color::Rgb(30, 55, 90),
-        Theme::Light => Color::Rgb(221, 235, 255),
-    };
     Style::default()
         .fg(role_color(Role::Primary))
-        .bg(background)
-        .add_modifier(Modifier::BOLD)
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
 }
 
 /// 行内 md 扫描:`` `code` ``(Warn 色)与 `**bold**`(加粗);未闭合记号按字面。纯函数。
@@ -1803,15 +1794,107 @@ pub(crate) fn static_tool_lines(tool: &ToolBlock, width: u16) -> Vec<(String, Co
         format!("{} ", tool.phase_short_label())
     };
     let mut lines = vec![(format!("{prefix}{}", tool.summary()), tool.summary_color())];
-    // Native scrollback is the audit record: do not reuse the bounded live
-    // projection or its fold hint here.  Physical insertion remains batched
-    // by `insert_bounded_commit_lines`, so a large observation stays usable.
-    lines.extend(
-        tool.details_text()
-            .lines()
-            .map(|line| (format!("  │ {line}"), role_color(Role::Info))),
-    );
+    let detail = tool.details_text();
+    let details = compact_diff_detail_lines(&detail);
+    lines.extend(details.into_iter().enumerate().map(|(index, line)| {
+        let color = if is_diff_row(&line, '+') {
+            role_color(Role::DiffAdd)
+        } else if is_diff_row(&line, '-') {
+            role_color(Role::DiffDel)
+        } else {
+            role_color(Role::Info)
+        };
+        let rail = if index == 0 { "  └─ " } else { "  │  " };
+        (format!("{rail}{line}"), color)
+    }));
     lines
+}
+
+fn is_diff_row(line: &str, marker: char) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with(marker)
+        && trimmed
+            .chars()
+            .nth(1)
+            .is_some_and(|next| next.is_whitespace())
+}
+
+/// Keep review output short without discarding the audit copy held by ToolBlock.
+/// Each contiguous patch hunk gets one unchanged row on either side; larger
+/// untouched spans become an exact omission marker.
+fn compact_diff_detail_lines(detail: &str) -> Vec<String> {
+    let source = detail.lines().collect::<Vec<_>>();
+    let changes = source
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            (is_diff_row(line, '+') || is_diff_row(line, '-')).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if changes.is_empty() {
+        return source.into_iter().map(str::to_owned).collect();
+    }
+    let mut keep = vec![false; source.len()];
+    for (index, line) in source.iter().enumerate() {
+        let trimmed = line.trim_start();
+        keep[index] = trimmed.starts_with("@@")
+            || trimmed.starts_with("diff --")
+            || trimmed.starts_with("--- ")
+            || trimmed.starts_with("+++ ");
+    }
+    for index in changes {
+        keep[index] = true;
+        if index > 0 {
+            keep[index - 1] = true;
+        }
+        if index + 1 < keep.len() {
+            keep[index + 1] = true;
+        }
+    }
+    let mut out = Vec::new();
+    let mut omitted = 0usize;
+    for (line, keep) in source.into_iter().zip(keep) {
+        if keep {
+            if omitted > 0 {
+                out.push(format!("… {omitted} unchanged lines"));
+                omitted = 0;
+            }
+            out.push(line.to_owned());
+        } else {
+            omitted += 1;
+        }
+    }
+    if omitted > 0 {
+        out.push(format!("… {omitted} unchanged lines"));
+    }
+    out
+}
+
+#[cfg(test)]
+mod compact_diff_tests {
+    use super::compact_diff_detail_lines;
+
+    #[test]
+    fn compact_diff_keeps_one_context_row_on_each_side_of_a_hunk() {
+        let rows = compact_diff_detail_lines(
+            "header\nold before\n- removed\n+ added\nnew after\nunchanged 1\nunchanged 2\n- next removed\n+ next added\ntail",
+        );
+        assert_eq!(
+            rows,
+            vec![
+                "… 1 unchanged lines",
+                "old before",
+                "- removed",
+                "+ added",
+                "new after",
+                "… 1 unchanged lines",
+                "unchanged 2",
+                "- next removed",
+                "+ next added",
+                "tail",
+            ]
+        );
+    }
 }
 
 pub(crate) fn commit_lines(
@@ -1888,7 +1971,12 @@ pub(crate) fn colored_commit_lines(
 }
 
 fn diff_line_marker(text: &str, marker: char) -> bool {
-    let text = text.strip_prefix('┆').map(str::trim_start).unwrap_or(text);
+    let text = text
+        .strip_prefix('┆')
+        .or_else(|| text.strip_prefix('│'))
+        .or_else(|| text.strip_prefix("└─"))
+        .map(str::trim_start)
+        .unwrap_or(text);
     text.strip_prefix(marker)
         .is_some_and(|rest| rest.starts_with(' '))
 }
@@ -1902,6 +1990,8 @@ struct CommitSemanticPrefix {
 fn commit_semantic_prefix(spans: &[Span<'static>]) -> Option<CommitSemanticPrefix> {
     let first = spans.first()?.content.as_ref();
     [
+        ("¶ ASK · ", "  │ "),
+        ("› GUIDE · ", "  │ "),
         ("\u{256d} ANSWER ", "\u{2502} "),
         ("\u{2502} ", "\u{2502} "),
         ("\u{256d} ", "\u{2502} "),

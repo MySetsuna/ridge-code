@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800" role="img" aria-labelledby="title desc">
+  <title id="title">RidgeCode agent-status dashboard</title>
+  <desc id="desc">A dark abstract interface with a subtle grid, luminous orbit rings, a central agent node, and online status.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#070b16"/>
+      <stop offset="0.55" stop-color="#0b1022"/>
+      <stop offset="1" stop-color="#11152c"/>
+    </linearGradient>
+    <radialGradient id="ambient" cx="50%" cy="44%" r="52%">
+      <stop offset="0" stop-color="#6157ff" stop-opacity=".18"/>
+      <stop offset=".46" stop-color="#17d6c3" stop-opacity=".07"/>
+      <stop offset="1" stop-color="#070b16" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="orbitA" x1="220" y1="170" x2="950" y2="650" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#655cff" stop-opacity=".08"/>
+      <stop offset=".42" stop-color="#8b7cff"/>
+      <stop offset=".72" stop-color="#25e1c3"/>
+      <stop offset="1" stop-color="#25e1c3" stop-opacity=".06"/>
+    </linearGradient>
+    <linearGradient id="orbitB" x1="920" y1="155" x2="280" y2="640" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#33e5cb" stop-opacity=".04"/>
+      <stop offset=".33" stop-color="#33e5cb" stop-opacity=".76"/>
+      <stop offset=".7" stop-color="#6b63ff" stop-opacity=".68"/>
+      <stop offset="1" stop-color="#6b63ff" stop-opacity=".03"/>
+    </linearGradient>
+    <radialGradient id="core" cx="40%" cy="35%" r="70%">
+      <stop offset="0" stop-color="#f1ffff"/>
+      <stop offset=".2" stop-color="#67ffe0"/>
+      <stop offset=".58" stop-color="#625cff"/>
+      <stop offset="1" stop-color="#26204e"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#8fa2d8" stroke-opacity=".07" stroke-width="1"/>
+      <circle cx="0" cy="0" r="1" fill="#b8c6ef" fill-opacity=".13"/>
+    </pattern>
+    <filter id="blur28" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="28"/>
+    </filter>
+    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="9" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="softShadow" x="-30%" y="-30%" width="160%" height="180%">
+      <feDropShadow dx="0" dy="18" stdDeviation="24" flood-color="#00040d" flood-opacity=".65"/>
+    </filter>
+    <clipPath id="panelClip"><rect x="42" y="42" width="1116" height="716" rx="30"/></clipPath>
+  </defs>
+
+  <rect width="1200" height="800" fill="url(#bg)"/>
+  <rect width="1200" height="800" fill="url(#ambient)"/>
+
+  <g filter="url(#softShadow)">
+    <rect x="42" y="42" width="1116" height="716" rx="30" fill="#0a1020" fill-opacity=".72" stroke="#a6b5e5" stroke-opacity=".13"/>
+  </g>
+  <g clip-path="url(#panelClip)">
+    <rect x="42" y="42" width="1116" height="716" fill="url(#grid)"/>
+    <path d="M42 132H1158M132 42V758" stroke="#aebcef" stroke-opacity=".07"/>
+    <circle cx="598" cy="393" r="226" fill="#6058ff" fill-opacity=".12" filter="url(#blur28)"/>
+    <circle cx="635" cy="405" r="165" fill="#22ddc1" fill-opacity=".08" filter="url(#blur28)"/>
+  </g>
+
+  <g font-family="Inter,Segoe UI,Arial,sans-serif">
+    <g transform="translate(82 82)">
+      <rect width="40" height="40" rx="12" fill="#121a32" stroke="#8f9de0" stroke-opacity=".25"/>
+      <path d="M11 26V14l9-5 9 5v12l-9 5-9-5Z" fill="none" stroke="#70f0d8" stroke-width="1.8"/>
+      <circle cx="20" cy="20" r="3.4" fill="#8177ff"/>
+      <text x="57" y="27" fill="#dce5ff" font-size="17" font-weight="700" letter-spacing="3">AGENT SYSTEM</text>
+    </g>
+    <text x="1098" y="107" fill="#7583ac" font-size="12" text-anchor="end" letter-spacing="2.5">NODE / RC-01</text>
+  </g>
+
+  <g transform="translate(600 400)">
+    <ellipse rx="342" ry="172" transform="rotate(-13)" fill="none" stroke="url(#orbitA)" stroke-width="2.2"/>
+    <ellipse rx="277" ry="260" transform="rotate(34)" fill="none" stroke="url(#orbitB)" stroke-width="1.5" stroke-dasharray="3 11" stroke-linecap="round"/>
+    <ellipse rx="190" ry="328" transform="rotate(77)" fill="none" stroke="url(#orbitA)" stroke-width="1.2" stroke-opacity=".72"/>
+    <circle r="128" fill="none" stroke="#9ca9dd" stroke-opacity=".1"/>
+    <circle r="92" fill="none" stroke="#9ca9dd" stroke-opacity=".12" stroke-dasharray="1 9" stroke-linecap="round"/>
+
+    <g fill="#85ffe6" filter="url(#glow)">
+      <circle cx="-318" cy="74" r="4"/>
+      <circle cx="243" cy="-158" r="3.5"/>
+      <circle cx="193" cy="222" r="3"/>
+    </g>
+    <g fill="#8b82ff" filter="url(#glow)">
+      <circle cx="-146" cy="-253" r="3.5"/>
+      <circle cx="329" cy="64" r="4"/>
+    </g>
+
+    <circle r="76" fill="#5c56ff" fill-opacity=".16" filter="url(#blur28)"/>
+    <circle r="56" fill="#0c1328" stroke="#7d78ff" stroke-opacity=".42" stroke-width="1.5"/>
+    <circle r="42" fill="url(#core)" filter="url(#glow)"/>
+    <circle cx="-12" cy="-14" r="12" fill="#fff" fill-opacity=".23"/>
+    <path d="M-16 1 0-15 16 1 0 17Z" fill="none" stroke="#ecfffb" stroke-width="2" stroke-linejoin="round" opacity=".92"/>
+    <circle r="4" fill="#fff"/>
+  </g>
+
+  <g font-family="Inter,Segoe UI,Arial,sans-serif" text-anchor="middle">
+    <text x="600" y="655" fill="#f0f4ff" font-size="49" font-weight="750" letter-spacing="11">RIDGECODE</text>
+    <text x="600" y="686" fill="#7d89af" font-size="12" font-weight="600" letter-spacing="5">AUTONOMOUS AGENT NETWORK</text>
+    <g transform="translate(600 719)">
+      <rect x="-52" y="-14" width="104" height="28" rx="14" fill="#0d251f" stroke="#48e6bd" stroke-opacity=".36"/>
+      <circle cx="-32" r="4" fill="#57f2c8" filter="url(#glow)"/>
+      <text x="9" y="4" fill="#77f5d4" font-size="11" font-weight="700" letter-spacing="2.4">ONLINE</text>
+    </g>
+  </g>
+
+  <g fill="#667398" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="10" letter-spacing="1.7">
+    <text x="82" y="721">STATUS / NOMINAL</text>
+    <text x="1118" y="721" text-anchor="end">UPTIME 99.99%</text>
+  </g>
+  <path d="M82 697h92M1026 697h92" stroke="#65729a" stroke-opacity=".35"/>
+</svg>

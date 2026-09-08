@@ -1,5 +1,7 @@
 use crate::knowledge::Skill;
-use crate::state::{AgentState, Patch, MAX_ERR_STREAK, MAX_EXPLORE, MAX_STALL};
+use crate::state::{
+    AgentState, Patch, MAX_ERR_STREAK, MAX_EXPLORE, MAX_POLICY_BLOCKED_STREAK, MAX_STALL,
+};
 use langgraph::{CompiledGraph, GraphError, StateGraph, END};
 use provider::{Role, ToolEffect};
 use std::convert::Infallible;
@@ -238,6 +240,12 @@ pub(crate) fn stalled(s: &AgentState) -> bool {
 /// 熔断?(连续 MAX_ERR_STREAK 轮工具/provider 报错 —— 即便报错内容每轮不同 stall 不触发)
 pub(crate) fn circuit_broken(s: &AgentState) -> bool {
     s.err_streak >= MAX_ERR_STREAK
+}
+
+/// Stop after repeated, structured policy denials even when the model changes
+/// tool arguments or alternates between equivalent exploration tools.
+pub(crate) fn policy_blocked(s: &AgentState) -> bool {
+    s.policy_blocked_streak >= MAX_POLICY_BLOCKED_STREAK
 }
 
 /// 纯侦察耗尽?(连续 [`MAX_EXPLORE`] 轮未取得新证据)。
@@ -487,12 +495,16 @@ pub(crate) fn verify_failure_reason(s: &AgentState) -> &'static str {
 /// 多层独立退出:到回合上限 / 超预算 / 无进展 / 侦察耗尽 / 熔断任一命中,循环都该停(loop engineering:停机是设计的一半)。
 /// 全是 O(1) 字段判定;上下文腐烂(需算压缩)不进此热路径,只在终态 [`halt_reason`] 里作诊断重标签。
 pub(crate) fn must_stop(s: &AgentState) -> bool {
-    hard_stop(s) || explore_exhausted(s)
+    hard_stop(s) || explore_exhausted(s) || policy_blocked(s)
 }
 
 /// 停机硬闸；探索交接可暂时覆盖 `explore_exhausted`，但不能绕过这些上限。
 fn hard_stop(s: &AgentState) -> bool {
-    s.steps >= s.reasoning_limit() || over_budget(s) || stalled(s) || circuit_broken(s)
+    s.steps >= s.reasoning_limit()
+        || over_budget(s)
+        || stalled(s)
+        || circuit_broken(s)
+        || policy_blocked(s)
 }
 
 pub(crate) fn explore_handoff_patch(s: &AgentState) -> Patch {
@@ -744,9 +756,9 @@ mod tests {
     use super::{
         act_route, bounded_skills_block, build_system_prompt, build_system_prompt_with_mode,
         completion_blocked, explore_exhausted, explore_handoff_patch, is_land_edit_tool, must_stop,
-        needs_land_edit, reason_route, tool_output_failed, verify_failure_reason, verify_node,
-        verify_ok, verify_route, verify_route_llm, AgentState, Skill, BASE_SYSTEM, SKILLS_CHAR_CAP,
-        SKILLS_TOKEN_CAP, SKILLS_TRUNCATION_MARKER,
+        needs_land_edit, policy_blocked, reason_route, tool_output_failed, verify_failure_reason,
+        verify_node, verify_ok, verify_route, verify_route_llm, AgentState, Skill, BASE_SYSTEM,
+        SKILLS_CHAR_CAP, SKILLS_TOKEN_CAP, SKILLS_TRUNCATION_MARKER,
     };
     use crate::state::{Todo, MAX_EXPLORE};
     use langgraph::GraphState;
@@ -1151,6 +1163,12 @@ mod tests {
         };
         assert!(explore_exhausted(&thrash));
         assert!(must_stop(&thrash));
+        let policy = AgentState {
+            policy_blocked_streak: crate::MAX_POLICY_BLOCKED_STREAK,
+            ..Default::default()
+        };
+        assert!(policy_blocked(&policy));
+        assert!(must_stop(&policy));
         assert!(is_land_edit_tool("edit_file"));
         let located = AgentState {
             task: "edit Cargo.toml then pack".into(),
