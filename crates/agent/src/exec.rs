@@ -1894,7 +1894,12 @@ mod tests {
                 break obs;
             }
             assert!(!obs.contains("timed out after 180000ms"), "{obs}");
-            if started.elapsed() > std::time::Duration::from_secs(8) {
+            // The parked shell itself is allowed up to ten seconds.  Keep
+            // the test margin above that contract so a cold PowerShell
+            // startup on a busy Windows runner cannot become a false
+            // timeout (the previous eight-second assertion was shorter than
+            // the production limit it was testing).
+            if started.elapsed() > std::time::Duration::from_secs(15) {
                 panic!("poll did not finish: {obs}");
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
