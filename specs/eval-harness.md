@@ -88,9 +88,11 @@ invariant, so report-only runs cannot be mistaken for a passing gate. The JSON
 top level also exposes `timeout_rate`, `resumed_rate`, and `average_tokens`;
 `resumed_rate` measures manifest reuse only and is not a benchmark success
 signal.
-The Windows quality gate runs the bounded soak plus phased Input and
-Completion+Resize ConPTY fixtures after building the workspace; the Unix gate
-runs the dependency-free Linux PTY replay.
+The local PowerShell quality gate runs the bounded soak plus phased Input and
+Completion+Resize ConPTY fixtures after building the workspace; the GitHub
+Windows matrix additionally runs Completion+Resize and the kill/restart
+recovery soak on every push. The Unix gate runs the dependency-free Linux PTY
+replay.
 
 每个 case 经 `build_llm_agent` 执行；可并发但结果按输入索引复原。invariant 数量、并发度与超时均有上限，最终报告仅保留稳定的类别与数值证据。Windows PTY 默认将 `status=partial` 视为非零失败；仅显式 `-AllowPartial` 可作诊断运行。
 
