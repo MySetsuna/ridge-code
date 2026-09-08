@@ -84,7 +84,10 @@ steps and tokens while still failing every invariant closed. The soak records
 per-iteration process and case durations plus observed timeout cost.
 `--fail-on-unapproved` is the explicit CI gate: it prints the
 same report but exits non-zero when the suite is empty or any case fails an
-invariant, so report-only runs cannot be mistaken for a passing gate.
+invariant, so report-only runs cannot be mistaken for a passing gate. The JSON
+top level also exposes `timeout_rate`, `resumed_rate`, and `average_tokens`;
+`resumed_rate` measures manifest reuse only and is not a benchmark success
+signal.
 The Windows quality gate runs the bounded soak plus phased Input and
 Completion+Resize ConPTY fixtures after building the workspace; the Unix gate
 runs the dependency-free Linux PTY replay.

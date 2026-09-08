@@ -35,7 +35,7 @@ emitting the same structured report.
 
 # Verification-first evaluation harness
 
-eval harness 批量运行 agent，统计 pass-rate、steps、tokens，并只以 `approved` 与显式 invariant 计入本地 harness 通过。`run_eval` 走默认有界 `HarnessOptions`，`run_eval_with_options` 可显式收紧并发上限与 case timeout；两者保持输入顺序稳定和有界 evidence，失败/超时不泄漏原始错误文本。`ridgecode-eval --json` 提供可供 CI/审计消费的结构化结果，避免从展示文本反推质量闸。
+eval harness 批量运行 agent，统计 pass-rate、steps、tokens，并只以 `approved` 与显式 invariant 计入本地 harness 通过。`EvalReport` 还提供 `timeout_rate`、`resumed_rate` 和 `average_tokens`，用于区分稳定性、恢复覆盖和成本。`run_eval` 走默认有界 `HarnessOptions`，`run_eval_with_options` 可显式收紧并发上限与 case timeout；两者保持输入顺序稳定和有界 evidence，失败/超时不泄漏原始错误文本。`ridgecode-eval --json` 提供可供 CI/审计消费的结构化结果，避免从展示文本反推质量闸。
 
 外部 benchmark 使用独立的 `run_external_eval`：它逐 case 启动隔离的
 `ridgecode run --jsonl --no-persist`，随后以**非 shell** argv 方式启动 case
