@@ -1163,6 +1163,7 @@ fn is_ctrl_c(key: &KeyEvent) -> bool {
 }
 
 fn handle_ctrl_c(context: &mut KeyEventContext<'_>) -> anyhow::Result<KeyEventResult> {
+    tui_trace("input.ctrl_c");
     let now = Instant::now();
     if is_second_ctrl_c(*context.last_ctrl_c, now) {
         return Ok(KeyEventResult::Exit);
@@ -1185,12 +1186,14 @@ fn interrupt_task(
     handle: tokio::task::JoinHandle<()>,
     clear_activity: bool,
 ) {
+    tui_trace("task.cancel.begin");
     settle_active_goal(context.ui, false, "goal task interrupted by user");
     mark_takeover_requested(context.ui);
     if let Some(task) = context.last_task {
         let _ = mark_durable_cancelled(active_run_dir_for(task), "cancelled by user takeover");
     }
     handle.abort();
+    tui_trace("task.cancel.abort");
     *context.bus.lock().unwrap() = None;
     clear_steer(context.steer_bus);
     context.ui.busy = false;
@@ -1225,6 +1228,7 @@ fn interrupt_task(
         "interrupted current task · takeover ready".into()
     };
     context.ui.note(tail, role_color(Role::Warn));
+    tui_trace("task.cancel.end");
 }
 
 fn handle_approval_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> bool {
@@ -3614,6 +3618,7 @@ async fn run_event_loop(context: TuiLoopContext) -> anyhow::Result<()> {
     }
     if let Some(handle) = task {
         handle.abort();
+        tui_trace("task.shutdown.abort");
     }
     if ui.active_goal_path.is_some() {
         settle_active_goal(&mut ui, false, "TUI exited before goal completion");
