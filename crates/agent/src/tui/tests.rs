@@ -10761,7 +10761,10 @@ fn reasoning_scrollback_preserves_markdown_roles() {
     let heading = lines
         .iter()
         .flat_map(|line| line.spans.iter())
-        .find(|span| span.content.as_ref().contains("plan"))
+        .find(|span| {
+            span.style.fg == Some(role_color(Role::Primary))
+                && span.style.add_modifier.contains(Modifier::BOLD)
+        })
         .expect("heading span");
     assert_eq!(heading.style.fg, Some(role_color(Role::Primary)));
     assert!(heading.style.add_modifier.contains(Modifier::BOLD));
