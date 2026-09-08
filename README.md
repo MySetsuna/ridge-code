@@ -149,6 +149,18 @@ ridgecode-eval swebench-compare `
   --candidate-reports .\logs\evaluation\run-b\ridgecode__glm-5.3
 ~~~
 
+离线基线与恢复实验可直接输出机器可读 JSON：
+
+~~~powershell
+ridgecode-eval --json --recovery-fixture `
+  --manifest .\target\quality\baseline.jsonl
+~~~
+
+顶层指标包括 `pass_rate`（通过率）、`timeout_rate`（超时率）、
+`resumed_rate`（从 manifest 恢复的 case 占比）和 `average_tokens`（平均 token
+成本）。第二次使用同一 `--manifest` 运行时，`executed` 应为 0、`resumed_rate`
+应为 1.0；这只证明评测恢复语义，不等同于外部 benchmark 成功。
+
 ## 命令行用法
 
 ~~~text
