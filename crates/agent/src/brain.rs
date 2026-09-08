@@ -258,6 +258,29 @@ pub(crate) fn is_land_edit_tool(name: &str) -> bool {
 
 /// Change-intent in the user task (or an already-fired explore handoff).
 pub(crate) fn looks_like_change_task(s: &AgentState) -> bool {
+    // Explicit read-only/non-mutating wording must override an incidental
+    // change verb (for example, "不要修改任何文件").  Otherwise the
+    // completion gate demands a landed edit for an information task and
+    // turns a correct read-only answer into `unverified`.
+    let non_mutating = [
+        "read-only",
+        "readonly",
+        "只读",
+        "不要修改任何文件",
+        "无需修改文件",
+        "不修改任何文件",
+        "do not modify any files",
+        "without modifying any files",
+    ];
+    if non_mutating.iter().any(|marker| {
+        if marker.is_ascii() {
+            s.task.to_ascii_lowercase().contains(marker)
+        } else {
+            s.task.contains(marker)
+        }
+    }) {
+        return false;
+    }
     const MARKERS: &[&str] = &[
         "edit",
         "fix",
@@ -1165,6 +1188,22 @@ mod tests {
             ..Default::default()
         };
         assert!(!needs_land_edit(&created));
+    }
+
+    #[test]
+    fn explicit_read_only_wording_overrides_incidental_change_verbs() {
+        let state = AgentState {
+            task: "检查配置，不要修改任何文件".into(),
+            ..Default::default()
+        };
+        assert!(!super::looks_like_change_task(&state));
+        assert!(!needs_land_edit(&state));
+
+        let english = AgentState {
+            task: "Read-only inspection; do not modify any files".into(),
+            ..Default::default()
+        };
+        assert!(!super::looks_like_change_task(&english));
     }
 
     #[test]
