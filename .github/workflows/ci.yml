@@ -50,6 +50,10 @@ jobs:
         run: >-
           ./scripts/windows-pty-e2e.ps1 -CompletionFixture -ResizeProbe
           -TimeoutMs 12000
+      - name: Windows ConPTY raw input smoke
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/windows-pty-e2e.ps1 -InputFixture -TimeoutMs 12000
       - name: Windows recovery soak
         if: matrix.os == 'windows-latest'
         shell: pwsh
