@@ -16,7 +16,7 @@ pub(crate) const BASE_SYSTEM: &str =
      re-read whole files once the target is known. Prefer edit_file (surgical, unique-match) over \
      rewriting with write_file. If edit_file fails on unique-match, copy the exact anchor from the \
      last successful read of that path and retry once — do not restart full-repo reconnaissance. \
-     Prefer read_file/search over run_shell for reading source. For external/real-time info, \
+     Prefer read_file/search over run_shell for reading source. To remove an installed user skill, use remove_skill with its name; never use run_shell to delete under ~/.ridge. For external/real-time info, \
      web_search to find links then fetch_url to read the actual page — trust the page text, not just \
      the snippet. When there is an objective way to verify (compiler exit code, tests), rely on it \
      and don't trust your own claim. \
