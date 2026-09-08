@@ -11,6 +11,10 @@ const DETAIL_SCROLL_STEP: i32 = 4;
 /// 交互页类别:决定 Enter 动作与提示文案。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PanelKind {
+    /// Searchable action and slash-command launcher.
+    CommandPalette,
+    /// Contextual/default keybinding reference.
+    Keybindings,
     /// 配置页:Enter 就地编辑选中键的值。
     Config,
     /// 工具页:只读浏览 + 搜索。
@@ -39,6 +43,59 @@ pub(crate) enum PanelKind {
     Mcp,
     /// Skills 页(iter-40):↑↓ 选技能 → Enter 查看详情/管理。
     Skills,
+}
+
+pub(crate) fn command_palette_panel() -> Panel {
+    let mut commands: Vec<String> = super::SLASH_COMMANDS
+        .iter()
+        .map(|command| (*command).to_string())
+        .collect();
+    commands.extend(super::dynamic_commands().iter().cloned());
+    commands.sort();
+    commands.dedup();
+    let rows = commands
+        .into_iter()
+        .map(|command| {
+            let shortcut = super::ActionId::ALL
+                .into_iter()
+                .find(|action| action.command() == Some(command.as_str()))
+                .map(super::shortcut_label)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "command".into());
+            PanelRow {
+                key: command,
+                value: shortcut,
+                ctx: None,
+            }
+        })
+        .collect();
+    Panel::new(PanelKind::CommandPalette, "Command palette".into(), rows)
+}
+
+pub(crate) fn keybindings_panel() -> Panel {
+    let mut rows: Vec<PanelRow> = super::keybinding_rows()
+        .into_iter()
+        .map(|(key, value)| PanelRow {
+            key,
+            value,
+            ctx: None,
+        })
+        .collect();
+    if let Some(warning) = super::keymap_warning() {
+        rows.insert(
+            0,
+            PanelRow {
+                key: "Configuration warning".into(),
+                value: format!("{warning}; defaults active"),
+                ctx: None,
+            },
+        );
+    }
+    Panel::new(
+        PanelKind::Keybindings,
+        "Keyboard · current context".into(),
+        rows,
+    )
 }
 
 /// 一行:动作键(config 键 / provider 名 / 模型 id / 工具名 / agent 名)+ 右列值 + (模型)上下文窗口。
@@ -234,6 +291,8 @@ impl Panel {
                     | PanelKind::LiveHistory
                     | PanelKind::Activity
                     | PanelKind::Queue
+                    | PanelKind::CommandPalette
+                    | PanelKind::Keybindings
             )
     }
 }

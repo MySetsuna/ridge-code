@@ -8,6 +8,7 @@ code_targets:
   - Cargo.toml
   - crates/agent/src/main.rs
   - crates/agent/src/tui/input.rs
+  - crates/agent/src/tui/keymap.rs
   - crates/agent/src/tui/csi.rs
   - crates/agent/src/tui/command.rs
   - crates/agent/src/tui/terminal.rs
@@ -34,6 +35,7 @@ public_interface:
   - tui::feed_nav_key
   - ridgecode TUI Enter/Tab/paste behavior
   - ridgecode terminal doctor
+  - Config.keybindings action-to-chord map
 known_gap:
   - Linux PTY smoke now runs under WSL Ubuntu-22.04; macOS/native terminal matrix and physical host coverage remain pending.
   - Unix SSH/Jupyter/IDE bridge input now opts into Crossterm's raw `/dev/tty` descriptor poll/select path; a hard-exclusive reader and replay path are not yet implemented or verified.

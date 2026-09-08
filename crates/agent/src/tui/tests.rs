@@ -269,9 +269,9 @@ async fn extracted_key_handler_covers_priority_and_edit_paths() {
         "Activity".into(),
         Vec::new(),
     ));
-    assert_continue(dispatch!(key(KeyCode::Char('o'), KeyModifiers::CONTROL)));
-    assert_continue(dispatch!(key(KeyCode::Char('r'), KeyModifiers::CONTROL)));
-    assert_continue(dispatch!(key(KeyCode::Char('a'), KeyModifiers::CONTROL)));
+    assert_continue(dispatch!(key(KeyCode::Char('t'), KeyModifiers::ALT)));
+    assert_continue(dispatch!(key(KeyCode::Char('r'), KeyModifiers::ALT)));
+    assert_continue(dispatch!(key(KeyCode::Char('a'), KeyModifiers::ALT)));
     assert_continue(dispatch!(key(KeyCode::Esc, KeyModifiers::NONE)));
     ui.panel = Some(Panel::new(
         PanelKind::Activity,
@@ -287,9 +287,9 @@ async fn extracted_key_handler_covers_priority_and_edit_paths() {
         .is_some_and(|panel| panel.editing.is_none()));
     assert_continue(dispatch!(key(KeyCode::Esc, KeyModifiers::NONE)));
 
-    assert_continue(dispatch!(key(KeyCode::Char('i'), KeyModifiers::CONTROL)));
+    assert_continue(dispatch!(key(KeyCode::Char('i'), KeyModifiers::ALT)));
     assert!(ui.panel.is_some());
-    assert_continue(dispatch!(key(KeyCode::Char('t'), KeyModifiers::CONTROL)));
+    assert_continue(dispatch!(key(KeyCode::Char('g'), KeyModifiers::ALT)));
     assert_continue(dispatch!(key(KeyCode::Esc, KeyModifiers::NONE)));
     assert!(ui.panel.is_none());
 
@@ -2812,9 +2812,9 @@ fn completed_idle_surface_exposes_answer_recovery_at_narrow_width() {
         text.contains("SUM") && text.contains("settling result"),
         "conclusion summary missing: {text}"
     );
-    assert!(text.contains("^A"), "answer recovery hint missing: {text}");
+    assert!(text.contains("A-A"), "answer recovery hint missing: {text}");
     assert!(
-        text.contains("^R"),
+        text.contains("A-R"),
         "reasoning recovery hint missing: {text}"
     );
     assert!(
@@ -2852,7 +2852,7 @@ fn completed_idle_surface_exposes_reasoning_excerpt_when_room_exists() {
         "answer excerpt missing: {text}"
     );
     assert!(
-        text.contains("^R"),
+        text.contains("A-R"),
         "reasoning recovery hint missing: {text}"
     );
     assert!(
@@ -2875,7 +2875,7 @@ fn completed_idle_surface_exposes_reasoning_excerpt_when_room_exists() {
         "reasoning excerpt should yield to controls: {narrow}"
     );
     assert!(
-        narrow.contains("^R"),
+        narrow.contains("A-R"),
         "narrow reasoning control missing: {narrow}"
     );
 }
@@ -3156,11 +3156,11 @@ fn completed_idle_surface_keeps_whole_labels_at_extreme_widths() {
             "answer tag missing at {width}: {text}"
         );
         assert!(
-            text.contains("^A"),
+            text.contains("A-A"),
             "answer shortcut missing at {width}: {text}"
         );
         assert!(
-            text.contains("^R"),
+            text.contains("A-R"),
             "reasoning shortcut missing at {width}: {text}"
         );
         assert!(
@@ -3252,9 +3252,9 @@ fn idle_conclusion_without_answer_does_not_advertise_empty_archive() {
         .collect::<String>();
 
     assert!(text.contains("SUM"), "conclusion summary missing: {text}");
-    assert!(text.contains("Ctrl+T"), "activity recovery missing: {text}");
+    assert!(text.contains("Alt+G"), "activity recovery missing: {text}");
     assert!(
-        !text.contains("Ctrl+A"),
+        !text.contains("Alt+A"),
         "empty answer archive advertised: {text}"
     );
 }
@@ -3786,7 +3786,7 @@ fn top_chrome_surfaces_reasoning_visibility_without_tools() {
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>();
-    assert!(expanded.contains("Ctrl+R collapse"), "{expanded}");
+    assert!(expanded.contains("Alt+R collapse"), "{expanded}");
     assert!(ui.scroll_live(1));
     let inspected = top_chrome(&ui, &vitals, 96)
         .spans
@@ -4931,11 +4931,11 @@ fn chrome(
 fn input_chrome_exposes_submit_or_queue_mode() {
     let (idle, idle_role) = chrome(false, 0, 80, false, true, false, false);
     assert!(idle.contains("Input"));
-    assert!(idle.contains("Ctrl+R reasoning"));
+    assert!(idle.contains("Alt+R reasoning"));
     let (idle_send, _) = chrome(false, 0, 64, false, true, false, false);
     assert!(idle_send.contains("Enter send"), "{idle_send}");
     assert!(idle_send.contains("Tab complete"), "{idle_send}");
-    assert!(!idle.contains("Ctrl+O"));
+    assert!(!idle.contains("Alt+T"));
     assert!(!idle.contains("Alt+↑/↓ focus"));
     assert_eq!(idle_role, Role::Primary);
 
@@ -4943,8 +4943,8 @@ fn input_chrome_exposes_submit_or_queue_mode() {
     assert!(queued.contains("Queue [2]"));
     assert!(queued.contains("Ctrl+Enter front"));
     assert!(queued.contains("Ctrl+C takeover"));
-    assert!(queued.contains("Ctrl+R reasoning"));
-    assert!(!queued.contains("Ctrl+O"));
+    assert!(queued.contains("Alt+R reasoning"));
+    assert!(!queued.contains("Alt+T"));
     assert_eq!(queued_role, Role::Primary);
 
     let (reasoning_history, _) = input_chrome(InputChromeArgs {
@@ -4963,9 +4963,9 @@ fn input_chrome_exposes_submit_or_queue_mode() {
         has_live_output: false,
         live_inspecting: false,
     });
-    assert!(reasoning_history.contains("Ctrl+R history"));
+    assert!(reasoning_history.contains("Alt+R history"));
     assert!(
-        reasoning_history.contains("Ctrl+T activity"),
+        reasoning_history.contains("Ctrl+P commands"),
         "{reasoning_history}"
     );
     assert!(str_cells(&reasoning_history) <= 94, "{reasoning_history}");
@@ -4986,9 +4986,9 @@ fn input_chrome_exposes_submit_or_queue_mode() {
         has_live_output: false,
         live_inspecting: false,
     });
-    assert!(answers_history.contains("Ctrl+A answers"));
+    assert!(answers_history.contains("Alt+A answers"));
     assert!(
-        answers_history.contains("Ctrl+T activity"),
+        answers_history.contains("Ctrl+P commands"),
         "{answers_history}"
     );
     assert!(str_cells(&answers_history) <= 94, "{answers_history}");
@@ -5006,8 +5006,8 @@ fn input_chrome_exposes_submit_or_queue_mode() {
     }
 
     let (idle_history, _) = chrome(false, 0, 80, false, true, false, true);
-    assert!(idle_history.contains("Ctrl+O history"));
-    assert!(!idle_history.contains("Ctrl+O details"));
+    assert!(idle_history.contains("Alt+T history"));
+    assert!(!idle_history.contains("Alt+T details"));
 
     for width in [14_u16, 18, 24] {
         let (compact, _) = input_chrome(InputChromeArgs {
@@ -5074,9 +5074,9 @@ fn input_chrome_exposes_submit_or_queue_mode() {
     let (busy_tools, _) = chrome(true, 2, 80, false, true, true, false);
     assert!(busy_tools.contains("Queue [2]"));
     assert!(busy_tools.contains("Alt+↑/↓"));
-    assert!(busy_tools.contains("^O details"));
+    assert!(busy_tools.contains("A-T details"));
     assert!(busy_tools.contains("^C takeover"));
-    assert!(busy_tools.contains("^R"));
+    assert!(busy_tools.contains("A-R"));
 
     let (busy_answer, _) = input_chrome(InputChromeArgs {
         busy: true,
@@ -5094,7 +5094,7 @@ fn input_chrome_exposes_submit_or_queue_mode() {
         has_live_output: true,
         live_inspecting: false,
     });
-    assert!(busy_answer.contains("Ctrl+A focus"), "{busy_answer}");
+    assert!(busy_answer.contains("Alt+A focus"), "{busy_answer}");
 
     let (held_answer, _) = input_chrome(InputChromeArgs {
         busy: true,
@@ -5112,7 +5112,7 @@ fn input_chrome_exposes_submit_or_queue_mode() {
         has_live_output: true,
         live_inspecting: true,
     });
-    assert!(held_answer.contains("^A answer"), "{held_answer}");
+    assert!(held_answer.contains("Alt+A"), "{held_answer}");
 
     let (live_inspect, _) = input_chrome(InputChromeArgs {
         busy: false,
@@ -5131,7 +5131,7 @@ fn input_chrome_exposes_submit_or_queue_mode() {
         live_inspecting: false,
     });
     assert!(live_inspect.contains("PgUp/PgDn page"));
-    assert!(live_inspect.contains("Ctrl+I inspect"));
+    assert!(live_inspect.contains("Alt+I inspect"));
     let (live_follow, _) = input_chrome(InputChromeArgs {
         busy: false,
         queued: 0,
@@ -5169,7 +5169,7 @@ fn input_chrome_exposes_submit_or_queue_mode() {
 
     let (busy_tools_expanded, _) = chrome(true, 2, 80, true, true, true, false);
     assert!(busy_tools_expanded.contains("^C takeover"));
-    assert!(busy_tools_expanded.contains("^R collapse"));
+    assert!(busy_tools_expanded.contains("A-R collapse"));
     let (busy_tools_scrolled, _) = input_chrome(InputChromeArgs {
         busy: true,
         queued: 2,
@@ -5189,13 +5189,13 @@ fn input_chrome_exposes_submit_or_queue_mode() {
     assert!(busy_tools_scrolled.contains("Alt+PgUp/PgDn scroll"));
 
     let (wide_busy_tools, _) = chrome(true, 2, 96, false, true, true, false);
-    assert!(wide_busy_tools.contains("Ctrl+R reasoning"));
+    assert!(wide_busy_tools.contains("Alt+R reasoning"));
     assert!(wide_busy_tools.contains("Alt+↑/↓ focus"));
-    assert!(wide_busy_tools.contains("Ctrl+O details"));
+    assert!(wide_busy_tools.contains("Alt+T details"));
 
     let (expanded, _) = chrome(false, 0, 80, true, true, true, false);
-    assert!(expanded.contains("Ctrl+R collapse"));
-    assert!(!expanded.contains("Ctrl+R reasoning"));
+    assert!(expanded.contains("Alt+R collapse"));
+    assert!(!expanded.contains("Alt+R reasoning"));
 
     let (wide_idle, _) = chrome(false, 0, 96, false, true, true, false);
     assert!(wide_idle.contains("Alt+↑/↓ focus"));
@@ -5216,40 +5216,38 @@ fn input_chrome_exposes_submit_or_queue_mode() {
     let (medium_with_tools, _) = chrome(true, 10, 64, false, true, true, false);
     assert!(medium_with_tools.contains("^Enter front"));
     assert!(medium_with_tools.contains("^C takeover"));
-    assert!(medium_with_tools.contains("^O details"));
-    assert!(medium_with_tools.contains("^R"));
+    assert!(medium_with_tools.contains("A-T details"));
 
     let (narrow_medium_with_tools, _) = chrome(true, 10, 56, false, true, true, false);
     assert!(narrow_medium_with_tools.contains("↵ queue"));
-    assert!(narrow_medium_with_tools.contains("^O details"));
-    assert!(narrow_medium_with_tools.contains("^R"));
+    assert!(narrow_medium_with_tools.contains("A-T details"));
 
     let (medium_with_tools_expanded, _) = chrome(true, 10, 64, true, true, true, false);
-    assert!(medium_with_tools_expanded.contains("^R"));
+    assert!(medium_with_tools_expanded.contains("A-T"));
 
     let (narrow, narrow_role) = chrome(true, 10, 15, false, false, true, false);
-    assert_eq!(narrow, " Q:[10]↵^C^O ");
+    assert_eq!(narrow, " Q:[10]↵^C⌥T ");
     assert_eq!(narrow_role, Role::Primary);
     assert!(str_cells(&narrow) <= 13);
     assert!(narrow.contains("^C"), "takeover disappeared: {narrow}");
 
     let (narrow_idle_tools, _) = chrome(false, 0, 15, false, true, true, false);
-    assert!(narrow_idle_tools.contains("^O"), "{narrow_idle_tools}");
+    assert!(narrow_idle_tools.contains("⌥T"), "{narrow_idle_tools}");
     assert!(str_cells(&narrow_idle_tools) <= 13);
 
     let (compact_tools_and_reasoning, _) = chrome(false, 0, 18, false, true, true, false);
     assert!(
-        compact_tools_and_reasoning.contains("^O"),
+        compact_tools_and_reasoning.contains("⌥T"),
         "{compact_tools_and_reasoning}"
     );
     assert!(
-        compact_tools_and_reasoning.contains("^R"),
+        compact_tools_and_reasoning.contains("⌥R"),
         "{compact_tools_and_reasoning}"
     );
     assert!(str_cells(&compact_tools_and_reasoning) <= 16);
 
     let (narrow_history, _) = chrome(false, 0, 15, false, false, false, true);
-    assert!(narrow_history.contains("^O"), "{narrow_history}");
+    assert!(narrow_history.contains("⌥T"), "{narrow_history}");
     assert!(str_cells(&narrow_history) <= 13);
 
     for width in [12, 15, 18, 32] {
@@ -5278,7 +5276,7 @@ fn narrow_idle_history_keeps_answer_and_reasoning_entrypoints_visible() {
         live_inspecting: false,
     })
     .0;
-    assert!(answer.contains("^A"), "answer archive hidden: {answer}");
+    assert!(answer.contains("⌥A"), "answer archive hidden: {answer}");
     assert!(str_cells(&answer) <= 30);
 
     let reasoning = input_chrome(InputChromeArgs {
@@ -5299,7 +5297,7 @@ fn narrow_idle_history_keeps_answer_and_reasoning_entrypoints_visible() {
     })
     .0;
     assert!(
-        reasoning.contains("^R"),
+        reasoning.contains("⌥R"),
         "reasoning archive hidden: {reasoning}"
     );
     assert!(str_cells(&reasoning) <= 30);
@@ -5330,8 +5328,8 @@ fn busy_tool_action_rail_preserves_reasoning_and_focus_at_medium_widths() {
             "width={width}: {text}"
         );
         assert!(text.contains("^C"), "width={width}: {text}");
-        assert!(text.contains("^R"), "width={width}: {text}");
-        assert!(text.contains("^O"), "width={width}: {text}");
+        assert!(text.contains("A-R"), "width={width}: {text}");
+        assert!(text.contains("A-T"), "width={width}: {text}");
         assert!(text.contains("Alt+↑/↓"), "width={width}: {text}");
         if width < 88 {
             assert!(
@@ -5347,8 +5345,8 @@ fn busy_tool_action_rail_preserves_reasoning_and_focus_at_medium_widths() {
     }
 
     let (wide, _) = chrome(true, 2, 96, false, true, true, false);
-    assert!(wide.contains("Ctrl+R reasoning"), "{wide}");
-    assert!(wide.contains("Ctrl+O details"), "{wide}");
+    assert!(wide.contains("Alt+R reasoning"), "{wide}");
+    assert!(wide.contains("Alt+T details"), "{wide}");
     assert!(wide.contains("Alt+↑/↓ focus"), "{wide}");
 }
 
@@ -5441,20 +5439,20 @@ fn semantic_toggle_dispatches_to_existing_tool_and_reasoning_state() {
 #[test]
 fn reasoning_hint_tracks_actual_content_at_narrow_widths() {
     let (none, _) = chrome(false, 0, 80, false, false, false, false);
-    assert!(!none.contains("Ctrl+R"));
-    assert!(!none.contains("^R"));
+    assert!(!none.contains("Alt+R"));
+    assert!(!none.contains("A-R"));
 
     let (wide, _) = chrome(false, 0, 80, false, true, false, false);
-    assert!(wide.contains("Ctrl+R reasoning"));
+    assert!(wide.contains("Alt+R reasoning"));
 
     let (compact, _) = chrome(false, 0, 18, false, true, false, false);
-    assert!(compact.contains("Ctrl+R"), "{compact}");
+    assert!(compact.contains("Alt+R"), "{compact}");
 
     let (tiny, _) = chrome(true, 2, 15, false, true, false, false);
-    assert!(tiny.contains("^R"), "{tiny}");
+    assert!(tiny.contains("⌥R"), "{tiny}");
 
     let (expanded, _) = chrome(false, 0, 80, true, true, false, false);
-    assert!(expanded.contains("Ctrl+R collapse"));
+    assert!(expanded.contains("Alt+R collapse"));
 }
 
 #[test]
@@ -7080,7 +7078,7 @@ fn input_action_routes_keys() {
     );
     assert_eq!(
         input_action(
-            &KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+            &KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT),
             false,
             false
         ),
@@ -7088,7 +7086,7 @@ fn input_action_routes_keys() {
     );
     assert_eq!(
         input_action(
-            &KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            &KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT),
             true,
             false
         ),
@@ -7096,7 +7094,7 @@ fn input_action_routes_keys() {
     );
     assert_eq!(
         input_action(
-            &KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            &KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT),
             true,
             false
         ),
@@ -7104,7 +7102,7 @@ fn input_action_routes_keys() {
     );
     assert_eq!(
         input_action(
-            &KeyEvent::new(KeyCode::Char('O'), KeyModifiers::CONTROL),
+            &KeyEvent::new(KeyCode::Char('T'), KeyModifiers::ALT),
             false,
             false
         ),
@@ -7112,7 +7110,7 @@ fn input_action_routes_keys() {
     );
     assert_eq!(
         input_action(
-            &KeyEvent::new(KeyCode::Char('R'), KeyModifiers::CONTROL),
+            &KeyEvent::new(KeyCode::Char('R'), KeyModifiers::ALT),
             true,
             false
         ),
@@ -7120,7 +7118,7 @@ fn input_action_routes_keys() {
     );
     assert_eq!(
         input_action(
-            &KeyEvent::new(KeyCode::Char('T'), KeyModifiers::CONTROL),
+            &KeyEvent::new(KeyCode::Char('G'), KeyModifiers::ALT),
             true,
             false
         ),
@@ -7139,7 +7137,7 @@ fn input_action_routes_keys() {
         KeyModifiers::CONTROL
     )));
     assert!(!queue_panel_toggle_action(&press(KeyCode::Char('q'))));
-    assert!(live_history_toggle_action(
+    assert!(!live_history_toggle_action(
         &KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL),
         false,
         true
@@ -7149,7 +7147,7 @@ fn input_action_routes_keys() {
         false,
         true
     ));
-    assert!(live_history_toggle_action(
+    assert!(!live_history_toggle_action(
         &KeyEvent::new(KeyCode::Char('\t'), KeyModifiers::CONTROL),
         false,
         true
@@ -7623,7 +7621,7 @@ fn decide_key_pairs_modifier_alias_release_without_stray_actions() {
 
 #[test]
 fn panel_attention_shortcuts_remain_global_while_browsing() {
-    let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+    let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT);
     assert_eq!(
         panel_attention_action(&key('a'), true, false),
         Some(InputAction::ToggleAnswer)
@@ -7633,19 +7631,19 @@ fn panel_attention_shortcuts_remain_global_while_browsing() {
         Some(InputAction::ToggleReasoning)
     );
     assert_eq!(
-        panel_attention_action(&key('o'), true, false),
+        panel_attention_action(&key('t'), true, false),
         Some(InputAction::ToggleDetails)
     );
     assert_eq!(
-        panel_attention_action(&key('t'), true, false),
+        panel_attention_action(&key('g'), true, false),
         Some(InputAction::ToggleActivity)
     );
 }
 
 #[test]
 fn panel_attention_shortcuts_ignore_editor_and_popup() {
-    let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
-    for c in ['a', 'r', 'o', 't'] {
+    let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT);
+    for c in ['a', 'r', 't', 'g'] {
         assert_eq!(panel_attention_action(&key(c), false, false), None);
         assert_eq!(panel_attention_action(&key(c), true, true), None);
     }
@@ -7656,23 +7654,26 @@ fn wide_audit_panel_hint_exposes_global_attention_switches() {
     let panel = Panel::new(PanelKind::Activity, "Activity".into(), Vec::new());
     let hint = panel_hint(&panel, 96);
     assert!(
-        hint.contains("^R think"),
+        hint.contains("A-R think"),
         "missing reasoning affordance: {hint}"
     );
     assert!(
-        hint.contains("^A answers"),
+        hint.contains("A-A answers"),
         "missing answer affordance: {hint}"
     );
-    assert!(hint.contains("^O tools"), "missing tool affordance: {hint}");
     assert!(
-        hint.contains("^T activity"),
+        hint.contains("A-T tools"),
+        "missing tool affordance: {hint}"
+    );
+    assert!(
+        hint.contains("A-G activity"),
         "missing activity affordance: {hint}"
     );
     assert!(str_cells(&hint) <= 96, "hint overflow: {hint}");
 
     let compact = panel_hint(&panel, 72);
     assert!(
-        compact.contains("^A/^R/^O/^T audit"),
+        compact.contains("A-A/A-R/A-T/A-G audit"),
         "missing compact affordance: {compact}"
     );
     assert!(
@@ -7818,8 +7819,13 @@ fn terminal_control_matrix_normalizes_without_literal_tab_or_space_residue() {
         ),
         InputAction::PopupOpen
     );
-    assert!(live_history_toggle_action(
+    assert!(!live_history_toggle_action(
         &KeyEvent::new(KeyCode::Char('\t'), KeyModifiers::CONTROL),
+        false,
+        true
+    ));
+    assert!(live_history_toggle_action(
+        &KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT),
         false,
         true
     ));
@@ -9669,7 +9675,7 @@ fn full_tui_frame_survives_narrow_cjk_and_escape_text() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(
-        before_symbols.contains("Ctrl+R reasoning"),
+        before_symbols.contains("Alt+R reasoning"),
         "{before_symbols}"
     );
 
@@ -9686,9 +9692,9 @@ fn full_tui_frame_survives_narrow_cjk_and_escape_text() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(after_symbols.contains("Ctrl+R collapse"), "{after_symbols}");
+    assert!(after_symbols.contains("Alt+R collapse"), "{after_symbols}");
     assert!(
-        !after_symbols.contains("Ctrl+R reasoning"),
+        !after_symbols.contains("Alt+R reasoning"),
         "{after_symbols}"
     );
 
@@ -10982,7 +10988,7 @@ fn answer_history_shortcut_opens_and_closes_without_mutating_input() {
 
     assert_eq!(
         input_action(
-            &KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            &KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT),
             false,
             false
         ),

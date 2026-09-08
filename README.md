@@ -262,11 +262,11 @@ ChatGPT/Codex 启动时会用 OAuth 账号目录校验当前模型；若配置�
 - Answer 支持有界行级 Markdown 展示：标题、粗体、行内 code、代码围栏与 ANSI 16 色语义角色。
 - Markdown 告警（`NOTE`/`TIP`/`IMPORTANT`/`WARNING`/`CAUTION`）及其后续引用行共享语义侧轨；正文仍按普通 Markdown 折行，不额外挤占输出槽。
 - fenced code 的 Live 可见行与落入终端历史的 Answer 都按有限词法规则区分关键字、类型、字符串、数字、字面量和注释；未知文本保持普通 Muted 色，不猜测跨行语法。
-- 工具调用默认显示摘要；Ctrl+O 展开当前工具详情。Alt+↑/↓ 选择旧工具并锁定焦点；详情展开且可滚动时，Alt+PageUp/PageDown 查看旧/新详情位置。
-- Ctrl+I（部分终端用 Alt+I）或 `/inspect` 打开 Live Block Inspector：按当前流顺序聚合 Answer/Reasoning/Tool，并在同一面板底部显示 pending FIFO；↑↓/PgUp/PgDn 聚焦历史块，Enter 或 Space 展开详情，Delete 删除选中的待执行消息，Ctrl+Q 切到完整队列，筛选与检视均不暂停模型；大段文本仅保留头尾有界预览，避免拖慢重绘。
-- Ctrl+R 展开或收起当前实际 Reasoning；当前回合结束后自动保留最近 8 段 reasoning，可再次按 Ctrl+R 或 `/reasoning` 检索、筛选、展开与滚动，不再因进入终端历史而失去入口。
-- 顶部状态条显示当前阶段及该阶段已持续时间（`+ms`/`+s`）；Ctrl+T 或 `/activity` 打开最近 5 个真实 Agent 活动，最新阶段置顶，窄终端自动折行。
-- 宽屏顶部以低饱和 `⟦SYS›THK›TLS›CHK›SUM›ANS⟧` breadcrumb 显示最近观测相位；`THK` 表示调查/思考，`ANS` 表示回答，`TLS` 表示工具，`CHK` 表示验证，`SUM` 表示结论收束，`WAIT` 表示等待；窄屏保留当前阶段与等待/工具目标，并以 `⏭N` 标出队首待执行数，Ctrl+T 可展开完整活动链。
+- 工具调用默认显示摘要；Alt+T 展开当前工具详情。Alt+↑/↓ 选择旧工具并锁定焦点；详情展开且可滚动时，Alt+PageUp/PageDown 查看旧/新详情位置。
+- Alt+I 或 `/inspect` 打开 Live Block Inspector：按当前流顺序聚合 Answer/Reasoning/Tool，并在同一面板底部显示 pending FIFO；↑↓/PgUp/PgDn 聚焦历史块，Enter 或 Space 展开详情，Delete 删除选中的待执行消息，Ctrl+Q 切到完整队列，筛选与检视均不暂停模型；大段文本仅保留头尾有界预览，避免拖慢重绘。
+- Alt+R 展开或收起当前实际 Reasoning；当前回合结束后自动保留最近 8 段 reasoning，可再次按 Alt+R 或 `/reasoning` 检索、筛选、展开与滚动，不再因进入终端历史而失去入口。
+- 顶部状态条显示当前阶段及该阶段已持续时间（`+ms`/`+s`）；Alt+G 或 `/activity` 打开最近 5 个真实 Agent 活动，最新阶段置顶，窄终端自动折行。
+- 宽屏顶部以低饱和 `⟦SYS›THK›TLS›CHK›SUM›ANS⟧` breadcrumb 显示最近观测相位；`THK` 表示调查/思考，`ANS` 表示回答，`TLS` 表示工具，`CHK` 表示验证，`SUM` 表示结论收束，`WAIT` 表示等待；窄屏保留当前阶段与等待/工具目标，并以 `⏭N` 标出队首待执行数，Alt+G 可展开完整活动链。
 - Live Answer/Reasoning 默认跟随最新尾部；`Alt+PageUp/PageDown` 暂停并检视较早/较新内容，`Alt+End` 回到最新尾部。检视状态会在顶栏显示。
 - 长任务中可继续编辑输入；任务忙时按 Enter 会排队，输入框上方显示 `⏭ next` 与有界 FIFO 预览；Ctrl+Enter 将消息插入队首且不打断当前模型思考，当前任务结束后继续执行。`Ctrl+Shift+Enter` 或 `/steer <guidance>` 将引导送入当前 agent 的下一次推理请求；不打断当前 provider 回合，若回合已到边界则自动作为 follow-up 继续。
 
@@ -278,10 +278,13 @@ ChatGPT/Codex 启动时会用 OAuth 账号目录校验当前模型；若配置�
 | Ctrl+J | 插入换行 |
 | Shift+Enter | 支持 CSI-u 的终端插入换行；Windows Terminal 可用 Alt+Enter 或 Ctrl+J |
 | Ctrl+C | 首次中断当前任务并进入 takeover；2 秒内再次按下退出整个会话 |
-| Ctrl+R | 切换当前 Reasoning；无 live reasoning 时打开 Reasoning History |
-| Ctrl+O | 切换工具详情；无 live 工具时打开 Tool History |
-| Ctrl+I / Alt+I | 打开/关闭 Live Block Inspector；可检视/删除 pending，不暂停当前任务 |
-| Ctrl+T | 打开/关闭最近 Agent 活动 |
+| Ctrl+P | 打开可搜索的命令面板 |
+| F1 | 打开当前键位帮助；等价于 `/help` |
+| Alt+R | 切换当前 Reasoning；无 live reasoning 时打开 Reasoning History |
+| Alt+T | 切换工具详情；无 live 工具时打开 Tool History |
+| Alt+I | 打开/关闭 Live Block Inspector；可检视/删除 pending，不暂停当前任务 |
+| Alt+A | 打开完整 Answer 或 Answer History |
+| Alt+G | 打开/关闭最近 Agent 活动 |
 | Ctrl+Q | 打开/关闭待执行队列面板 |
 | Ctrl+Space | 支持释放事件的终端：按住进入 HOLD、松开回到 FOLLOW；旧终端按键切换，不暂停模型任务 |
 | Ctrl+Enter | 忙时将当前输入插入队首，不打断当前任务 |
@@ -301,9 +304,9 @@ ChatGPT/Codex 启动时会用 OAuth 账号目录校验当前模型；若配置�
 
 ### 队列干预与接管
 
-任务忙时，普通 `Enter` 将当前输入追加到 FIFO；`Ctrl+Enter` 直接插入队首，均不打断当前模型思考。`Ctrl+Shift+Enter` 或 `/steer <guidance>` 直接引导当前 agent，消息不丢、不启动独立任务。输入框上方持续显示队首与有界预览。Live Inspector 也显示 pending 行：选中后 `Delete` 可直接移除；`Ctrl+Q` 或 `/queue` 切到完整队列，`Ctrl+I` 可从队列返回 Inspector。删除只作用于尚未执行的队列，不影响当前回合。面板可实时观察队列变化，模型仍继续输出。
+任务忙时，普通 `Enter` 将当前输入追加到 FIFO；`Ctrl+Enter` 直接插入队首，均不打断当前模型思考。`Ctrl+Shift+Enter` 或 `/steer <guidance>` 直接引导当前 agent，消息不丢、不启动独立任务。输入框上方持续显示队首与有界预览。Live Inspector 也显示 pending 行：选中后 `Delete` 可直接移除；`Ctrl+Q` 或 `/queue` 切到完整队列，`Alt+I` 可从队列返回 Inspector。删除只作用于尚未执行的队列，不影响当前回合。面板可实时观察队列变化，模型仍继续输出。
 
-实时状态位于顶部活动条与底部状态条：阶段、阶段耗时、工具/思考/回答通道、输入/输出 token、速率、上下文占用、effort 与队列深度均分开显示。长回答与工具输出按终端宽度换行；文件读取默认折叠为一个工具块，`Ctrl+O` 展开当前工具详情，详情保留首尾并折叠中段，`Alt+↑/↓` 切换工具，`Alt+PageUp/PageDown` 查看详情，`/history` 搜索已完成工具记录。`Ctrl+I`/`Alt+I` 或 `/inspect` 检视当前 Answer/Reasoning/Tool 混合块，Enter/Space 展开选中块而不打断模型。`Ctrl+R` 或 `/reasoning` 搜索最近 8 段已完成 reasoning，Enter 展开全文，Alt+PageUp/PageDown 滚动详情。支持释放事件的终端中，`Ctrl+Space` 按住将实时视口置为 `HOLD`，松开回到 `FOLLOW`；不支持释放事件的终端保留原有按键切换。任何情况下都不打断模型。`Ctrl+C` 第一次请求接管并保留输入，2 秒内第二次才退出。
+实时状态位于顶部活动条与底部状态条：阶段、阶段耗时、工具/思考/回答通道、输入/输出 token、速率、上下文占用、effort 与队列深度均分开显示。长回答与工具输出按终端宽度换行；文件读取默认折叠为一个工具块，`Alt+T` 展开当前工具详情，详情保留首尾并折叠中段，`Alt+↑/↓` 切换工具，`Alt+PageUp/PageDown` 查看详情，`/history` 搜索已完成工具记录。`Alt+I` 或 `/inspect` 检视当前 Answer/Reasoning/Tool 混合块，Enter/Space 展开选中块而不打断模型。`Alt+R` 或 `/reasoning` 搜索最近 8 段已完成 reasoning，Enter 展开全文，Alt+PageUp/PageDown 滚动详情。支持释放事件的终端中，`Ctrl+Space` 按住将实时视口置为 `HOLD`，松开回到 `FOLLOW`；不支持释放事件的终端保留原有按键切换。任何情况下都不打断模型。`Ctrl+C` 第一次请求接管并保留输入，2 秒内第二次才退出。
 
 启用 `RIDGECODE_TUI_SNAPSHOT` 时，诊断 JSON 还会记录当前面板、筛选词、选中项、详情展开/滚动位置、可见行数、`state.live_view`（`hold`/`follow`）、`state.reasoning_expanded`、`state.live_focus`（`answer`/`reasoning`/`tool:<id>`）、`state.activity_kind`、有界 `state.activity_history`、`state.live_blocks` 与 `state.reasoning_history` 数量，便于外部终端/测试工具实时判断用户正在查看什么。
 
@@ -338,7 +341,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows-pty-e2e.ps
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows-pty-e2e.ps1 -InputFixture -KeepDiagnostics
 ~~~
 
-该夹具逐段发送并等待快照确认：`a b` → BS 后 `a ` → 补回 `b` → DEL 后 `a ` → 清理为 `a` → TAB → Shift-Tab → 含 CSI/OSC 的原子 bracketed paste 后 `axyz`。Tab、Shift-Tab、paste 与最终独立物理 LF 各有独立 keylog 边界；首任务完成后，再于同一次 ConPTY 写入发送 bracketed paste + CRLF，keylog 必须恰有一个 Paste、一个 Enter，输入框为空且第二任务已进入 busy。结果必须含 `input_backend=raw-vt` 及 `input_backend_reason`，故最终缓冲不再反推此前动作皆成功。`InputFixture` 显式设置 `RIDGECODE_TUI_VT_INPUT=1`，不设置 `RIDGECODE_TUI_UNWRAPPED_BRIDGE=1`，也不注入或断言 `axyzraw\n\ttail`。Parser 识别完整 bracketed envelope 后将正文交给现有 `sanitize_paste`；未知/不完整 VT 序列有界回放，不以事件速度猜测粘贴。每次调用使用 GUID 隔离的临时 profile/config，输入正文只在夹具显式设置的 `RIDGECODE_TUI_INPUT_DIAGNOSTICS=1` 快照中出现。所有 PTY 模式默认受 `-MaxOutputBytes 4194304`、`-RenderP95BudgetUs 16000` 与 `-RenderMaxBudgetUs 50000` 约束；输出超限、draw-render 样本缺失/截断或延迟越界均失败。draw 闸不含快照序列化/写盘与事件循环延迟。
+该夹具逐段发送并等待快照确认：`a b` → BS 后 `a ` → 补回 `b` → DEL 后 `a ` → 清理为 `a` → TAB → Shift-Tab → 含 CSI/OSC 的原子 bracketed paste 后 `axyz`。Tab、Shift-Tab、paste 与最终独立物理 LF 各有独立 keylog 边界；首任务完成后，再于同一次 ConPTY 写入发送 bracketed paste + CRLF，keylog 必须恰有一个 Paste、一个 Enter，输入框为空且第二任务已进入 busy。结果必须含 `input_backend=raw-vt` 及 `input_backend_reason`，故最终缓冲不再反推此前动作皆成功。`InputFixture` 显式设置 `RIDGECODE_TUI_VT_INPUT=1`，不设置 `RIDGECODE_TUI_UNWRAPPED_BRIDGE=1`，也不注入或断言 `axyzraw\n\ttail`。Parser 识别完整 bracketed envelope 后将正文交给现有 `sanitize_paste`；未知/不完整 VT 序列有界回放，不以事件速度猜测粘贴。每次调用使用 GUID 隔离的临时 profile/config，输入正文只在夹具显式设置的 `RIDGECODE_TUI_INPUT_DIAGNOSTICS=1` 快照中出现。所有 PTY 模式默认受 `-MaxOutputBytes 4194304`、`-RenderP95BudgetUs 16000` 与 `-RenderMaxBudgetUs 50000` 约束；Completion+Resize 还要求 event-to-frame p95/max 不超过 25/100 ms、Snapshot I/O 不超过 25/300 ms、payload 不超过 512 KiB/1 MiB。Snapshot 写盘走容量为 2 的有界后台队列，Windows 文件系统离群值不会阻塞输入；输出、样本或延迟越界均失败。
 
 若 Enter/Tab 在某个终端或 IDE PTY 中失真，可在无法进入 TUI 时运行
 `ridgecode terminal doctor`，或在 TUI 内运行 `/doctor`。两者共用同一终端能力策略：
@@ -358,11 +361,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows-pty-e2e.ps
 
 该夹具每次运行创建 GUID 隔离的临时 workspace，并预置 `src/fixture.rs`；`main.rs` 中的 `ScriptedProvider` 对该文件真实执行 `read_file → edit_file → final`，不会写入仓库。要求 Snapshot 同时出现 `busy=false`、`snapshot_has_reasoning_history=true`、`snapshot_has_answer_history=true`，并在 ConPTY 原始滚屏中出现 fixture reasoning 与最终 Answer 文本；夹具随后自动打开 Answer archive、先捕获表格/高亮证据，再展开 Tool history；组合 `-ResizeProbe` 时首个 resize 等待 Answer archive 快照已可见，避免仅因中段表格尚未渲染而误报。随后仍验证两次 Ctrl+C 退出。`completion_evidence_satisfied=true` 才表示思考→回答→历史归档→滚屏完成态均已走通。`-KeepDiagnostics` 还会保留 `pty-output.bin`、`frame.json`、`tui-trace.log` 及 `workspace_path`，便于复核原始字节、最终帧与隔离文件。
 
-需验证流式块聚焦时追加 `-InspectLive`：夹具用 ConPTY 发送 Alt+I，再发送 Space，要求 `live_inspector_observed=true` 与 `live_inspector_expanded_observed=true`；Ctrl+I 仍是交互终端主快捷键。
+需验证流式块聚焦时追加 `-InspectLive`：夹具用 ConPTY 发送 Alt+I，再发送 Space，要求 `live_inspector_observed=true` 与 `live_inspector_expanded_observed=true`。
 
 需验证 Inspector 内的 pending 干预与面板互切时再追加 `-InspectQueue`（须同时带 `-BusyFixture -InspectLive`）：夹具选中末条 pending、发送 Delete，再用 Ctrl+Q 切到完整队列、Alt+I 返回 Inspector；要求 `live_inspector_queue_removed_observed=true`、`attention_queue_observed=true` 与 `attention_live_return_observed=true`。
 
-需验证物理控制字节时，可追加 `-InspectReasoning` 或 `-InspectHold`（均须带 `-BusyFixture`）：前者发送真实 Ctrl+R 并要求 `reasoning_observed=true`；后者发送真实 Ctrl+Space 两次并要求 `hold_observed=true`、`follow_observed=true`。可与 `-InspectLive -InspectQueue` 组合。
+需验证物理控制字节时，可追加 `-InspectReasoning` 或 `-InspectHold`（均须带 `-BusyFixture`）：前者发送真实 Alt+R 并要求 `reasoning_observed=true`；后者发送真实 Ctrl+Space 两次并要求 `hold_observed=true`、`follow_observed=true`。可与 `-InspectLive -InspectQueue` 组合。
 
 需验证运行中动态重排时追加 `-ResizeProbe`（可与上述 BusyFixture 探针组合）：脚本调用 Windows `ResizePseudoConsole`，在运行中于 `96×24 ↔ 40×12` 间切换，并要求 `resize_observed=true`、Snapshot `rect.width/height` 更新。RidgeCode 内联视口高度有意封顶为 14 行，因此目标高度超过 14 时，`resize_expected_frame_rows=14` 属正常；宽度仍必须精确切换。
 
@@ -373,13 +376,14 @@ $env:RIDGECODE_TUI_SNAPSHOT = "$pwd\ridgecode-frame.json"
 .\target\debug\ridgecode.exe
 ~~~
 
-快照为最后一次已绘制的 JSON 帧，`version=2`，含 `format`、`rect`、`render_us`、`state`、`telemetry`、按行排列的 `rows` 文本与压缩后的 `styled_rows` 样式 runs；`state` 提供 `busy`、`waiting`、`phase`、`activity`、`activity_kind`、有界 `activity_history`、`live_view`、`reasoning_expanded`、`live_focus`、`queued`/`queue`、输入/输出/流式 token、`rate`、`effort` 等诊断字段；`telemetry` 提供 `phase_duration_ms`、`token_velocity`、`last_render_us`，以及至多 4096 帧 exact draw-render 样本所得 `frame_sequence`、`render_sample_count`、`render_p95_us`、`render_max_us`、`render_samples_truncated`。`styled_rows` 保留每段的 cell 起点、宽度、文本、前景/背景色、修饰符及候选语义角色，便于外部渲染器或 harness 复现“虚拟视网膜”。仅用于诊断/自动验收，路径由用户指定，文件会被下一帧覆盖。
+快照为最后一次已绘制的 JSON 帧，`version=2`，含 `format`、`rect`、`render_us`、`state`、`telemetry`、按行排列的 `rows` 文本与压缩后的 `styled_rows` 样式 runs；`state` 提供 `busy`、`waiting`、`phase`、`activity`、`activity_kind`、有界 `activity_history`、`live_view`、`reasoning_expanded`、`live_focus`、`queued`/`queue`、输入/输出/流式 token、`rate`、`effort` 等诊断字段；`telemetry` 提供 `phase_duration_ms`、`token_velocity`、`last_render_us`，以及至多 4096 帧 exact 样本所得 draw、event-to-frame、Snapshot serialize/write 和 payload-byte p95/max。`styled_rows` 保留每段的 cell 起点、宽度、文本、前景/背景色、修饰符及候选语义角色，便于外部渲染器或 harness 复现“虚拟视网膜”。仅用于诊断/自动验收，路径由用户指定，文件会被后续帧覆盖。
 
 ### 斜杠命令
 
 | 命令 | 用法 |
 |---|---|
 | /help | 显示快捷键与命令提示 |
+| /keybindings | 查看当前生效的全局快捷键 |
 | /exit、/quit | 退出 TUI |
 | /reset | 清空当前上下文并保存空会话 |
 | /compact | 压缩历史消息，保留最近上下文 |
@@ -454,6 +458,7 @@ $env:RIDGECODE_TUI_SNAPSHOT = "$pwd\ridgecode-frame.json"
 | commands_dir | 自定义命令目录；默认 ~/.ridge/commands |
 | skip_danger | true 自动批准工具；灾难命令仍硬拦 |
 | status_bar | 输入框下状态条模板 |
+| keybindings | 全局动作到快捷键数组的映射；结构化字段 |
 | allow_jailbreak | 是否允许 cwd 子树外写入；默认关 |
 | notify | 每个任务完成时响终端铃 |
 | sandbox_cmd | run_shell 的外置 sandbox 包裹模板，{cwd} 替换项目目录 |
@@ -463,6 +468,18 @@ $env:RIDGECODE_TUI_SNAPSHOT = "$pwd\ridgecode-frame.json"
 | hooks | pre_tool、post_tool、session_start、stop hook 数组 |
 
 /config set 允许持久化：provider、model、base_url、budget_tokens、skills_dir、skip_danger、status_bar、allow_jailbreak、proxy。结构化字段（如 mcp、providers、hooks）请直接编辑 JSON。
+
+快捷键可按稳定 action id 覆盖；配置会整组校验，出现未知动作、非法 chord、保留键或冲突时整组回退默认值，并在 TUI 显示提示。空数组可禁用一个可配置动作：
+
+~~~json
+{
+  "keybindings": {
+    "command_palette": ["ctrl+p"],
+    "live_inspector": ["alt+i"],
+    "reasoning_history": ["alt+r"]
+  }
+}
+~~~
 
 代理优先级为 `RIDGECODE_PROXY` > 配置项 `proxy` > 通用 `HTTP_PROXY`/`HTTPS_PROXY`；需临时覆盖配置时用 `RIDGECODE_PROXY`。
 

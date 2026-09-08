@@ -101,7 +101,7 @@ pub(crate) enum InputAction {
 /// 仅 Ctrl+Space 的 Release 留给主循环拦截即时审计；并把 no-break(U+00A0)/全角(U+3000)空格
 /// **归一为普通空格**(否则显示像空格但按 `' '` 分词的命令会失败)。返回 `Some(归一后的事件)` = 处理;
 /// `None` = 忽略。
-fn canonical_key_code(key: &KeyEvent) -> KeyCode {
+pub(crate) fn canonical_key_code(key: &KeyEvent) -> KeyCode {
     match key.code {
         // ConPTY/legacy terminals may surface Enter as CR or LF instead of
         // KeyCode::Enter.  Normalize at the boundary so submit, queue and
@@ -644,15 +644,12 @@ fn popup_action(key: &KeyEvent, code: KeyCode) -> InputAction {
 }
 
 fn global_attention_action(key: &KeyEvent) -> Option<InputAction> {
-    if !key.modifiers.contains(KeyModifiers::CONTROL) {
-        return None;
-    }
-    match key.code {
-        KeyCode::Char('o' | 'O') => Some(InputAction::ToggleDetails),
-        KeyCode::Char('r' | 'R') => Some(InputAction::ToggleReasoning),
-        KeyCode::Char('a' | 'A') => Some(InputAction::ToggleAnswer),
-        KeyCode::Char('t' | 'T') => Some(InputAction::ToggleActivity),
-        KeyCode::Char('f' | 'F') => Some(InputAction::OpenLiveSearch),
+    match super::keymap_action(key) {
+        Some(super::ActionId::ToolHistory) => Some(InputAction::ToggleDetails),
+        Some(super::ActionId::ReasoningHistory) => Some(InputAction::ToggleReasoning),
+        Some(super::ActionId::AnswerHistory) => Some(InputAction::ToggleAnswer),
+        Some(super::ActionId::Activity) => Some(InputAction::ToggleActivity),
+        Some(super::ActionId::LiveSearch) => Some(InputAction::OpenLiveSearch),
         _ => None,
     }
 }
@@ -666,7 +663,7 @@ fn normal_input_action(key: &KeyEvent, code: KeyCode, busy: bool) -> InputAction
             InputAction::NewLine
         }
         KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => InputAction::NewLine,
-        KeyCode::Char('e' | 'E') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        _ if super::keymap_action(key) == Some(super::ActionId::InputEditor) => {
             InputAction::OpenInputEditor
         }
         KeyCode::Char('v' | 'V') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -724,9 +721,7 @@ pub(crate) fn panel_attention_action(
 
 /// Queue inspection is a global, non-destructive intervention shortcut.
 pub(crate) fn queue_panel_toggle_action(key: &KeyEvent) -> bool {
-    key.kind == KeyEventKind::Press
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char('q' | 'Q'))
+    super::keymap_action(key) == Some(super::ActionId::Queue)
 }
 
 /// Open/close the current mixed-stream inspector without cancelling the task.
@@ -737,13 +732,7 @@ pub(crate) fn live_history_toggle_action(
     popup_open: bool,
     has_history: bool,
 ) -> bool {
-    let code = canonical_key_code(key);
-    key.kind == KeyEventKind::Press
-        && !popup_open
-        && has_history
-        && (key.modifiers.contains(KeyModifiers::CONTROL)
-            || key.modifiers.contains(KeyModifiers::ALT))
-        && matches!(code, KeyCode::Char('i' | 'I'))
+    !popup_open && has_history && super::keymap_action(key) == Some(super::ActionId::LiveInspector)
 }
 
 /// Live 工具焦点快捷键:仅在无浮窗且确有工具块时拦截 Alt+↑/↓,避免破坏输入编辑回退。
@@ -828,13 +817,13 @@ pub(crate) fn live_hold_toggle_action(key: &KeyEvent, popup_open: bool, has_outp
     if key.kind != KeyEventKind::Press || popup_open || !has_output {
         return false;
     }
-    is_momentary_hold_key(key)
+    super::keymap_action(key) == Some(super::ActionId::LiveHold)
 }
 
 /// Release half of the optional momentary live-audit gesture. Terminals that
 /// do not report releases simply keep the existing press-to-toggle behavior.
 pub(crate) fn live_hold_release_action(key: &KeyEvent, popup_open: bool) -> bool {
-    key.kind == KeyEventKind::Release && !popup_open && is_momentary_hold_key(key)
+    !popup_open && super::keymap_release_action(key) == Some(super::ActionId::LiveHold)
 }
 
 /// In the held Inspector, plain Space activates the focused semantic block.
@@ -1174,6 +1163,7 @@ pub(crate) const SLASH_COMMANDS: &[&str] = &[
     "/history",
     "/inspect",
     "/jailbreak",
+    "/keybindings",
     "/login",
     "/mcp",
     "/model",

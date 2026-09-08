@@ -297,6 +297,8 @@ pub(crate) struct ActivityEntry {
 
 #[derive(Default)]
 pub(crate) struct Ui {
+    /// Most recent external event accepted by the loop; cleared after the next frame.
+    pub(crate) event_received_at: Option<std::time::Instant>,
     pub(crate) input: InputState,
     /// Accumulates a Windows/ConPTY CSI tail after Esc so `[A` is navigation.
     pub(crate) csi_pending: String,

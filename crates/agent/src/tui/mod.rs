@@ -785,6 +785,7 @@ mod eventfmt;
 #[cfg(test)]
 mod idle_submit_tests;
 mod input;
+mod keymap;
 mod panel;
 mod presentation;
 #[cfg(target_os = "windows")]
@@ -807,6 +808,7 @@ pub(crate) use csi::*;
 pub(crate) use draw::*;
 pub(crate) use eventfmt::*;
 pub(crate) use input::*;
+pub(crate) use keymap::*;
 pub(crate) use panel::*;
 pub(crate) use presentation::*;
 #[cfg(target_os = "windows")]
@@ -1261,6 +1263,35 @@ fn handle_approval_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> boo
 }
 
 fn handle_global_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> bool {
+    match keymap_action(key) {
+        Some(ActionId::CommandPalette) if context.ui.popup.is_none() => {
+            if context
+                .ui
+                .panel
+                .as_ref()
+                .is_some_and(|panel| panel.kind == PanelKind::CommandPalette)
+            {
+                context.ui.panel = None;
+            } else {
+                context.ui.panel = Some(command_palette_panel());
+            }
+            return true;
+        }
+        Some(ActionId::ContextHelp) if context.ui.popup.is_none() => {
+            if context
+                .ui
+                .panel
+                .as_ref()
+                .is_some_and(|panel| panel.kind == PanelKind::Keybindings)
+            {
+                context.ui.panel = None;
+            } else {
+                context.ui.panel = Some(keybindings_panel());
+            }
+            return true;
+        }
+        _ => {}
+    }
     if queue_panel_toggle_action(key)
         && (context.ui.panel.is_none()
             || context
@@ -1530,6 +1561,26 @@ fn edit_panel(ui: &mut Ui, action: PanelAction) {
 }
 
 async fn panel_enter_key(key: &KeyEvent, context: &mut KeyEventContext<'_>) -> anyhow::Result<()> {
+    if context
+        .ui
+        .panel
+        .as_ref()
+        .is_some_and(|panel| panel.kind == PanelKind::CommandPalette)
+    {
+        let command = context
+            .ui
+            .panel
+            .as_ref()
+            .and_then(Panel::selected)
+            .map(|row| row.key.clone());
+        context.ui.panel = None;
+        if let Some(command) = command {
+            context.ui.input.buffer = command;
+            context.ui.input.cursor = context.ui.input.buffer.chars().count();
+            handle_input_action(InputAction::Submit, context);
+        }
+        return Ok(());
+    }
     if context
         .ui
         .panel
@@ -2648,6 +2699,7 @@ async fn run_event_step(context: EventStepContext<'_>) -> anyhow::Result<EventSt
     let dirty = tokio::select! {
         biased;
         Some(event) = key_rx.recv() => {
+            ui.event_received_at = Some(Instant::now());
             let events = if raw_vt_input {
                 vec![event]
             } else {
@@ -2691,6 +2743,7 @@ async fn run_event_step(context: EventStepContext<'_>) -> anyhow::Result<EventSt
             true
         }
         Some(chunk) = token_rx.recv() => {
+            ui.event_received_at = Some(Instant::now());
             handle_token_chunk(chunk, ui, last_activity, token_rx);
             // The token sender is intentionally lossless and may remain ready
             // throughout a long response. Yield after each bounded drain so
@@ -2700,6 +2753,7 @@ async fn run_event_step(context: EventStepContext<'_>) -> anyhow::Result<EventSt
             true
         }
         Some(event) = event_rx.recv() => {
+            ui.event_received_at = Some(Instant::now());
             handle_stream_event(
                 event,
                 &mut StreamEventContext {
@@ -2712,6 +2766,7 @@ async fn run_event_step(context: EventStepContext<'_>) -> anyhow::Result<EventSt
             true
         }
         Some(request) = approval_rx.recv() => {
+            ui.event_received_at = Some(Instant::now());
             *pending = Some(request);
             *momentary_hold = false;
             ui.scroll = 0;
@@ -2721,6 +2776,7 @@ async fn run_event_step(context: EventStepContext<'_>) -> anyhow::Result<EventSt
             true
         }
         Some(result) = done_rx.recv() => {
+            ui.event_received_at = Some(Instant::now());
             handle_done_result(
                 result,
                 &mut DoneEventContext {
@@ -2955,6 +3011,7 @@ fn draw_tui_frame(context: &mut DrawFrameContext<'_>) -> anyhow::Result<()> {
             context.live_cache,
         )
     })?;
+    context.ui.event_received_at = None;
     tui_trace("draw.end");
     Ok(())
 }
@@ -3640,8 +3697,10 @@ pub(super) async fn run(
     read_only: bool,
     commands: Vec<agent::SlashCommand>,
     initial_effort: String,
+    keybindings: std::collections::BTreeMap<String, Vec<String>>,
 ) -> anyhow::Result<()> {
     tui_trace("run.enter");
+    let keymap_warning = install_keymap(&keybindings).err();
     set_dynamic_commands(&commands); // 自定义/skill 命令名进补全源(iter-39)
     let mcp_statuses = mcp.statuses().to_vec();
     let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
@@ -3680,6 +3739,12 @@ pub(super) async fn run(
         session_id: agent::current_session_id(),
         ..Ui::default()
     };
+    if let Some(warning) = keymap_warning {
+        ui.note(
+            format!("keybindings ignored · {warning} · using defaults"),
+            role_color(Role::Warn),
+        );
+    }
     apply_terminal_title(&compose_terminal_title(&ui, "idle"));
     let commands_fixture =
         std::env::var("RIDGECODE_TUI_FIXTURE").ok().as_deref() == Some("commands");

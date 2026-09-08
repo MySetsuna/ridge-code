@@ -14,9 +14,9 @@ use agent::{
 use provider::{AnthropicProvider, Message, SwapProvider};
 
 use super::{
-    agent_panel, config_panel, effort_panel, login_panel, mcp_panel, models_panel, skills_panel,
-    tools_panel, ModelCatalog, PanelKind, PendingModelSelection, Role, Ui, CLAUDE_OAUTH_ROW,
-    CODEX_OAUTH_ROW, DEFAULT_STATUS_BAR, GROK_OAUTH_ROW,
+    agent_panel, config_panel, effort_panel, keybindings_panel, login_panel, mcp_panel,
+    models_panel, skills_panel, tools_panel, ModelCatalog, PanelKind, PendingModelSelection, Role,
+    Ui, CLAUDE_OAUTH_ROW, CODEX_OAUTH_ROW, DEFAULT_STATUS_BAR, GROK_OAUTH_ROW,
 };
 use crate::tui::{self, role_color};
 use agent::preset_by_id;
@@ -982,6 +982,8 @@ pub(crate) fn panel_enter(ui: &mut Ui, meta: &mut ReplMeta, swap: &Arc<SwapProvi
             ui.toggle_live_panel_detail();
         }
         (PanelKind::Tools, _)
+        | (PanelKind::CommandPalette, _)
+        | (PanelKind::Keybindings, _)
         | (PanelKind::Agent, _)
         | (PanelKind::Mcp, _)
         | (PanelKind::Skills, _)
@@ -1270,10 +1272,7 @@ pub(crate) async fn run_command(
         return Ok(false);
     }
     if input == "/help" {
-        ui.note(
-            "/exit /model /provider /config /effort /find [query] /goal [status|create|start|advance|resume|complete|block|cancel] /activity /inspect /transcript /audit /reasoning /answer /answers /sessions /new /queue /steer <guidance> /doctor /tools /history /login /agent /mcp /skills /commands; !command runs a local shell; /provider opens the model catalog; /answer opens the latest full answer; /answers opens the searchable answer archive; /sessions lists resume ids; /new starts a fresh session id; /doctor reports terminal keyboard capability and safe fallbacks; Enter queues while busy; empty Enter sends the next queued item; queued items auto-send when the current turn finishes; Ctrl+Enter front-queues without interrupting; Ctrl+Shift+Enter or /steer steers the active turn; Ctrl+F opens non-blocking live search; Ctrl+Q opens the queue and Delete removes a pending item; Ctrl+I/Alt+I inspects live blocks in Transcript Audit; Ctrl+A opens the latest full answer; Ctrl+R toggles live reasoning or opens Reasoning history; Ctrl+O toggles live tool details or opens Tool history; Ctrl+T opens recent Agent activity; Ctrl-C hands input back.",
-            role_color(Role::Muted),
-        );
+        ui.panel = Some(keybindings_panel());
         return Ok(false);
     }
     if input == "/exit" || input == "/quit" {
@@ -1310,6 +1309,7 @@ fn handle_navigation_command(
 
 fn handle_panel_navigation(input: &str, ui: &mut Ui, meta: &ReplMeta) -> bool {
     match input {
+        "/keybindings" => ui.panel = Some(keybindings_panel()),
         "/tools" => ui.panel = Some(tools_panel(&meta.tools)),
         "/activity" => ui.open_activity_panel(),
         "/inspect" | "/live" | "/transcript" | "/audit" => show_live_history(ui),
@@ -1765,7 +1765,11 @@ fn show_commands(ui: &mut Ui, commands: &[agent::SlashCommand]) {
 }
 
 fn show_terminal_doctor(ui: &mut Ui) {
-    ui.note(super::terminal_doctor_report(), role_color(Role::Info));
+    let mut report = super::terminal_doctor_report();
+    if let Some(warning) = super::keymap_warning() {
+        report.push_str(&format!("\nkeybindings: defaults active ({warning})"));
+    }
+    ui.note(report, role_color(Role::Info));
 }
 
 #[cfg(test)]

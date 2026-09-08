@@ -341,11 +341,11 @@ fn append_busy_action_tokens(text: &mut String, options: BusyActionTokens) {
     for token in [
         Some(enqueue),
         Some("^C"),
-        has_live_answer.then_some("^A"),
+        has_live_answer.then_some("⌥A"),
         live_inspecting.then_some("^Space"),
-        has_tools.then_some("^O"),
-        has_reasoning.then_some("^R"),
-        has_live_history.then_some("^I"),
+        has_tools.then_some("⌥T"),
+        has_reasoning.then_some("⌥R"),
+        has_live_history.then_some("⌥I"),
     ]
     .into_iter()
     .flatten()
@@ -431,19 +431,19 @@ fn append_inspection_shortcuts(
         text.push_str(" · ^Enter front");
     }
     if width >= 80 && has_tools {
-        text.push_str(" · ^O details");
+        text.push_str(" · Alt+T details");
     }
     if width >= 80 && has_live_answer {
-        text.push_str(" · ^A answer");
+        text.push_str(" · Alt+A answer");
     }
     if width >= 88 && has_reasoning {
-        text.push_str(" · ^R");
+        text.push_str(" · Alt+R");
     }
     if width >= 96 && has_live_history {
-        text.push_str(" · ^I");
+        text.push_str(" · Alt+I");
     }
     if width >= 104 {
-        text.push_str(" · Ctrl+T activity");
+        text.push_str(" · Alt+G activity");
     }
 }
 
@@ -470,10 +470,10 @@ fn compact_idle_history_actions(
     for token in [
         Some(" ↵"),
         Some(tab_hint),
-        has_answer_history.then_some(" ^A"),
-        has_reasoning_history.then_some(" ^R"),
-        has_tools.then_some(" ^O"),
-        has_live_history.then_some(" ^I"),
+        has_answer_history.then_some(" ⌥A"),
+        has_reasoning_history.then_some(" ⌥R"),
+        has_tools.then_some(" ⌥T"),
+        has_live_history.then_some(" ⌥I"),
     ]
     .into_iter()
     .flatten()
@@ -547,11 +547,11 @@ impl InputChromeHints {
             args.has_reasoning,
         );
         let inspect = if args.has_live_history {
-            " · Ctrl+I inspect"
+            " · Alt+I inspect"
         } else {
             ""
         };
-        let inspect_compact = if args.has_live_history { " ^I" } else { "" };
+        let inspect_compact = if args.has_live_history { " ⌥I" } else { "" };
         let wide_live_prefix = wide_live_prefix(live, args.has_live_history);
         Self {
             multiline: multiline_shortcut_hint(),
@@ -574,12 +574,12 @@ impl InputChromeHints {
 fn reasoning_hint(has_reasoning: bool, expanded: bool, has_history: bool) -> Option<&'static str> {
     if has_reasoning {
         Some(if expanded {
-            "Ctrl+R collapse"
+            "Alt+R collapse"
         } else {
-            "Ctrl+R reasoning"
+            "Alt+R reasoning"
         })
     } else if has_history {
-        Some("Ctrl+R history")
+        Some("Alt+R history")
     } else {
         None
     }
@@ -587,9 +587,9 @@ fn reasoning_hint(has_reasoning: bool, expanded: bool, has_history: bool) -> Opt
 
 fn answer_suffix(has_live: bool, has_history: bool) -> &'static str {
     if has_live {
-        " · Ctrl+A focus"
+        " · Alt+A focus"
     } else if has_history {
-        " · Ctrl+A answers"
+        " · Alt+A answers"
     } else {
         ""
     }
@@ -597,9 +597,9 @@ fn answer_suffix(has_live: bool, has_history: bool) -> &'static str {
 
 fn answer_prefix(has_live: bool, has_history: bool) -> &'static str {
     if has_live {
-        "Ctrl+A focus · "
+        "Alt+A focus · "
     } else if has_history {
-        "Ctrl+A answers · "
+        "Alt+A answers · "
     } else {
         ""
     }
@@ -607,9 +607,9 @@ fn answer_prefix(has_live: bool, has_history: bool) -> &'static str {
 
 fn toggle_hint(has_tools: bool, has_history: bool) -> &'static str {
     if has_tools {
-        "Ctrl+O details"
+        "Alt+T details"
     } else if has_history {
-        "Ctrl+O history"
+        "Alt+T history"
     } else {
         ""
     }
@@ -638,7 +638,7 @@ fn wide_live_prefix(live: &str, has_history: bool) -> String {
         .map(|hint| format!("{hint} · "))
         .unwrap_or_default();
     if has_history {
-        format!("Ctrl+I inspect · {prefix}")
+        format!("Alt+I inspect · {prefix}")
     } else {
         prefix
     }
@@ -712,7 +712,7 @@ fn busy_input_chrome_text(args: &InputChromeArgs, hints: &InputChromeHints) -> S
 
 fn busy_wide_tools_chrome(queued: usize, hints: &InputChromeHints) -> String {
     format!(
-        " Queue [{queued}]{reasoning_suffix}{answer_suffix}{toggle_separator}{toggle_hint}{focus_hint}{inspect_hint} · Ctrl+T activity · Enter queue · Ctrl+Enter front · Ctrl+C takeover{scroll_hint}{live_hint} · Ctrl+Shift+Enter steer",
+        " Queue [{queued}]{reasoning_suffix}{answer_suffix}{toggle_separator}{toggle_hint}{focus_hint}{inspect_hint} · Alt+G activity · Enter queue · Ctrl+Enter front · Ctrl+C takeover{scroll_hint}{live_hint} · Ctrl+Shift+Enter steer",
         reasoning_suffix = hints.reasoning_suffix,
         answer_suffix = hints.answer_suffix,
         toggle_separator = hints.toggle_separator,
@@ -742,7 +742,7 @@ fn busy_tools_chrome(
     } else {
         "^Enter"
     };
-    let details = if width >= 80 { "^O details" } else { "^O" };
+    let details = if width >= 80 { "A-T details" } else { "A-T" };
     format!(
         " Queue [{queued}]{enqueue} · {front} · ^C takeover{reasoning} · {details} · Alt+↑/↓{}",
         hints.inspect
@@ -751,7 +751,7 @@ fn busy_tools_chrome(
 
 fn busy_wide_busy_chrome(queued: usize, hints: &InputChromeHints) -> String {
     format!(
-        " Queue [{queued}] · Ctrl+Enter front · Ctrl+C takeover · Enter{reasoning_suffix}{answer_suffix}{toggle_separator}{toggle}{inspect}{live} · Ctrl+T activity · Ctrl+Shift+Enter steer",
+        " Queue [{queued}] · Ctrl+Enter front · Ctrl+C takeover · Enter{reasoning_suffix}{answer_suffix}{toggle_separator}{toggle}{inspect}{live} · Alt+G activity · Ctrl+Shift+Enter steer",
         reasoning_suffix = hints.reasoning_suffix,
         answer_suffix = hints.answer_suffix,
         toggle_separator = hints.toggle_separator,
@@ -768,15 +768,15 @@ fn busy_compact_tools_chrome(
     has_live_answer: bool,
     hints: &InputChromeHints,
 ) -> String {
-    let reasoning = if has_reasoning { " · ^R" } else { "" };
-    let answer = if has_live_answer { " · ^A" } else { "" };
+    let reasoning = if has_reasoning { " · A-R" } else { "" };
+    let answer = if has_live_answer { " · A-A" } else { "" };
     let (queue_separator, front, takeover) = if width >= 64 {
         ("", "^Enter front", "^C takeover")
     } else {
         (" · ", "^Enter", "^C")
     };
     format!(
-        " Q:[{queued}]{queue_separator}↵ queue · {front} · {takeover} · ^O details{reasoning}{answer}{} ",
+        " Q:[{queued}]{queue_separator}↵ queue · {front} · {takeover} · A-T details{reasoning}{answer}{} ",
         hints.inspect_compact
     )
 }
@@ -795,9 +795,9 @@ fn busy_reasoning_hint(has_reasoning: bool, expanded: bool) -> &'static str {
     if !has_reasoning {
         ""
     } else if expanded {
-        " · ^R collapse"
+        " · A-R collapse"
     } else {
-        " · ^R"
+        " · A-R"
     }
 }
 
@@ -840,11 +840,11 @@ fn idle_input_chrome_text(args: &InputChromeArgs, hints: &InputChromeHints) -> S
         ),
         width if width >= 18 && has_reasoning => {
             let text = if width < 32 {
-                " In ↵ Ctrl+R ".to_owned()
+                " In ↵ Alt+R ".to_owned()
             } else {
                 format!(
                     " Input · ↵ · {} ",
-                    hints.reasoning.unwrap_or("Ctrl+R reasoning")
+                    hints.reasoning.unwrap_or("Alt+R reasoning")
                 )
             };
             clip_display_cells(&text, width.saturating_sub(2))
@@ -871,7 +871,7 @@ fn idle_input_chrome_text(args: &InputChromeArgs, hints: &InputChromeHints) -> S
 
 fn wide_idle_input_chrome(args: &InputChromeArgs, hints: &InputChromeHints) -> String {
     let full = format!(
-        " Input ({answer_prefix}{wide_live_prefix}Enter send · {multiline} · Tab complete{focus}{toggle_separator}{toggle}{scroll}{reasoning_suffix} · Ctrl+T activity) ",
+        " Input ({answer_prefix}{wide_live_prefix}Enter send · {multiline} · Tab complete{focus}{toggle_separator}{toggle}{scroll}{reasoning_suffix} · Ctrl+P commands) ",
         answer_prefix = hints.answer_prefix,
         wide_live_prefix = hints.wide_live_prefix,
         multiline = hints.multiline,
@@ -885,7 +885,7 @@ fn wide_idle_input_chrome(args: &InputChromeArgs, hints: &InputChromeHints) -> S
         full
     } else {
         format!(
-            " Input ({answer_prefix}{wide_live_prefix}Enter · Ctrl+J newline · Tab{focus}{toggle_separator}{toggle}{scroll}{reasoning_suffix} · Ctrl+T activity) ",
+            " Input ({answer_prefix}{wide_live_prefix}Enter · Ctrl+J newline · Tab{focus}{toggle_separator}{toggle}{scroll}{reasoning_suffix} · Ctrl+P commands) ",
             answer_prefix = hints.answer_prefix,
             wide_live_prefix = hints.wide_live_prefix,
             focus = hints.focus,

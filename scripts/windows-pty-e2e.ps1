@@ -10,6 +10,12 @@ param(
     [int]$MaxOutputBytes = 4194304,
     [int]$RenderP95BudgetUs = 16000,
     [int]$RenderMaxBudgetUs = 50000,
+    [int]$EventP95BudgetUs = 25000,
+    [int]$EventMaxBudgetUs = 100000,
+    [int]$SnapshotIoP95BudgetUs = 25000,
+    [int]$SnapshotIoMaxBudgetUs = 300000,
+    [int]$SnapshotP95BudgetBytes = 524288,
+    [int]$SnapshotMaxBudgetBytes = 1048576,
     [int]$EnterAfterMs = 500,
     [int]$InterruptAfterMs = 1200,
     [switch]$EscTakeover,
@@ -40,6 +46,15 @@ if ($RenderP95BudgetUs -lt 1 -or $RenderMaxBudgetUs -lt 1) {
 }
 if ($RenderP95BudgetUs -gt $RenderMaxBudgetUs) {
     throw '-RenderP95BudgetUs cannot exceed -RenderMaxBudgetUs'
+}
+if ($EventP95BudgetUs -lt 1 -or $EventP95BudgetUs -gt $EventMaxBudgetUs) {
+    throw '-EventP95BudgetUs must be positive and no greater than -EventMaxBudgetUs'
+}
+if ($SnapshotIoP95BudgetUs -lt 1 -or $SnapshotIoP95BudgetUs -gt $SnapshotIoMaxBudgetUs) {
+    throw '-SnapshotIoP95BudgetUs must be positive and no greater than -SnapshotIoMaxBudgetUs'
+}
+if ($SnapshotP95BudgetBytes -lt 1 -or $SnapshotP95BudgetBytes -gt $SnapshotMaxBudgetBytes) {
+    throw '-SnapshotP95BudgetBytes must be positive and no greater than -SnapshotMaxBudgetBytes'
 }
 $binaryPath = [System.IO.Path]::GetFullPath($Binary)
 if (-not (Test-Path -LiteralPath $binaryPath -PathType Leaf)) {
@@ -970,6 +985,10 @@ try {
             }
         }
         if ($completionMode -and $sentHelp -and -not $completionTaskSent -and $elapsed -ge 850) {
+            # /help is a modal keybinding panel in TUI v2; close it before
+            # submitting the completion fixture as a normal prompt.
+            $session.Send([byte[]](0x1b))
+            Start-Sleep -Milliseconds 80
             $session.Send([Text.Encoding]::UTF8.GetBytes('completion fixture task'))
             $session.Send([byte[]](0x0d))
             $completionTaskSent = $true
@@ -980,9 +999,9 @@ try {
                 $parsed = $candidate | ConvertFrom-Json
                 if ($null -ne $parsed.state -and $parsed.state.busy -and
                     $parsed.state.live_blocks -gt 0 -and $parsed.state.live_trace -match 'ANS') {
-                    # Ctrl+A is the contextual live-answer audit shortcut; send
+                    # Alt+A is the contextual live-answer audit shortcut; send
                     # it only after the snapshot proves the Answer block exists.
-                    $session.Send([byte[]](0x01))
+                    $session.Send([byte[]](0x1b, 0x61))
                     $sentAnswerInspect = $true
                 }
             } catch {
@@ -1010,10 +1029,10 @@ try {
         }
         if ($answerArchiveMode -and $completionObserved -and -not $answerInspectObserved -and
             -not $sentAnswerArchiveInspect) {
-            # If the live Answer settled before the first Ctrl+A snapshot, use
+            # If the live Answer settled before the first Alt+A snapshot, use
             # the same shortcut after completion to open the retained full
             # Answer archive and verify its expandable detail surface.
-            $session.Send([byte[]](0x01))
+            $session.Send([byte[]](0x1b, 0x61))
             $sentAnswerArchiveInspect = $true
         }
         if ($answerArchiveMode -and $completionObserved -and -not $sentAnswerInspectEnd -and
@@ -1053,7 +1072,7 @@ try {
             -not $completionToolHistorySent) {
             # The completion fixture's edit is initially folded in the live
             # rail. Open Tool history so the PTY captures its real diff detail.
-            $session.Send([byte[]](0x0f))
+            $session.Send([byte[]](0x1b, 0x74))
             $completionToolHistorySent = $true
         }
         if ($CompletionFixture -and $completionToolHistorySent -and
@@ -1103,9 +1122,8 @@ try {
             $sentQueueTail = $true
         }
         if ($BusyFixture -and $InspectReasoning -and $sentFront -and -not $sentReasoning -and $elapsed -ge 1400) {
-            # Ctrl+R is the physical control byte used by Windows ConPTY;
-            # the application maps it to live reasoning/history inspection.
-            $session.Send([byte[]](0x12))
+            # TUI v2 uses Alt+R (ESC r) for reasoning/history inspection.
+            $session.Send([byte[]](0x1b, 0x72))
             $sentReasoning = $true
         }
         if ($InspectReasoning -and $sentReasoning -and -not $reasoningObserved -and (Test-Path -LiteralPath $isolatedSnapshot)) {
@@ -1199,10 +1217,8 @@ try {
         }
         if ($BusyFixture -and $InspectLive -and $sentInspect -and
             -not $sentInspectFallback -and -not $inspectObserved -and $elapsed -ge 2300) {
-            # Some ConPTY hosts drop the Alt modifier from Kitty CSI-u.  The
-            # documented Ctrl+I byte is the deterministic fallback and should
-            # exercise the same production inspector route.
-            $session.Send([byte[]](0x09))
+            # Fall back to the legacy ESC+i spelling of the same Alt+I action.
+            $session.Send([byte[]](0x1b, 0x69))
             $sentInspectFallback = $true
         }
         if ($inspectObserved -and -not $sentInspectSpace -and $elapsed -ge 2100) {
@@ -1448,6 +1464,16 @@ try {
     } else {
         $true
     }
+    $eventP95Us = if ($null -ne $snapshotTelemetry) { [long]$snapshotTelemetry.event_to_frame_p95_us } else { 0 }
+    $eventMaxUs = if ($null -ne $snapshotTelemetry) { [long]$snapshotTelemetry.event_to_frame_max_us } else { 0 }
+    $snapshotIoP95Us = if ($null -ne $snapshotTelemetry) {
+        [long]$snapshotTelemetry.snapshot_serialize_p95_us + [long]$snapshotTelemetry.snapshot_write_p95_us
+    } else { 0 }
+    $snapshotIoMaxUs = if ($null -ne $snapshotTelemetry) {
+        [long]$snapshotTelemetry.snapshot_serialize_max_us + [long]$snapshotTelemetry.snapshot_write_max_us
+    } else { 0 }
+    $snapshotBytesP95 = if ($null -ne $snapshotTelemetry) { [long]$snapshotTelemetry.snapshot_bytes_p95 } else { 0 }
+    $snapshotBytesMax = if ($null -ne $snapshotTelemetry) { [long]$snapshotTelemetry.snapshot_bytes_max } else { 0 }
     $snapshotState = if ($null -ne $snapshotJson) {
         $snapshotJson.state
     } else {
@@ -1605,6 +1631,15 @@ try {
         -not $renderSamplesTruncated -and
         $renderP95Us -le $RenderP95BudgetUs -and
         $renderMaxUs -le $RenderMaxBudgetUs
+    $extendedPerfRequired = $CompletionFixture -and $ResizeProbe
+    $extendedPerfSatisfied = -not $extendedPerfRequired -or (
+        $eventP95Us -gt 0 -and $eventP95Us -le $EventP95BudgetUs -and
+        $eventMaxUs -le $EventMaxBudgetUs -and
+        $snapshotIoP95Us -gt 0 -and $snapshotIoP95Us -le $SnapshotIoP95BudgetUs -and
+        $snapshotIoMaxUs -le $SnapshotIoMaxBudgetUs -and
+        $snapshotBytesP95 -gt 0 -and $snapshotBytesP95 -le $SnapshotP95BudgetBytes -and
+        $snapshotBytesMax -le $SnapshotMaxBudgetBytes
+    )
     $rawOutputPath = Join-Path $isolatedHome '.ridge\pty-output.bin'
     if ($KeepDiagnostics) {
         [IO.File]::WriteAllBytes($rawOutputPath, $rawOutput.ToArray())
@@ -1670,6 +1705,9 @@ try {
     }
     if (-not $renderBudgetSatisfied) {
         throw "TUI render budget failed (frames=$renderFrameSequence samples=$renderSampleCount truncated=$renderSamplesTruncated p95_us=$renderP95Us/$RenderP95BudgetUs max_us=$renderMaxUs/$RenderMaxBudgetUs; snapshot=$isolatedSnapshot)"
+    }
+    if (-not $extendedPerfSatisfied) {
+        throw "TUI event/snapshot budget failed (event_p95_us=$eventP95Us/$EventP95BudgetUs event_max_us=$eventMaxUs/$EventMaxBudgetUs io_p95_us=$snapshotIoP95Us/$SnapshotIoP95BudgetUs io_max_us=$snapshotIoMaxUs/$SnapshotIoMaxBudgetUs bytes_p95=$snapshotBytesP95/$SnapshotP95BudgetBytes bytes_max=$snapshotBytesMax/$SnapshotMaxBudgetBytes; snapshot=$isolatedSnapshot)"
     }
     if (-not $sentHelp -or -not $sentInterrupt -or -not $aliveAfterEnter) {
         throw 'ConPTY probe did not complete the Enter-then-interrupt sequence'
@@ -1741,6 +1779,14 @@ try {
         render_p95_budget_us = $RenderP95BudgetUs
         render_max_budget_us = $RenderMaxBudgetUs
         render_budget_satisfied = $renderBudgetSatisfied
+        event_to_frame_p95_us = $eventP95Us
+        event_to_frame_max_us = $eventMaxUs
+        snapshot_io_p95_us = $snapshotIoP95Us
+        snapshot_io_max_us = $snapshotIoMaxUs
+        snapshot_bytes_p95 = $snapshotBytesP95
+        snapshot_bytes_max = $snapshotBytesMax
+        extended_perf_required = $extendedPerfRequired
+        extended_perf_satisfied = $extendedPerfSatisfied
         snapshot_json_valid = ($null -ne $snapshotJson)
         snapshot_mid_bytes = [Text.Encoding]::UTF8.GetByteCount($snapshotMidRaw)
         snapshot_mid_json_valid = ($null -ne $snapshotMidJson)

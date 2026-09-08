@@ -227,11 +227,10 @@ async fn idle_enter_release_runs_help_command() {
     assert!(harness.ui.input.buffer.is_empty());
     assert!(harness.ui.popup.is_none());
     assert!(!harness.consume_submit().await);
-    let help = commit_texts(&harness.ui)
-        .into_iter()
-        .find(|text| text.contains("/login") && text.contains("/exit"))
-        .expect("run_command(/help) must emit help text");
-    assert!(help.contains("/model"), "{help}");
+    assert_eq!(
+        harness.ui.panel.as_ref().map(|panel| panel.kind),
+        Some(PanelKind::Keybindings)
+    );
     assert!(harness.history.is_empty());
     assert!(harness.task.is_none());
 }
@@ -243,9 +242,10 @@ async fn idle_enter_press_runs_help_command() {
     harness.send(enter_press()).await;
     assert_eq!(harness.pending_submit.as_deref(), Some("/help"));
     assert!(!harness.consume_submit().await);
-    assert!(commit_texts(&harness.ui)
-        .iter()
-        .any(|text| text.contains("/login")));
+    assert_eq!(
+        harness.ui.panel.as_ref().map(|panel| panel.kind),
+        Some(PanelKind::Keybindings)
+    );
 }
 
 #[test]

@@ -25,6 +25,9 @@ pub struct Config {
     /// 输入框下方自定义状态条模板(可选)。占位:`{provider}{model}{ctx}{tokens}{cwd}`。
     /// 留空则用内置默认模板(见 `tui::DEFAULT_STATUS_BAR`)。
     pub status_bar: Option<String>,
+    /// TUI 全局动作快捷键覆盖。键是稳定 action id，值是 `ctrl+p` 一类 chord；
+    /// 空数组禁用该动作。编辑/审批/取消等安全键不在此接口内。
+    pub keybindings: std::collections::BTreeMap<String, Vec<String>>,
     /// 地址越狱(iter-34):true 则放行 cwd 子树外的写。默认 false;开启 TUI 状态栏标红。
     /// **只放宽 cwd 子树** —— 危险命令拦截/受保护路径/只读不受影响。
     pub allow_jailbreak: Option<bool>,
@@ -616,6 +619,14 @@ mod tests {
         let out = config_set(&out, "effort", "high").unwrap();
         assert_eq!(Config::parse(&out).effort.as_deref(), Some("high"));
         assert!(config_set(&out, "effort", "invalid").is_err());
+    }
+
+    #[test]
+    fn config_parses_structured_keybinding_overrides_without_affecting_secrets() {
+        let cfg = Config::parse(r#"{"keybindings":{"command_palette":["ctrl+p"],"activity":[]}}"#);
+        assert_eq!(cfg.keybindings["command_palette"], ["ctrl+p"]);
+        assert!(cfg.keybindings["activity"].is_empty());
+        assert!(cfg.api_key.is_none());
     }
 
     /// iter-34:`allow_jailbreak` 是可持久化 bool 配置键。

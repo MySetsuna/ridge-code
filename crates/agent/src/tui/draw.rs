@@ -1,6 +1,6 @@
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::sync::{mpsc, Mutex, OnceLock};
 
 use super::{
     alert_edges, char_cells, clip_display_cells, compact_status_line, context_pressure_role,
@@ -172,6 +172,14 @@ struct SnapshotRenderStats {
     p95_us: u128,
     max_us: u128,
     truncated: bool,
+    serialize_p95_us: u128,
+    serialize_max_us: u128,
+    write_p95_us: u128,
+    write_max_us: u128,
+    bytes_p95: u128,
+    bytes_max: u128,
+    event_p95_us: u128,
+    event_max_us: u128,
 }
 
 #[derive(Default)]
@@ -180,6 +188,27 @@ struct SnapshotRenderTelemetry {
     sorted_samples: Vec<u128>,
     frame_sequence: u64,
     truncated: bool,
+    serialize_samples: Vec<u128>,
+    write_samples: Vec<u128>,
+    byte_samples: Vec<u128>,
+    event_samples: Vec<u128>,
+}
+
+fn record_sorted(samples: &mut Vec<u128>, value: u128) {
+    if samples.len() >= SNAPSHOT_RENDER_SAMPLE_CAPACITY {
+        return;
+    }
+    let index = samples.partition_point(|sample| *sample <= value);
+    samples.insert(index, value);
+}
+
+fn sample_p95(samples: &[u128]) -> u128 {
+    let index = samples
+        .len()
+        .saturating_mul(95)
+        .div_ceil(100)
+        .saturating_sub(1);
+    samples.get(index).copied().unwrap_or(0)
 }
 
 impl SnapshotRenderTelemetry {
@@ -189,6 +218,10 @@ impl SnapshotRenderTelemetry {
             self.sorted_samples.clear();
             self.frame_sequence = 0;
             self.truncated = false;
+            self.serialize_samples.clear();
+            self.write_samples.clear();
+            self.byte_samples.clear();
+            self.event_samples.clear();
         }
 
         self.frame_sequence = self.frame_sequence.saturating_add(1);
@@ -202,23 +235,80 @@ impl SnapshotRenderTelemetry {
         }
 
         let sample_count = self.sorted_samples.len();
-        let p95_index = sample_count
-            .saturating_mul(95)
-            .div_ceil(100)
-            .saturating_sub(1);
         SnapshotRenderStats {
             frame_sequence: self.frame_sequence,
             sample_count,
-            p95_us: self.sorted_samples.get(p95_index).copied().unwrap_or(0),
+            p95_us: sample_p95(&self.sorted_samples),
             max_us: self.sorted_samples.last().copied().unwrap_or(0),
             truncated: self.truncated,
+            serialize_p95_us: sample_p95(&self.serialize_samples),
+            serialize_max_us: self.serialize_samples.last().copied().unwrap_or(0),
+            write_p95_us: sample_p95(&self.write_samples),
+            write_max_us: self.write_samples.last().copied().unwrap_or(0),
+            bytes_p95: sample_p95(&self.byte_samples),
+            bytes_max: self.byte_samples.last().copied().unwrap_or(0),
+            event_p95_us: sample_p95(&self.event_samples),
+            event_max_us: self.event_samples.last().copied().unwrap_or(0),
         }
+    }
+
+    fn record_io(&mut self, serialize_us: u128, write_us: u128, bytes: usize, event_us: u128) {
+        for (samples, value) in [
+            (&mut self.serialize_samples, serialize_us),
+            (&mut self.write_samples, write_us),
+            (&mut self.byte_samples, bytes as u128),
+            (&mut self.event_samples, event_us),
+        ] {
+            record_sorted(samples, value);
+        }
+        self.truncated |= self.serialize_samples.len() >= SNAPSHOT_RENDER_SAMPLE_CAPACITY;
     }
 }
 
-thread_local! {
-    static SNAPSHOT_RENDER_TELEMETRY: RefCell<SnapshotRenderTelemetry> =
-        RefCell::new(SnapshotRenderTelemetry::default());
+static SNAPSHOT_RENDER_TELEMETRY: OnceLock<Mutex<SnapshotRenderTelemetry>> = OnceLock::new();
+
+fn snapshot_telemetry() -> &'static Mutex<SnapshotRenderTelemetry> {
+    SNAPSHOT_RENDER_TELEMETRY.get_or_init(|| Mutex::new(SnapshotRenderTelemetry::default()))
+}
+
+struct SnapshotWriteJob {
+    path: std::path::PathBuf,
+    payload: String,
+    serialize_us: u128,
+    event_us: u128,
+}
+
+static SNAPSHOT_WRITER: OnceLock<mpsc::SyncSender<SnapshotWriteJob>> = OnceLock::new();
+
+fn snapshot_writer() -> &'static mpsc::SyncSender<SnapshotWriteJob> {
+    SNAPSHOT_WRITER.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel::<SnapshotWriteJob>(2);
+        std::thread::Builder::new()
+            .name("ridgecode-snapshot-writer".into())
+            .spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    let write_started = std::time::Instant::now();
+                    let result = write_snapshot_payload(&job.path, &job.payload);
+                    let write_us = write_started.elapsed().as_micros();
+                    snapshot_telemetry()
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .record_io(
+                            job.serialize_us,
+                            write_us,
+                            job.payload.len(),
+                            job.event_us,
+                        );
+                    if let Err(error) = result {
+                        if error.raw_os_error() != Some(32) {
+                            tracing::warn!(path = ?job.path, %error, "failed to write RIDGECODE_TUI_SNAPSHOT");
+                        }
+                    }
+                }
+            })
+            .expect("snapshot writer thread");
+        tx
+    })
 }
 
 fn snapshot_payload(
@@ -340,6 +430,14 @@ fn snapshot_payload(
             "render_max_us": render_stats.map(|stats| stats.max_us),
             "render_samples_truncated": render_stats.map(|stats| stats.truncated),
             "render_sample_capacity": SNAPSHOT_RENDER_SAMPLE_CAPACITY,
+            "snapshot_serialize_p95_us": render_stats.map(|stats| stats.serialize_p95_us),
+            "snapshot_serialize_max_us": render_stats.map(|stats| stats.serialize_max_us),
+            "snapshot_write_p95_us": render_stats.map(|stats| stats.write_p95_us),
+            "snapshot_write_max_us": render_stats.map(|stats| stats.write_max_us),
+            "snapshot_bytes_p95": render_stats.map(|stats| stats.bytes_p95),
+            "snapshot_bytes_max": render_stats.map(|stats| stats.bytes_max),
+            "event_to_frame_p95_us": render_stats.map(|stats| stats.event_p95_us),
+            "event_to_frame_max_us": render_stats.map(|stats| stats.event_max_us),
         },
         "rows": rows,
         "styled_rows": snapshot_styled_rows(buffer),
@@ -377,8 +475,11 @@ fn dump_frame_snapshot(
         );
     }
     let render_us = elapsed.as_micros();
-    let render_stats =
-        SNAPSHOT_RENDER_TELEMETRY.with(|telemetry| telemetry.borrow_mut().record(&path, render_us));
+    let render_stats = snapshot_telemetry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .record(&path, render_us);
+    let serialize_started = std::time::Instant::now();
     let payload = snapshot_payload(
         frame.buffer_mut(),
         render_us,
@@ -386,13 +487,19 @@ fn dump_frame_snapshot(
         ui,
         vitals,
     );
-    if let Err(error) = write_snapshot_payload(&path, &payload) {
-        // A live harness may hold the previous frame briefly while reading it.
-        // Dropping that diagnostic frame is preferable to polluting the TUI
-        // with a warning or making the opt-in observer affect interaction.
-        if error.raw_os_error() != Some(32) {
-            tracing::warn!(?path, %error, "failed to write RIDGECODE_TUI_SNAPSHOT");
-        }
+    let serialize_us = serialize_started.elapsed().as_micros();
+    let event_us = ui
+        .event_received_at
+        .map(|received| received.elapsed().as_micros())
+        .unwrap_or(0);
+    let job = SnapshotWriteJob {
+        path,
+        payload,
+        serialize_us,
+        event_us,
+    };
+    if let Err(mpsc::TrySendError::Disconnected(job)) = snapshot_writer().try_send(job) {
+        tracing::warn!(path = ?job.path, "RIDGECODE_TUI_SNAPSHOT writer disconnected");
     }
 }
 
@@ -446,6 +553,8 @@ pub(crate) fn panel_rect_for_kind(area: Rect, kind: PanelKind) -> Rect {
 
 fn panel_kind_label(kind: PanelKind) -> &'static str {
     match kind {
+        PanelKind::CommandPalette => "Commands",
+        PanelKind::Keybindings => "Keys",
         PanelKind::Config => "Config",
         PanelKind::Tools => "Tools",
         PanelKind::ToolHistory => "History",
@@ -465,11 +574,14 @@ fn panel_kind_label(kind: PanelKind) -> &'static str {
 
 pub(crate) fn panel_title_role(kind: PanelKind) -> Role {
     match kind {
-        PanelKind::AnswerHistory | PanelKind::LiveHistory => Role::Primary,
+        PanelKind::AnswerHistory | PanelKind::LiveHistory | PanelKind::CommandPalette => {
+            Role::Primary
+        }
         PanelKind::ReasoningHistory
         | PanelKind::ToolHistory
         | PanelKind::Activity
-        | PanelKind::Queue => Role::Info,
+        | PanelKind::Queue
+        | PanelKind::Keybindings => Role::Info,
         _ => Role::Primary,
     }
 }
@@ -534,13 +646,15 @@ fn panel_full_hint(panel: &Panel) -> &'static str {
         };
     }
     match panel.kind {
+        PanelKind::CommandPalette => "type to search · Enter run · Esc close",
+        PanelKind::Keybindings => "type to filter · Esc close",
         PanelKind::Config => "↑↓ select · Enter edit · type to filter · Esc close",
         PanelKind::Models => {
             "↑↓ select · Enter next · type to filter · Esc close"
         }
         PanelKind::Effort => "↑↓ select · Enter apply · Esc close",
         PanelKind::Login => "↑↓ pick provider · Enter enter key · type to filter · Esc close",
-        PanelKind::Queue => "select · Delete remove · Ctrl+I inspect · type to filter · Esc close",
+        PanelKind::Queue => "select · Delete remove · Alt+I inspect · type to filter · Esc close",
         PanelKind::ToolHistory | PanelKind::ReasoningHistory | PanelKind::AnswerHistory => {
             "↑↓/PgUp/PgDn select · Alt+PgUp/PgDn scroll detail · Home/End jump · Enter expand · Esc close"
         }
@@ -561,7 +675,7 @@ fn panel_compact_hint(panel: &Panel, width: u16) -> &'static str {
         return "Enter · Esc";
     }
     if panel.kind == PanelKind::Queue {
-        return "select · Del remove · Ctrl+I · Esc";
+        return "select · Del remove · Alt+I · Esc";
     }
     if panel.detail_open && panel.supports_detail() {
         return panel_detail_compact_hint(panel.kind, width);
@@ -650,9 +764,9 @@ fn panel_attention_hint(text: &str, panel: &Panel, width: u16) -> String {
         return clip_hint_with_close(text, width);
     }
     let attention = if width >= 96 {
-        " · ^A answers · ^R think · ^O tools · ^T activity"
+        " · A-A answers · A-R think · A-T tools · A-G activity"
     } else {
-        " · ^A/^R/^O/^T audit"
+        " · A-A/A-R/A-T/A-G audit"
     };
     let budget = width.saturating_sub(str_cells(attention) as u16);
     format!("{}{attention}", clip_hint_with_close(text, budget))
@@ -3000,10 +3114,10 @@ fn live_line_content(
         return live_answer_content(line, context, text_width, has_badge, alert_edge, state);
     }
     let display_text = if line.kind == LiveLineKind::ToolDetail
-        && line.text.trim_start().starts_with("[Ctrl+O details")
+        && line.text.trim_start().starts_with("[Alt+T details")
         && str_cells(line.text) > text_width as usize
     {
-        "[Ctrl+O]"
+        "[Alt+T]"
     } else {
         line.text
     };
@@ -3185,9 +3299,9 @@ fn reasoning_visibility_chip(expanded: bool, remaining: usize) -> Option<String>
         return None;
     }
     let full = if expanded {
-        " ◇ THINKING · Ctrl+R collapse "
+        " ◇ THINKING · Alt+R collapse "
     } else {
-        " ◇ THINKING · Ctrl+R reasoning "
+        " ◇ THINKING · Alt+R reasoning "
     };
     if str_cells(full) <= remaining {
         return Some(full.to_owned());
@@ -3376,7 +3490,7 @@ fn live_lifecycle_anchor(ui: &Ui, vitals: &Vitals, width: u16) -> Option<Line<'s
         .unwrap_or(entry.text.as_str());
     let step = (vitals.step > 0).then(|| format!(" · step {}", vitals.step));
     let hint = if width >= 28 {
-        " · Ctrl+T activity"
+        " · Alt+G activity"
     } else {
         ""
     };
@@ -4382,39 +4496,39 @@ fn fit_idle_line(width: usize, candidates: &[String]) -> String {
 
 fn idle_history_actions(width: usize) -> &'static str {
     if width >= 48 {
-        "Ctrl+A answers · Ctrl+R reasoning · Ctrl+T activity"
+        "Alt+A answers · Alt+R reasoning · Alt+G activity"
     } else if width >= 31 {
-        "^A answers · ^R think · ^T log"
+        "A-A answers · A-R think · A-G log"
     } else if width >= 28 {
-        "^A answers · ^R think · ^T"
+        "A-A answers · A-R think · A-G"
     } else if width >= 21 {
-        "^A answers · ^R think"
+        "A-A answers · A-R think"
     } else if width >= 11 {
-        "^A ans · ^R"
+        "A-A ans · A-R"
     } else {
-        "^A/^R"
+        "A-A/A-R"
     }
 }
 
 fn idle_answer_recovery(width: usize, partial: bool) -> &'static str {
     if partial {
         if width >= 23 {
-            "PARTIAL · Ctrl+A expand"
+            "PARTIAL · Alt+A expand"
         } else if width >= 19 {
-            "PARTIAL · ^A expand"
+            "PARTIAL · A-A expand"
         } else if width >= 12 {
-            "PARTIAL · ^A"
+            "PARTIAL · A-A"
         } else {
-            "^A"
+            "A-A"
         }
     } else if width >= 19 {
-        "ANS · Ctrl+A expand"
+        "ANS · Alt+A expand"
     } else if width >= 15 {
-        "ANS · ^A expand"
+        "ANS · A-A expand"
     } else if width >= 8 {
-        "ANS · ^A"
+        "ANS · A-A"
     } else {
-        "^A"
+        "A-A"
     }
 }
 
@@ -4616,7 +4730,7 @@ fn idle_result_card_lines(
 
 fn idle_activity_recovery(width: usize) -> &'static str {
     if width >= 15 {
-        "Ctrl+T activity"
+        "Alt+G activity"
     } else if width >= 11 {
         "^T activity"
     } else if width >= 6 {
@@ -4683,15 +4797,15 @@ fn empty_state_headline(width: usize, mode: &str, detail: &str) -> String {
 fn empty_state_actions(width: usize, mode: &str) -> String {
     let candidates = match mode {
         "LIVE" => vec![
-            "observing stream · Ctrl+Space hold · Ctrl+I inspect · Esc takeover".to_owned(),
-            "stream · Ctrl+Space hold · Ctrl+I · Esc takeover".to_owned(),
+            "observing stream · Ctrl+Space hold · Alt+I inspect · Esc takeover".to_owned(),
+            "stream · Ctrl+Space hold · Alt+I · Esc takeover".to_owned(),
             "stream · ^Space hold · ^I · Esc".to_owned(),
             "stream · ^Space · ^I · Esc".to_owned(),
             "^Space · ^I · Esc".to_owned(),
             "Esc".to_owned(),
         ],
         "WAIT" => vec![
-            "waiting · no stream · Esc/Ctrl+C takeover · Ctrl+I inspect".to_owned(),
+            "waiting · no stream · Esc/Ctrl+C takeover · Alt+I inspect".to_owned(),
             "waiting · Esc/Ctrl+C takeover".to_owned(),
             "WAIT · Esc/^C takeover".to_owned(),
             "WAIT · ^C".to_owned(),
@@ -4705,7 +4819,7 @@ fn empty_state_actions(width: usize, mode: &str) -> String {
             "Enter".to_owned(),
         ],
         _ => vec![
-            "Enter send · Ctrl+T activity · /help".to_owned(),
+            "Enter send · Ctrl+P commands · F1 help".to_owned(),
             "Enter send · ^T activity".to_owned(),
             "Enter · ^T".to_owned(),
             "Enter".to_owned(),
@@ -5403,6 +5517,7 @@ mod snapshot_tests {
             sorted_samples: vec![1; SNAPSHOT_RENDER_SAMPLE_CAPACITY],
             frame_sequence: SNAPSHOT_RENDER_SAMPLE_CAPACITY as u64,
             truncated: false,
+            ..Default::default()
         };
         let stats = telemetry.record(&path, 2);
         assert_eq!(stats.sample_count, SNAPSHOT_RENDER_SAMPLE_CAPACITY);
@@ -5411,6 +5526,20 @@ mod snapshot_tests {
             SNAPSHOT_RENDER_SAMPLE_CAPACITY as u64 + 1
         );
         assert!(stats.truncated);
+    }
+
+    #[test]
+    fn snapshot_telemetry_tracks_io_bytes_and_event_latency() {
+        let path = std::path::Path::new("perf-frame.json");
+        let mut telemetry = SnapshotRenderTelemetry::default();
+        telemetry.record(path, 5);
+        telemetry.record_io(10, 20, 1_024, 30);
+        telemetry.record_io(40, 50, 2_048, 60);
+        let stats = telemetry.record(path, 7);
+        assert_eq!(stats.serialize_p95_us, 40);
+        assert_eq!(stats.write_max_us, 50);
+        assert_eq!(stats.bytes_p95, 2_048);
+        assert_eq!(stats.event_max_us, 60);
     }
 
     #[test]
@@ -5440,6 +5569,7 @@ mod snapshot_tests {
             p95_us: 37,
             max_us: 41,
             truncated: false,
+            ..Default::default()
         };
         let snapshot = snapshot_payload(&buffer, 37, Some(render_stats), &ui, &vitals);
         let value: serde_json::Value = serde_json::from_str(&snapshot).expect("snapshot json");
@@ -5467,6 +5597,8 @@ mod snapshot_tests {
         assert_eq!(value["telemetry"]["render_sample_count"], 4);
         assert_eq!(value["telemetry"]["render_p95_us"], 37);
         assert_eq!(value["telemetry"]["render_max_us"], 41);
+        assert_eq!(value["telemetry"]["snapshot_serialize_p95_us"], 0);
+        assert_eq!(value["telemetry"]["event_to_frame_max_us"], 0);
         assert_eq!(value["telemetry"]["render_samples_truncated"], false);
         assert_eq!(
             value["telemetry"]["render_sample_capacity"],

@@ -1261,6 +1261,7 @@ async fn run_interactive(run: InteractiveRun<'_>) -> anyhow::Result<()> {
             read_only,
             commands,
             effort,
+            cfg.keybindings.clone(),
         )
         .await
     } else {
@@ -1346,6 +1347,7 @@ async fn run_without_provider(
         read_only,
         commands,
         effort,
+        cfg.keybindings.clone(),
     )
     .await
 }
