@@ -91,6 +91,12 @@ $sonarCommand = Get-Command "sonar-scanner" -ErrorAction SilentlyContinue
 if ($null -eq $sonarCommand) {
     $sonarCommand = Get-Command "sonar-scanner-npm" -ErrorAction SilentlyContinue
 }
+if ($null -eq $sonarCommand -and $env:OS -eq 'Windows_NT') {
+    $sonarCommand = Get-Command "sonar-scanner.ps1" -ErrorAction SilentlyContinue
+    if ($null -eq $sonarCommand) {
+        $sonarCommand = Get-Command "sonar-scanner-npm.ps1" -ErrorAction SilentlyContinue
+    }
+}
 if ($null -eq $sonarCommand) {
     throw "sonar-scanner or sonar-scanner-npm is required; the quality gate cannot skip Sonar"
 }

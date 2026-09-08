@@ -24,6 +24,17 @@ function Invoke-Quiet {
     finally { $ErrorActionPreference = $old }
 }
 
+function Find-Command {
+    param([string]$Name)
+    $found = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($null -eq $found -and $env:OS -eq 'Windows_NT') {
+        # npm global bins are commonly exposed as .ps1 shims on Windows;
+        # PATHEXT does not resolve PowerShell scripts from a bare name.
+        $found = Get-Command "$Name.ps1" -ErrorAction SilentlyContinue
+    }
+    $found
+}
+
 $checks = [System.Collections.Generic.List[object]]::new()
 foreach ($command in @('cargo', 'npm')) {
     $found = Get-Command $command -ErrorAction SilentlyContinue
@@ -43,7 +54,7 @@ if ($null -eq $llvm) {
 }
 
 $sonar = @('sonar-scanner', 'sonar-scanner-npm') |
-    ForEach-Object { Get-Command $_ -ErrorAction SilentlyContinue } |
+    ForEach-Object { Find-Command $_ } |
     Where-Object { $null -ne $_ } |
     Select-Object -First 1
 if ($null -eq $sonar) {
