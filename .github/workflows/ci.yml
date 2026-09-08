@@ -46,10 +46,10 @@ jobs:
         run: python3 scripts/linux-pty-input.py --binary target/debug/ridgecode --timeout 12
       - name: Windows ConPTY completion and resize smoke
         if: matrix.os == 'windows-latest'
-        shell: powershell
+        shell: pwsh
         run: >-
-          powershell -NoProfile -ExecutionPolicy Bypass -File
-          scripts/windows-pty-e2e.ps1 -CompletionFixture -ResizeProbe -TimeoutMs 12000
+          ./scripts/windows-pty-e2e.ps1 -CompletionFixture -ResizeProbe
+          -TimeoutMs 12000
       - name: Harbor adapter syntax check
         if: matrix.os == 'ubuntu-latest'
         run: python3 -m py_compile eval/harbor/ridgecode_agent.py
