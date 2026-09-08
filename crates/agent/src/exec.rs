@@ -1140,9 +1140,13 @@ fn execute_signal_tool(call: &ToolCall) -> ToolResult {
     let resolve = tool_arg(call, "resolve");
     if !resolve.is_empty() {
         return match signal_resolve(SIGNALS_DIR, resolve) {
-            Ok(true) => blocked_result(format!("signal resolved: {resolve}")),
-            Ok(false) => blocked_result(format!("signal 未找到: {resolve}")),
-            Err(error) => blocked_result(format!("signal error: {error}")),
+            // Resolving bookkeeping is a completed control-plane action,
+            // not a blocked task.  Marking it Blocked poisoned the final
+            // typed result and prevented otherwise successful read-only runs
+            // from completing.
+            Ok(true) => tool_result(format!("signal resolved: {resolve}")),
+            Ok(false) => error_result(format!("signal 未找到: {resolve}")),
+            Err(error) => error_result(format!("signal error: {error}")),
         };
     }
     let body = tool_arg(call, "body");
