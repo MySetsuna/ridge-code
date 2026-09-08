@@ -34,7 +34,10 @@ $llvm = Get-Command 'cargo-llvm-cov' -ErrorAction SilentlyContinue
 if ($null -eq $llvm) {
     Add-Check $checks 'cargo-llvm-cov' $false 'required command is not on PATH'
 } else {
-    $result = Invoke-Quiet @('cargo-llvm-cov', '--version')
+    # `cargo-llvm-cov` is a Cargo subcommand plugin.  Invoking the plugin
+    # executable directly with only `--version` exits 1; probe the supported
+    # public entry point instead so Windows preflight agrees with CI/shell.
+    $result = Invoke-Quiet @('cargo', 'llvm-cov', '--version')
     $ok = $result.exit_code -eq 0 -and -not [string]::IsNullOrWhiteSpace($result.text)
     Add-Check $checks 'cargo-llvm-cov' $ok $(if ($ok) { $result.text.Trim() } else { 'command is present but not executable' })
 }
