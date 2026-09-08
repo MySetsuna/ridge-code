@@ -386,21 +386,7 @@ fn dump_frame_snapshot(
         ui,
         vitals,
     );
-    let mut write_error = None;
-    for attempt in 0..4 {
-        match std::fs::write(&path, &payload) {
-            Ok(()) => return,
-            Err(error) if error.raw_os_error() == Some(32) && attempt < 3 => {
-                write_error = Some(error);
-                std::thread::sleep(std::time::Duration::from_millis(2));
-            }
-            Err(error) => {
-                write_error = Some(error);
-                break;
-            }
-        }
-    }
-    if let Some(error) = write_error {
+    if let Err(error) = write_snapshot_payload(&path, &payload) {
         // A live harness may hold the previous frame briefly while reading it.
         // Dropping that diagnostic frame is preferable to polluting the TUI
         // with a warning or making the opt-in observer affect interaction.
@@ -408,6 +394,24 @@ fn dump_frame_snapshot(
             tracing::warn!(?path, %error, "failed to write RIDGECODE_TUI_SNAPSHOT");
         }
     }
+}
+
+fn write_snapshot_payload(path: &std::path::Path, payload: &str) -> std::io::Result<()> {
+    let mut last_error = None;
+    for attempt in 0..4 {
+        match std::fs::write(path, payload) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.raw_os_error() == Some(32) && attempt < 3 => {
+                last_error = Some(error);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            Err(error) => {
+                last_error = Some(error);
+                break;
+            }
+        }
+    }
+    Err(last_error.expect("snapshot write attempts always produce an error"))
 }
 
 fn modal_rect(area: Rect) -> Rect {
@@ -5496,6 +5500,36 @@ mod snapshot_tests {
                             modifiers.iter().any(|modifier| modifier == "bold")
                         })
             }));
+    }
+
+    #[test]
+    fn snapshot_payload_write_round_trips_json() {
+        let root = std::env::temp_dir().join(format!(
+            "ridgecode-snapshot-write-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("snapshot fixture directory");
+        let path = root.join("frame.json");
+        let buffer = Buffer::with_lines(["probe"]);
+        let vitals = Vitals {
+            step: 0,
+            elapsed_s: 0,
+            task_tokens: 0,
+            rate: 0,
+            ctx_used: 0,
+            queued: 0,
+        };
+        let payload = snapshot_payload(&buffer, 3, None, &Ui::default(), &vitals);
+        write_snapshot_payload(&path, &payload).expect("snapshot write");
+        let observed = std::fs::read_to_string(&path).expect("snapshot read");
+        let value: serde_json::Value = serde_json::from_str(&observed).expect("snapshot JSON");
+        assert_eq!(value["format"], "ridgecode-tui-frame");
+        assert_eq!(value["rows"][0], "probe");
+        std::fs::remove_dir_all(root).expect("remove snapshot fixture");
     }
 
     #[test]
