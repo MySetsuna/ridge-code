@@ -701,7 +701,9 @@ cargo build --workspace --locked
 Full quality gate also runs line coverage (minimum 80%) and the local SonarQube
 quality gate. On Windows it first runs the bounded eval soak plus phased Input
 and Completion+Resize ConPTY fixtures; on Unix it runs the real Linux PTY
-replay. The repository targets `http://localhost:9000`; start the local
+replay. GitHub Windows CI additionally runs the raw-VT Input fixture and the
+kill/restart recovery soak on every push. The repository targets
+`http://localhost:9000`; start the local
 SonarQube service, create a project token at
 `http://localhost:9000/account/security`, then run
 `pwsh -File scripts/configure-sonar-secret.ps1` and paste the token into the
